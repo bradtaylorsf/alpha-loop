@@ -357,9 +357,9 @@ export function listSessions(
 ): (Session & { issues: SessionIssue[] })[] {
   let sessions: Session[];
   if (options.status) {
-    sessions = db.prepare(`SELECT * FROM sessions WHERE status = ? ORDER BY created_at DESC`).all(options.status) as Session[];
+    sessions = db.prepare(`SELECT * FROM sessions WHERE status = ? ORDER BY created_at DESC, id DESC`).all(options.status) as Session[];
   } else {
-    sessions = db.prepare(`SELECT * FROM sessions ORDER BY created_at DESC`).all() as Session[];
+    sessions = db.prepare(`SELECT * FROM sessions ORDER BY created_at DESC, id DESC`).all() as Session[];
   }
 
   return sessions.map((s) => {
