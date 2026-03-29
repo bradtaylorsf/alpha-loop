@@ -2,6 +2,7 @@ import {
   processIssue,
   startLoop,
   defaultConfig,
+  buildWhatToTest,
 } from "../../src/engine/loop";
 import type {
   LoopConfig,
@@ -373,6 +374,113 @@ describe("defaultConfig", () => {
     expect(config.model).toBe("opus");
     expect(config.maxTurns).toBe(10);
     expect(config.baseBranch).toBe("master"); // default preserved
+  });
+});
+
+describe("buildWhatToTest", () => {
+  it("extracts manual test instructions from issue body", () => {
+    const issue = makeIssue({
+      body: `### Description\nSome feature\n\n### Manual Test Instructions\n1. Run pnpm dev\n2. Open http://localhost:4001\n3. Click the button\n\n### Acceptance Criteria\n- [ ] Works`,
+    });
+
+    const result = buildWhatToTest(issue);
+
+    expect(result).toContain("Run pnpm dev");
+    expect(result).toContain("Open http://localhost:4001");
+    expect(result).toContain("Click the button");
+    expect(result).not.toContain("Auto-generated");
+  });
+
+  it("generates fallback when no manual test instructions in issue", () => {
+    const issue = makeIssue({
+      body: `### Description\nSome feature\n\n### Acceptance Criteria\n- [ ] Endpoint returns 200\n- [ ] Tests pass`,
+    });
+
+    const result = buildWhatToTest(issue, "src/server/routes.ts | 10 +++--");
+
+    expect(result).toContain("Auto-generated");
+    expect(result).toContain("src/server/routes.ts");
+    expect(result).toContain("Verify acceptance criteria");
+    expect(result).toContain("Endpoint returns 200");
+  });
+
+  it("generates fallback with diff stat only when no acceptance criteria", () => {
+    const issue = makeIssue({ body: "Just do the thing" });
+
+    const result = buildWhatToTest(issue, "file.ts | 5 +++++");
+
+    expect(result).toContain("Auto-generated");
+    expect(result).toContain("file.ts");
+    expect(result).not.toContain("Verify acceptance criteria");
+  });
+
+  it("handles empty body gracefully", () => {
+    const issue = makeIssue({ body: "" });
+
+    const result = buildWhatToTest(issue);
+
+    expect(result).toContain("Auto-generated");
+  });
+
+  it("handles null body gracefully", () => {
+    const issue = makeIssue({ body: undefined as unknown as string });
+
+    const result = buildWhatToTest(issue);
+
+    expect(result).toContain("Auto-generated");
+  });
+});
+
+describe("PR body includes What to Test section", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockExecSync.mockReturnValue("");
+  });
+
+  it("PR body contains What to Test section", async () => {
+    const runner = makeRunner();
+    const github = makeGitHub();
+    const config = makeConfig();
+
+    await processIssue(makeIssue(), config, runner, github);
+
+    expect(github.createPR).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.stringContaining("## What to Test"),
+      }),
+    );
+  });
+
+  it("PR body uses manual test instructions when available", async () => {
+    const runner = makeRunner();
+    const github = makeGitHub();
+    const config = makeConfig();
+
+    const issue = makeIssue({
+      body: `### Description\nFeature\n\n### Manual Test Instructions\n1. Start server\n2. Hit /api/test\n\n### Done`,
+    });
+
+    await processIssue(issue, config, runner, github);
+
+    const prCall = (github.createPR as jest.Mock).mock.calls[0][0];
+    expect(prCall.body).toContain("## What to Test");
+    expect(prCall.body).toContain("Start server");
+    expect(prCall.body).toContain("Hit /api/test");
+    expect(prCall.body).not.toContain("Auto-generated");
+  });
+
+  it("PR body uses auto-generated fallback when no manual instructions", async () => {
+    const runner = makeRunner();
+    const github = makeGitHub();
+    const config = makeConfig();
+
+    const issue = makeIssue({ body: "Just a simple description" });
+
+    await processIssue(issue, config, runner, github);
+
+    const prCall = (github.createPR as jest.Mock).mock.calls[0][0];
+    expect(prCall.body).toContain("## What to Test");
+    expect(prCall.body).toContain("Auto-generated");
   });
 });
 
