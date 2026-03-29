@@ -12,7 +12,7 @@ import { initLearningsRouter } from "./routes/learnings.js";
 import { createDatabase } from "./db.js";
 
 const app: ReturnType<typeof express> = express();
-const PORT = process.env.PORT ?? 3000;
+const PORT = process.env.PORT ?? 4000;
 
 const db = createDatabase();
 

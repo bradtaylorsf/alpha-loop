@@ -23,10 +23,19 @@ Agent-agnostic automated development loop that implements The Loop methodology:
 pnpm loop          # Run the loop continuously
 pnpm loop:once     # Process one issue and exit
 pnpm loop:dry      # Dry run (preview, no changes)
-pnpm dev           # Start monitoring server
-pnpm test          # Run tests
-pnpm build         # Build TypeScript
+pnpm dev           # Start server (4000) + dashboard (4001)
+pnpm dev:server    # Server only (4000)
+pnpm dev:client    # Dashboard only (4001)
+pnpm test          # Run all tests
+pnpm build         # Build server + client
 ```
+
+## Ports
+
+| Port | Service |
+|------|---------|
+| 4000 | Express API server |
+| 4001 | Vite dev server (React dashboard) |
 
 ## Directory Structure
 
