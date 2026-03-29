@@ -80,6 +80,7 @@ for arg in "$@"; do
     --clean) HISTORY_CLEAN="true" ;;
     init) SUBCOMMAND="init" ;;
     scan) SUBCOMMAND="scan" ;;
+    vision) SUBCOMMAND="vision" ;;
     history) SUBCOMMAND="history" ;;
     *)
       # Capture the session name argument for history subcommand
@@ -796,7 +797,232 @@ cleanup_worktree() {
 # ---------------------------------------------------------------------------
 CONTEXT_DIR="${PROJECT_DIR}/.alpha-loop"
 CONTEXT_FILE="${CONTEXT_DIR}/context.md"
+VISION_FILE="${CONTEXT_DIR}/vision.md"
 
+# ---------------------------------------------------------------------------
+# Project Vision -- product context that guides agent decisions
+# ---------------------------------------------------------------------------
+
+# Interactive vision setup
+run_vision() {
+  mkdir -p "$CONTEXT_DIR"
+
+  if [[ -f "$VISION_FILE" ]]; then
+    echo ""
+    echo -e "${BOLD}Current project vision:${NC}"
+    echo ""
+    cat "$VISION_FILE"
+    echo ""
+    read -r -p "Update this vision? [y/N]: " update_choice
+    if [[ "$update_choice" != "y" && "$update_choice" != "Y" ]]; then
+      return 0
+    fi
+  else
+    echo ""
+    echo -e "${BOLD}${CYAN}No project vision found. Let's set one up.${NC}"
+    echo -e "This helps the agent understand what it's building and make better decisions."
+    echo ""
+  fi
+
+  # Question 1: What is this project?
+  echo -e "${BOLD}What is this project?${NC} (1-2 sentences)"
+  read -r -p "> " project_description
+  echo ""
+
+  # Question 2: Target users
+  echo -e "${BOLD}Who are the target users?${NC}"
+  echo "  [1] Technical users (developers, engineers)"
+  echo "  [2] Semi-technical (power users, admins)"
+  echo "  [3] Non-technical (general consumers, elderly, caregivers)"
+  echo "  [4] Mixed audience"
+  read -r -p "> " user_type_choice
+  case "$user_type_choice" in
+    1) user_type="Technical users (developers, engineers)" ;;
+    2) user_type="Semi-technical (power users, admins)" ;;
+    3) user_type="Non-technical (general consumers, elderly, caregivers) — UI must be simple, accessible, and forgiving" ;;
+    4) user_type="Mixed audience — needs both simple and advanced interfaces" ;;
+    *) user_type="$user_type_choice" ;;  # freeform
+  esac
+  echo ""
+
+  # Question 3: Project stage
+  echo -e "${BOLD}What stage is the project in?${NC}"
+  echo "  [1] Brand new / greenfield"
+  echo "  [2] MVP / early development"
+  echo "  [3] Working product, adding features"
+  echo "  [4] Mature product, maintenance mode"
+  read -r -p "> " stage_choice
+  case "$stage_choice" in
+    1) project_stage="Brand new / greenfield — focus on getting core architecture right" ;;
+    2) project_stage="MVP / early development — focus on core flows working end-to-end" ;;
+    3) project_stage="Working product — adding features without breaking existing functionality" ;;
+    4) project_stage="Mature product — maintenance, optimization, and careful changes" ;;
+    *) project_stage="$stage_choice" ;;
+  esac
+  echo ""
+
+  # Question 4: Current priority
+  echo -e "${BOLD}What matters most right now?${NC}"
+  echo "  [1] Core functionality works reliably"
+  echo "  [2] User experience and polish"
+  echo "  [3] Scale and performance"
+  echo "  [4] Security and compliance"
+  echo "  [5] Something else (type it)"
+  read -r -p "> " priority_choice
+  case "$priority_choice" in
+    1) priority="Core functionality — make it work reliably before making it pretty" ;;
+    2) priority="User experience — the product works, now make it delightful" ;;
+    3) priority="Scale and performance — handle more load, optimize bottlenecks" ;;
+    4) priority="Security and compliance — harden, audit, meet regulatory requirements" ;;
+    *) priority="$priority_choice" ;;
+  esac
+  echo ""
+
+  # Question 5: UX/design guidelines
+  echo -e "${BOLD}Any UX or design guidelines?${NC} (press Enter to skip)"
+  echo "  Examples: 'mobile-first', 'dark mode', 'WCAG AA accessible', 'minimal UI'"
+  read -r -p "> " ux_guidelines
+  echo ""
+
+  # Question 6: North star issue or additional context
+  echo -e "${BOLD}Link a north star issue or paste additional context?${NC}"
+  echo "  Paste a GitHub issue URL, issue number, or freeform text (Enter to skip)"
+  read -r -p "> " north_star_input
+  echo ""
+
+  local north_star_content=""
+  if [[ -n "$north_star_input" ]]; then
+    # Check if it's a URL or issue number
+    local issue_num=""
+    if [[ "$north_star_input" =~ ^[0-9]+$ ]]; then
+      issue_num="$north_star_input"
+    elif [[ "$north_star_input" =~ issues/([0-9]+) ]]; then
+      issue_num="${BASH_REMATCH[1]}"
+    fi
+
+    if [[ -n "$issue_num" ]]; then
+      log_info "Fetching issue #${issue_num}..."
+      local issue_data
+      issue_data=$(gh issue view "$issue_num" --repo "$REPO" --json title,body 2>/dev/null) || true
+      if [[ -n "$issue_data" ]]; then
+        local issue_title issue_body
+        issue_title=$(echo "$issue_data" | jq -r '.title')
+        issue_body=$(echo "$issue_data" | jq -r '.body')
+        north_star_content="### North Star: #${issue_num} — ${issue_title}
+
+${issue_body}"
+        log_success "Fetched issue #${issue_num}: ${issue_title}"
+      else
+        log_warn "Could not fetch issue #${issue_num}"
+        north_star_content="$north_star_input"
+      fi
+    else
+      north_star_content="$north_star_input"
+    fi
+  fi
+
+  # Question 7: Anything else?
+  echo -e "${BOLD}Anything else the agent should always keep in mind?${NC} (Enter to skip)"
+  read -r -p "> " additional_context
+  echo ""
+
+  # Now synthesize with Claude
+  log_step "Generating project vision..."
+
+  local vision_prompt
+  vision_prompt=$(cat <<VEOF
+Synthesize the following inputs into a concise project vision document. This will be read by AI agents before every task to guide their decisions.
+
+Project description: ${project_description}
+Target users: ${user_type}
+Project stage: ${project_stage}
+Current priority: ${priority}
+UX guidelines: ${ux_guidelines:-"None specified"}
+Additional context: ${additional_context:-"None"}
+
+${north_star_content:+North star context:
+${north_star_content}}
+
+Output ONLY this markdown structure. Be specific and actionable. Under 500 words total.
+
+## What We're Building
+(2-3 sentences synthesizing the project description and north star)
+
+## Who It's For
+(Target users and what that means for UX/design decisions)
+
+## Current Stage & Priority
+(Where the project is and what matters most right now)
+
+## Decision Guidelines
+(5-7 bullet points the agent should follow when making choices about implementation, UX, what to build vs defer, etc. Derived from all inputs above.)
+
+## What Good Looks Like
+(3-4 bullet points describing the quality bar — what a successful implementation looks like for this project)
+VEOF
+)
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would generate project vision"
+    return 0
+  fi
+
+  local vision_output
+  set +e
+  vision_output=$(echo "$vision_prompt" | claude -p \
+    --model "${MODEL:-opus}" \
+    --max-turns 3 \
+    --dangerously-skip-permissions \
+    --output-format text \
+    2>/dev/null)
+  local vision_exit=$?
+  set -e
+
+  if [[ "$vision_exit" -ne 0 || -z "$vision_output" ]]; then
+    # Fallback: write raw inputs without synthesis
+    log_warn "Claude synthesis failed, saving raw inputs"
+    cat > "$VISION_FILE" <<RAWEOF
+## What We're Building
+${project_description}
+
+## Who It's For
+${user_type}
+
+## Current Stage & Priority
+${project_stage}
+Priority: ${priority}
+
+## UX Guidelines
+${ux_guidelines:-"None specified"}
+
+${north_star_content:+## North Star
+${north_star_content}}
+
+${additional_context:+## Additional Context
+${additional_context}}
+RAWEOF
+  else
+    echo "$vision_output" > "$VISION_FILE"
+  fi
+
+  log_success "Project vision saved to $VISION_FILE"
+  echo ""
+  cat "$VISION_FILE"
+}
+
+# Get vision context for prompts (brief version)
+get_vision_context() {
+  if [[ -f "$VISION_FILE" ]]; then
+    cat "$VISION_FILE"
+  fi
+}
+
+# Check if vision exists
+has_vision() {
+  [[ -f "$VISION_FILE" ]]
+}
+
+# ---------------------------------------------------------------------------
 # Generate or update project context by scanning the codebase
 generate_project_context() {
   local worktree="${1:-$PROJECT_DIR}"
@@ -955,17 +1181,21 @@ context_needs_refresh() {
 # ---------------------------------------------------------------------------
 build_implement_prompt() {
   local issue_num="$1" title="$2" body="$3"
+  local vision_context=""
   local project_context=""
   local previous_result=""
   local learning_context=""
 
-  # 1. Project context (architecture, conventions, rules)
+  # 1. Product vision (what we're building, who for, decision guidelines)
+  vision_context=$(get_vision_context 2>/dev/null) || true
+
+  # 2. Technical context (architecture, conventions, rules)
   project_context=$(get_project_context 2>/dev/null) || true
 
-  # 2. Previous issue result (session continuity)
+  # 3. Previous issue result (session continuity)
   previous_result=$(get_previous_result 2>/dev/null) || true
 
-  # 3. Learning context from past runs (patterns, anti-patterns)
+  # 4. Learning context from past runs (patterns, anti-patterns)
   if [[ "$SKIP_LEARNINGS" != "true" ]]; then
     learning_context=$(get_learning_context 2>/dev/null) || true
   fi
@@ -974,9 +1204,13 @@ build_implement_prompt() {
 Implement GitHub issue #${issue_num}: ${title}
 
 ${body}
+${vision_context:+
+
+## Product Vision
+${vision_context}}
 ${project_context:+
 
-## Project Context
+## Technical Context
 ${project_context}}
 ${previous_result:+
 
@@ -986,9 +1220,10 @@ ${learning_context:+
 ${learning_context}}
 
 ## Before You Start
-1. Read the files mentioned in the project context above
-2. Understand how your changes connect to existing code
-3. If you're creating new files, make sure they're wired into the appropriate entry points
+1. Read the product vision and technical context above
+2. Make decisions that align with the target users and current priority
+3. Understand how your changes connect to existing code
+4. If you're creating new files, make sure they're wired into the appropriate entry points
 
 ## After Implementing
 1. Write tests for your changes
@@ -999,6 +1234,8 @@ EOF
 
 build_review_prompt() {
   local issue_num="$1" title="$2" body="$3"
+  local vision_context=""
+  vision_context=$(get_vision_context 2>/dev/null) || true
 
   cat <<EOF
 Review the code changes for issue #${issue_num}: ${title}
@@ -1007,8 +1244,17 @@ Run git diff origin/master...HEAD to see what changed.
 
 Original requirements:
 ${body}
+${vision_context:+
 
-Review for: correctness vs requirements, security issues, missing tests, code quality.
+## Product Vision (guide your review decisions)
+${vision_context}}
+
+Review for:
+- Correctness vs requirements
+- Security issues
+- Missing tests
+- Code quality
+- UX decisions align with target users and project priorities
 
 For any issues you find:
 - CRITICAL or WARNING issues: fix them directly, run tests, and commit with "fix: address review findings for #${issue_num}"
@@ -2496,6 +2742,16 @@ main() {
   # Pre-flight test validation
   run_preflight
 
+  # Prompt for project vision if it doesn't exist (interactive only)
+  if ! has_vision && [[ -t 0 ]]; then
+    echo ""
+    echo -e "${YELLOW}[WARN]${NC} No project vision found. The agent will make better decisions with one."
+    read -r -p "Set up project vision now? [Y/n]: " vision_choice
+    if [[ "$vision_choice" != "n" && "$vision_choice" != "N" ]]; then
+      run_vision
+    fi
+  fi
+
   # Generate or refresh project context if needed
   if context_needs_refresh; then
     generate_project_context
@@ -2597,6 +2853,12 @@ if [[ "$SUBCOMMAND" == "scan" ]]; then
     echo ""
     cat "$CONTEXT_FILE"
   fi
+  exit 0
+fi
+
+# Handle vision subcommand -- interactive project vision setup
+if [[ "$SUBCOMMAND" == "vision" ]]; then
+  run_vision
   exit 0
 fi
 
