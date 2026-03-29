@@ -54,6 +54,8 @@ router.post("/runs", (req, res) => {
   }
 });
 
+const VALID_STATUSES = new Set(["running", "success", "failure"]);
+
 router.patch("/runs/:id", (req, res) => {
   try {
     const id = parseInt(req.params.id);
@@ -66,7 +68,12 @@ router.patch("/runs/:id", (req, res) => {
       res.status(404).json({ error: "Run not found" });
       return;
     }
-    const run = updateRun(_db, id, req.body);
+    const { status, stages_json, pr_url, duration_seconds } = req.body;
+    if (status !== undefined && !VALID_STATUSES.has(status)) {
+      res.status(400).json({ error: "Invalid status. Must be: running, success, or failure" });
+      return;
+    }
+    const run = updateRun(_db, id, { status, stages_json, pr_url, duration_seconds });
     res.json(run);
   } catch (err) {
     res.status(500).json({ error: "Failed to update run" });

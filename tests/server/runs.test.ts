@@ -230,5 +230,16 @@ describe("API endpoints", () => {
       });
       expect(res.status).toBe(404);
     });
+
+    it("returns 400 for invalid status", async () => {
+      createRun(db, { issue_number: 1, issue_title: "Test", agent: "claude", model: "sonnet" });
+      const app = createApp(db);
+      const res = await request(app, "/api/runs/1", {
+        method: "PATCH",
+        body: { status: "banana" },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/Invalid status/);
+    });
   });
 });
