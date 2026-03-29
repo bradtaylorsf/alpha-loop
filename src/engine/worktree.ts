@@ -18,6 +18,18 @@ export interface WorktreeResult {
 
 // --- Helpers ---
 
+function validateIssueNumber(issueNumber: number): void {
+  if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
+    throw new Error(`Invalid issue number: ${issueNumber}`);
+  }
+}
+
+function validateRef(ref: string): void {
+  if (!/^[a-zA-Z0-9._\-/]+$/.test(ref)) {
+    throw new Error(`Invalid git ref: ${ref}`);
+  }
+}
+
 export function worktreePath(repoRoot: string, issueNumber: number): string {
   return resolve(dirname(repoRoot), `issue-${issueNumber}`);
 }
@@ -30,9 +42,13 @@ function exec(cmd: string, cwd?: string): string {
   return execSync(cmd, { cwd, stdio: "pipe", encoding: "utf-8" }).trim();
 }
 
+function q(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
 function branchExistsLocally(branch: string, cwd?: string): boolean {
   try {
-    exec(`git rev-parse --verify refs/heads/${branch}`, cwd);
+    exec(`git rev-parse --verify refs/heads/${q(branch)}`, cwd);
     return true;
   } catch {
     return false;
@@ -41,8 +57,7 @@ function branchExistsLocally(branch: string, cwd?: string): boolean {
 
 function branchExistsRemotely(branch: string, cwd?: string): boolean {
   try {
-    exec(`git ls-remote --heads origin ${branch}`, cwd);
-    const output = exec(`git ls-remote --heads origin ${branch}`, cwd);
+    const output = exec(`git ls-remote --heads origin ${q(branch)}`, cwd);
     return output.length > 0;
   } catch {
     return false;
@@ -64,7 +79,9 @@ export function createWorktree(
   issueNumber: number,
   options: WorktreeOptions = {},
 ): WorktreeResult {
+  validateIssueNumber(issueNumber);
   const { baseBranch = "main", installDeps = true } = options;
+  validateRef(baseBranch);
   const repoRoot = options.repoRoot ?? exec("git rev-parse --show-toplevel");
   const wtPath = worktreePath(repoRoot, issueNumber);
   const branch = branchName(issueNumber);
@@ -77,17 +94,17 @@ export function createWorktree(
 
     // Delete existing local branch if it exists
     if (branchExistsLocally(branch, repoRoot)) {
-      exec(`git branch -D ${branch}`, repoRoot);
+      exec(`git branch -D ${q(branch)}`, repoRoot);
     }
 
     // Delete existing remote branch if it exists
     if (branchExistsRemotely(branch, repoRoot)) {
-      exec(`git push origin --delete ${branch}`, repoRoot);
+      exec(`git push origin --delete ${q(branch)}`, repoRoot);
     }
 
     // Create the worktree with a new branch from the base
     exec(
-      `git worktree add -b ${branch} ${wtPath} ${baseBranch}`,
+      `git worktree add -b ${q(branch)} ${q(wtPath)} ${q(baseBranch)}`,
       repoRoot,
     );
 
@@ -112,15 +129,16 @@ export function removeWorktree(
   issueNumber: number,
   options: Pick<WorktreeOptions, "repoRoot"> = {},
 ): void {
+  validateIssueNumber(issueNumber);
   const repoRoot =
     options.repoRoot ?? exec("git rev-parse --show-toplevel");
   const wtPath = worktreePath(repoRoot, issueNumber);
 
   if (worktreeExists(wtPath, repoRoot)) {
-    exec(`git worktree remove --force ${wtPath}`, repoRoot);
+    exec(`git worktree remove --force ${q(wtPath)}`, repoRoot);
   } else if (existsSync(wtPath)) {
     // Directory exists but not registered — force remove then prune
-    exec(`rm -rf ${wtPath}`);
+    exec(`rm -rf ${q(wtPath)}`);
     exec("git worktree prune", repoRoot);
   }
 }
