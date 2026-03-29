@@ -24,6 +24,7 @@
 #   SKIP_INSTALL    - Skip pnpm install in worktree (default: false)
 #   AUTO_CLEANUP    - Auto-remove worktrees (default: true)
 #   LABEL_READY     - Label to pick up issues (default: ready)
+#   SKIP_E2E        - Skip Playwright E2E tests in the loop (default: false)
 #   RUN_FULL        - Bypass API response cache, hit real APIs (default: false)
 ###############################################################################
 
@@ -50,6 +51,7 @@ AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 LABEL_READY="${LABEL_READY:-ready}"
 MAX_TEST_RETRIES="${MAX_TEST_RETRIES:-3}"
 RUN_FULL="${RUN_FULL:-false}"
+SKIP_E2E="${SKIP_E2E:-false}"
 AUTO_MERGE="${AUTO_MERGE:-false}"
 MERGE_TO="${MERGE_TO:-}"
 RUN_ONCE=""
@@ -516,6 +518,39 @@ run_tests() {
 
   log_success "All tests passed"
   return 0
+}
+
+run_e2e_tests() {
+  local worktree="$1" log_file="$2"
+
+  if [[ "$SKIP_E2E" == "true" ]]; then
+    log_info "Skipping E2E tests (SKIP_E2E=true)"
+    echo "E2E tests skipped"
+    return 0
+  fi
+
+  if [[ "$SKIP_TESTS" == "true" ]]; then
+    log_info "Skipping E2E tests (SKIP_TESTS=true)"
+    echo "E2E tests skipped"
+    return 0
+  fi
+
+  log_step "Running Playwright E2E tests"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would run pnpm test:e2e"
+    echo "E2E tests skipped (dry run)"
+    return 0
+  fi
+
+  log_info "Running E2E tests..."
+  if (cd "$worktree" && pnpm test:e2e 2>&1 | tee -a "$log_file"); then
+    log_success "E2E tests passed"
+    return 0
+  else
+    log_error "E2E tests failed"
+    return 1
+  fi
 }
 
 run_review() {

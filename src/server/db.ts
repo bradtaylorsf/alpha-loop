@@ -76,6 +76,14 @@ const SCHEMA = `
 
 export function createDatabase(dbPath?: string): Database.Database {
   if (!dbPath) {
+    dbPath = process.env.DATABASE_PATH;
+  }
+
+  if (dbPath === ":memory:") {
+    return createInMemoryDatabase();
+  }
+
+  if (!dbPath) {
     const dataDir = node_path.join(process.cwd(), "data");
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });

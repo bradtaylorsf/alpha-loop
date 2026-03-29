@@ -22,6 +22,7 @@
     "test:client": "jest --runInBand --config jest.client.config.cjs",
     "test:unit": "jest --runInBand",
     "test:api": "jest --runInBand",
+    "test:e2e": "npx playwright test",
     "test:full": "RECORD_FIXTURES=true jest --runInBand && RECORD_FIXTURES=true jest --runInBand --config jest.client.config.cjs",
     "test:watch": "jest --watch",
     "lint": "eslint src/ --ext .ts,.tsx",
@@ -39,6 +40,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/better-sqlite3": "^7.6.13",
