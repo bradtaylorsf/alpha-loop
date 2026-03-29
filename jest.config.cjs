@@ -13,4 +13,7 @@ module.exports = {
       useESM: false,
     }],
   },
+  // Prevent hung tests from blocking the loop
+  testTimeout: 30000,
+  forceExit: true,
 };

@@ -66,6 +66,14 @@ The `reference/` directory contains battle-tested implementations from a previou
 
 When improving existing `src/engine/` modules, adopt patterns from these reference files rather than reinventing solutions.
 
+## Protected Files -- DO NOT MODIFY OR DELETE
+
+- `reference/` -- Battle-tested code from previous project. Read-only reference.
+- `CLAUDE.md` -- This file. Do not modify unless explicitly asked.
+- `.claude/agents/` -- Agent definitions. Do not modify unless explicitly asked.
+- `.claude/skills/` -- Skill definitions. Do not modify unless explicitly asked.
+- `scripts/loop.sh` -- The loop script. Do not modify unless explicitly asked.
+
 ## Code Style
 
 - TypeScript strict mode, ESM with .js extensions in imports
@@ -73,3 +81,11 @@ When improving existing `src/engine/` modules, adopt patterns from these referen
 - pnpm only (not npm or yarn)
 - Use `node:` prefix for built-in modules (e.g., `node:path`, `node:child_process`)
 - Jest for tests, `.test.ts` suffix, co-located in `tests/` directory
+
+## Testing Rules
+
+- Jest with `forceExit: true` and `testTimeout: 30000` (see jest.config.cjs)
+- Tests MUST close all HTTP connections and servers in afterEach/afterAll
+- Tests MUST NOT leave open connections that prevent Jest from exiting
+- Use `jest.useFakeTimers()` for any timer-based testing (SSE heartbeats, polling)
+- Do NOT use real `setTimeout`/`setInterval` in tests
