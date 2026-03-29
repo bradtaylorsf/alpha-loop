@@ -9,6 +9,8 @@ import type { LoopConfig } from "../engine/loop.js";
 import { createGitHubClient } from "../engine/github.js";
 import { createRunnerFromConfig } from "../engine/runners/index.js";
 import { createServer } from "../server/index.js";
+import { selectAll, selectSpecific, selectInteractive } from "./issues.js";
+import type { IssueWithDeps } from "./issues.js";
 
 // --- Help text ---
 
@@ -28,6 +30,8 @@ Options:
   --project <num>                GitHub project number
   --once                         Process one batch and exit
   --dry-run                      Preview mode, no changes
+  --all                          Process all ready issues (skip interactive selection)
+  --issues <nums>                Process specific issues (e.g. --issues 96,97,98)
   --auto-merge                   Auto-merge PRs when checks pass
   --merge-to <branch>            Base branch for PRs (default: "master")
   --skip-tests                   Skip test stage
@@ -118,6 +122,8 @@ export function parseCliArgs(argv: string[]): {
         "skip-tests": { type: "boolean", default: false },
         "skip-review": { type: "boolean", default: false },
         "skip-e2e": { type: "boolean", default: false },
+        all: { type: "boolean", default: false },
+        issues: { type: "string" },
         model: { type: "string" },
         repo: { type: "string" },
         project: { type: "string" },
@@ -217,9 +223,42 @@ async function main(): Promise<void> {
   if (options.once) console.log("Mode: --once (single batch)");
   if (config.dryRun) console.log("Mode: --dry-run (preview only)");
 
+  // Issue selection: --all, --issues, or interactive
+  let selectedIssues: IssueWithDeps[] | undefined;
+  if (options.all) {
+    selectedIssues = await selectAll(github, config.label);
+    if (selectedIssues.length === 0) {
+      console.log(`No issues labeled '${config.label}' found.`);
+      return;
+    }
+    console.log(`Processing all ${selectedIssues.length} ready issues.`);
+  } else if (options.issues) {
+    const nums = (options.issues as string)
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => !isNaN(n) && n > 0);
+    if (nums.length === 0) {
+      console.error("Error: --issues requires comma-separated issue numbers (e.g. --issues 96,97,98)");
+      process.exitCode = 1;
+      return;
+    }
+    selectedIssues = await selectSpecific(github, config.label, nums);
+    if (selectedIssues.length === 0) {
+      console.log("No matching issues found.");
+      return;
+    }
+  } else if (options.once) {
+    // Interactive selection for --once mode
+    selectedIssues = await selectInteractive(github, config.label);
+    if (selectedIssues.length === 0) {
+      return;
+    }
+  }
+
   await startLoop(config, runner, github, undefined, {
     db,
     once: options.once as boolean,
+    selectedIssues: selectedIssues?.map((i) => i.number),
   });
 }
 
