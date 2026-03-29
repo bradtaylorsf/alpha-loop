@@ -102,7 +102,9 @@ SESSION_NAME="${SESSION_BRANCH}"
 
 # Resolve paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# PROJECT_DIR is the current working directory (the repo being worked on),
+# NOT the directory where loop.sh lives (which would be alpha-loop)
+PROJECT_DIR="$(pwd)"
 PROMPTS_DIR="$SCRIPT_DIR/prompts"
 
 # State
