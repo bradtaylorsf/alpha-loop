@@ -2,6 +2,7 @@ import { Router, type Router as RouterType } from "express";
 import type Database from "better-sqlite3";
 import { listLearnings } from "../db.js";
 import type { LearningType } from "../db.js";
+import { computeMetrics, aggregateLearnings } from "../../learning/improver.js";
 
 let _db: Database.Database;
 
@@ -29,6 +30,32 @@ router.get("/learnings", (_req, res) => {
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: "Failed to list learnings" });
+  }
+});
+
+router.get("/learnings/metrics", (_req, res) => {
+  try {
+    const metrics = computeMetrics(_db);
+    res.json(metrics);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to compute metrics" });
+  }
+});
+
+router.get("/learnings/suggestions", (_req, res) => {
+  try {
+    const learnings = aggregateLearnings(_db);
+    const suggestions = learnings.promptImprovements.map((l) => ({
+      id: l.id,
+      content: l.content,
+      confidence: l.confidence,
+      run_id: l.run_id,
+      issue_number: l.issue_number,
+      created_at: l.created_at,
+    }));
+    res.json({ suggestions });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to get suggestions" });
   }
 });
 

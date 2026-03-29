@@ -25,7 +25,12 @@ export interface CompleteEvent {
   data: { issue: number; prUrl: string; duration: number };
 }
 
-export type LoopEvent = StageEvent | OutputEvent | TestEvent | ErrorEvent | CompleteEvent;
+export interface LearningEvent {
+  type: "learning";
+  data: { issue: number; count: number; timestamp: string };
+}
+
+export type LoopEvent = StageEvent | OutputEvent | TestEvent | ErrorEvent | CompleteEvent | LearningEvent;
 
 const loopEventEmitter = new EventEmitter();
 

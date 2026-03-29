@@ -25,6 +25,7 @@
 #   AUTO_CLEANUP    - Auto-remove worktrees (default: true)
 #   LABEL_READY     - Label to pick up issues (default: ready)
 #   SKIP_E2E        - Skip Playwright E2E tests in the loop (default: false)
+#   SKIP_LEARNINGS  - Skip learning extraction after runs (default: false)
 #   RUN_FULL        - Bypass API response cache, hit real APIs (default: false)
 ###############################################################################
 
@@ -52,6 +53,7 @@ LABEL_READY="${LABEL_READY:-ready}"
 MAX_TEST_RETRIES="${MAX_TEST_RETRIES:-3}"
 RUN_FULL="${RUN_FULL:-false}"
 SKIP_E2E="${SKIP_E2E:-false}"
+SKIP_LEARNINGS="${SKIP_LEARNINGS:-false}"
 AUTO_MERGE="${AUTO_MERGE:-false}"
 MERGE_TO="${MERGE_TO:-}"
 RUN_ONCE=""
@@ -950,10 +952,24 @@ $test_output"
 ---
 *Processed by agent-loop in ${SECONDS}s*" || true
 
-  # Step 8: Auto-merge if enabled
+  # Step 8: Extract learnings
+  if [[ "$SKIP_LEARNINGS" != "true" ]]; then
+    log_step "Extracting learnings from run..."
+    # Emit SSE event for learning extraction start
+    if command -v curl &>/dev/null && [[ -n "${API_URL:-}" ]]; then
+      curl -s -X POST "${API_URL}/api/stream" \
+        -H "Content-Type: application/json" \
+        -d "{\"type\":\"learning\",\"data\":{\"issue\":${issue_num},\"count\":0,\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" || true
+    fi
+    log_info "Learning extraction queued for issue #$issue_num"
+  else
+    log_info "Skipping learnings (SKIP_LEARNINGS=true)"
+  fi
+
+  # Step 9: Auto-merge if enabled
   merge_pr "$issue_num" || true
 
-  # Step 9: Cleanup worktree (keep branch for PR if not merged)
+  # Step 10: Cleanup worktree (keep branch for PR if not merged)
   cleanup_worktree "$issue_num"
 
   end_time=$(date +%s)
@@ -986,6 +1002,7 @@ main() {
   echo -e "  Dry Run:       ${BOLD}$DRY_RUN${NC}"
   echo -e "  Skip Tests:    ${BOLD}$SKIP_TESTS${NC}"
   echo -e "  Skip Review:   ${BOLD}$SKIP_REVIEW${NC}"
+  echo -e "  Skip Learnings:${BOLD}$SKIP_LEARNINGS${NC}"
   echo -e "  Test Retries:  ${BOLD}$MAX_TEST_RETRIES${NC}"
   echo -e "  Auto Merge:    ${BOLD}$AUTO_MERGE${NC}"
   echo -e "  Merge To:      ${BOLD}${SESSION_BRANCH}${NC}"

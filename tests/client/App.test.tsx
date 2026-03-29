@@ -16,6 +16,9 @@ jest.mock("../../src/client/History", () => ({
 jest.mock("../../src/client/Config", () => ({
   Config: () => <div data-testid="config">Config</div>,
 }));
+jest.mock("../../src/client/Learnings", () => ({
+  Learnings: () => <div data-testid="learnings">Learnings</div>,
+}));
 
 // Stub EventSource for LiveView (even though mocked, jsdom doesn't have it)
 beforeAll(() => {
@@ -54,10 +57,18 @@ describe("App", () => {
     expect(screen.queryByTestId("live-view")).not.toBeInTheDocument();
   });
 
-  it("renders all three navigation buttons", () => {
+  it("switches to Learnings tab", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("Learnings"));
+    expect(screen.getByTestId("learnings")).toBeInTheDocument();
+    expect(screen.queryByTestId("live-view")).not.toBeInTheDocument();
+  });
+
+  it("renders all four navigation buttons", () => {
     render(<App />);
     expect(screen.getByText("Live View")).toBeInTheDocument();
     expect(screen.getByText("Run History")).toBeInTheDocument();
+    expect(screen.getByText("Learnings")).toBeInTheDocument();
     expect(screen.getByText("Config")).toBeInTheDocument();
   });
 });
