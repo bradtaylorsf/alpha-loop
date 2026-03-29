@@ -50,6 +50,11 @@ export interface LearningEvent {
   data: { issue: number; count: number; timestamp: string };
 }
 
+export interface VerifyResultEvent {
+  type: "verify_result";
+  data: { passed: boolean; attempt: number; maxAttempts: number; timestamp: string };
+}
+
 export type LoopEvent =
   | StageEvent
   | StageStartEvent
@@ -58,6 +63,7 @@ export type LoopEvent =
   | TestEvent
   | TestResultEvent
   | ReviewResultEvent
+  | VerifyResultEvent
   | ErrorEvent
   | CompleteEvent
   | LearningEvent;

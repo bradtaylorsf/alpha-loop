@@ -55,6 +55,7 @@ const DISPLAY_STAGES: PipelineStage[] = [
   "implement",
   "test",
   "fix",
+  "verify",
   "review",
   "pr",
   "cleanup",
