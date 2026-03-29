@@ -1,5 +1,4 @@
 import { createCodexRunner, isCodexInstalled } from "../../../src/engine/runners/codex";
-import type { RunOptions } from "../../../src/engine/runner";
 import { createRunnerFromConfig } from "../../../src/engine/runners/index";
 import { createClaudeRunner } from "../../../src/engine/runners/claude";
 
