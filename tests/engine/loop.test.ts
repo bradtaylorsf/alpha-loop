@@ -358,7 +358,7 @@ describe("defaultConfig", () => {
   it("returns sensible defaults", () => {
     const config = defaultConfig();
     expect(config.baseBranch).toBe("master");
-    expect(config.model).toBe("sonnet");
+    expect(config.model).toBe("opus");
     expect(config.maxTurns).toBe(30);
     expect(config.maxTestRetries).toBe(3);
     expect(config.pollInterval).toBe(60);
