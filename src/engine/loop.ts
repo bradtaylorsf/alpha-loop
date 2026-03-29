@@ -103,7 +103,11 @@ function runTests(cwd: string): { success: boolean; output: string } {
 }
 
 function pushBranch(cwd: string, branch: string): void {
-  execSync(`git push -u origin ${branch}`, {
+  // Validate branch name to prevent command injection
+  if (!/^[a-zA-Z0-9._\-/]+$/.test(branch)) {
+    throw new Error(`Invalid branch name: ${branch}`);
+  }
+  execSync(`git push -u origin '${branch}'`, {
     cwd,
     encoding: "utf-8",
     stdio: "pipe",
@@ -157,10 +161,11 @@ export async function processIssue(
   }
 
   function fail(error: string): PipelineResult {
+    const failedAtStage = currentStage;
     transition("failed", error);
     emitSSE({
       type: "error",
-      data: { message: error, stage: currentStage, timestamp: new Date().toISOString() },
+      data: { message: error, stage: failedAtStage, timestamp: new Date().toISOString() },
     });
     const duration = Date.now() - start;
     if (run && db) {
@@ -302,6 +307,19 @@ export async function processIssue(
       `Implementation complete. PR: #${prNumber}`,
     );
 
+    // Capture diff before cleanup for learnings context
+    let diffOutput = "";
+    try {
+      diffOutput = execSync(`git diff ${config.baseBranch}...HEAD`, {
+        cwd: worktreePath,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 30_000,
+      });
+    } catch {
+      // Best-effort — diff may not be available
+    }
+
     // --- Cleanup ---
     transition("cleanup", "Removing worktree");
     if (config.autoCleanup) {
@@ -338,7 +356,7 @@ export async function processIssue(
       try {
         const result = await extractLearnings(
           { ...run, status: "success", duration_seconds: Math.round(duration / 1000), pr_url: prUrl },
-          { issueBody: issue.body ?? "", diff: "", testOutput: "", reviewOutput: "", retryCount: 0 },
+          { issueBody: issue.body ?? "", diff: diffOutput, testOutput: "", reviewOutput: "", retryCount: 0 },
           runner,
           db,
         );
