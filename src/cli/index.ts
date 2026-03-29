@@ -20,6 +20,8 @@ import {
 } from "./config.js";
 import type { ConfigFlags } from "./config.js";
 import { createControls } from "./controls.js";
+import { showPostRunSummary } from "./summary.js";
+import type { MergeStrategy } from "./config.js";
 
 // --- Help text ---
 
@@ -286,10 +288,15 @@ async function main(): Promise<void> {
 
   const issuesForConfig = selectedIssues ?? [];
 
+  let sessionName = "session";
+  let mergeStrategy: MergeStrategy = "session-branch";
+
   if (hasAllConfigFlags(configFlags)) {
     // Non-interactive: all flags provided, skip prompts
     const sessionConfig = buildSessionConfigFromFlags(config, configFlags);
     console.log(formatSessionSummary(sessionConfig.sessionName, repoStr, issuesForConfig, sessionConfig));
+    sessionName = sessionConfig.sessionName;
+    mergeStrategy = sessionConfig.mergeStrategy;
     // Apply session config back to loop config
     config.model = sessionConfig.model;
     config.reviewModel = sessionConfig.reviewModel;
@@ -302,6 +309,8 @@ async function main(): Promise<void> {
     if (!sessionConfig) {
       return; // User cancelled
     }
+    sessionName = sessionConfig.sessionName;
+    mergeStrategy = sessionConfig.mergeStrategy;
     // Apply session config back to loop config
     config.model = sessionConfig.model;
     config.reviewModel = sessionConfig.reviewModel;
@@ -311,13 +320,39 @@ async function main(): Promise<void> {
   }
 
   const controls = createControls();
+  const startedAt = new Date();
 
-  await startLoop(config, runner, github, undefined, {
+  const loopResults = await startLoop(config, runner, github, undefined, {
     db,
     once: options.once as boolean,
     selectedIssues: selectedIssues?.map((i) => i.number),
     controls,
   });
+
+  // Show post-run summary if there are results
+  if (loopResults.results.length > 0 || loopResults.skippedIssues.length > 0) {
+    const action = await showPostRunSummary(
+      loopResults,
+      sessionName,
+      config.owner,
+      config.repo,
+      config.model,
+      mergeStrategy,
+      startedAt,
+    );
+
+    // Handle retry: start a new mini-session with just the failed issues
+    if (action.type === "retry_failed" && action.failedIssues && action.failedIssues.length > 0) {
+      console.log(`\nRetrying failed issues: ${action.failedIssues.map((n) => `#${n}`).join(", ")}`);
+      const retryControls = createControls();
+      await startLoop(config, runner, github, undefined, {
+        db,
+        once: true,
+        selectedIssues: action.failedIssues,
+        controls: retryControls,
+      });
+    }
+  }
 }
 
 // Only run main() when executed directly (not imported in tests)

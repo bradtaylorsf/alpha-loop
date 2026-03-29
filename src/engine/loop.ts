@@ -527,16 +527,25 @@ export interface StartLoopOptions {
   controls?: LoopControls;
 }
 
+export interface LoopResults {
+  results: PipelineResult[];
+  issues: Map<number, GitHubIssue>;
+  skippedIssues: number[];
+}
+
 export async function startLoop(
   config: LoopConfig,
   runner: AgentRunner,
   github: GitHubClient,
   onStage?: StageListener,
   options?: StartLoopOptions,
-): Promise<void> {
+): Promise<LoopResults> {
   let running = true;
   const db = options?.db;
   const controls = options?.controls;
+  const allResults: PipelineResult[] = [];
+  const issueMap = new Map<number, GitHubIssue>();
+  const skippedIssues: number[] = [];
 
   function shutdown(): void {
     console.log("\nShutting down gracefully...");
@@ -581,8 +590,10 @@ export async function startLoop(
         if (controls?.shouldQuit()) break;
 
         controls?.startIssue(issue);
+        issueMap.set(issue.number, issue);
         log("setup", issue.number, `Processing: ${issue.title}`);
         const result = await processIssue(issue, config, runner, github, onStage, { db, controls });
+        allResults.push(result);
 
         if (result.success) {
           log("done", issue.number, `Completed in ${result.duration}ms`);
@@ -601,6 +612,8 @@ export async function startLoop(
           if (action === "skip" && nextIssue) {
             // Skip next issue — handled by the loop naturally since we just continue
             // The "skip" at between-issues means skip the NEXT issue
+            skippedIssues.push(nextIssue.number);
+            issueMap.set(nextIssue.number, nextIssue);
             i++; // Skip next
             continue;
           }
@@ -619,6 +632,8 @@ export async function startLoop(
     process.removeListener("SIGTERM", shutdown);
     controls?.destroy();
   }
+
+  return { results: allResults, issues: issueMap, skippedIssues };
 }
 
 // --- Prompt builders ---
