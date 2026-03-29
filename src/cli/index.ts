@@ -78,6 +78,27 @@ function parseRepo(repoStr: string): { owner: string; repo: string } {
   return { owner: parts[0], repo: parts[1] };
 }
 
+function detectRepoFromGit(): string | undefined {
+  try {
+    const { execSync } = require("node:child_process");
+    const remote = execSync("git remote get-url origin", {
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 5000,
+    }).trim();
+    // Handle both HTTPS and SSH formats
+    // https://github.com/owner/repo.git -> owner/repo
+    // git@github.com:owner/repo.git -> owner/repo
+    const httpsMatch = remote.match(/github\.com\/([^/]+\/[^/.]+)/);
+    if (httpsMatch) return httpsMatch[1];
+    const sshMatch = remote.match(/github\.com:([^/]+\/[^/.]+)/);
+    if (sshMatch) return sshMatch[1];
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // --- CLI arg parsing ---
 
 export function parseCliArgs(argv: string[]): {
@@ -135,15 +156,18 @@ export function buildConfig(options: Record<string, string | boolean | undefined
   const envSkipReview = process.env.SKIP_REVIEW === "true";
   const envDryRun = process.env.DRY_RUN === "true";
 
-  // Config priority: CLI flags > env vars > config.yaml > defaults
-  const repoStr = (options.repo as string) ?? envRepo ?? yaml.loop?.repo;
-  const { owner, repo } = repoStr ? parseRepo(repoStr) : { owner: "owner", repo: "repo" };
+  // Config priority: CLI flags > env vars > config.yaml > git remote > defaults
+  const repoStr = (options.repo as string) ?? envRepo ?? yaml.loop?.repo ?? detectRepoFromGit();
+  if (!repoStr) {
+    throw new Error("Could not determine repo. Pass --repo owner/repo, set REPO env var, or run from a git repo with a GitHub remote.");
+  }
+  const { owner, repo } = parseRepo(repoStr);
 
   return defaultConfig({
     owner,
     repo,
     baseBranch: (options["merge-to"] as string) ?? envBaseBranch ?? yaml.loop?.baseBranch,
-    model: (options.model as string) ?? envModel ?? yaml.agent?.model,
+    model: (options.model as string) ?? envModel ?? yaml.agent?.model ?? "opus",
     reviewModel: yaml.agent?.reviewModel,
     maxTurns: envMaxTurns ?? yaml.agent?.maxTurns,
     maxTestRetries: yaml.loop?.maxTestRetries,

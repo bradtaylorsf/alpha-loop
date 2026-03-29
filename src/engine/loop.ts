@@ -64,7 +64,7 @@ export function defaultConfig(
     owner: overrides.owner ?? "owner",
     repo: overrides.repo ?? "repo",
     baseBranch: overrides.baseBranch ?? "master",
-    model: overrides.model ?? "sonnet",
+    model: overrides.model ?? "opus",
     reviewModel: overrides.reviewModel,
     maxTurns: overrides.maxTurns ?? 30,
     maxTestRetries: overrides.maxTestRetries ?? 3,
