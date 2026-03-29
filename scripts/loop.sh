@@ -292,9 +292,14 @@ setup_worktree() {
   fi
 
   # When auto-merging, branch from session branch so each issue builds on previous
+  # But only if the session branch actually exists (it's created on first merge)
   local from_branch="$BASE_BRANCH"
   if [[ "$AUTO_MERGE" == "true" && "$SESSION_BRANCH" != "$BASE_BRANCH" ]]; then
-    from_branch="$SESSION_BRANCH"
+    # Check if session branch exists on remote or locally
+    if git -C "$PROJECT_DIR" rev-parse --verify "origin/$SESSION_BRANCH" &>/dev/null || \
+       git -C "$PROJECT_DIR" rev-parse --verify "$SESSION_BRANCH" &>/dev/null; then
+      from_branch="$SESSION_BRANCH"
+    fi
   fi
 
   # Ensure we're on the latest
