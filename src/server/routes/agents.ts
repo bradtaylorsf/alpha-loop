@@ -46,6 +46,13 @@ router.get("/agents", (_req, res) => {
 router.get("/agents/:name", (req, res) => {
   try {
     const agentName = req.params.name;
+
+    // Prevent path traversal -- only allow simple alphanumeric/hyphen/underscore names
+    if (!/^[a-zA-Z0-9_-]+$/.test(agentName)) {
+      res.status(400).json({ error: "Invalid agent name" });
+      return;
+    }
+
     const filePath = resolve(AGENTS_DIR, `${agentName}.md`);
 
     try {

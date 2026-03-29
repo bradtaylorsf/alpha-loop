@@ -71,4 +71,12 @@ describe("GET /api/agents/:name", () => {
     expect(res.status).toBe(404);
     expect(res.body.error).toMatch(/not found/);
   });
+
+  it("rejects path traversal attempts", async () => {
+    const app = createApp();
+    const res = await request(app, "/api/agents/..%2F..%2Fetc%2Fpasswd");
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid agent name/);
+  });
 });
