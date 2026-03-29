@@ -1,5 +1,6 @@
 loop:
   repo: bradtaylorsf/alpha-loop
+  project: 2
   baseBranch: master
   pollInterval: 60
   maxTestRetries: 3
@@ -10,8 +11,8 @@ loop:
 
 agent:
   name: claude
-  model: sonnet
-  reviewModel: sonnet
+  model: opus
+  reviewModel: opus
   maxTurns: 30
   permissionMode: acceptEdits
 
