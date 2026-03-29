@@ -79,6 +79,7 @@ for arg in "$@"; do
     --qa) HISTORY_QA="true" ;;
     --clean) HISTORY_CLEAN="true" ;;
     init) SUBCOMMAND="init" ;;
+    scan) SUBCOMMAND="scan" ;;
     history) SUBCOMMAND="history" ;;
     *)
       # Capture the session name argument for history subcommand
@@ -759,13 +760,180 @@ cleanup_worktree() {
 }
 
 # ---------------------------------------------------------------------------
+# Project Context -- living memory that persists across runs
+# ---------------------------------------------------------------------------
+CONTEXT_DIR="${PROJECT_DIR}/.alpha-loop"
+CONTEXT_FILE="${CONTEXT_DIR}/context.md"
+
+# Generate or update project context by scanning the codebase
+generate_project_context() {
+  local worktree="${1:-$PROJECT_DIR}"
+
+  mkdir -p "$CONTEXT_DIR"
+
+  log_step "Scanning codebase for project context..."
+
+  local scan_prompt
+  scan_prompt=$(cat <<'SCANEOF'
+Analyze this codebase and produce a concise project context file. Read the key files (package.json, entry points, config files, README, CLAUDE.md) and output ONLY this markdown structure:
+
+## Architecture
+- Entry points and how they connect (e.g., "Express server in src/server/index.ts mounts routes from routes/*.ts")
+- Database (type, schema location, how to query)
+- Key directories and what they contain
+
+## Conventions
+- Language, framework, coding patterns used
+- How tests are structured and run
+- How new features should be wired in (e.g., "new routes must be imported in index.ts")
+
+## Critical Rules
+- Files/directories that must not be deleted or modified without care
+- Integration points that break if not updated together
+- Common mistakes to avoid in this codebase
+
+## Active State
+- Test status: (will be filled in by the loop)
+- Recent changes: (will be filled in by the loop)
+
+Keep each section to 3-5 bullet points. Be specific to THIS codebase, not generic advice. Under 400 words total.
+SCANEOF
+)
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would generate project context"
+    return 0
+  fi
+
+  local context_output
+  context_output=$(cd "$worktree" && echo "$scan_prompt" | claude -p \
+    --model "${MODEL:-opus}" \
+    --max-turns 5 \
+    --dangerously-skip-permissions \
+    --output-format text \
+    2>/dev/null) || {
+    log_warn "Project context generation failed"
+    return 0
+  }
+
+  if [[ -n "$context_output" ]]; then
+    echo "$context_output" > "$CONTEXT_FILE"
+    log_success "Project context saved to $CONTEXT_FILE"
+  fi
+}
+
+# Read project context (returns empty string if not available)
+get_project_context() {
+  if [[ -f "$CONTEXT_FILE" ]]; then
+    cat "$CONTEXT_FILE"
+  fi
+}
+
+# Update the "Active State" section of project context after a run
+update_context_after_run() {
+  local issue_num="$1" title="$2" status="$3" files_changed="$4"
+
+  if [[ ! -f "$CONTEXT_FILE" ]]; then
+    return 0
+  fi
+
+  # Append to active state
+  local timestamp
+  timestamp=$(date +%Y-%m-%dT%H:%M:%S)
+
+  # Update the Active State section with latest run info
+  # Use a simple append approach -- the learning aggregation will clean this up
+  local state_update="- [${timestamp}] #${issue_num} ${title} (${status}) — ${files_changed} files changed"
+
+  # Check if Active State section exists
+  if grep -q "^## Active State" "$CONTEXT_FILE" 2>/dev/null; then
+    # Append under Active State, keep only last 5 entries
+    local temp_file="${CONTEXT_FILE}.tmp"
+    awk -v new_entry="$state_update" '
+      /^## Active State/ { in_section=1; print; next }
+      in_section && /^## / {
+        # Print last 5 entries then the new section header
+        in_section=0; print; next
+      }
+      { print }
+      END { if (in_section) print new_entry }
+    ' "$CONTEXT_FILE" > "$temp_file"
+    # Add new entry at end of Active State
+    sed -i.bak "/^## Active State/a\\
+${state_update}" "$CONTEXT_FILE" 2>/dev/null || {
+      # macOS sed needs different syntax
+      sed -i '' "/^## Active State/a\\
+${state_update}" "$CONTEXT_FILE" 2>/dev/null || true
+    }
+    rm -f "${CONTEXT_FILE}.bak" "$temp_file" 2>/dev/null
+  fi
+}
+
+# Save a session result summary for the next issue to read
+save_session_result() {
+  local issue_num="$1" title="$2" status="$3" files_summary="$4"
+  local session_dir="$PROJECT_DIR/sessions/$SESSION_NAME"
+  mkdir -p "$session_dir"
+
+  cat > "$session_dir/issue-${issue_num}-result.md" <<RESULTEOF
+## Previous Issue Result
+- Issue: #${issue_num} — ${title}
+- Status: ${status}
+- Files changed: ${files_summary}
+- Completed: $(date +%Y-%m-%dT%H:%M:%S)
+
+Note: Build on this work. If this issue created new modules, make sure your changes integrate with them.
+RESULTEOF
+}
+
+# Get the result from the previous issue in this session
+get_previous_result() {
+  local session_dir="$PROJECT_DIR/sessions/$SESSION_NAME"
+  if [[ ! -d "$session_dir" ]]; then
+    return 0
+  fi
+
+  # Find the most recent result file
+  local latest_result
+  latest_result=$(find "$session_dir" -maxdepth 1 -name "issue-*-result.md" -type f 2>/dev/null | sort -V | tail -1)
+
+  if [[ -n "$latest_result" && -f "$latest_result" ]]; then
+    cat "$latest_result"
+  fi
+}
+
+# Check if project context is stale (older than 7 days or doesn't exist)
+context_needs_refresh() {
+  if [[ ! -f "$CONTEXT_FILE" ]]; then
+    return 0  # needs refresh (doesn't exist)
+  fi
+
+  local file_age_days
+  if [[ "$(uname)" == "Darwin" ]]; then
+    file_age_days=$(( ($(date +%s) - $(stat -f %m "$CONTEXT_FILE")) / 86400 ))
+  else
+    file_age_days=$(( ($(date +%s) - $(stat -c %Y "$CONTEXT_FILE")) / 86400 ))
+  fi
+
+  [[ "$file_age_days" -ge 7 ]]
+}
+
+# ---------------------------------------------------------------------------
 # Prompt Building -- keep prompts SHORT, let skills/CLAUDE.md do the work
 # ---------------------------------------------------------------------------
 build_implement_prompt() {
   local issue_num="$1" title="$2" body="$3"
+  local project_context=""
+  local previous_result=""
   local learning_context=""
 
-  # Inject learning context from previous runs (if available)
+  # 1. Project context (architecture, conventions, rules)
+  project_context=$(get_project_context 2>/dev/null) || true
+
+  # 2. Previous issue result (session continuity)
+  previous_result=$(get_previous_result 2>/dev/null) || true
+
+  # 3. Learning context from past runs (patterns, anti-patterns)
   if [[ "$SKIP_LEARNINGS" != "true" ]]; then
     learning_context=$(get_learning_context 2>/dev/null) || true
   fi
@@ -774,11 +942,26 @@ build_implement_prompt() {
 Implement GitHub issue #${issue_num}: ${title}
 
 ${body}
+${project_context:+
+
+## Project Context
+${project_context}}
+${previous_result:+
+
+${previous_result}}
 ${learning_context:+
 
 ${learning_context}}
 
-After implementing, write tests, run pnpm test to verify, and commit with: git commit -m "feat: ${title} (closes #${issue_num})"
+## Before You Start
+1. Read the files mentioned in the project context above
+2. Understand how your changes connect to existing code
+3. If you're creating new files, make sure they're wired into the appropriate entry points
+
+## After Implementing
+1. Write tests for your changes
+2. Run the test command to verify
+3. Commit with: git commit -m "feat: ${title} (closes #${issue_num})"
 EOF
 }
 
@@ -1163,6 +1346,9 @@ Automated by alpha-loop learning system" \
       fi
     )
   fi
+
+  # Refresh project context after aggregation (learnings may have changed what matters)
+  generate_project_context || true
 
   log_success "Learning aggregation complete"
   return 0
@@ -1954,6 +2140,14 @@ Instructions:
   run_learn "$issue_num" "$title" "$run_status" "$attempt" "$duration" \
     "$run_diff" "$test_output" "${REVIEW_OUTPUT:-}" "${verify_output:-}" "$body" || true
 
+  # Step 9b: Update project context and save session result for next issue
+  local files_changed_count
+  files_changed_count=$(echo "$run_diff" | grep -c "^diff --git" 2>/dev/null) || files_changed_count=0
+  local files_summary
+  files_summary=$(cd "$worktree" && git diff --stat "origin/$BASE_BRANCH...HEAD" 2>/dev/null | tail -1) || files_summary="${files_changed_count} files"
+  update_context_after_run "$issue_num" "$title" "$run_status" "$files_changed_count" || true
+  save_session_result "$issue_num" "$title" "$run_status" "$files_summary" || true
+
   # Emit SSE event for learning extraction
   if command -v curl &>/dev/null && [[ -n "${API_URL:-}" ]]; then
     local learn_count
@@ -2270,6 +2464,13 @@ main() {
   # Pre-flight test validation
   run_preflight
 
+  # Generate or refresh project context if needed
+  if context_needs_refresh; then
+    generate_project_context
+  else
+    log_info "Project context is fresh ($(basename "$CONTEXT_FILE"))"
+  fi
+
   while true; do
     log_info "Polling for issues labeled '$LABEL_READY'..."
 
@@ -2354,6 +2555,16 @@ trap cleanup_on_exit EXIT
 # Handle init subcommand before applying config (init doesn't need full config)
 if [[ "$SUBCOMMAND" == "init" ]]; then
   run_init
+  exit 0
+fi
+
+# Handle scan subcommand -- generate project context
+if [[ "$SUBCOMMAND" == "scan" ]]; then
+  generate_project_context
+  if [[ -f "$CONTEXT_FILE" ]]; then
+    echo ""
+    cat "$CONTEXT_FILE"
+  fi
   exit 0
 fi
 
