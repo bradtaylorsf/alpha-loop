@@ -123,7 +123,7 @@ describe("buildConfig", () => {
   it("returns default config with no overrides", () => {
     const config = buildConfig({});
     expect(config.baseBranch).toBe("master");
-    expect(config.model).toBe("sonnet");
+    expect(config.model).toBe("opus");
     expect(config.skipTests).toBe(false);
     expect(config.skipReview).toBe(false);
     expect(config.dryRun).toBe(false);
