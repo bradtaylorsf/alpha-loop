@@ -283,13 +283,28 @@ export async function processIssue(
       return fail(`Failed to push branch: ${String(err)}`);
     }
 
+    // Capture diff stat for "What to Test" section
+    let diffStat = "";
+    try {
+      diffStat = execSync(`git diff ${config.baseBranch}...HEAD --stat`, {
+        cwd: worktreePath,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 30_000,
+      });
+    } catch {
+      // Best-effort
+    }
+
+    const whatToTest = buildWhatToTest(issue, diffStat);
+
     let prNumber: number;
     try {
       const pr = await github.createPR({
         branch,
         base: config.baseBranch,
         title: `feat: ${issue.title} (closes #${issue.number})`,
-        body: `## Summary\n\nAutomated implementation of #${issue.number}: **${issue.title}**\n\n---\nAutomated by alpha-loop`,
+        body: `## Summary\n\nAutomated implementation of #${issue.number}: **${issue.title}**\n\n## What to Test\n\n${whatToTest}\n\n---\nAutomated by alpha-loop | [Issue #${issue.number}](https://github.com/${config.owner}/${config.repo}/issues/${issue.number})`,
       });
       prNumber = pr.number;
     } catch (err) {
@@ -479,6 +494,44 @@ Instructions:
 2. Fix the implementation code OR the tests as appropriate
 3. Run pnpm test to verify fixes
 4. Commit your fixes with message: fix: resolve test failures for issue #${issueNumber}`;
+}
+
+export function buildWhatToTest(issue: GitHubIssue, diffStat?: string): string {
+  const body = issue.body ?? "";
+
+  // Try to extract manual test instructions from the issue body
+  const manualTestMatch = body.match(
+    /### Manual Test Instructions\s*\n([\s\S]*?)(?=\n### |\n$|$)/,
+  );
+  if (manualTestMatch) {
+    const instructions = manualTestMatch[1].trim();
+    if (instructions.length > 0) {
+      return instructions;
+    }
+  }
+
+  // Fallback: generate from diff stat and issue content
+  const lines: string[] = [
+    "_Auto-generated — no manual test instructions were provided in the issue._",
+    "",
+  ];
+
+  if (diffStat) {
+    lines.push("**Changed files:**", "```", diffStat.trim(), "```", "");
+  }
+
+  // Extract acceptance criteria for verification hints
+  const acMatch = body.match(
+    /### Acceptance Criteria\s*\n([\s\S]*?)(?=\n### |\n$|$)/,
+  );
+  if (acMatch) {
+    const criteria = acMatch[1].trim();
+    if (criteria.length > 0) {
+      lines.push("**Verify acceptance criteria:**", criteria, "");
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function buildReviewPrompt(issue: GitHubIssue, baseBranch: string): string {

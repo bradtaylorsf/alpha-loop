@@ -41,6 +41,16 @@ body:
         - E2E test for...
 
   - type: textarea
+    id: manual-test-instructions
+    attributes:
+      label: Manual Test Instructions
+      description: Steps a reviewer can follow to manually verify the changes work correctly
+      placeholder: |
+        1. Start the dev server with `pnpm dev`
+        2. Navigate to ...
+        3. Verify that ...
+
+  - type: textarea
     id: affected-files
     attributes:
       label: Affected Files/Areas

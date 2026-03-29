@@ -581,8 +581,61 @@ Instructions:
   fi
 }
 
+generate_what_to_test() {
+  local issue_num="$1" body="$2" worktree="$3"
+  local manual_test_section=""
+
+  # Try to extract manual test instructions from the issue body
+  # Look for a "Manual Test Instructions" section (from the issue template)
+  manual_test_section=$(echo "$body" | sed -n '/### Manual Test Instructions/,/### /{ /### Manual Test Instructions/d; /### [^M]/d; p; }' | sed '/^$/d')
+
+  if [[ -n "$manual_test_section" ]]; then
+    echo "$manual_test_section"
+    return 0
+  fi
+
+  # Fallback: generate from the diff
+  local diff_stat
+  diff_stat=$(cd "$worktree" && git diff "origin/$BASE_BRANCH...HEAD" --stat 2>/dev/null || echo "No diff available")
+
+  local new_endpoints
+  new_endpoints=$(cd "$worktree" && git diff "origin/$BASE_BRANCH...HEAD" -- '*.ts' '*.js' 2>/dev/null | grep -E '^\+.*(app\.(get|post|put|delete|patch)|router\.(get|post|put|delete|patch))' | sed 's/^\+//' || echo "")
+
+  local new_components
+  new_components=$(cd "$worktree" && git diff "origin/$BASE_BRANCH...HEAD" -- '*.tsx' '*.jsx' 2>/dev/null | grep -E '^\+.*export.*(function|const)' | sed 's/^\+//' || echo "")
+
+  cat <<TESTEOF
+_Auto-generated from diff — no manual test instructions were provided in the issue._
+
+**Changed files:**
+\`\`\`
+${diff_stat}
+\`\`\`
+TESTEOF
+
+  if [[ -n "$new_endpoints" ]]; then
+    cat <<TESTEOF
+
+**New/modified endpoints detected:**
+\`\`\`
+${new_endpoints}
+\`\`\`
+TESTEOF
+  fi
+
+  if [[ -n "$new_components" ]]; then
+    cat <<TESTEOF
+
+**New/modified UI components detected:**
+\`\`\`
+${new_components}
+\`\`\`
+TESTEOF
+  fi
+}
+
 create_pr() {
-  local issue_num="$1" title="$2" worktree="$3" review="$4" test_output="$5"
+  local issue_num="$1" title="$2" worktree="$3" review="$4" test_output="$5" body="${6:-}"
   local branch="agent/issue-${issue_num}"
 
   log_step "Creating PR for issue #$issue_num"
@@ -607,6 +660,10 @@ create_pr() {
   # Check if PR already exists for this branch
   local existing_pr
   existing_pr=$(gh pr list --repo "$REPO" --head "$branch" --json number --limit 1 2>/dev/null | jq -r '.[0].number // empty')
+  # Generate "What to Test" section
+  local what_to_test
+  what_to_test=$(generate_what_to_test "$issue_num" "$body" "$worktree")
+
   if [[ -n "$existing_pr" ]]; then
     PR_URL="https://github.com/${REPO}/pull/${existing_pr}"
     log_info "PR already exists: $PR_URL, updating..."
@@ -631,8 +688,12 @@ ${review:-No review available}
 ${test_output:-Tests not captured}
 \`\`\`
 
+## What to Test
+
+${what_to_test}
+
 ---
-Automated by [agent-loop](scripts/loop.sh)
+Automated by [agent-loop](scripts/loop.sh) | [Issue #${issue_num}](https://github.com/${REPO}/issues/${issue_num})
 PREOF
 )" 2>/dev/null || true
     log_success "PR updated: $PR_URL"
@@ -673,8 +734,12 @@ ${review_truncated}
 ${test_output:-Tests not captured}
 \`\`\`
 
+## What to Test
+
+${what_to_test}
+
 ---
-Automated by [agent-loop](scripts/loop.sh)
+Automated by [agent-loop](scripts/loop.sh) | [Issue #${issue_num}](https://github.com/${REPO}/issues/${issue_num})
 PREOF
 )" 2>&1) || {
     log_error "Failed to create PR"
@@ -810,7 +875,7 @@ $test_output"
 
   # Step 6: Create PR (sets PR_URL global)
   PR_URL=""
-  if ! create_pr "$issue_num" "$title" "$worktree" "$REVIEW_OUTPUT" "$test_output"; then
+  if ! create_pr "$issue_num" "$title" "$worktree" "$REVIEW_OUTPUT" "$test_output" "$body"; then
     log_error "Failed to create PR for issue #$issue_num"
     label_issue "$issue_num" "failed" "in-progress" || true
     comment_issue "$issue_num" "Agent loop failed: could not create PR. Branch: agent/issue-${issue_num}" || true

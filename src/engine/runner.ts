@@ -74,10 +74,17 @@ export function spawnAgent(
       logStream?.write(text);
     });
 
+    const finish = (result: RunResult) => {
+      if (logStream) {
+        logStream.end(() => resolve(result));
+      } else {
+        resolve(result);
+      }
+    };
+
     child.on("close", (code) => {
-      logStream?.end();
       const exitCode = code ?? 1;
-      resolve({
+      finish({
         success: exitCode === 0,
         output: stdout || stderr,
         exitCode,
@@ -86,8 +93,7 @@ export function spawnAgent(
     });
 
     child.on("error", (err) => {
-      logStream?.end();
-      resolve({
+      finish({
         success: false,
         output: err.message,
         exitCode: 1,
