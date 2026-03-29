@@ -11,6 +11,14 @@ import { createRunnerFromConfig } from "../engine/runners/index.js";
 import { createServer } from "../server/index.js";
 import { selectAll, selectSpecific, selectInteractive } from "./issues.js";
 import type { IssueWithDeps } from "./issues.js";
+import {
+  interactiveConfig,
+  buildSessionConfigFromFlags,
+  hasAllConfigFlags,
+  formatSessionSummary,
+  formatMergeStrategy,
+} from "./config.js";
+import type { ConfigFlags } from "./config.js";
 
 // --- Help text ---
 
@@ -34,6 +42,10 @@ Options:
   --issues <nums>                Process specific issues (e.g. --issues 96,97,98)
   --auto-merge                   Auto-merge PRs when checks pass
   --merge-to <branch>            Base branch for PRs (default: "master")
+  --merge-strategy <strategy>    Merge strategy: session-branch, auto-merge-master, no-merge
+  --session-name <name>          Session name (skips prompt)
+  --review-model <model>         Model for code review stage
+  --max-turns <num>              Max agent turns per issue
   --skip-tests                   Skip test stage
   --skip-review                  Skip review stage
   --skip-e2e                     Skip e2e tests
@@ -125,6 +137,10 @@ export function parseCliArgs(argv: string[]): {
         all: { type: "boolean", default: false },
         issues: { type: "string" },
         model: { type: "string" },
+        "review-model": { type: "string" },
+        "max-turns": { type: "string" },
+        "merge-strategy": { type: "string" },
+        "session-name": { type: "string" },
         repo: { type: "string" },
         project: { type: "string" },
         "merge-to": { type: "string" },
@@ -253,6 +269,44 @@ async function main(): Promise<void> {
     if (selectedIssues.length === 0) {
       return;
     }
+  }
+
+  // Configuration prompt (after issue selection, before starting)
+  const repoStr = `${config.owner}/${config.repo}`;
+  const configFlags: ConfigFlags = {
+    model: options.model as string | undefined,
+    "review-model": options["review-model"] as string | undefined,
+    "max-turns": options["max-turns"] as string | undefined,
+    "merge-strategy": options["merge-strategy"] as string | undefined,
+    "session-name": options["session-name"] as string | undefined,
+    "skip-tests": options["skip-tests"] as boolean | undefined,
+    "skip-review": options["skip-review"] as boolean | undefined,
+  };
+
+  const issuesForConfig = selectedIssues ?? [];
+
+  if (hasAllConfigFlags(configFlags)) {
+    // Non-interactive: all flags provided, skip prompts
+    const sessionConfig = buildSessionConfigFromFlags(config, configFlags);
+    console.log(formatSessionSummary(sessionConfig.sessionName, repoStr, issuesForConfig, sessionConfig));
+    // Apply session config back to loop config
+    config.model = sessionConfig.model;
+    config.reviewModel = sessionConfig.reviewModel;
+    config.maxTurns = sessionConfig.maxTurns;
+    config.skipTests = sessionConfig.skipTests;
+    config.skipReview = sessionConfig.skipReview;
+  } else if (issuesForConfig.length > 0) {
+    // Interactive config prompt
+    const sessionConfig = await interactiveConfig(config, repoStr, issuesForConfig);
+    if (!sessionConfig) {
+      return; // User cancelled
+    }
+    // Apply session config back to loop config
+    config.model = sessionConfig.model;
+    config.reviewModel = sessionConfig.reviewModel;
+    config.maxTurns = sessionConfig.maxTurns;
+    config.skipTests = sessionConfig.skipTests;
+    config.skipReview = sessionConfig.skipReview;
   }
 
   await startLoop(config, runner, github, undefined, {
