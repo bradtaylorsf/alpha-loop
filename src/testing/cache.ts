@@ -7,6 +7,7 @@
  */
 import * as node_fs from 'node:fs';
 import * as node_path from 'node:path';
+import type { ClientRequest, IncomingMessage, RequestOptions } from 'node:http';
 // Use require() for http/https so we get mutable CommonJS module objects
 // (ESM namespace objects have non-configurable properties that can't be patched)
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -162,7 +163,7 @@ export function mockExpensiveAPI(opts: MockExpensiveAPIOptions): {
     original: typeof node_http.request,
   ): typeof node_http.request {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return function patchedRequest(...args: any[]): node_http.ClientRequest {
+    return function patchedRequest(...args: any[]): ClientRequest {
       // Determine the URL from the arguments
       let url: string | undefined;
       const firstArg = args[0];
@@ -171,18 +172,18 @@ export function mockExpensiveAPI(opts: MockExpensiveAPIOptions): {
       } else if (firstArg instanceof URL) {
         url = firstArg.toString();
       } else if (firstArg && typeof firstArg === 'object' && 'hostname' in firstArg) {
-        const o = firstArg as node_http.RequestOptions;
+        const o = firstArg as RequestOptions;
         const proto = o.protocol ?? 'https:';
         url = `${proto}//${o.hostname}${o.port ? ':' + o.port : ''}${o.path ?? '/'}`;
       }
 
       if (!url || !matchesPattern(url, pattern)) {
-        return original.apply(null, args as never) as node_http.ClientRequest;
+        return original.apply(null, args as never) as ClientRequest;
       }
 
       const method =
         (typeof firstArg === 'object' && !(firstArg instanceof URL)
-          ? (firstArg as node_http.RequestOptions).method
+          ? (firstArg as RequestOptions).method
           : 'GET') ?? 'GET';
 
       if (!recording) {
@@ -225,7 +226,7 @@ export function mockExpensiveAPI(opts: MockExpensiveAPIOptions): {
       }
 
       // --- Record mode: let real request through, capture response ---
-      const realReq = original.apply(null, args as never) as node_http.ClientRequest;
+      const realReq = original.apply(null, args as never) as ClientRequest;
 
       // Capture request body
       const origWrite = realReq.write.bind(realReq);
@@ -238,7 +239,7 @@ export function mockExpensiveAPI(opts: MockExpensiveAPIOptions): {
         return origWrite(chunk, ...rest);
       } as typeof realReq.write;
 
-      realReq.on('response', (res: node_http.IncomingMessage) => {
+      realReq.on('response', (res: IncomingMessage) => {
         const resChunks: Buffer[] = [];
         res.on('data', (c: Buffer) => resChunks.push(c));
         res.on('end', () => {
