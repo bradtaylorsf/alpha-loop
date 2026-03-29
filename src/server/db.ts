@@ -37,6 +37,37 @@ export interface UpdateRunInput {
   diff_stat?: string;
 }
 
+// --- Session types ---
+
+export type SessionStatus = "pending" | "active" | "completed" | "cancelled";
+export type SessionIssueStatus = "pending" | "in_progress" | "completed" | "failed";
+
+export interface Session {
+  id: number;
+  name: string;
+  status: SessionStatus;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface SessionIssue {
+  id: number;
+  session_id: number;
+  issue_number: number;
+  position: number;
+  status: SessionIssueStatus;
+  pr_url: string | null;
+}
+
+export interface CreateSessionInput {
+  name: string;
+  issues: { issue_number: number; position?: number }[];
+}
+
+export interface UpdateSessionIssueOrderInput {
+  issues: { issue_number: number; position: number }[];
+}
+
 export type LearningType = "pattern" | "anti_pattern" | "prompt_improvement";
 
 export interface Learning {
@@ -86,6 +117,25 @@ const SCHEMA = `
   )
 `;
 
+const SESSIONS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS session_issues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    issue_number INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    pr_url TEXT,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+  );
+`;
+
 const MIGRATIONS = [
   // Add new columns to existing databases
   `ALTER TABLE runs ADD COLUMN stage_durations_json TEXT NOT NULL DEFAULT '{}'`,
@@ -124,6 +174,7 @@ export function createDatabase(dbPath?: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.exec(SCHEMA);
+  db.exec(SESSIONS_SCHEMA);
   applyMigrations(db);
   return db;
 }
@@ -131,6 +182,7 @@ export function createDatabase(dbPath?: string): Database.Database {
 export function createInMemoryDatabase(): Database.Database {
   const db = new Database(":memory:");
   db.exec(SCHEMA);
+  db.exec(SESSIONS_SCHEMA);
   return db;
 }
 
@@ -261,4 +313,129 @@ export function listLearnings(
   const total = (db.prepare(`SELECT COUNT(*) as count FROM learnings`).get() as { count: number }).count;
   const learnings = db.prepare(`SELECT * FROM learnings ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset) as Learning[];
   return { learnings, total };
+}
+
+// --- Sessions CRUD ---
+
+export function createSession(db: Database.Database, input: CreateSessionInput): Session & { issues: SessionIssue[] } {
+  const insertSession = db.prepare(
+    `INSERT INTO sessions (name) VALUES (?)`
+  );
+  const insertIssue = db.prepare(
+    `INSERT INTO session_issues (session_id, issue_number, position) VALUES (?, ?, ?)`
+  );
+
+  const result = db.transaction(() => {
+    const res = insertSession.run(input.name);
+    const sessionId = res.lastInsertRowid as number;
+
+    for (let i = 0; i < input.issues.length; i++) {
+      const issue = input.issues[i];
+      insertIssue.run(sessionId, issue.issue_number, issue.position ?? i);
+    }
+
+    return sessionId;
+  })();
+
+  return getSession(db, result)!;
+}
+
+export function getSession(db: Database.Database, id: number): (Session & { issues: SessionIssue[] }) | undefined {
+  const session = db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(id) as Session | undefined;
+  if (!session) return undefined;
+
+  const issues = db.prepare(
+    `SELECT * FROM session_issues WHERE session_id = ? ORDER BY position ASC`
+  ).all(id) as SessionIssue[];
+
+  return { ...session, issues };
+}
+
+export function listSessions(
+  db: Database.Database,
+  options: { status?: string } = {}
+): (Session & { issues: SessionIssue[] })[] {
+  let sessions: Session[];
+  if (options.status) {
+    sessions = db.prepare(`SELECT * FROM sessions WHERE status = ? ORDER BY created_at DESC`).all(options.status) as Session[];
+  } else {
+    sessions = db.prepare(`SELECT * FROM sessions ORDER BY created_at DESC`).all() as Session[];
+  }
+
+  return sessions.map((s) => {
+    const issues = db.prepare(
+      `SELECT * FROM session_issues WHERE session_id = ? ORDER BY position ASC`
+    ).all(s.id) as SessionIssue[];
+    return { ...s, issues };
+  });
+}
+
+export function updateSessionStatus(
+  db: Database.Database,
+  id: number,
+  status: SessionStatus
+): (Session & { issues: SessionIssue[] }) | undefined {
+  const completedAt = status === "completed" || status === "cancelled" ? "datetime('now')" : "NULL";
+  db.prepare(`UPDATE sessions SET status = ?, completed_at = ${completedAt} WHERE id = ?`).run(status, id);
+  return getSession(db, id);
+}
+
+export function reorderSessionIssues(
+  db: Database.Database,
+  sessionId: number,
+  input: UpdateSessionIssueOrderInput
+): (Session & { issues: SessionIssue[] }) | undefined {
+  const stmt = db.prepare(
+    `UPDATE session_issues SET position = ? WHERE session_id = ? AND issue_number = ?`
+  );
+
+  db.transaction(() => {
+    for (const issue of input.issues) {
+      stmt.run(issue.position, sessionId, issue.issue_number);
+    }
+  })();
+
+  return getSession(db, sessionId);
+}
+
+export function deleteSession(db: Database.Database, id: number): boolean {
+  const session = db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(id) as Session | undefined;
+  if (!session) return false;
+  if (session.status !== "pending") return false;
+
+  db.transaction(() => {
+    db.prepare(`DELETE FROM session_issues WHERE session_id = ?`).run(id);
+    db.prepare(`DELETE FROM sessions WHERE id = ?`).run(id);
+  })();
+
+  return true;
+}
+
+export function updateSessionIssueStatus(
+  db: Database.Database,
+  sessionId: number,
+  issueNumber: number,
+  status: SessionIssueStatus,
+  prUrl?: string
+): void {
+  if (prUrl !== undefined) {
+    db.prepare(
+      `UPDATE session_issues SET status = ?, pr_url = ? WHERE session_id = ? AND issue_number = ?`
+    ).run(status, prUrl, sessionId, issueNumber);
+  } else {
+    db.prepare(
+      `UPDATE session_issues SET status = ? WHERE session_id = ? AND issue_number = ?`
+    ).run(status, sessionId, issueNumber);
+  }
+}
+
+export function getActiveSession(db: Database.Database): (Session & { issues: SessionIssue[] }) | undefined {
+  const session = db.prepare(`SELECT * FROM sessions WHERE status = 'active' LIMIT 1`).get() as Session | undefined;
+  if (!session) return undefined;
+
+  const issues = db.prepare(
+    `SELECT * FROM session_issues WHERE session_id = ? ORDER BY position ASC`
+  ).all(session.id) as SessionIssue[];
+
+  return { ...session, issues };
 }

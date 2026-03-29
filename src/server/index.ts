@@ -11,6 +11,7 @@ import { configRouter } from "./routes/config.js";
 import { agentsRouter } from "./routes/agents.js";
 import { initRunsRouter } from "./routes/runs.js";
 import { initLearningsRouter } from "./routes/learnings.js";
+import { initSessionsRouter } from "./routes/sessions.js";
 import { createDatabase } from "./db.js";
 
 export interface ServerOptions {
@@ -31,6 +32,7 @@ export function createServer(options: ServerOptions = {}): { app: ReturnType<typ
   app.use("/api", agentsRouter);
   app.use("/api", initRunsRouter(db));
   app.use("/api", initLearningsRouter(db));
+  app.use("/api", initSessionsRouter(db));
 
   // Serve built React dashboard in production
   const __dirname = dirname(fileURLToPath(import.meta.url));
