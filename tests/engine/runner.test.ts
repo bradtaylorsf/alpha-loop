@@ -135,7 +135,12 @@ describe("Runner process handling", () => {
 });
 
 describe("Integration: claude --help", () => {
-  it("can invoke claude -p --help", async () => {
+  const skipReason = process.env.TEST_INTEGRATION
+    ? undefined
+    : "set TEST_INTEGRATION=1 to run";
+  const maybeIt = skipReason ? it.skip : it;
+
+  maybeIt("can invoke claude -p --help", async () => {
     const runner = createClaudeRunner();
     const result = await runner.run({ prompt: "--help" });
     // claude -p --help should either succeed or print usage info
