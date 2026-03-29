@@ -9,6 +9,8 @@ import { createRun, updateRun } from "../server/db.js";
 import { extractLearnings } from "../learning/extractor.js";
 import type { LoopControls } from "../cli/controls.js";
 import { injectContext } from "../cli/controls.js";
+import { buildPlaywrightFlags, collectArtifacts } from "./artifacts.js";
+import type { ArtifactInfo } from "./artifacts.js";
 
 // --- Types ---
 
@@ -41,6 +43,7 @@ export interface LoopConfig {
   verifyTimeout: number;
   dryRun: boolean;
   autoCleanup: boolean;
+  sessionName?: string;
 }
 
 export interface PipelineResult {
@@ -50,6 +53,7 @@ export interface PipelineResult {
   prNumber?: number;
   error?: string;
   duration: number;
+  artifacts?: ArtifactInfo;
 }
 
 export interface StageEvent {
@@ -165,9 +169,10 @@ interface VerifyResult {
   success: boolean;
   output: string;
   method: "playwright" | "api" | "skipped";
+  artifacts?: ArtifactInfo;
 }
 
-function runVerify(cwd: string, config: LoopConfig): VerifyResult {
+function runVerify(cwd: string, config: LoopConfig, issueNumber: number): VerifyResult {
   if (config.skipVerify) {
     return { success: true, output: "Verification skipped", method: "skipped" };
   }
@@ -218,6 +223,14 @@ function runVerify(cwd: string, config: LoopConfig): VerifyResult {
     // Playwright not installed
   }
 
+  if (!hasPlaywright && hasPlaywrightTests) {
+    return {
+      success: true,
+      output: "\u2139 Playwright not installed \u2014 skipping visual proof. Install with: pnpm add -D @playwright/test",
+      method: "skipped",
+    };
+  }
+
   const startScript = detectStartCommand(cwd);
   if (!startScript) {
     return { success: true, output: "No dev/start/preview script found, skipping verification", method: "skipped" };
@@ -242,22 +255,40 @@ function runVerify(cwd: string, config: LoopConfig): VerifyResult {
     }
 
     if (hasPlaywrightTests && hasPlaywright) {
-      // Run Playwright tests against tests/verify/
+      // Build artifact flags if session name is configured
+      let artifactFlags: string[] = [];
+      let artifactsOutputDir: string | undefined;
+      if (config.sessionName) {
+        const pwFlags = buildPlaywrightFlags(config.sessionName, issueNumber);
+        artifactFlags = pwFlags.flags;
+        artifactsOutputDir = pwFlags.outputDir;
+      }
+
+      // Run Playwright tests against tests/verify/ with artifact capture
+      const playwrightCmd = [
+        "pnpm exec playwright test tests/verify/",
+        ...artifactFlags,
+      ].join(" ");
+
       try {
-        const output = execSync("pnpm exec playwright test tests/verify/", {
+        const output = execSync(playwrightCmd, {
           cwd,
           encoding: "utf-8",
           stdio: "pipe",
           timeout: config.verifyTimeout,
           env: { ...process.env, BASE_URL: `http://localhost:${port}` },
         });
-        return { success: true, output, method: "playwright" };
+
+        const artifacts = artifactsOutputDir ? collectArtifacts(artifactsOutputDir) : undefined;
+        return { success: true, output, method: "playwright", artifacts };
       } catch (err: unknown) {
         const output =
           (err as { stdout?: string }).stdout ??
           (err as { stderr?: string }).stderr ??
           String(err);
-        return { success: false, output, method: "playwright" };
+        // Still collect artifacts on failure (screenshots on failure are valuable)
+        const artifacts = artifactsOutputDir ? collectArtifacts(artifactsOutputDir) : undefined;
+        return { success: false, output, method: "playwright", artifacts };
       }
     } else {
       // API verification fallback: curl key endpoints
@@ -331,6 +362,7 @@ export async function processIssue(
   let stageStart = Date.now();
   let testOutput = "";
   let reviewOutput = "";
+  let issueArtifacts: ArtifactInfo | undefined;
 
   // Create run record in DB
   const run = db
@@ -533,7 +565,7 @@ export async function processIssue(
 
       for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
         transition("verify", `Verification attempt ${attempt}/${config.maxTestRetries}`);
-        const verifyResult = runVerify(worktreePath, config);
+        const verifyResult = runVerify(worktreePath, config, issue.number);
 
         emitSSE({
           type: "verify_result",
@@ -553,9 +585,13 @@ export async function processIssue(
 
         if (verifyResult.success) {
           log("verify", issue.number, `Verification passed (${verifyResult.method})`);
+          if (verifyResult.artifacts) issueArtifacts = verifyResult.artifacts;
           verifyPassed = true;
           break;
         }
+
+        // Capture artifacts even on failure (failure screenshots are valuable)
+        if (verifyResult.artifacts) issueArtifacts = verifyResult.artifacts;
 
         log("verify", issue.number, `Verification failed (${verifyResult.method}): ${verifyResult.output.slice(0, 200)}`);
 
@@ -760,6 +796,7 @@ export async function processIssue(
       success: true,
       prNumber,
       duration,
+      artifacts: issueArtifacts,
     };
   } catch (err) {
     return fail(`Unexpected error: ${String(err)}`);
