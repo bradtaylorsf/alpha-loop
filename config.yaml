@@ -1,0 +1,21 @@
+loop:
+  repo: bradtaylorsf/alpha-loop
+  baseBranch: master
+  pollInterval: 60
+  maxTestRetries: 3
+  labels:
+    ready: ready
+    inProgress: in-progress
+    inReview: in-review
+
+agent:
+  name: claude
+  model: sonnet
+  reviewModel: sonnet
+  maxTurns: 30
+  permissionMode: acceptEdits
+
+tests:
+  command: pnpm test
+  skipTests: false
+  skipReview: false
