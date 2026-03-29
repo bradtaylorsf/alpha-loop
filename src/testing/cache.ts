@@ -7,8 +7,12 @@
  */
 import * as node_fs from 'node:fs';
 import * as node_path from 'node:path';
-import * as node_http from 'node:http';
-import * as node_https from 'node:https';
+// Use require() for http/https so we get mutable CommonJS module objects
+// (ESM namespace objects have non-configurable properties that can't be patched)
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const node_http = require('node:http') as typeof import('node:http');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const node_https = require('node:https') as typeof import('node:https');
 
 export interface FixtureMetadata {
   recordedAt: string;
@@ -92,7 +96,7 @@ export function checkStaleness(entries: FixtureEntry[]): string[] {
     const days = age / (1000 * 60 * 60 * 24);
     if (days > STALE_DAYS) {
       warnings.push(
-        `Fixture for ${entry.request.method} ${entry.request.url} is ${Math.floor(days)} days old (recorded ${entry.metadata.recordedAt}). Re-record with RECORD_FIXTURES=true.`,
+        `Fixture for ${entry.request.method} ${entry.request.url} is ${Math.round(days)} days old (recorded ${entry.metadata.recordedAt}). Re-record with RECORD_FIXTURES=true.`,
       );
     }
   }
@@ -227,11 +231,11 @@ export function mockExpensiveAPI(opts: MockExpensiveAPIOptions): {
       const origWrite = realReq.write.bind(realReq);
       const bodyChunks: Buffer[] = [];
       realReq.write = function (
-        chunk: unknown,
-        ...rest: unknown[]
+        chunk: any,
+        ...rest: any[]
       ): boolean {
         if (chunk) bodyChunks.push(Buffer.from(chunk as string));
-        return origWrite(chunk, ...(rest as [unknown]));
+        return origWrite(chunk, ...rest);
       } as typeof realReq.write;
 
       realReq.on('response', (res: node_http.IncomingMessage) => {
@@ -281,17 +285,13 @@ export function mockExpensiveAPI(opts: MockExpensiveAPIOptions): {
     } as typeof node_http.request;
   }
 
-  // Apply patches
-  (node_http as { request: typeof node_http.request }).request =
-    createPatcher(originalHttpRequest);
-  (node_https as { request: typeof node_https.request }).request =
-    createPatcher(originalHttpsRequest);
+  // Apply patches (CJS module objects are mutable)
+  (node_http as any).request = createPatcher(originalHttpRequest);
+  (node_https as any).request = createPatcher(originalHttpsRequest);
 
   function restore(): void {
-    (node_http as { request: typeof node_http.request }).request =
-      originalHttpRequest;
-    (node_https as { request: typeof node_https.request }).request =
-      originalHttpsRequest;
+    (node_http as any).request = originalHttpRequest;
+    (node_https as any).request = originalHttpsRequest;
 
     // Persist recorded fixtures
     if (recording && recorded.length > 0) {
