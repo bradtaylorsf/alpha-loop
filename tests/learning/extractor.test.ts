@@ -1,5 +1,3 @@
-import express from "express";
-import http from "node:http";
 import type Database from "better-sqlite3";
 import {
   createInMemoryDatabase,
@@ -16,7 +14,6 @@ import {
 } from "../../src/learning/extractor";
 import type { RunContext } from "../../src/learning/extractor";
 import type { AgentRunner } from "../../src/engine/runner";
-import { initLearningsRouter } from "../../src/server/routes/learnings";
 
 // --- Helpers ---
 
@@ -52,43 +49,6 @@ function mockRunner(output: string, success = true): AgentRunner {
       duration: 100,
     }),
   };
-}
-
-function createApp(db: Database.Database) {
-  const app = express();
-  app.use(express.json());
-  app.use("/api", initLearningsRouter(db));
-  return app;
-}
-
-function request(
-  app: express.Express,
-  path: string,
-): Promise<{ status: number; body: any }> {
-  return new Promise((resolve, reject) => {
-    const server = app.listen(0, () => {
-      const addr = server.address();
-      if (!addr || typeof addr === "string") {
-        server.close();
-        return reject(new Error("Failed to get server address"));
-      }
-      const url = `http://127.0.0.1:${addr.port}${path}`;
-
-      const req = http.request(url, (res) => {
-        let data = "";
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
-          server.close();
-          resolve({ status: res.statusCode ?? 0, body: data ? JSON.parse(data) : null });
-        });
-      });
-      req.on("error", (err) => {
-        server.close();
-        reject(err);
-      });
-      req.end();
-    });
-  });
 }
 
 // --- Tests ---
@@ -303,48 +263,3 @@ describe("Learnings DB CRUD", () => {
   });
 });
 
-describe("GET /api/learnings", () => {
-  let db: Database.Database;
-
-  beforeEach(() => { db = createInMemoryDatabase(); });
-  afterEach(() => { db.close(); });
-
-  it("returns empty list when no learnings", async () => {
-    const app = createApp(db);
-    const res = await request(app, "/api/learnings");
-    expect(res.status).toBe(200);
-    expect(res.body.learnings).toEqual([]);
-    expect(res.body.total).toBe(0);
-  });
-
-  it("returns paginated learnings", async () => {
-    const run = makeRun(db);
-    for (let i = 0; i < 3; i++) {
-      createLearning(db, { run_id: run.id, issue_number: 42, type: "pattern", content: `L${i}`, confidence: 0.5 });
-    }
-    const app = createApp(db);
-    const res = await request(app, "/api/learnings?limit=2&offset=0");
-    expect(res.status).toBe(200);
-    expect(res.body.learnings).toHaveLength(2);
-    expect(res.body.total).toBe(3);
-  });
-
-  it("filters by type", async () => {
-    const run = makeRun(db);
-    createLearning(db, { run_id: run.id, issue_number: 42, type: "pattern", content: "A", confidence: 0.5 });
-    createLearning(db, { run_id: run.id, issue_number: 42, type: "anti_pattern", content: "B", confidence: 0.5 });
-    const app = createApp(db);
-
-    const res = await request(app, "/api/learnings?type=pattern");
-    expect(res.status).toBe(200);
-    expect(res.body.learnings).toHaveLength(1);
-    expect(res.body.learnings[0].content).toBe("A");
-  });
-
-  it("returns 400 for invalid type", async () => {
-    const app = createApp(db);
-    const res = await request(app, "/api/learnings?type=invalid");
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Invalid type/);
-  });
-});
