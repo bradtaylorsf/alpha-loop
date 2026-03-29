@@ -29,6 +29,26 @@ export interface UpdateRunInput {
   duration_seconds?: number;
 }
 
+export type LearningType = "pattern" | "anti_pattern" | "prompt_improvement";
+
+export interface Learning {
+  id: number;
+  run_id: number;
+  issue_number: number;
+  type: LearningType;
+  content: string;
+  confidence: number;
+  created_at: string;
+}
+
+export interface CreateLearningInput {
+  run_id: number;
+  issue_number: number;
+  type: LearningType;
+  content: string;
+  confidence: number;
+}
+
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,6 +61,16 @@ const SCHEMA = `
     pr_url TEXT,
     duration_seconds INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS learnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    issue_number INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (run_id) REFERENCES runs(id)
   )
 `;
 
@@ -118,4 +148,36 @@ export function listRuns(
   const runs = db.prepare(`SELECT * FROM runs ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset) as Run[];
 
   return { runs, total };
+}
+
+// --- Learnings CRUD ---
+
+export function createLearning(db: Database.Database, input: CreateLearningInput): Learning {
+  const stmt = db.prepare(
+    `INSERT INTO learnings (run_id, issue_number, type, content, confidence) VALUES (?, ?, ?, ?, ?)`
+  );
+  const result = stmt.run(input.run_id, input.issue_number, input.type, input.content, input.confidence);
+  return getLearning(db, result.lastInsertRowid as number)!;
+}
+
+export function getLearning(db: Database.Database, id: number): Learning | undefined {
+  return db.prepare(`SELECT * FROM learnings WHERE id = ?`).get(id) as Learning | undefined;
+}
+
+export function listLearnings(
+  db: Database.Database,
+  options: { limit?: number; offset?: number; type?: LearningType } = {}
+): { learnings: Learning[]; total: number } {
+  const limit = options.limit ?? 20;
+  const offset = options.offset ?? 0;
+
+  if (options.type) {
+    const total = (db.prepare(`SELECT COUNT(*) as count FROM learnings WHERE type = ?`).get(options.type) as { count: number }).count;
+    const learnings = db.prepare(`SELECT * FROM learnings WHERE type = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(options.type, limit, offset) as Learning[];
+    return { learnings, total };
+  }
+
+  const total = (db.prepare(`SELECT COUNT(*) as count FROM learnings`).get() as { count: number }).count;
+  const learnings = db.prepare(`SELECT * FROM learnings ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset) as Learning[];
+  return { learnings, total };
 }
