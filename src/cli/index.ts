@@ -23,7 +23,7 @@ Usage:
   alpha-loop --help              Show this help
 
 Options:
-  --model <model>                AI model to use (default: from config or "sonnet")
+  --model <model>                AI model to use (default: from config or "opus")
   --repo <owner/repo>            GitHub repository (default: from config or REPO env)
   --project <num>                GitHub project number
   --once                         Process one batch and exit
