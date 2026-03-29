@@ -7,6 +7,8 @@ import { loopEmitter } from "../server/sse.js";
 import type { LoopEvent } from "../server/sse.js";
 import { createRun, updateRun } from "../server/db.js";
 import { extractLearnings } from "../learning/extractor.js";
+import type { LoopControls } from "../cli/controls.js";
+import { injectContext } from "../cli/controls.js";
 
 // --- Types ---
 
@@ -118,6 +120,7 @@ function pushBranch(cwd: string, branch: string): void {
 
 export interface ProcessIssueOptions {
   db?: Database.Database;
+  controls?: LoopControls;
 }
 
 export async function processIssue(
@@ -132,6 +135,7 @@ export async function processIssue(
   let currentStage: PipelineStage = "setup";
   let worktreePath: string | undefined;
   const db = options?.db;
+  const controls = options?.controls;
   const stages: string[] = [];
   const stageDurations: Record<string, number> = {};
   let stageStart = Date.now();
@@ -173,6 +177,7 @@ export async function processIssue(
     stageStart = now;
     log(to, issue.number, message ?? `Entering ${to}`);
     onStage?.({ issueNumber: issue.number, from, to, message });
+    controls?.onStage(to, message);
 
     // Emit stage event (backward compat)
     emitSSE({
@@ -235,15 +240,33 @@ export async function processIssue(
 
     // --- Implement ---
     transition("implement", "Running agent for implementation");
-    const implementPrompt = buildImplementPrompt(issue);
+    let implementPrompt = buildImplementPrompt(issue);
+    const userContext = controls?.consumeContext();
+    if (userContext) {
+      implementPrompt = injectContext(implementPrompt, userContext);
+    }
+    const abortSignal = controls?.getAbortController().signal;
     const implementOpts: RunOptions = {
       prompt: implementPrompt,
       model: config.model,
       maxTurns: config.maxTurns,
       cwd: worktreePath,
+      abortSignal,
     };
 
     const implementResult = await runner.run(implementOpts);
+
+    // Check if user skipped this issue
+    if (controls?.wasSkipped()) {
+      await github.updateLabels(issue.number, ["skipped"], ["in-progress"]);
+      await github.addComment(issue.number, "Skipped by user during session");
+      if (worktreePath && config.autoCleanup) {
+        try { removeWorktree(issue.number); } catch { /* best effort */ }
+        worktreePath = undefined;
+      }
+      return fail("Skipped by user");
+    }
+
     if (!implementResult.success) {
       await github.updateLabels(issue.number, ["failed"], ["in-progress"]);
       await github.addComment(
@@ -281,13 +304,27 @@ export async function processIssue(
 
         if (attempt < config.maxTestRetries) {
           transition("fix", `Fixing test failures (attempt ${attempt})`);
-          const fixPrompt = buildFixPrompt(issue.number, testResult.output);
+          let fixPrompt = buildFixPrompt(issue.number, testResult.output);
+          const fixContext = controls?.consumeContext();
+          if (fixContext) {
+            fixPrompt = injectContext(fixPrompt, fixContext);
+          }
           const fixResult = await runner.run({
             prompt: fixPrompt,
             model: config.model,
             maxTurns: 20,
             cwd: worktreePath,
+            abortSignal: controls?.getAbortController().signal,
           });
+          if (controls?.wasSkipped()) {
+            await github.updateLabels(issue.number, ["skipped"], ["in-progress"]);
+            await github.addComment(issue.number, "Skipped by user during session");
+            if (worktreePath && config.autoCleanup) {
+              try { removeWorktree(issue.number); } catch { /* best effort */ }
+              worktreePath = undefined;
+            }
+            return fail("Skipped by user");
+          }
           if (!fixResult.success) {
             log("fix", issue.number, "Fix agent failed, will retry tests anyway");
           }
@@ -303,13 +340,28 @@ export async function processIssue(
     // --- Review ---
     if (!config.skipReview) {
       transition("review", "Running code review");
-      const reviewPrompt = buildReviewPrompt(issue, config.baseBranch);
+      let reviewPrompt = buildReviewPrompt(issue, config.baseBranch);
+      const reviewContext = controls?.consumeContext();
+      if (reviewContext) {
+        reviewPrompt = injectContext(reviewPrompt, reviewContext);
+      }
       const reviewResult = await runner.run({
         prompt: reviewPrompt,
         model: config.reviewModel ?? config.model,
         maxTurns: 15,
         cwd: worktreePath,
+        abortSignal: controls?.getAbortController().signal,
       });
+      if (controls?.wasSkipped()) {
+        await github.updateLabels(issue.number, ["skipped"], ["in-progress"]);
+        await github.addComment(issue.number, "Skipped by user during session");
+        if (worktreePath && config.autoCleanup) {
+          try { removeWorktree(issue.number); } catch { /* best effort */ }
+          worktreePath = undefined;
+        }
+        return fail("Skipped by user");
+      }
+
       reviewOutput = reviewResult.output;
 
       // Emit structured review result
@@ -472,6 +524,7 @@ export interface StartLoopOptions {
   db?: Database.Database;
   once?: boolean;
   selectedIssues?: number[];
+  controls?: LoopControls;
 }
 
 export async function startLoop(
@@ -483,6 +536,7 @@ export async function startLoop(
 ): Promise<void> {
   let running = true;
   const db = options?.db;
+  const controls = options?.controls;
 
   function shutdown(): void {
     console.log("\nShutting down gracefully...");
@@ -521,16 +575,35 @@ export async function startLoop(
         continue;
       }
 
-      for (const issue of issues) {
+      for (let i = 0; i < issues.length; i++) {
+        const issue = issues[i];
         if (!running) break;
+        if (controls?.shouldQuit()) break;
 
+        controls?.startIssue(issue);
         log("setup", issue.number, `Processing: ${issue.title}`);
-        const result = await processIssue(issue, config, runner, github, onStage, { db });
+        const result = await processIssue(issue, config, runner, github, onStage, { db, controls });
 
         if (result.success) {
           log("done", issue.number, `Completed in ${result.duration}ms`);
         } else {
           log("failed", issue.number, `Failed at ${result.stage}: ${result.error}`);
+        }
+
+        // Between-issues prompt
+        const nextIssue = issues[i + 1];
+        if (controls && (nextIssue || !options?.once)) {
+          const action = await controls.betweenIssues(result, nextIssue);
+          if (action === "quit") {
+            running = false;
+            break;
+          }
+          if (action === "skip" && nextIssue) {
+            // Skip next issue — handled by the loop naturally since we just continue
+            // The "skip" at between-issues means skip the NEXT issue
+            i++; // Skip next
+            continue;
+          }
         }
       }
 
@@ -544,6 +617,7 @@ export async function startLoop(
   } finally {
     process.removeListener("SIGINT", shutdown);
     process.removeListener("SIGTERM", shutdown);
+    controls?.destroy();
   }
 }
 

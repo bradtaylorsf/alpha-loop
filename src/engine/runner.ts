@@ -12,6 +12,7 @@ export interface RunOptions {
   cwd?: string;
   logFile?: string;
   env?: Record<string, string>;
+  abortSignal?: AbortSignal;
 }
 
 export interface RunResult {
@@ -100,6 +101,17 @@ export function spawnAgent(
         duration: Date.now() - start,
       });
     });
+
+    // Handle abort signal (for skip control)
+    if (options.abortSignal) {
+      if (options.abortSignal.aborted) {
+        child.kill("SIGTERM");
+      } else {
+        options.abortSignal.addEventListener("abort", () => {
+          child.kill("SIGTERM");
+        }, { once: true });
+      }
+    }
 
     // Pipe prompt to stdin then close
     child.stdin.write(options.prompt);

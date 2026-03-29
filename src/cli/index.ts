@@ -19,6 +19,7 @@ import {
   formatMergeStrategy,
 } from "./config.js";
 import type { ConfigFlags } from "./config.js";
+import { createControls } from "./controls.js";
 
 // --- Help text ---
 
@@ -309,10 +310,13 @@ async function main(): Promise<void> {
     config.skipReview = sessionConfig.skipReview;
   }
 
+  const controls = createControls();
+
   await startLoop(config, runner, github, undefined, {
     db,
     once: options.once as boolean,
     selectedIssues: selectedIssues?.map((i) => i.number),
+    controls,
   });
 }
 
