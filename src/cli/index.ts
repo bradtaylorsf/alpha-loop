@@ -12,7 +12,7 @@ import { createServer } from "../server/index.js";
 
 // --- Help text ---
 
-const USAGE = `
+export const USAGE = `
 alpha-loop — Agent-agnostic automated development loop
 
 Usage:
@@ -83,35 +83,41 @@ function parseRepo(repoStr: string): { owner: string; repo: string } {
 export function parseCliArgs(argv: string[]): {
   command: "loop" | "dashboard" | "help";
   options: Record<string, string | boolean | undefined>;
+  error?: string;
 } {
-  const { values, positionals } = parseArgs({
-    args: argv,
-    allowPositionals: true,
-    options: {
-      help: { type: "boolean", default: false },
-      once: { type: "boolean", default: false },
-      "dry-run": { type: "boolean", default: false },
-      "auto-merge": { type: "boolean", default: false },
-      "skip-tests": { type: "boolean", default: false },
-      "skip-review": { type: "boolean", default: false },
-      "skip-e2e": { type: "boolean", default: false },
-      model: { type: "string" },
-      repo: { type: "string" },
-      project: { type: "string" },
-      "merge-to": { type: "string" },
-      "api-port": { type: "string" },
-    },
-  });
+  try {
+    const { values, positionals } = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        help: { type: "boolean", default: false },
+        once: { type: "boolean", default: false },
+        "dry-run": { type: "boolean", default: false },
+        "auto-merge": { type: "boolean", default: false },
+        "skip-tests": { type: "boolean", default: false },
+        "skip-review": { type: "boolean", default: false },
+        "skip-e2e": { type: "boolean", default: false },
+        model: { type: "string" },
+        repo: { type: "string" },
+        project: { type: "string" },
+        "merge-to": { type: "string" },
+        "api-port": { type: "string" },
+      },
+    });
 
-  if (values.help) {
-    return { command: "help", options: values };
+    if (values.help) {
+      return { command: "help", options: values };
+    }
+
+    if (positionals.includes("dashboard")) {
+      return { command: "dashboard", options: values };
+    }
+
+    return { command: "loop", options: values };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { command: "help", options: {}, error: message };
   }
-
-  if (positionals.includes("dashboard")) {
-    return { command: "dashboard", options: values };
-  }
-
-  return { command: "loop", options: values };
 }
 
 // --- Build config from all sources ---
@@ -153,10 +159,16 @@ export function buildConfig(options: Record<string, string | boolean | undefined
 // --- Main ---
 
 async function main(): Promise<void> {
-  const { command, options } = parseCliArgs(process.argv.slice(2));
+  const { command, options, error } = parseCliArgs(process.argv.slice(2));
 
   if (command === "help") {
+    if (error) {
+      console.error(`Error: ${error}\n`);
+    }
     console.log(USAGE);
+    if (error) {
+      process.exitCode = 1;
+    }
     return;
   }
 

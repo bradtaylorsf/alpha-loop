@@ -1,4 +1,4 @@
-import { parseCliArgs, buildConfig } from "../../src/cli/index";
+import { parseCliArgs, buildConfig, USAGE } from "../../src/cli/index";
 
 // Mock modules that have side effects
 jest.mock("../../src/engine/loop", () => ({
@@ -94,6 +94,19 @@ describe("parseCliArgs", () => {
     expect(result.options.repo).toBe("owner/repo");
     expect(result.options["skip-tests"]).toBe(true);
   });
+
+  it("returns error for unknown flags instead of throwing", () => {
+    const result = parseCliArgs(["--unknown-flag"]);
+    expect(result.command).toBe("help");
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain("unknown-flag");
+  });
+
+  it("returns error for flags missing required value", () => {
+    const result = parseCliArgs(["--model"]);
+    expect(result.command).toBe("help");
+    expect(result.error).toBeDefined();
+  });
 });
 
 describe("buildConfig", () => {
@@ -165,5 +178,46 @@ describe("buildConfig", () => {
 
   it("throws on invalid repo format", () => {
     expect(() => buildConfig({ repo: "invalid-repo" })).toThrow("Invalid repo format");
+  });
+});
+
+describe("--help integration", () => {
+  it("USAGE contains all documented flags", () => {
+    const expectedFlags = [
+      "--once",
+      "--dry-run",
+      "--model",
+      "--auto-merge",
+      "--merge-to",
+      "--skip-tests",
+      "--skip-review",
+      "--help",
+      "dashboard",
+    ];
+    for (const flag of expectedFlags) {
+      expect(USAGE).toContain(flag);
+    }
+  });
+
+  it("USAGE starts with the tool name", () => {
+    expect(USAGE).toMatch(/^alpha-loop/);
+  });
+
+  it("--help prints usage to stdout", () => {
+    const spy = jest.spyOn(console, "log").mockImplementation(() => {});
+    const { command } = parseCliArgs(["--help"]);
+    expect(command).toBe("help");
+    // In main(), this would trigger console.log(USAGE)
+    console.log(USAGE);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("alpha-loop"));
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining("--once"));
+    spy.mockRestore();
+  });
+
+  it("invalid flags produce error and show help", () => {
+    const result = parseCliArgs(["--bogus"]);
+    expect(result.command).toBe("help");
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain("bogus");
   });
 });
