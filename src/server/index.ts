@@ -5,6 +5,7 @@ import { streamRouter } from "./routes/stream.js";
 import { configRouter } from "./routes/config.js";
 import { agentsRouter } from "./routes/agents.js";
 import { initRunsRouter } from "./routes/runs.js";
+import { initLearningsRouter } from "./routes/learnings.js";
 import { createDatabase } from "./db.js";
 
 const app: ReturnType<typeof express> = express();
@@ -19,6 +20,7 @@ app.use("/api", streamRouter);
 app.use("/api", configRouter);
 app.use("/api", agentsRouter);
 app.use("/api", initRunsRouter(db));
+app.use("/api", initLearningsRouter(db));
 
 const server = app.listen(PORT, () => {
   console.log(`Alpha Loop server listening on port ${PORT}`);
