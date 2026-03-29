@@ -7,6 +7,8 @@ import type { PipelineResult } from "../engine/loop.js";
 import type { LoopResults } from "../engine/loop.js";
 import type { GitHubIssue } from "../engine/github.js";
 import type { MergeStrategy } from "./config.js";
+import type { ArtifactInfo } from "../engine/artifacts.js";
+import { formatArtifactCounts, formatArtifactLinks } from "../engine/artifacts.js";
 
 // --- Types ---
 
@@ -20,6 +22,7 @@ export interface IssueResultEntry {
   prUrl?: string;
   error?: string;
   duration: number; // ms
+  artifacts?: ArtifactInfo;
 }
 
 export interface SessionSummaryData {
@@ -81,6 +84,9 @@ export function buildIssueResults(
     if (result.error && !isSkipped) {
       entry.error = result.error;
     }
+    if (result.artifacts) {
+      entry.artifacts = result.artifacts;
+    }
 
     entries.push(entry);
   }
@@ -133,6 +139,10 @@ export function formatPostRunSummary(data: SessionSummaryData): string {
     if (issue.status === "skipped") {
       line += " \u2014 user skipped";
     }
+    if (issue.artifacts) {
+      const counts = formatArtifactCounts(issue.artifacts);
+      if (counts) line += `  ${counts}`;
+    }
 
     lines.push(line);
   }
@@ -148,6 +158,7 @@ export interface QAChecklistEntry {
   issueTitle: string;
   changedFiles: string;
   checklistItems: string[];
+  artifacts?: ArtifactInfo;
 }
 
 export function generateQAChecklist(
@@ -170,6 +181,7 @@ export function generateQAChecklist(
       issueTitle: issue.title,
       changedFiles: "", // Will be populated if diff info available
       checklistItems,
+      artifacts: issue.artifacts,
     });
   }
 
@@ -222,6 +234,10 @@ export function formatQAChecklist(entries: QAChecklistEntry[]): string {
     for (const item of entry.checklistItems) {
       lines.push(`  \u25A1 ${item}`);
     }
+    if (entry.artifacts) {
+      const artifactLines = formatArtifactLinks(entry.artifacts);
+      lines.push(...artifactLines);
+    }
     lines.push("");
   }
 
@@ -247,6 +263,13 @@ export function buildSessionYaml(data: SessionSummaryData): Record<string, unkno
       if (issue.prUrl) entry.pr_url = issue.prUrl;
       if (issue.error) entry.error = issue.error;
       entry.duration = Math.round(issue.duration / 1000);
+      if (issue.artifacts) {
+        entry.artifacts = {
+          screenshots: issue.artifacts.screenshots.length,
+          videos: issue.artifacts.videos.length,
+          dir: issue.artifacts.artifactsDir,
+        };
+      }
       return entry;
     }),
   };
