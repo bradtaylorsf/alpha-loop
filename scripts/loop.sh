@@ -1633,8 +1633,10 @@ history_clean() {
       continue
     fi
 
-    # Parse date to epoch
-    session_epoch=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$started" +%s 2>/dev/null || \
+    # Parse date to epoch (strip milliseconds if present, e.g. .310Z -> Z)
+    local clean_started="${started%.*Z}Z"
+    [[ "$started" != *"."*"Z" ]] && clean_started="$started"
+    session_epoch=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$clean_started" +%s 2>/dev/null || \
                     date -d "$started" +%s 2>/dev/null || echo "0")
 
     if [[ "$session_epoch" -gt 0 && "$session_epoch" -lt "$cutoff_epoch" ]]; then

@@ -41,6 +41,7 @@ function sourceAndRun(dir: string, expr: string): string {
       'HISTORY_CLEAN=""',
       `PROJECT_DIR="${dir}"`,
       "source " + JSON.stringify(filtered),
+      `PROJECT_DIR="${dir}"`,
       expr,
     ].join("\n"),
     { mode: 0o755 },
