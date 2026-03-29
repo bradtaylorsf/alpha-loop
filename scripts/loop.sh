@@ -61,12 +61,24 @@ AUTO_MERGE="${AUTO_MERGE:-false}"
 MERGE_TO="${MERGE_TO:-}"
 RUN_ONCE=""
 SUBCOMMAND=""
+HISTORY_ARG=""
+HISTORY_QA=""
+HISTORY_CLEAN=""
 for arg in "$@"; do
   case "$arg" in
     --once) RUN_ONCE="--once" ;;
     --run-full) RUN_FULL="true" ;;
     --skip-preflight) SKIP_PREFLIGHT="true" ;;
+    --qa) HISTORY_QA="true" ;;
+    --clean) HISTORY_CLEAN="true" ;;
     init) SUBCOMMAND="init" ;;
+    history) SUBCOMMAND="history" ;;
+    *)
+      # Capture the session name argument for history subcommand
+      if [[ "$SUBCOMMAND" == "history" && -z "$HISTORY_ARG" && "$arg" != "--"* ]]; then
+        HISTORY_ARG="$arg"
+      fi
+      ;;
   esac
 done
 
@@ -76,6 +88,9 @@ if [[ -z "$MERGE_TO" ]]; then
 else
   SESSION_BRANCH="$MERGE_TO"
 fi
+
+# Session name for session storage (derived from SESSION_BRANCH)
+SESSION_NAME="${SESSION_BRANCH}"
 
 # Resolve paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1266,9 +1281,10 @@ process_issue() {
 
   start_time=$(date +%s)
 
-  # Setup logging
-  mkdir -p "$PROJECT_DIR/$LOG_DIR"
-  log_file="$PROJECT_DIR/$LOG_DIR/issue-${issue_num}-$(date +%Y%m%d-%H%M%S).log"
+  # Setup logging -- write to sessions/{name}/logs/
+  local session_logs_dir="$PROJECT_DIR/sessions/$SESSION_NAME/logs"
+  mkdir -p "$session_logs_dir"
+  log_file="$session_logs_dir/issue-${issue_num}.log"
 
   echo "========================================" | tee "$log_file"
   echo "Processing Issue #$issue_num: $title" | tee -a "$log_file"
@@ -1379,6 +1395,264 @@ $test_output"
   log_info "Log: $log_file"
 
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# History Subcommand
+# ---------------------------------------------------------------------------
+run_history() {
+  local sessions_dir="$PROJECT_DIR/sessions"
+
+  # --clean: delete sessions older than 30 days
+  if [[ "$HISTORY_CLEAN" == "true" ]]; then
+    history_clean "$sessions_dir"
+    return 0
+  fi
+
+  # history <name> -- show detail for a specific session
+  if [[ -n "$HISTORY_ARG" ]]; then
+    # --qa flag: print QA checklist
+    if [[ "$HISTORY_QA" == "true" ]]; then
+      history_show_qa "$sessions_dir" "$HISTORY_ARG"
+    else
+      history_show_detail "$sessions_dir" "$HISTORY_ARG"
+    fi
+    return 0
+  fi
+
+  # history -- list all sessions
+  history_list "$sessions_dir"
+}
+
+history_list() {
+  local sessions_dir="$1"
+
+  if [[ ! -d "$sessions_dir" ]]; then
+    echo "No sessions found."
+    return 0
+  fi
+
+  echo "Sessions:"
+
+  # Find all session.yaml files, parse and display
+  while IFS= read -r yaml_file; do
+    [[ -z "$yaml_file" ]] && continue
+    local session_dir
+    session_dir=$(dirname "$yaml_file")
+    local name date issue_count success_count failed_count duration
+
+    name=$(grep -E '^name:' "$yaml_file" | head -1 | sed 's/^name:[[:space:]]*//')
+    date=$(grep -E '^started:' "$yaml_file" | head -1 | sed 's/^started:[[:space:]]*//' | cut -c1-10)
+    duration=$(grep -E '^duration:' "$yaml_file" | head -1 | sed 's/^duration:[[:space:]]*//')
+    issue_count=$(grep -cE '^[[:space:]]*- number:' "$yaml_file" 2>/dev/null || echo "0")
+    success_count=$(grep -cE 'status:[[:space:]]*success' "$yaml_file" 2>/dev/null || echo "0")
+    failed_count=$(grep -cE 'status:[[:space:]]*failed' "$yaml_file" 2>/dev/null || echo "0")
+
+    # Format duration
+    local dur_str=""
+    if [[ -n "$duration" && "$duration" -gt 0 ]] 2>/dev/null; then
+      local mins=$((duration / 60))
+      local secs=$((duration % 60))
+      if [[ $mins -gt 0 ]]; then
+        dur_str="${mins}m $(printf '%02d' $secs)s"
+      else
+        dur_str="${secs}s"
+      fi
+    fi
+
+    # Format issue word
+    local issue_word="issues"
+    [[ "$issue_count" -eq 1 ]] && issue_word="issue"
+
+    # Format status
+    local status_parts=""
+    [[ "$success_count" -gt 0 ]] && status_parts="${success_count} \u2713"
+    [[ "$failed_count" -gt 0 ]] && status_parts="$status_parts ${failed_count} \u2717"
+
+    printf "  %-30s %s  %s %-7s %-10s %s\n" \
+      "${name:-unknown}" "${date:-????-??-??}" "$issue_count" "$issue_word" "$status_parts" "$dur_str"
+
+  done < <(find "$sessions_dir" -name "session.yaml" -type f 2>/dev/null | sort -r)
+}
+
+history_show_detail() {
+  local sessions_dir="$1" session_name="$2"
+  local session_dir="$sessions_dir/$session_name"
+  local yaml_file="$session_dir/session.yaml"
+
+  if [[ ! -f "$yaml_file" ]]; then
+    log_error "Session not found: $session_name"
+    return 1
+  fi
+
+  local name repo started duration model
+  name=$(grep -E '^name:' "$yaml_file" | head -1 | sed 's/^name:[[:space:]]*//')
+  repo=$(grep -E '^repo:' "$yaml_file" | head -1 | sed 's/^repo:[[:space:]]*//')
+  started=$(grep -E '^started:' "$yaml_file" | head -1 | sed 's/^started:[[:space:]]*//')
+  duration=$(grep -E '^duration:' "$yaml_file" | head -1 | sed 's/^duration:[[:space:]]*//')
+  model=$(grep -E '^model:' "$yaml_file" | head -1 | sed 's/^model:[[:space:]]*//')
+
+  # Format date
+  local date_display="${started:0:10} ${started:11:5}"
+
+  # Format duration
+  local dur_str=""
+  if [[ -n "$duration" && "$duration" -gt 0 ]] 2>/dev/null; then
+    local mins=$((duration / 60))
+    local secs=$((duration % 60))
+    if [[ $mins -gt 0 ]]; then
+      dur_str="${mins}m $(printf '%02d' $secs)s"
+    else
+      dur_str="${secs}s"
+    fi
+  fi
+
+  echo "Session: ${name:-$session_name}"
+  echo "Date:    $date_display"
+  [[ -n "$repo" ]] && echo "Repo:    $repo"
+  [[ -n "$model" ]] && echo "Model:   $model"
+  echo "Duration: $dur_str"
+  echo ""
+
+  # Parse and display issues
+  echo "Issues:"
+
+  # Use a simple line-by-line parser for the issues array
+  local in_issues=false
+  local num="" status="" pr_url="" error="" issue_dur=""
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^issues: ]]; then
+      in_issues=true
+      continue
+    fi
+    if [[ "$in_issues" == false ]]; then
+      continue
+    fi
+    # End of issues section if we hit a non-indented line
+    if [[ "$in_issues" == true && ! "$line" =~ ^[[:space:]] && -n "$line" ]]; then
+      break
+    fi
+
+    if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*number:[[:space:]]*(.*) ]]; then
+      # Emit previous issue if we have one
+      if [[ -n "$num" ]]; then
+        _emit_issue_line "$num" "$status" "$pr_url" "$error" "$issue_dur"
+      fi
+      num="${BASH_REMATCH[1]}"
+      status="" pr_url="" error="" issue_dur=""
+    elif [[ "$line" =~ ^[[:space:]]*status:[[:space:]]*(.*) ]]; then
+      status="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^[[:space:]]*pr_url:[[:space:]]*(.*) ]]; then
+      pr_url="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^[[:space:]]*error:[[:space:]]*(.*) ]]; then
+      error="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^[[:space:]]*duration:[[:space:]]*(.*) ]]; then
+      issue_dur="${BASH_REMATCH[1]}"
+    fi
+  done < "$yaml_file"
+
+  # Emit last issue
+  if [[ -n "$num" ]]; then
+    _emit_issue_line "$num" "$status" "$pr_url" "$error" "$issue_dur"
+  fi
+
+  echo ""
+  echo "QA Checklist: sessions/$session_name/qa-checklist.md"
+  echo "Logs:         sessions/$session_name/logs/"
+}
+
+_emit_issue_line() {
+  local num="$1" status="$2" pr_url="$3" error="$4" dur="$5"
+
+  local symbol status_text dur_str=""
+
+  case "$status" in
+    success) symbol="\u2713" ;;
+    failed)  symbol="\u2717" ;;
+    *)       symbol="\u2298" ;;
+  esac
+
+  if [[ "$status" == "success" && -n "$pr_url" ]]; then
+    local pr_num
+    pr_num=$(echo "$pr_url" | grep -oE '[0-9]+$')
+    status_text="PR #${pr_num}"
+  elif [[ "$status" == "failed" ]]; then
+    status_text="FAILED"
+  else
+    status_text="SKIPPED"
+  fi
+
+  if [[ -n "$dur" && "$dur" -gt 0 ]] 2>/dev/null; then
+    local mins=$((dur / 60))
+    local secs=$((dur % 60))
+    if [[ $mins -gt 0 ]]; then
+      dur_str="${mins}m $(printf '%02d' $secs)s"
+    else
+      dur_str="${secs}s"
+    fi
+  fi
+
+  local line
+  printf -v line "  %b #%-4s %-9s (%s)" "$symbol" "$num" "$status_text" "$dur_str"
+  if [[ -n "$error" ]]; then
+    line="$line \u2014 $error"
+  fi
+  echo -e "$line"
+}
+
+history_show_qa() {
+  local sessions_dir="$1" session_name="$2"
+  local qa_file="$sessions_dir/$session_name/qa-checklist.md"
+
+  if [[ ! -f "$qa_file" ]]; then
+    log_error "QA checklist not found for session: $session_name"
+    return 1
+  fi
+
+  cat "$qa_file"
+}
+
+history_clean() {
+  local sessions_dir="$1"
+  local cutoff_epoch
+  cutoff_epoch=$(date -v-30d +%s 2>/dev/null || date -d "30 days ago" +%s 2>/dev/null)
+
+  if [[ ! -d "$sessions_dir" ]]; then
+    echo "No sessions found."
+    return 0
+  fi
+
+  local removed=0
+  while IFS= read -r yaml_file; do
+    [[ -z "$yaml_file" ]] && continue
+    local session_dir started session_epoch
+    session_dir=$(dirname "$yaml_file")
+    started=$(grep -E '^started:' "$yaml_file" | head -1 | sed 's/^started:[[:space:]]*//')
+
+    if [[ -z "$started" ]]; then
+      continue
+    fi
+
+    # Parse date to epoch (strip milliseconds if present, e.g. .310Z -> Z)
+    local clean_started="${started%.*Z}Z"
+    [[ "$started" != *"."*"Z" ]] && clean_started="$started"
+    session_epoch=$(date -jf "%Y-%m-%dT%H:%M:%SZ" "$clean_started" +%s 2>/dev/null || \
+                    date -d "$started" +%s 2>/dev/null || echo "0")
+
+    if [[ "$session_epoch" -gt 0 && "$session_epoch" -lt "$cutoff_epoch" ]]; then
+      local name
+      name=$(grep -E '^name:' "$yaml_file" | head -1 | sed 's/^name:[[:space:]]*//')
+      rm -rf "$session_dir"
+      echo "Removed: ${name:-$session_dir}"
+      ((removed++))
+    fi
+  done < <(find "$sessions_dir" -name "session.yaml" -type f 2>/dev/null)
+
+  if [[ $removed -eq 0 ]]; then
+    echo "No sessions older than 30 days found."
+  else
+    echo "Removed $removed session(s)."
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1501,6 +1775,12 @@ trap cleanup_on_exit EXIT
 # Handle init subcommand before applying config (init doesn't need full config)
 if [[ "$SUBCOMMAND" == "init" ]]; then
   run_init
+  exit 0
+fi
+
+# Handle history subcommand (doesn't need full config or prerequisites)
+if [[ "$SUBCOMMAND" == "history" ]]; then
+  run_history
   exit 0
 fi
 
