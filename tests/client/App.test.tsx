@@ -13,6 +13,9 @@ jest.mock("../../src/client/LiveView", () => ({
 jest.mock("../../src/client/History", () => ({
   History: () => <div data-testid="history">History</div>,
 }));
+jest.mock("../../src/client/RunDetail", () => ({
+  RunDetail: () => <div data-testid="run-detail">RunDetail</div>,
+}));
 jest.mock("../../src/client/Config", () => ({
   Config: () => <div data-testid="config">Config</div>,
 }));

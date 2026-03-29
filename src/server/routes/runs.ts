@@ -1,6 +1,6 @@
 import { Router, type Router as RouterType } from "express";
 import type Database from "better-sqlite3";
-import { getRun, listRuns, createRun, updateRun } from "../db.js";
+import { getRun, listRuns, createRun, updateRun, listLearnings } from "../db.js";
 
 let _db: Database.Database;
 
@@ -15,7 +15,11 @@ router.get("/runs", (_req, res) => {
   try {
     const limit = Math.min(Math.max(parseInt(_req.query.limit as string) || 20, 1), 100);
     const offset = Math.max(parseInt(_req.query.offset as string) || 0, 0);
-    const result = listRuns(_db, { limit, offset });
+    const status = _req.query.status as string | undefined;
+    const issueNumber = _req.query.issue_number ? parseInt(_req.query.issue_number as string) : undefined;
+    const search = _req.query.search as string | undefined;
+
+    const result = listRuns(_db, { limit, offset, status, issueNumber, search });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: "Failed to list runs" });
@@ -34,7 +38,12 @@ router.get("/runs/:id", (req, res) => {
       res.status(404).json({ error: "Run not found" });
       return;
     }
-    res.json(run);
+
+    // Enrich with learnings for this run
+    const { learnings } = listLearnings(_db, { limit: 100 });
+    const runLearnings = learnings.filter((l) => l.run_id === id);
+
+    res.json({ ...run, learnings: runLearnings });
   } catch (err) {
     res.status(500).json({ error: "Failed to get run" });
   }
@@ -68,12 +77,12 @@ router.patch("/runs/:id", (req, res) => {
       res.status(404).json({ error: "Run not found" });
       return;
     }
-    const { status, stages_json, pr_url, duration_seconds } = req.body;
+    const { status, stages_json, stage_durations_json, pr_url, duration_seconds, test_output, review_output, diff_stat } = req.body;
     if (status !== undefined && !VALID_STATUSES.has(status)) {
       res.status(400).json({ error: "Invalid status. Must be: running, success, or failure" });
       return;
     }
-    const run = updateRun(_db, id, { status, stages_json, pr_url, duration_seconds });
+    const run = updateRun(_db, id, { status, stages_json, stage_durations_json, pr_url, duration_seconds, test_output, review_output, diff_stat });
     res.json(run);
   } catch (err) {
     res.status(500).json({ error: "Failed to update run" });

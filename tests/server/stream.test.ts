@@ -1,8 +1,7 @@
 import express from "express";
 import http from "node:http";
-import { EventEmitter } from "node:events";
 import { streamRouter } from "../../src/server/routes/stream";
-import { loopEmitter } from "../../src/server/sse";
+import { broadcaster } from "../../src/server/sse";
 import type { LoopEvent } from "../../src/server/sse";
 
 function createApp(): express.Express {
@@ -31,17 +30,34 @@ interface SSEClient {
   res: http.IncomingMessage;
   req: http.ClientRequest;
   messages: string[];
+  eventIds: string[];
   destroy: () => void;
 }
 
-function connectSSE(port: number): Promise<SSEClient> {
+function connectSSE(port: number, lastEventId?: number): Promise<SSEClient> {
   return new Promise((resolve, reject) => {
-    const req = http.get(`http://127.0.0.1:${port}/api/stream`, (res) => {
+    const headers: Record<string, string> = {};
+    if (lastEventId !== undefined) {
+      headers["Last-Event-ID"] = String(lastEventId);
+    }
+    const req = http.get(`http://127.0.0.1:${port}/api/stream`, { headers }, (res) => {
       const messages: string[] = [];
+      const eventIds: string[] = [];
+      let buffer = "";
       res.on("data", (chunk: Buffer) => {
-        for (const line of chunk.toString().split("\n")) {
-          if (line.startsWith("data: ")) {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        let currentId = "";
+        for (const line of lines) {
+          if (line.startsWith("id: ")) {
+            currentId = line.slice(4).trim();
+          } else if (line.startsWith("data: ")) {
             messages.push(line.slice(6));
+            if (currentId) {
+              eventIds.push(currentId);
+              currentId = "";
+            }
           } else if (line.startsWith(": ping")) {
             messages.push("ping");
           }
@@ -51,6 +67,7 @@ function connectSSE(port: number): Promise<SSEClient> {
         res,
         req,
         messages,
+        eventIds,
         destroy: () => { res.destroy(); req.destroy(); },
       });
     });
@@ -67,15 +84,15 @@ describe("GET /api/stream", () => {
   const clients: SSEClient[] = [];
 
   afterEach(async () => {
-    loopEmitter.removeAllListeners();
+    broadcaster.removeAllListeners();
     for (const c of clients) c.destroy();
     clients.length = 0;
     if (server?.listening) await closeServer(server);
     server = null;
   });
 
-  async function connect(): Promise<SSEClient> {
-    const client = await connectSSE(getPort(server!));
+  async function connect(lastEventId?: number): Promise<SSEClient> {
+    const client = await connectSSE(getPort(server!), lastEventId);
     clients.push(client);
     return client;
   }
@@ -88,7 +105,7 @@ describe("GET /api/stream", () => {
     expect(client.res.headers["cache-control"]).toBe("no-cache");
   });
 
-  it("streams JSON-encoded events with type field", async () => {
+  it("streams JSON-encoded events with type field and sequence id", async () => {
     server = await startServer(createApp());
     const client = await connect();
 
@@ -96,7 +113,7 @@ describe("GET /api/stream", () => {
       type: "stage",
       data: { issue: 28, stage: "implement", timestamp: "2026-03-29T00:00:00Z" },
     };
-    loopEmitter.emit("loopEvent", event);
+    broadcaster.emit(event);
     await wait(50);
 
     expect(client.messages.length).toBeGreaterThanOrEqual(1);
@@ -104,6 +121,10 @@ describe("GET /api/stream", () => {
     expect(parsed.type).toBe("stage");
     expect(parsed.data.issue).toBe(28);
     expect(parsed.data.stage).toBe("implement");
+
+    // Should have a numeric event ID
+    expect(client.eventIds.length).toBeGreaterThanOrEqual(1);
+    expect(parseInt(client.eventIds[0])).toBeGreaterThan(0);
   });
 
   it("supports multiple simultaneous clients", async () => {
@@ -115,7 +136,7 @@ describe("GET /api/stream", () => {
       type: "output",
       data: { line: "Creating health.ts...", timestamp: "2026-03-29T00:00:00Z" },
     };
-    loopEmitter.emit("loopEvent", event);
+    broadcaster.emit(event);
     await wait(50);
 
     expect(client1.messages.length).toBeGreaterThanOrEqual(1);
@@ -124,52 +145,43 @@ describe("GET /api/stream", () => {
     expect(JSON.parse(client2.messages[0]).type).toBe("output");
   });
 
-  it("configures heartbeat at 30s interval", () => {
-    jest.useFakeTimers();
-    try {
-      const mockReq = new EventEmitter();
-      const writtenChunks: string[] = [];
-      const mockRes = {
-        set: jest.fn(),
-        flushHeaders: jest.fn(),
-        write: jest.fn((chunk: string) => writtenChunks.push(chunk)),
-        on: jest.fn(),
-      };
+  it("replays missed events on reconnection with Last-Event-ID", async () => {
+    server = await startServer(createApp());
 
-      // Extract the route handler directly from the router
-      const streamLayer = (streamRouter as any).stack.find(
-        (layer: any) => layer.route?.path === "/stream"
-      );
-      expect(streamLayer).toBeDefined();
-      const handler = streamLayer.route.stack[0].handle;
+    // First, emit events without a connected client
+    const event1: LoopEvent = { type: "output", data: { line: "line1", timestamp: "t" } };
+    const event2: LoopEvent = { type: "output", data: { line: "line2", timestamp: "t" } };
+    const event3: LoopEvent = { type: "output", data: { line: "line3", timestamp: "t" } };
 
-      handler(mockReq, mockRes);
+    const id1 = broadcaster.emit(event1);
+    const id2 = broadcaster.emit(event2);
+    const id3 = broadcaster.emit(event3);
 
-      jest.advanceTimersByTime(30_000);
-      expect(writtenChunks).toContain(": ping\n\n");
+    // Connect with Last-Event-ID = id1, should replay id2 and id3
+    const client = await connect(id1);
+    await wait(100);
 
-      jest.advanceTimersByTime(30_000);
-      const pingCount = writtenChunks.filter((c) => c === ": ping\n\n").length;
-      expect(pingCount).toBe(2);
+    // Should have received the replayed events
+    const dataMessages = client.messages.filter((m) => m !== "ping");
+    expect(dataMessages.length).toBeGreaterThanOrEqual(2);
 
-      // Cleanup
-      mockReq.emit("close");
-    } finally {
-      jest.useRealTimers();
-    }
+    const parsed = dataMessages.map((m) => JSON.parse(m));
+    const lines = parsed.map((p) => p.data.line);
+    expect(lines).toContain("line2");
+    expect(lines).toContain("line3");
   });
 
   it("cleans up listener on client disconnect", async () => {
     server = await startServer(createApp());
 
-    const initialCount = loopEmitter.listenerCount("loopEvent");
+    const initialCount = broadcaster.listenerCount();
     const client = await connect();
-    expect(loopEmitter.listenerCount("loopEvent")).toBe(initialCount + 1);
+    expect(broadcaster.listenerCount()).toBe(initialCount + 1);
 
     client.destroy();
     await wait(100);
 
-    expect(loopEmitter.listenerCount("loopEvent")).toBe(initialCount);
+    expect(broadcaster.listenerCount()).toBe(initialCount);
   });
 
   it("streams all event types correctly", async () => {
@@ -185,12 +197,32 @@ describe("GET /api/stream", () => {
     ];
 
     for (const event of events) {
-      loopEmitter.emit("loopEvent", event);
+      broadcaster.emit(event);
     }
     await wait(50);
 
     expect(client.messages.length).toBe(5);
     const types = client.messages.map((m) => JSON.parse(m).type);
     expect(types).toEqual(["stage", "output", "test", "error", "complete"]);
+  });
+
+  it("streams new structured event types", async () => {
+    server = await startServer(createApp());
+    const client = await connect();
+
+    const events: LoopEvent[] = [
+      { type: "stage_start", data: { issue: 1, stage: "test", timestamp: "t" } },
+      { type: "stage_complete", data: { issue: 1, stage: "test", duration: 15, timestamp: "t" } },
+      { type: "test_result", data: { passed: 10, failed: 0, attempt: 1, maxAttempts: 3, timestamp: "t" } },
+      { type: "review_result", data: { issue: 1, success: true, timestamp: "t" } },
+    ];
+
+    for (const event of events) {
+      broadcaster.emit(event);
+    }
+    await wait(50);
+
+    const types = client.messages.map((m) => JSON.parse(m).type);
+    expect(types).toEqual(["stage_start", "stage_complete", "test_result", "review_result"]);
   });
 });

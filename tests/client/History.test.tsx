@@ -2,17 +2,22 @@
  * @jest-environment jsdom
  */
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { History } from "../../src/client/History";
 
+let mockESInstance: any;
+
 beforeAll(() => {
-  (global as any).EventSource = jest.fn().mockImplementation(() => ({
-    onopen: null,
-    onmessage: null,
-    onerror: null,
-    close: jest.fn(),
-  }));
+  (global as any).EventSource = jest.fn().mockImplementation(() => {
+    mockESInstance = {
+      onopen: null,
+      onmessage: null,
+      onerror: null,
+      close: jest.fn(),
+    };
+    return mockESInstance;
+  });
 });
 
 describe("History", () => {
@@ -36,8 +41,11 @@ describe("History", () => {
           agent: "claude",
           model: "sonnet",
           status: "success",
+          stages_json: "[]",
+          stage_durations_json: "{}",
           pr_url: "https://github.com/org/repo/pull/1",
           duration_seconds: 120,
+          diff_stat: " 2 files changed, 10 insertions(+), 3 deletions(-)",
           created_at: "2025-01-01T00:00:00.000Z",
         },
         {
@@ -47,8 +55,11 @@ describe("History", () => {
           agent: "claude",
           model: "opus",
           status: "failure",
+          stages_json: "[]",
+          stage_durations_json: "{}",
           pr_url: null,
           duration_seconds: null,
+          diff_stat: null,
           created_at: "2025-01-02T00:00:00.000Z",
         },
       ],
@@ -103,8 +114,11 @@ describe("History", () => {
           agent: "claude",
           model: "sonnet",
           status: "success",
+          stages_json: "[]",
+          stage_durations_json: "{}",
           pr_url: "javascript:alert(1)",
           duration_seconds: 10,
+          diff_stat: null,
           created_at: "2025-01-01T00:00:00.000Z",
         },
       ],
@@ -137,5 +151,57 @@ describe("History", () => {
     await waitFor(() => {
       expect(screen.getByText("Error: HTTP 500")).toBeInTheDocument();
     });
+  });
+
+  it("renders filter controls", async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ runs: [], total: 0 }),
+    }) as any;
+
+    render(<History />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("filter-row")).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId("search-input")).toBeInTheDocument();
+    expect(screen.getByTestId("status-filter")).toBeInTheDocument();
+  });
+
+  it("renders Changes column with diff summary", async () => {
+    const mockRuns = {
+      runs: [
+        {
+          id: 1,
+          issue_number: 42,
+          issue_title: "Fix the bug",
+          agent: "claude",
+          model: "sonnet",
+          status: "success",
+          stages_json: "[]",
+          stage_durations_json: "{}",
+          pr_url: "https://github.com/org/repo/pull/1",
+          duration_seconds: 120,
+          diff_stat: " src/foo.ts | 10 ++++\n 1 file changed, 10 insertions(+)",
+          created_at: "2025-01-01T00:00:00.000Z",
+        },
+      ],
+      total: 1,
+    };
+
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockRuns),
+    }) as any;
+
+    render(<History />);
+
+    await waitFor(() => {
+      expect(screen.getByText("#42")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Changes")).toBeInTheDocument();
+    expect(screen.getByText("1 file changed, 10 insertions(+)")).toBeInTheDocument();
   });
 });
