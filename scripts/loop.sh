@@ -126,12 +126,13 @@ check_prerequisites() {
 # ---------------------------------------------------------------------------
 poll_issues() {
   local limit="${1:-1}"
+  # Sort by issue number ascending (oldest first) so dependencies are built in order
   gh issue list \
     --repo "$REPO" \
     --label "$LABEL_READY" \
     --state open \
     --json number,title,body,labels \
-    --limit "$limit" 2>/dev/null || echo "[]"
+    --limit "$limit" 2>/dev/null | jq 'sort_by(.number)' 2>/dev/null || echo "[]"
 }
 
 get_issue_field() {
