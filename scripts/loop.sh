@@ -126,13 +126,14 @@ check_prerequisites() {
 # ---------------------------------------------------------------------------
 poll_issues() {
   local limit="${1:-1}"
-  # Sort by issue number ascending (oldest first) so dependencies are built in order
+  # Fetch up to 100 issues, sort by number ascending (oldest first), then take limit
+  # GitHub returns newest first, so we must over-fetch to get the right order
   gh issue list \
     --repo "$REPO" \
     --label "$LABEL_READY" \
     --state open \
     --json number,title,body,labels \
-    --limit "$limit" 2>/dev/null | jq 'sort_by(.number)' 2>/dev/null || echo "[]"
+    --limit 100 2>/dev/null | jq "sort_by(.number) | .[0:${limit}]" 2>/dev/null || echo "[]"
 }
 
 get_issue_field() {
