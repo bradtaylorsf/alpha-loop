@@ -11,8 +11,8 @@
 #
 # Configuration (env vars):
 #   REPO            - GitHub repo (default: bradtaylorsf/alpha-loop)
-#   MODEL           - Claude model for implementation (default: sonnet)
-#   REVIEW_MODEL    - Claude model for review (default: sonnet)
+#   MODEL           - Claude model for implementation (default: opus)
+#   REVIEW_MODEL    - Claude model for review (default: opus)
 #   MAX_TURNS       - Max turns per implementation (default: 30)
 #   POLL_INTERVAL   - Seconds between polls (default: 60)
 #   DRY_RUN         - Preview mode, no changes (default: false)
@@ -34,8 +34,8 @@ set -euo pipefail
 REPO="${REPO:-bradtaylorsf/alpha-loop}"
 REPO_OWNER="${REPO_OWNER:-bradtaylorsf}"
 PROJECT_NUM="${PROJECT_NUM:-2}"
-MODEL="${MODEL:-sonnet}"
-REVIEW_MODEL="${REVIEW_MODEL:-sonnet}"
+MODEL="${MODEL:-opus}"
+REVIEW_MODEL="${REVIEW_MODEL:-opus}"
 MAX_TURNS="${MAX_TURNS:-30}"
 POLL_INTERVAL="${POLL_INTERVAL:-60}"
 DRY_RUN="${DRY_RUN:-false}"
