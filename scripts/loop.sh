@@ -32,6 +32,8 @@ set -euo pipefail
 # Configuration
 # ---------------------------------------------------------------------------
 REPO="${REPO:-bradtaylorsf/alpha-loop}"
+REPO_OWNER="${REPO_OWNER:-bradtaylorsf}"
+PROJECT_NUM="${PROJECT_NUM:-2}"
 MODEL="${MODEL:-sonnet}"
 REVIEW_MODEL="${REVIEW_MODEL:-sonnet}"
 MAX_TURNS="${MAX_TURNS:-30}"
@@ -122,18 +124,92 @@ check_prerequisites() {
 }
 
 # ---------------------------------------------------------------------------
-# Issue Polling
+# Issue Polling - reads from GitHub Project board in priority order
 # ---------------------------------------------------------------------------
 poll_issues() {
   local limit="${1:-1}"
-  # Fetch up to 100 issues, sort by number ascending (oldest first), then take limit
-  # GitHub returns newest first, so we must over-fetch to get the right order
-  gh issue list \
-    --repo "$REPO" \
-    --label "$LABEL_READY" \
-    --state open \
-    --json number,title,body,labels \
-    --limit 100 2>/dev/null | jq "sort_by(.number) | .[0:${limit}]" 2>/dev/null || echo "[]"
+
+  # Read from the GitHub Project board -- items come in the board's display order
+  # (the order you set by dragging in the project view)
+  # Filter to "Todo" status only, then take the first N items
+  local project_items
+  project_items=$(gh project item-list "$PROJECT_NUM" \
+    --owner "$REPO_OWNER" \
+    --format json \
+    --limit 100 2>/dev/null) || { echo "[]"; return; }
+
+  # Filter to Todo items, extract issue number/title/body in board order, take limit
+  echo "$project_items" | jq --argjson limit "$limit" '
+    [.items[]
+     | select(.status == "Todo")
+     | select(.content.type == "Issue")
+     | {
+         number: .content.number,
+         title: .content.title,
+         body: .content.body,
+         labels: [.labels[]?]
+       }
+    ] | .[0:$limit]
+  ' 2>/dev/null || echo "[]"
+}
+
+update_project_status() {
+  local issue_num="$1" new_status="$2"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would update project status for #$issue_num to '$new_status'"
+    return 0
+  fi
+
+  # Find the item ID for this issue in the project
+  local item_id
+  item_id=$(gh project item-list "$PROJECT_NUM" \
+    --owner "$REPO_OWNER" \
+    --format json \
+    --limit 100 2>/dev/null | jq -r --argjson num "$issue_num" '
+      .items[] | select(.content.number == $num) | .id
+    ' 2>/dev/null)
+
+  if [[ -z "$item_id" || "$item_id" == "null" ]]; then
+    log_warn "Could not find project item for issue #$issue_num"
+    return 1
+  fi
+
+  # Get the Status field ID and option ID
+  local field_data
+  field_data=$(gh project field-list "$PROJECT_NUM" \
+    --owner "$REPO_OWNER" \
+    --format json 2>/dev/null | jq -r --arg status "$new_status" '
+      .fields[] | select(.name == "Status") |
+      .id as $fid |
+      (.options[] | select(.name == $status) | .id) as $oid |
+      "\($fid)|\($oid)"
+    ' 2>/dev/null)
+
+  local field_id="${field_data%%|*}"
+  local option_id="${field_data##*|}"
+
+  if [[ -z "$field_id" || -z "$option_id" ]]; then
+    log_warn "Could not resolve project field/option for status '$new_status'"
+    return 1
+  fi
+
+  # Get project ID
+  local project_id
+  project_id=$(gh project view "$PROJECT_NUM" \
+    --owner "$REPO_OWNER" \
+    --format json 2>/dev/null | jq -r '.id')
+
+  gh project item-edit \
+    --project-id "$project_id" \
+    --id "$item_id" \
+    --field-id "$field_id" \
+    --single-select-option-id "$option_id" 2>/dev/null || {
+    log_warn "Failed to update project status for #$issue_num"
+    return 1
+  }
+
+  log_info "Project board: #$issue_num -> $new_status"
 }
 
 get_issue_field() {
@@ -596,7 +672,8 @@ process_issue() {
   echo "Started: $(date)" | tee -a "$log_file"
   echo "========================================" | tee -a "$log_file"
 
-  # Step 1: Update label
+  # Step 1: Update status on project board and labels
+  update_project_status "$issue_num" "In progress" || true
   label_issue "$issue_num" "in-progress" "$LABEL_READY" || true
 
   # Step 2: Setup worktree (sets WORKTREE_PATH global)
@@ -660,6 +737,7 @@ $test_output"
   local status_msg="Implementation done."
   [[ "$tests_passing" == "true" ]] && status_msg="$status_msg All tests passing." || status_msg="$status_msg Some tests failing -- see PR."
 
+  update_project_status "$issue_num" "Done" || true
   label_issue "$issue_num" "in-review" "in-progress" || true
   comment_issue "$issue_num" "Automated implementation complete.
 
@@ -693,6 +771,7 @@ main() {
   echo -e "${BOLD}${CYAN}=====================================${NC}"
   echo ""
   echo -e "  Repo:          ${BOLD}$REPO${NC}"
+  echo -e "  Project:       ${BOLD}#$PROJECT_NUM (${REPO_OWNER})${NC}"
   echo -e "  Model:         ${BOLD}$MODEL${NC}"
   echo -e "  Review Model:  ${BOLD}$REVIEW_MODEL${NC}"
   echo -e "  Max Turns:     ${BOLD}$MAX_TURNS${NC}"
