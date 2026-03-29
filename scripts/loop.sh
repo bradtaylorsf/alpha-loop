@@ -383,9 +383,13 @@ run_preflight() {
   log_info "Test command: $test_cmd"
 
   # Run tests and capture output
+  # Note: must disable set -e temporarily because test failures are expected here
   local test_output=""
   local test_exit=0
-  test_output=$(eval "$test_cmd" 2>&1) || test_exit=$?
+  set +e
+  test_output=$(eval "$test_cmd" 2>&1)
+  test_exit=$?
+  set -e
 
   # Parse Jest output for pass/fail/skip counts
   local passed=0 failed=0 skipped=0
