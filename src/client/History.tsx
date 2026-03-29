@@ -97,7 +97,7 @@ export function History() {
                   </td>
                   <td style={styles.td}>{formatDuration(run.duration_seconds)}</td>
                   <td style={styles.td}>
-                    {run.pr_url ? (
+                    {run.pr_url && /^https?:\/\//.test(run.pr_url) ? (
                       <a href={run.pr_url} target="_blank" rel="noopener noreferrer" style={styles.link}>
                         PR
                       </a>

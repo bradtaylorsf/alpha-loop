@@ -93,6 +93,38 @@ describe("History", () => {
     });
   });
 
+  it("does not render javascript: URLs as links", async () => {
+    const mockRuns = {
+      runs: [
+        {
+          id: 1,
+          issue_number: 99,
+          issue_title: "XSS test",
+          agent: "claude",
+          model: "sonnet",
+          status: "success",
+          pr_url: "javascript:alert(1)",
+          duration_seconds: 10,
+          created_at: "2025-01-01T00:00:00.000Z",
+        },
+      ],
+      total: 1,
+    };
+
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockRuns),
+    }) as any;
+
+    render(<History />);
+
+    await waitFor(() => {
+      expect(screen.getByText("#99")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("link", { name: "PR" })).not.toBeInTheDocument();
+  });
+
   it("shows error state on fetch failure", async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: false,
