@@ -349,59 +349,39 @@ cleanup_worktree() {
 }
 
 # ---------------------------------------------------------------------------
-# Prompt Building
+# Prompt Building -- keep prompts SHORT, let skills/CLAUDE.md do the work
 # ---------------------------------------------------------------------------
 build_implement_prompt() {
   local issue_num="$1" title="$2" body="$3"
-  local template
 
-  template=$(<"$PROMPTS_DIR/implement.md")
-
-  # Interpolate placeholders
-  template="${template//\{NUMBER\}/$issue_num}"
-  template="${template//\{TITLE\}/$title}"
-  template="${template//\{BODY\}/$body}"
-
-  echo "$template"
-}
-
-build_review_prompt() {
-  local issue_num="$1" title="$2" body="$3" diff_file="$4"
-
-  # Build review prompt inline -- avoids bash substitution issues with diffs
-  cat <<REVIEWEOF
-# Code Review: GitHub Issue #${issue_num} - ${title}
-
-You are a senior code reviewer. Review the implementation against the original requirements.
-
-## Original Requirements
+  cat <<EOF
+Implement GitHub issue #${issue_num}: ${title}
 
 ${body}
 
-## Instructions
+After implementing, write tests, run pnpm test to verify, and commit with: git commit -m "feat: ${title} (closes #${issue_num})"
+EOF
+}
 
-1. Read the diff file at: ${diff_file}
-2. Check if the implementation meets all acceptance criteria
-3. Check for security vulnerabilities (OWASP Top 10)
-4. Check for missing tests
-5. Check code quality and conventions
+build_review_prompt() {
+  local issue_num="$1" title="$2" body="$3"
 
-## Output Format
+  cat <<EOF
+Review the code changes for issue #${issue_num}: ${title}
 
-### Review Summary
-**Status**: PASS | FAIL
-**Critical Issues**: <count>
-**Warnings**: <count>
+Run git diff origin/master...HEAD to see what changed.
 
-### Critical Issues (blocks merge)
-- [file:line] Description
+Original requirements:
+${body}
 
-### Warnings (should fix)
-- [file:line] Description
+Review for: correctness vs requirements, security issues, missing tests, code quality.
 
-### What Was Done Well
-- Positive observations
-REVIEWEOF
+For any issues you find:
+- CRITICAL or WARNING issues: fix them directly, run tests, and commit with "fix: address review findings for #${issue_num}"
+- Issues you cannot fix: note them for the output
+
+After fixing, output a brief review summary with what you found and what you fixed.
+EOF
 }
 
 # ---------------------------------------------------------------------------
@@ -534,34 +514,31 @@ run_review() {
     return 0
   fi
 
-  # Write diff to a temp file so Claude can read it (avoids bash substitution issues)
-  local diff_file="$worktree/.agent-diff.patch"
-  (cd "$worktree" && git diff "origin/$BASE_BRANCH...HEAD" > "$diff_file" 2>/dev/null || \
-   cd "$worktree" && git diff "$BASE_BRANCH...HEAD" > "$diff_file" 2>/dev/null)
+  # Check there are actual changes to review
+  local has_changes
+  has_changes=$(cd "$worktree" && git log "origin/$BASE_BRANCH..HEAD" --oneline 2>/dev/null | wc -l | tr -d ' ')
 
-  if [[ ! -s "$diff_file" ]]; then
-    log_warn "No diff to review"
+  if [[ "$has_changes" -eq 0 ]]; then
+    log_warn "No commits to review"
     REVIEW_OUTPUT="No changes to review"
-    rm -f "$diff_file"
     return 0
   fi
 
-  # Build review prompt (references diff file path, doesn't embed diff in string)
+  # Short prompt -- agent reads the diff itself and fixes issues directly
   local review_prompt
-  review_prompt=$(build_review_prompt "$issue_num" "$title" "$body" "$diff_file")
+  review_prompt=$(build_review_prompt "$issue_num" "$title" "$body")
 
-  # Run review -- Claude will read the diff file itself
-  log_info "Review agent: claude | Model: $REVIEW_MODEL"
+  # Review agent runs WITH edit permissions so it can fix issues it finds
+  log_info "Review agent: claude | Model: $REVIEW_MODEL | CWD: $worktree"
   REVIEW_OUTPUT=$(cd "$worktree" && echo "$review_prompt" | claude -p \
     --model "$REVIEW_MODEL" \
-    --max-turns 10 \
+    --max-turns 15 \
     --dangerously-skip-permissions \
     --verbose \
     --output-format text \
     2>&1)
 
   echo "$REVIEW_OUTPUT" >> "$log_file"
-  rm -f "$diff_file"
   log_success "Code review complete"
 }
 
