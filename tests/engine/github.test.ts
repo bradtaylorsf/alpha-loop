@@ -300,11 +300,39 @@ describe("Error handling", () => {
     await expect(client.listIssues()).rejects.toThrow(GitHubAuthError);
   });
 
-  it("throws GitHubAuthError on 403", async () => {
+  it("throws GitHubAuthError on 403 without rate-limit headers", async () => {
     mockIssues.get.mockRejectedValue({ status: 403, message: "Forbidden" });
 
     const client = makeClient();
     await expect(client.getIssue(1)).rejects.toThrow(GitHubAuthError);
+  });
+
+  it("throws GitHubRateLimitError on 403 with retry-after header (secondary rate limit)", async () => {
+    mockIssues.listForRepo.mockRejectedValue({
+      status: 403,
+      message: "You have exceeded a secondary rate limit",
+      response: { headers: { "retry-after": "30" } },
+    });
+
+    const client = makeClient();
+    try {
+      await client.listIssues();
+      fail("Expected error");
+    } catch (err) {
+      expect(err).toBeInstanceOf(GitHubRateLimitError);
+      expect((err as GitHubRateLimitError).retryAfter).toBe(30);
+    }
+  });
+
+  it("throws GitHubRateLimitError on 403 with x-ratelimit-remaining: 0", async () => {
+    mockIssues.listForRepo.mockRejectedValue({
+      status: 403,
+      message: "API rate limit exceeded",
+      response: { headers: { "x-ratelimit-remaining": "0" } },
+    });
+
+    const client = makeClient();
+    await expect(client.listIssues()).rejects.toThrow(GitHubRateLimitError);
   });
 
   it("throws GitHubRateLimitError on 429 with retryAfter", async () => {

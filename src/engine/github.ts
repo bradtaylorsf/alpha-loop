@@ -134,17 +134,32 @@ function handleApiError(err: unknown): never {
     const message =
       (err as { message?: string }).message ?? "GitHub API error";
 
-    if (status === 401 || status === 403) {
+    if (status === 401) {
       throw new GitHubAuthError(message);
     }
     if (status === 404) {
       throw new GitHubNotFoundError(message);
     }
+
+    // 429 is primary rate limit; 403 with retry-after or rate-limit
+    // headers is GitHub's secondary rate limit
+    const headers = (err as { response?: { headers?: Record<string, string> } })
+      .response?.headers;
+
     if (status === 429) {
-      const headers = (err as { response?: { headers?: Record<string, string> } })
-        .response?.headers;
       const retryAfter = parseInt(headers?.["retry-after"] ?? "60", 10);
       throw new GitHubRateLimitError(message, retryAfter);
+    }
+    if (status === 403) {
+      const retryAfter = headers?.["retry-after"];
+      const rateLimitRemaining = headers?.["x-ratelimit-remaining"];
+      if (retryAfter || rateLimitRemaining === "0") {
+        throw new GitHubRateLimitError(
+          message,
+          parseInt(retryAfter ?? "60", 10),
+        );
+      }
+      throw new GitHubAuthError(message);
     }
   }
   throw err;
