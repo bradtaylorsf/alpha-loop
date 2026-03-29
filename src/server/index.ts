@@ -1,5 +1,8 @@
 import express from "express";
 import cors from "cors";
+import { resolve, dirname } from "node:path";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { statusRouter } from "./routes/status.js";
 import { streamRouter } from "./routes/stream.js";
 import { configRouter } from "./routes/config.js";
@@ -21,6 +24,16 @@ app.use("/api", configRouter);
 app.use("/api", agentsRouter);
 app.use("/api", initRunsRouter(db));
 app.use("/api", initLearningsRouter(db));
+
+// Serve built React dashboard in production
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const clientDir = resolve(__dirname, "../client");
+if (existsSync(clientDir)) {
+  app.use(express.static(clientDir));
+  app.get("*", (_req, res) => {
+    res.sendFile(resolve(clientDir, "index.html"));
+  });
+}
 
 const server = app.listen(PORT, () => {
   console.log(`Alpha Loop server listening on port ${PORT}`);
