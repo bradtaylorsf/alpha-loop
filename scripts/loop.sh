@@ -382,10 +382,13 @@ run_implement() {
 
   # Run Claude in the worktree directory
   # CRITICAL: cd into worktree so Claude operates on the isolated copy
+  log_info "Agent: claude | Model: $MODEL | Max turns: $MAX_TURNS | CWD: $worktree"
+
   (cd "$worktree" && echo "$prompt" | claude -p \
     --model "$MODEL" \
     --max-turns "$MAX_TURNS" \
     --dangerously-skip-permissions \
+    --verbose \
     --output-format text \
     2>&1) | tee -a "$log_file"
 
@@ -506,10 +509,12 @@ run_review() {
   review_prompt=$(build_review_prompt "$issue_num" "$title" "$body" "$diff")
 
   # Run review in read-only mode -- capture to global to avoid stdout issues
+  log_info "Review agent: claude | Model: $REVIEW_MODEL"
   REVIEW_OUTPUT=$(cd "$worktree" && echo "$review_prompt" | claude -p \
     --model "$REVIEW_MODEL" \
     --max-turns 10 \
-    --permission-mode plan \
+    --dangerously-skip-permissions \
+    --verbose \
     --output-format text \
     2>/dev/null)
 
@@ -531,12 +536,14 @@ ${test_errors}
 Instructions:
 1. Read the failing test files to understand what they expect
 2. Fix the implementation code OR the tests as appropriate
-3. Run pnpm test:unit and pnpm test:api to verify fixes
+3. Run pnpm test to verify fixes
 4. Commit your fixes with message: fix: resolve test failures for issue #${issue_num}"
 
+  log_info "Fix-tests agent: claude | Model: $MODEL"
   (cd "$worktree" && echo "$fix_prompt" | claude -p \
     --model "$MODEL" \
     --max-turns 20 \
+    --verbose \
     --dangerously-skip-permissions \
     --output-format text \
     2>&1) | tee -a "$log_file"
