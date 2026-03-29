@@ -55,8 +55,21 @@ alpha-loop/
 4. **Self-improving** -- Extract learnings, update agent prompts automatically
 5. **Simple enough to understand** -- A course graduate should be able to read this codebase
 
+## Reference Code
+
+The `reference/` directory contains battle-tested implementations from a previous version of this project. **Always check these files before writing new engine code.** They contain edge-case handling and patterns that were debugged over many iterations:
+
+- `reference/cli-runner.reference.ts` -- JSONL stream parsing, OAuth, process lifecycle
+- `reference/github-client.reference.ts` -- PR status tracking, rate limit handling
+- `reference/worktree-manager.reference.ts` -- Retry logic for git locks, cleanup on error
+- `reference/logger.reference.ts` -- Structured logging
+
+When improving existing `src/engine/` modules, adopt patterns from these reference files rather than reinventing solutions.
+
 ## Code Style
 
 - TypeScript strict mode, ESM with .js extensions in imports
 - Functional style, no classes (except where wrapping external APIs)
 - pnpm only (not npm or yarn)
+- Use `node:` prefix for built-in modules (e.g., `node:path`, `node:child_process`)
+- Jest for tests, `.test.ts` suffix, co-located in `tests/` directory
