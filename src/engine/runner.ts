@@ -37,7 +37,7 @@ function ensureDir(filePath: string): void {
   }
 }
 
-function spawnAgent(
+export function spawnAgent(
   command: string,
   args: string[],
   options: RunOptions,
