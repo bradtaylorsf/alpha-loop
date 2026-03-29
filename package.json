@@ -22,6 +22,7 @@
     "test:client": "jest --runInBand --config jest.client.config.cjs",
     "test:unit": "jest --runInBand",
     "test:api": "jest --runInBand",
+    "test:full": "RECORD_FIXTURES=true jest --runInBand && RECORD_FIXTURES=true jest --runInBand --config jest.client.config.cjs",
     "test:watch": "jest --watch",
     "lint": "eslint src/ --ext .ts,.tsx",
     "type-check": "tsc --noEmit"

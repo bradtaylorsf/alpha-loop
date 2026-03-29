@@ -24,6 +24,7 @@
 #   SKIP_INSTALL    - Skip pnpm install in worktree (default: false)
 #   AUTO_CLEANUP    - Auto-remove worktrees (default: true)
 #   LABEL_READY     - Label to pick up issues (default: ready)
+#   RUN_FULL        - Bypass API response cache, hit real APIs (default: false)
 ###############################################################################
 
 set -euo pipefail
@@ -48,9 +49,16 @@ SKIP_INSTALL="${SKIP_INSTALL:-false}"
 AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 LABEL_READY="${LABEL_READY:-ready}"
 MAX_TEST_RETRIES="${MAX_TEST_RETRIES:-3}"
+RUN_FULL="${RUN_FULL:-false}"
 AUTO_MERGE="${AUTO_MERGE:-false}"
 MERGE_TO="${MERGE_TO:-}"
-RUN_ONCE="${1:-}"
+RUN_ONCE=""
+for arg in "$@"; do
+  case "$arg" in
+    --once) RUN_ONCE="--once" ;;
+    --run-full) RUN_FULL="true" ;;
+  esac
+done
 
 # Session branch: if MERGE_TO is not set, create a session branch for this run
 if [[ -z "$MERGE_TO" ]]; then
@@ -474,9 +482,18 @@ run_tests() {
     return 0
   fi
 
+  # Set RECORD_FIXTURES when --run-full is requested so tests hit real APIs
+  local test_env=""
+  if [[ "$RUN_FULL" == "true" ]]; then
+    test_env="RECORD_FIXTURES=true"
+    log_info "Running tests in full mode (RECORD_FIXTURES=true, real API calls)"
+  else
+    log_info "Running tests with cached API responses"
+  fi
+
   # Run unit tests
   log_info "Running unit tests..."
-  if (cd "$worktree" && pnpm test:unit 2>&1 | tee -a "$log_file"); then
+  if (cd "$worktree" && env $test_env pnpm test:unit 2>&1 | tee -a "$log_file"); then
     log_success "Unit tests passed"
   else
     log_warn "Unit tests had failures"
@@ -485,7 +502,7 @@ run_tests() {
 
   # Run API tests
   log_info "Running API tests..."
-  if (cd "$worktree" && pnpm test:api 2>&1 | tee -a "$log_file"); then
+  if (cd "$worktree" && env $test_env pnpm test:api 2>&1 | tee -a "$log_file"); then
     log_success "API tests passed"
   else
     log_warn "API tests had failures"
