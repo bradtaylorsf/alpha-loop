@@ -6,12 +6,15 @@
   "packageManager": "pnpm@9.0.0",
   "scripts": {
     "dev": "tsx watch src/server/index.ts",
-    "build": "tsc",
+    "build": "tsc && vite build",
+    "build:client": "vite build",
     "start": "node dist/server/index.js",
     "loop": "bash scripts/loop.sh",
     "loop:once": "bash scripts/loop.sh --once",
     "loop:dry": "DRY_RUN=true bash scripts/loop.sh --once",
-    "test": "jest --runInBand",
+    "test": "jest --runInBand && jest --runInBand --config jest.client.config.cjs",
+    "test:server": "jest --runInBand",
+    "test:client": "jest --runInBand --config jest.client.config.cjs",
     "test:unit": "jest --runInBand",
     "test:api": "jest --runInBand",
     "test:watch": "jest --watch",
@@ -24,19 +27,28 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.18.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "yaml": "^2.8.3",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.15",
     "@types/express": "^4.17.20",
     "@types/jest": "^29.5.11",
     "@types/node": "^20.9.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
     "jest": "^29.7.0",
+    "jest-environment-jsdom": "^30.3.0",
     "ts-jest": "^29.1.1",
     "ts-node": "^10.9.2",
     "tsx": "^4.6.0",
-    "typescript": "^5.2.2"
+    "typescript": "^5.2.2",
+    "vite": "^8.0.3"
   }
 }
