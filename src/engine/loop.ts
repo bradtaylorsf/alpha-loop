@@ -1,7 +1,12 @@
 import { execSync } from "node:child_process";
+import type Database from "better-sqlite3";
 import type { AgentRunner, RunOptions } from "./runner.js";
 import type { GitHubClient, GitHubIssue } from "./github.js";
 import { createWorktree, removeWorktree, branchName } from "./worktree.js";
+import { loopEmitter } from "../server/sse.js";
+import type { LoopEvent } from "../server/sse.js";
+import { createRun, updateRun } from "../server/db.js";
+import { extractLearnings } from "../learning/extractor.js";
 
 // --- Types ---
 
@@ -107,32 +112,70 @@ function pushBranch(cwd: string, branch: string): void {
 
 // --- Pipeline ---
 
+export interface ProcessIssueOptions {
+  db?: Database.Database;
+}
+
 export async function processIssue(
   issue: GitHubIssue,
   config: LoopConfig,
   runner: AgentRunner,
   github: GitHubClient,
   onStage?: StageListener,
+  options?: ProcessIssueOptions,
 ): Promise<PipelineResult> {
   const start = Date.now();
   let currentStage: PipelineStage = "setup";
   let worktreePath: string | undefined;
+  const db = options?.db;
+  const stages: string[] = [];
+
+  // Create run record in DB
+  const run = db
+    ? createRun(db, {
+        issue_number: issue.number,
+        issue_title: issue.title,
+        agent: runner.name,
+        model: config.model,
+      })
+    : undefined;
+
+  function emitSSE(event: LoopEvent): void {
+    loopEmitter.emit("loopEvent", event);
+  }
 
   function transition(to: PipelineStage, message?: string): void {
     const from = currentStage;
     currentStage = to;
+    stages.push(to);
     log(to, issue.number, message ?? `Entering ${to}`);
     onStage?.({ issueNumber: issue.number, from, to, message });
+    emitSSE({
+      type: "stage",
+      data: { issue: issue.number, stage: to, timestamp: new Date().toISOString() },
+    });
   }
 
   function fail(error: string): PipelineResult {
     transition("failed", error);
+    emitSSE({
+      type: "error",
+      data: { message: error, stage: currentStage, timestamp: new Date().toISOString() },
+    });
+    const duration = Date.now() - start;
+    if (run && db) {
+      updateRun(db, run.id, {
+        status: "failure",
+        stages_json: JSON.stringify(stages),
+        duration_seconds: Math.round(duration / 1000),
+      });
+    }
     return {
       issueNumber: issue.number,
       stage: currentStage,
       success: false,
       error,
-      duration: Date.now() - start,
+      duration,
     };
   }
 
@@ -271,12 +314,51 @@ export async function processIssue(
     }
 
     transition("done", "Pipeline complete");
+    const duration = Date.now() - start;
+    const prUrl = `https://github.com/${config.owner}/${config.repo}/pull/${prNumber}`;
+
+    // Update run record
+    if (run && db) {
+      updateRun(db, run.id, {
+        status: "success",
+        stages_json: JSON.stringify(stages),
+        pr_url: prUrl,
+        duration_seconds: Math.round(duration / 1000),
+      });
+    }
+
+    // Emit complete SSE event
+    emitSSE({
+      type: "complete",
+      data: { issue: issue.number, prUrl, duration },
+    });
+
+    // Extract learnings
+    if (run && db) {
+      try {
+        const result = await extractLearnings(
+          { ...run, status: "success", duration_seconds: Math.round(duration / 1000), pr_url: prUrl },
+          { issueBody: issue.body ?? "", diff: "", testOutput: "", reviewOutput: "", retryCount: 0 },
+          runner,
+          db,
+        );
+        if (result.learnings.length > 0) {
+          emitSSE({
+            type: "output",
+            data: { line: `Extracted ${result.learnings.length} learnings`, timestamp: new Date().toISOString() },
+          });
+        }
+      } catch (err) {
+        log("done", issue.number, `Learning extraction failed (non-fatal): ${String(err)}`);
+      }
+    }
+
     return {
       issueNumber: issue.number,
       stage: "done",
       success: true,
       prNumber,
-      duration: Date.now() - start,
+      duration,
     };
   } catch (err) {
     return fail(`Unexpected error: ${String(err)}`);
@@ -294,13 +376,20 @@ export async function processIssue(
 
 // --- Loop ---
 
+export interface StartLoopOptions {
+  db?: Database.Database;
+  once?: boolean;
+}
+
 export async function startLoop(
   config: LoopConfig,
   runner: AgentRunner,
   github: GitHubClient,
   onStage?: StageListener,
+  options?: StartLoopOptions,
 ): Promise<void> {
   let running = true;
+  const db = options?.db;
 
   function shutdown(): void {
     console.log("\nShutting down gracefully...");
@@ -319,6 +408,7 @@ export async function startLoop(
 
       if (issues.length === 0) {
         log("setup", 0, `No issues labeled '${config.label}', sleeping ${config.pollInterval}s`);
+        if (options?.once) break;
         await sleep(config.pollInterval * 1000);
         continue;
       }
@@ -327,7 +417,7 @@ export async function startLoop(
         if (!running) break;
 
         log("setup", issue.number, `Processing: ${issue.title}`);
-        const result = await processIssue(issue, config, runner, github, onStage);
+        const result = await processIssue(issue, config, runner, github, onStage, { db });
 
         if (result.success) {
           log("done", issue.number, `Completed in ${result.duration}ms`);
@@ -335,6 +425,8 @@ export async function startLoop(
           log("failed", issue.number, `Failed at ${result.stage}: ${result.error}`);
         }
       }
+
+      if (options?.once) break;
 
       if (running) {
         log("setup", 0, `Cycle complete. Sleeping ${config.pollInterval}s`);

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Agent-agnostic automated development loop: Plan -> Build -> Test -> Review -> Ship",
   "type": "module",
+  "bin": {
+    "alpha-loop": "./dist/cli/index.js"
+  },
   "packageManager": "pnpm@9.0.0",
   "scripts": {
     "dev": "concurrently \"pnpm dev:server\" \"pnpm dev:client\"",
