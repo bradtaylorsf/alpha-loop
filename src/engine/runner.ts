@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname } from "node:path";
 
 // --- Types ---
 
@@ -31,8 +31,8 @@ export interface AgentRunner {
 // --- Helpers ---
 
 function ensureDir(filePath: string): void {
-  const dir = filePath.substring(0, filePath.lastIndexOf("/"));
-  if (dir) {
+  const dir = dirname(filePath);
+  if (dir && dir !== ".") {
     mkdirSync(dir, { recursive: true });
   }
 }

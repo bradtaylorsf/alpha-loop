@@ -109,7 +109,8 @@ describe("Runner process handling", () => {
 
     const result = await runner.run({ prompt: "", cwd: "/tmp" });
     expect(result.success).toBe(true);
-    expect(result.output.trim()).toBe("/private/tmp");
+    // /tmp may resolve to /private/tmp on macOS
+    expect(["/tmp", "/private/tmp"]).toContain(result.output.trim());
   });
 
   it("streams output to a log file", async () => {
