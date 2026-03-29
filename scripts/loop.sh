@@ -879,7 +879,7 @@ main() {
     log_info "Polling for issues labeled '$LABEL_READY'..."
 
     local issues
-    issues=$(poll_issues 5)
+    issues=$(poll_issues 100)
     local count
     count=$(get_issue_count "$issues")
 
