@@ -48,7 +48,16 @@ SKIP_INSTALL="${SKIP_INSTALL:-false}"
 AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 LABEL_READY="${LABEL_READY:-ready}"
 MAX_TEST_RETRIES="${MAX_TEST_RETRIES:-3}"
+AUTO_MERGE="${AUTO_MERGE:-false}"
+MERGE_TO="${MERGE_TO:-}"
 RUN_ONCE="${1:-}"
+
+# Session branch: if MERGE_TO is not set, create a session branch for this run
+if [[ -z "$MERGE_TO" ]]; then
+  SESSION_BRANCH="session/$(date +%Y%m%d-%H%M%S)"
+else
+  SESSION_BRANCH="$MERGE_TO"
+fi
 
 # Resolve paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -282,12 +291,18 @@ setup_worktree() {
     return 0
   fi
 
-  # Ensure we're on the latest base branch
-  git -C "$PROJECT_DIR" fetch origin "$BASE_BRANCH" 2>/dev/null || true
+  # When auto-merging, branch from session branch so each issue builds on previous
+  local from_branch="$BASE_BRANCH"
+  if [[ "$AUTO_MERGE" == "true" && "$SESSION_BRANCH" != "$BASE_BRANCH" ]]; then
+    from_branch="$SESSION_BRANCH"
+  fi
 
-  # Create worktree from base branch
-  git -C "$PROJECT_DIR" worktree add "$WORKTREE_PATH" -b "$branch" "origin/$BASE_BRANCH" 2>/dev/null || \
-  git -C "$PROJECT_DIR" worktree add "$WORKTREE_PATH" -b "$branch" "$BASE_BRANCH" || {
+  # Ensure we're on the latest
+  git -C "$PROJECT_DIR" fetch origin 2>/dev/null || true
+
+  # Create worktree from the appropriate branch
+  git -C "$PROJECT_DIR" worktree add "$WORKTREE_PATH" -b "$branch" "origin/$from_branch" 2>/dev/null || \
+  git -C "$PROJECT_DIR" worktree add "$WORKTREE_PATH" -b "$branch" "$from_branch" || {
     log_error "Failed to create worktree"
     return 1
   }
@@ -351,17 +366,42 @@ build_implement_prompt() {
 }
 
 build_review_prompt() {
-  local issue_num="$1" title="$2" body="$3" diff="$4"
-  local template
+  local issue_num="$1" title="$2" body="$3" diff_file="$4"
 
-  template=$(<"$PROMPTS_DIR/review.md")
+  # Build review prompt inline -- avoids bash substitution issues with diffs
+  cat <<REVIEWEOF
+# Code Review: GitHub Issue #${issue_num} - ${title}
 
-  template="${template//\{NUMBER\}/$issue_num}"
-  template="${template//\{TITLE\}/$title}"
-  template="${template//\{BODY\}/$body}"
-  template="${template//\{DIFF\}/$diff}"
+You are a senior code reviewer. Review the implementation against the original requirements.
 
-  echo "$template"
+## Original Requirements
+
+${body}
+
+## Instructions
+
+1. Read the diff file at: ${diff_file}
+2. Check if the implementation meets all acceptance criteria
+3. Check for security vulnerabilities (OWASP Top 10)
+4. Check for missing tests
+5. Check code quality and conventions
+
+## Output Format
+
+### Review Summary
+**Status**: PASS | FAIL
+**Critical Issues**: <count>
+**Warnings**: <count>
+
+### Critical Issues (blocks merge)
+- [file:line] Description
+
+### Warnings (should fix)
+- [file:line] Description
+
+### What Was Done Well
+- Positive observations
+REVIEWEOF
 }
 
 # ---------------------------------------------------------------------------
@@ -494,21 +534,23 @@ run_review() {
     return 0
   fi
 
-  # Get the diff
-  diff=$(cd "$worktree" && git diff "origin/$BASE_BRANCH...HEAD" 2>/dev/null || \
-         cd "$worktree" && git diff "$BASE_BRANCH...HEAD" 2>/dev/null || \
-         echo "No diff available")
+  # Write diff to a temp file so Claude can read it (avoids bash substitution issues)
+  local diff_file="$worktree/.agent-diff.patch"
+  (cd "$worktree" && git diff "origin/$BASE_BRANCH...HEAD" > "$diff_file" 2>/dev/null || \
+   cd "$worktree" && git diff "$BASE_BRANCH...HEAD" > "$diff_file" 2>/dev/null)
 
-  if [[ "$diff" == "No diff available" || -z "$diff" ]]; then
+  if [[ ! -s "$diff_file" ]]; then
     log_warn "No diff to review"
     REVIEW_OUTPUT="No changes to review"
+    rm -f "$diff_file"
     return 0
   fi
 
-  # Build review prompt
-  review_prompt=$(build_review_prompt "$issue_num" "$title" "$body" "$diff")
+  # Build review prompt (references diff file path, doesn't embed diff in string)
+  local review_prompt
+  review_prompt=$(build_review_prompt "$issue_num" "$title" "$body" "$diff_file")
 
-  # Run review in read-only mode -- capture to global to avoid stdout issues
+  # Run review -- Claude will read the diff file itself
   log_info "Review agent: claude | Model: $REVIEW_MODEL"
   REVIEW_OUTPUT=$(cd "$worktree" && echo "$review_prompt" | claude -p \
     --model "$REVIEW_MODEL" \
@@ -516,9 +558,10 @@ run_review() {
     --dangerously-skip-permissions \
     --verbose \
     --output-format text \
-    2>/dev/null)
+    2>&1)
 
   echo "$REVIEW_OUTPUT" >> "$log_file"
+  rm -f "$diff_file"
   log_success "Code review complete"
 }
 
@@ -659,6 +702,59 @@ PREOF
   log_success "PR created: $PR_URL"
 }
 
+merge_pr() {
+  local issue_num="$1"
+  local branch="agent/issue-${issue_num}"
+
+  if [[ "$AUTO_MERGE" != "true" ]]; then
+    log_info "Auto-merge disabled. PR ready for manual review."
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would merge PR for issue #$issue_num into $SESSION_BRANCH"
+    return 0
+  fi
+
+  log_step "Auto-merging PR for issue #$issue_num"
+
+  # Find the PR number
+  local pr_num
+  pr_num=$(gh pr list --repo "$REPO" --head "$branch" --json number --limit 1 2>/dev/null | jq -r '.[0].number // empty')
+
+  if [[ -z "$pr_num" ]]; then
+    log_warn "No PR found to merge for branch $branch"
+    return 1
+  fi
+
+  # If merging to a session branch (not master), update the PR base
+  if [[ "$SESSION_BRANCH" != "$BASE_BRANCH" ]]; then
+    # Ensure session branch exists
+    if ! git -C "$PROJECT_DIR" rev-parse --verify "$SESSION_BRANCH" &>/dev/null; then
+      log_info "Creating session branch: $SESSION_BRANCH"
+      git -C "$PROJECT_DIR" branch "$SESSION_BRANCH" "origin/$BASE_BRANCH" 2>/dev/null || true
+      git -C "$PROJECT_DIR" push origin "$SESSION_BRANCH" 2>/dev/null || true
+    fi
+
+    # Rebase the PR onto the session branch
+    gh pr edit "$pr_num" --repo "$REPO" --base "$SESSION_BRANCH" 2>/dev/null || {
+      log_warn "Could not update PR base to $SESSION_BRANCH"
+    }
+  fi
+
+  # Merge the PR
+  gh pr merge "$pr_num" --repo "$REPO" --squash --delete-branch 2>&1 || {
+    log_error "Failed to merge PR #$pr_num"
+    return 1
+  }
+
+  log_success "PR #$pr_num merged into $SESSION_BRANCH"
+
+  # Pull the latest into local repo so next worktree gets the merged code
+  git -C "$PROJECT_DIR" fetch origin 2>/dev/null || true
+  git -C "$PROJECT_DIR" pull origin "$SESSION_BRANCH" 2>/dev/null || true
+}
+
 # ---------------------------------------------------------------------------
 # Process a Single Issue
 # ---------------------------------------------------------------------------
@@ -755,7 +851,10 @@ $test_output"
 ---
 *Processed by agent-loop in ${SECONDS}s*" || true
 
-  # Step 8: Cleanup worktree (keep branch for PR)
+  # Step 8: Auto-merge if enabled
+  merge_pr "$issue_num" || true
+
+  # Step 9: Cleanup worktree (keep branch for PR if not merged)
   cleanup_worktree "$issue_num"
 
   end_time=$(date +%s)
@@ -789,6 +888,8 @@ main() {
   echo -e "  Skip Tests:    ${BOLD}$SKIP_TESTS${NC}"
   echo -e "  Skip Review:   ${BOLD}$SKIP_REVIEW${NC}"
   echo -e "  Test Retries:  ${BOLD}$MAX_TEST_RETRIES${NC}"
+  echo -e "  Auto Merge:    ${BOLD}$AUTO_MERGE${NC}"
+  echo -e "  Merge To:      ${BOLD}${SESSION_BRANCH}${NC}"
   echo ""
 
   # Verify prerequisites
