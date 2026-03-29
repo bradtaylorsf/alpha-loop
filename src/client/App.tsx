@@ -3,8 +3,9 @@ import { LiveView } from "./LiveView.js";
 import { History } from "./History.js";
 import { Config } from "./Config.js";
 import { Learnings } from "./Learnings.js";
+import { Sessions } from "./Sessions.js";
 
-type Tab = "live" | "history" | "learnings" | "config";
+type Tab = "live" | "history" | "sessions" | "learnings" | "config";
 
 export function App() {
   const [tab, setTab] = useState<Tab>("live");
@@ -14,7 +15,7 @@ export function App() {
       <header style={styles.header}>
         <h1 style={styles.title}>Alpha Loop</h1>
         <nav style={styles.nav}>
-          {(["live", "history", "learnings", "config"] as const).map((t) => (
+          {(["live", "history", "sessions", "learnings", "config"] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -23,7 +24,7 @@ export function App() {
                 ...(tab === t ? styles.activeTab : {}),
               }}
             >
-              {t === "live" ? "Live View" : t === "history" ? "Run History" : t === "learnings" ? "Learnings" : "Config"}
+              {t === "live" ? "Live View" : t === "history" ? "Run History" : t === "sessions" ? "Sessions" : t === "learnings" ? "Learnings" : "Config"}
             </button>
           ))}
         </nav>
@@ -31,6 +32,7 @@ export function App() {
       <main style={styles.main}>
         {tab === "live" && <LiveView />}
         {tab === "history" && <History />}
+        {tab === "sessions" && <Sessions />}
         {tab === "learnings" && <Learnings />}
         {tab === "config" && <Config />}
       </main>
