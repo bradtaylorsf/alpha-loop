@@ -12,6 +12,8 @@
     "loop:once": "bash scripts/loop.sh --once",
     "loop:dry": "DRY_RUN=true bash scripts/loop.sh --once",
     "test": "jest --runInBand",
+    "test:unit": "jest --runInBand --testPathPattern=tests/",
+    "test:api": "jest --runInBand --testPathPattern=tests/",
     "test:watch": "jest --watch",
     "lint": "eslint src/ --ext .ts,.tsx",
     "type-check": "tsc --noEmit"
