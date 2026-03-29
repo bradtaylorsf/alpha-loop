@@ -383,19 +383,20 @@ run_preflight() {
   log_info "Test command: $test_cmd"
 
   # Run tests and capture output
-  # Note: must disable set -e temporarily because test failures are expected here
+  # Disable set -e for entire pre-flight — test failures and grep misses are expected
+  set +e
+
   local test_output=""
   local test_exit=0
-  set +e
   test_output=$(eval "$test_cmd" 2>&1)
   test_exit=$?
-  set -e
 
-  # Parse Jest output for pass/fail/skip counts
+  # Parse test output for pass/fail/skip counts
+  # Support both Jest and Vitest output formats
   local passed=0 failed=0 skipped=0
   local total_line=""
 
-  # Jest outputs lines like: Tests:  3 failed, 39 passed, 42 total
+  # Jest format:  "Tests:  3 failed, 39 passed, 42 total"
   total_line=$(echo "$test_output" | grep -E "Tests:.*total" | tail -1)
 
   if [[ -n "$total_line" ]]; then
@@ -404,25 +405,46 @@ run_preflight() {
     skipped=$(echo "$total_line" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' || echo "0")
   fi
 
+  # Vitest format: "Tests  1 failed | 2 passed (3)"
+  if [[ -z "$total_line" ]]; then
+    total_line=$(echo "$test_output" | grep -E "Tests[[:space:]].*passed" | tail -1)
+    if [[ -n "$total_line" ]]; then
+      passed=$(echo "$total_line" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo "0")
+      failed=$(echo "$total_line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' || echo "0")
+      skipped=$(echo "$total_line" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' || echo "0")
+    fi
+  fi
+
   # Default to 0 if empty
   passed="${passed:-0}"
   failed="${failed:-0}"
   skipped="${skipped:-0}"
 
   # All tests passed
-  if [[ "$test_exit" -eq 0 || "$failed" -eq 0 ]]; then
+  if [[ "$test_exit" -eq 0 ]]; then
     local summary="Pre-flight: ${GREEN}✓${NC} ${passed} passed, 0 failed"
     [[ "$skipped" -gt 0 ]] && summary="$summary, $skipped skipped"
     echo -e "$summary"
     log_success "Pre-flight tests passed"
+    set -e
     return 0
+  fi
+
+  # Tests failed but we couldn't parse the counts — use exit code
+  if [[ "$failed" -eq 0 && "$test_exit" -ne 0 ]]; then
+    failed=1
+    log_warn "Tests failed (exit code $test_exit) but could not parse failure count"
   fi
 
   # Some tests failed -- extract failing test names
   # Jest format: ● test suite name › test name
-  # or FAIL path/to/test.ts
   local failing_tests=""
   failing_tests=$(echo "$test_output" | grep -E "^[[:space:]]*● " | sed 's/^[[:space:]]*//' || true)
+
+  # Vitest format: "Test Files  1 failed (1)" + "❌ Test filename failed"
+  if [[ -z "$failing_tests" ]]; then
+    failing_tests=$(echo "$test_output" | grep -E "^❌ " || true)
+  fi
 
   # Also extract FAIL lines for file-level info
   local failing_files=""
@@ -450,6 +472,7 @@ run_preflight() {
   if [[ ! -t 0 ]]; then
     log_info "Non-interactive mode: ignoring pre-existing failures"
     _preflight_save_ignore_file "$test_output"
+    set -e
     return 0
   fi
 
@@ -478,6 +501,9 @@ run_preflight() {
       exit 1
       ;;
   esac
+
+  # Re-enable strict mode
+  set -e
 }
 
 _preflight_save_ignore_file() {
