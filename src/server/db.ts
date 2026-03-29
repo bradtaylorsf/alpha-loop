@@ -10,8 +10,12 @@ export interface Run {
   model: string;
   status: "running" | "success" | "failure";
   stages_json: string;
+  stage_durations_json: string;
   pr_url: string | null;
   duration_seconds: number | null;
+  test_output: string | null;
+  review_output: string | null;
+  diff_stat: string | null;
   created_at: string;
 }
 
@@ -25,8 +29,12 @@ export interface CreateRunInput {
 export interface UpdateRunInput {
   status?: Run["status"];
   stages_json?: string;
+  stage_durations_json?: string;
   pr_url?: string;
   duration_seconds?: number;
+  test_output?: string;
+  review_output?: string;
+  diff_stat?: string;
 }
 
 export type LearningType = "pattern" | "anti_pattern" | "prompt_improvement";
@@ -58,8 +66,12 @@ const SCHEMA = `
     model TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'running',
     stages_json TEXT NOT NULL DEFAULT '[]',
+    stage_durations_json TEXT NOT NULL DEFAULT '{}',
     pr_url TEXT,
     duration_seconds INTEGER,
+    test_output TEXT,
+    review_output TEXT,
+    diff_stat TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE TABLE IF NOT EXISTS learnings (
@@ -73,6 +85,24 @@ const SCHEMA = `
     FOREIGN KEY (run_id) REFERENCES runs(id)
   )
 `;
+
+const MIGRATIONS = [
+  // Add new columns to existing databases
+  `ALTER TABLE runs ADD COLUMN stage_durations_json TEXT NOT NULL DEFAULT '{}'`,
+  `ALTER TABLE runs ADD COLUMN test_output TEXT`,
+  `ALTER TABLE runs ADD COLUMN review_output TEXT`,
+  `ALTER TABLE runs ADD COLUMN diff_stat TEXT`,
+];
+
+function applyMigrations(db: Database.Database): void {
+  for (const migration of MIGRATIONS) {
+    try {
+      db.exec(migration);
+    } catch {
+      // Column already exists — ignore
+    }
+  }
+}
 
 export function createDatabase(dbPath?: string): Database.Database {
   if (!dbPath) {
@@ -94,6 +124,7 @@ export function createDatabase(dbPath?: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.exec(SCHEMA);
+  applyMigrations(db);
   return db;
 }
 
@@ -128,6 +159,10 @@ export function updateRun(db: Database.Database, id: number, input: UpdateRunInp
     fields.push("stages_json = ?");
     values.push(input.stages_json);
   }
+  if (input.stage_durations_json !== undefined) {
+    fields.push("stage_durations_json = ?");
+    values.push(input.stage_durations_json);
+  }
   if (input.pr_url !== undefined) {
     fields.push("pr_url = ?");
     values.push(input.pr_url);
@@ -135,6 +170,18 @@ export function updateRun(db: Database.Database, id: number, input: UpdateRunInp
   if (input.duration_seconds !== undefined) {
     fields.push("duration_seconds = ?");
     values.push(input.duration_seconds);
+  }
+  if (input.test_output !== undefined) {
+    fields.push("test_output = ?");
+    values.push(input.test_output);
+  }
+  if (input.review_output !== undefined) {
+    fields.push("review_output = ?");
+    values.push(input.review_output);
+  }
+  if (input.diff_stat !== undefined) {
+    fields.push("diff_stat = ?");
+    values.push(input.diff_stat);
   }
 
   if (fields.length === 0) return getRun(db, id);
@@ -145,15 +192,41 @@ export function updateRun(db: Database.Database, id: number, input: UpdateRunInp
   return getRun(db, id);
 }
 
+export interface ListRunsOptions {
+  limit?: number;
+  offset?: number;
+  status?: string;
+  issueNumber?: number;
+  search?: string;
+}
+
 export function listRuns(
   db: Database.Database,
-  options: { limit?: number; offset?: number } = {}
+  options: ListRunsOptions = {}
 ): { runs: Run[]; total: number } {
   const limit = options.limit ?? 20;
   const offset = options.offset ?? 0;
 
-  const total = (db.prepare(`SELECT COUNT(*) as count FROM runs`).get() as { count: number }).count;
-  const runs = db.prepare(`SELECT * FROM runs ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(limit, offset) as Run[];
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (options.status) {
+    conditions.push("status = ?");
+    params.push(options.status);
+  }
+  if (options.issueNumber) {
+    conditions.push("issue_number = ?");
+    params.push(options.issueNumber);
+  }
+  if (options.search) {
+    conditions.push("(issue_title LIKE ? OR CAST(issue_number AS TEXT) LIKE ?)");
+    params.push(`%${options.search}%`, `%${options.search}%`);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const total = (db.prepare(`SELECT COUNT(*) as count FROM runs ${where}`).get(...params) as { count: number }).count;
+  const runs = db.prepare(`SELECT * FROM runs ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Run[];
 
   return { runs, total };
 }

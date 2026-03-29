@@ -8,8 +8,8 @@ import type {
 } from "../../src/engine/loop";
 import type { AgentRunner, RunResult } from "../../src/engine/runner";
 import type { GitHubClient, GitHubIssue } from "../../src/engine/github";
-import { loopEmitter } from "../../src/server/sse";
-import type { LoopEvent } from "../../src/server/sse";
+import { broadcaster } from "../../src/server/sse";
+import type { LoopEvent, SequencedEvent } from "../../src/server/sse";
 import { createInMemoryDatabase, getRun, listRuns, listLearnings } from "../../src/server/db";
 import type Database from "better-sqlite3";
 
@@ -114,13 +114,13 @@ describe("processIssue SSE integration", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockExecSync.mockReturnValue("");
-    loopEmitter.removeAllListeners();
+    broadcaster.removeAllListeners();
   });
 
   it("emits SSE stage events during pipeline", async () => {
     const sseEvents: LoopEvent[] = [];
-    loopEmitter.on("loopEvent", (event: LoopEvent) => {
-      sseEvents.push(event);
+    broadcaster.on((seq: SequencedEvent) => {
+      sseEvents.push(seq.event);
     });
 
     const runner = makeRunner();
@@ -147,8 +147,8 @@ describe("processIssue SSE integration", () => {
 
   it("emits complete event on success", async () => {
     const sseEvents: LoopEvent[] = [];
-    loopEmitter.on("loopEvent", (event: LoopEvent) => {
-      sseEvents.push(event);
+    broadcaster.on((seq: SequencedEvent) => {
+      sseEvents.push(seq.event);
     });
 
     const runner = makeRunner();
@@ -166,8 +166,8 @@ describe("processIssue SSE integration", () => {
 
   it("emits error event on failure", async () => {
     const sseEvents: LoopEvent[] = [];
-    loopEmitter.on("loopEvent", (event: LoopEvent) => {
-      sseEvents.push(event);
+    broadcaster.on((seq: SequencedEvent) => {
+      sseEvents.push(seq.event);
     });
 
     const runner = makeRunner();
@@ -189,7 +189,7 @@ describe("processIssue DB integration", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockExecSync.mockReturnValue("");
-    loopEmitter.removeAllListeners();
+    broadcaster.removeAllListeners();
     db = createInMemoryDatabase();
   });
 

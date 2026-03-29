@@ -8,7 +8,7 @@ import { LiveView } from "../../src/client/LiveView";
 
 class MockEventSource {
   onopen: (() => void) | null = null;
-  onmessage: ((msg: { data: string }) => void) | null = null;
+  onmessage: ((msg: { data: string; lastEventId?: string }) => void) | null = null;
   onerror: (() => void) | null = null;
   close = jest.fn();
 
@@ -152,5 +152,135 @@ describe("LiveView", () => {
   it("connects to the correct SSE endpoint", () => {
     render(<LiveView />);
     expect(MockEventSource.instance.url).toBe("/api/stream");
+  });
+
+  it("shows pipeline progress when stage is active", () => {
+    render(<LiveView />);
+    const es = MockEventSource.instance;
+
+    act(() => {
+      es.onopen?.();
+      es.onmessage?.({
+        data: JSON.stringify({
+          type: "stage",
+          data: { issue: 10, stage: "implement", timestamp: new Date().toISOString() },
+        }),
+      });
+    });
+
+    expect(screen.getByTestId("pipeline-progress")).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-dot-setup")).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-dot-implement")).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-dot-done")).toBeInTheDocument();
+  });
+
+  it("does not show pipeline progress in idle state", () => {
+    render(<LiveView />);
+    expect(screen.queryByTestId("pipeline-progress")).not.toBeInTheDocument();
+  });
+
+  it("displays stage_complete events with duration", () => {
+    render(<LiveView />);
+    const es = MockEventSource.instance;
+
+    act(() => {
+      es.onopen?.();
+      es.onmessage?.({
+        data: JSON.stringify({
+          type: "stage_complete",
+          data: { issue: 10, stage: "setup", duration: 5, timestamp: new Date().toISOString() },
+        }),
+      });
+    });
+
+    expect(screen.getByText("[stage_complete] setup (5s)")).toBeInTheDocument();
+  });
+
+  it("displays test_result events with attempt info", () => {
+    render(<LiveView />);
+    const es = MockEventSource.instance;
+
+    act(() => {
+      es.onopen?.();
+      es.onmessage?.({
+        data: JSON.stringify({
+          type: "test_result",
+          data: { passed: 1, failed: 0, attempt: 2, maxAttempts: 3, timestamp: new Date().toISOString() },
+        }),
+      });
+    });
+
+    expect(screen.getByText("[test] attempt 2/3 — passed: 1, failed: 0")).toBeInTheDocument();
+  });
+
+  it("shows toast on complete event", () => {
+    render(<LiveView />);
+    const es = MockEventSource.instance;
+
+    act(() => {
+      es.onopen?.();
+      es.onmessage?.({
+        data: JSON.stringify({
+          type: "complete",
+          data: { issue: 42, prUrl: "https://github.com/pr/1", duration: 120 },
+        }),
+      });
+    });
+
+    expect(screen.getByTestId("toast-container")).toBeInTheDocument();
+    const toasts = screen.getAllByTestId("toast");
+    expect(toasts.length).toBeGreaterThanOrEqual(1);
+    expect(toasts[0]).toHaveTextContent("Issue #42 completed");
+  });
+
+  it("shows toast on error event", () => {
+    render(<LiveView />);
+    const es = MockEventSource.instance;
+
+    act(() => {
+      es.onopen?.();
+      es.onmessage?.({
+        data: JSON.stringify({
+          type: "error",
+          data: { message: "Build failed", stage: "implement", timestamp: new Date().toISOString() },
+        }),
+      });
+    });
+
+    const toasts = screen.getAllByTestId("toast");
+    expect(toasts.length).toBeGreaterThanOrEqual(1);
+    expect(toasts[0]).toHaveTextContent("Failed at implement");
+  });
+
+  it("displays per-stage duration in pipeline when stage_start and stage_complete are received", () => {
+    render(<LiveView />);
+    const es = MockEventSource.instance;
+
+    act(() => {
+      es.onopen?.();
+      // First show a stage so pipeline renders
+      es.onmessage?.({
+        data: JSON.stringify({
+          type: "stage",
+          data: { issue: 10, stage: "test", timestamp: new Date().toISOString() },
+        }),
+      });
+      // Then complete setup
+      es.onmessage?.({
+        data: JSON.stringify({
+          type: "stage_start",
+          data: { issue: 10, stage: "setup", timestamp: new Date().toISOString() },
+        }),
+      });
+      es.onmessage?.({
+        data: JSON.stringify({
+          type: "stage_complete",
+          data: { issue: 10, stage: "setup", duration: 3, timestamp: new Date().toISOString() },
+        }),
+      });
+    });
+
+    // The pipeline should show the 3s duration for setup
+    expect(screen.getByText("3s")).toBeInTheDocument();
   });
 });

@@ -133,6 +133,10 @@ export async function processIssue(
   let worktreePath: string | undefined;
   const db = options?.db;
   const stages: string[] = [];
+  const stageDurations: Record<string, number> = {};
+  let stageStart = Date.now();
+  let testOutput = "";
+  let reviewOutput = "";
 
   // Create run record in DB
   const run = db
@@ -150,12 +154,35 @@ export async function processIssue(
 
   function transition(to: PipelineStage, message?: string): void {
     const from = currentStage;
+    const now = Date.now();
+
+    // Record duration for the stage we're leaving
+    if (from !== to) {
+      const duration = Math.round((now - stageStart) / 1000);
+      stageDurations[from] = (stageDurations[from] ?? 0) + duration;
+
+      // Emit stage_complete for the stage we're leaving
+      emitSSE({
+        type: "stage_complete",
+        data: { issue: issue.number, stage: from, duration, timestamp: new Date().toISOString() },
+      });
+    }
+
     currentStage = to;
     stages.push(to);
+    stageStart = now;
     log(to, issue.number, message ?? `Entering ${to}`);
     onStage?.({ issueNumber: issue.number, from, to, message });
+
+    // Emit stage event (backward compat)
     emitSSE({
       type: "stage",
+      data: { issue: issue.number, stage: to, timestamp: new Date().toISOString() },
+    });
+
+    // Emit stage_start for the new stage
+    emitSSE({
+      type: "stage_start",
       data: { issue: issue.number, stage: to, timestamp: new Date().toISOString() },
     });
   }
@@ -172,7 +199,10 @@ export async function processIssue(
       updateRun(db, run.id, {
         status: "failure",
         stages_json: JSON.stringify(stages),
+        stage_durations_json: JSON.stringify(stageDurations),
         duration_seconds: Math.round(duration / 1000),
+        test_output: testOutput || undefined,
+        review_output: reviewOutput || undefined,
       });
     }
     return {
@@ -230,6 +260,19 @@ export async function processIssue(
       for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
         transition("test", `Test attempt ${attempt}/${config.maxTestRetries}`);
         const testResult = runTests(worktreePath);
+        testOutput = testResult.output;
+
+        // Emit structured test result
+        emitSSE({
+          type: "test_result",
+          data: {
+            passed: testResult.success ? 1 : 0,
+            failed: testResult.success ? 0 : 1,
+            attempt,
+            maxAttempts: config.maxTestRetries,
+            timestamp: new Date().toISOString(),
+          },
+        });
 
         if (testResult.success) {
           testsPassed = true;
@@ -267,6 +310,18 @@ export async function processIssue(
         maxTurns: 15,
         cwd: worktreePath,
       });
+      reviewOutput = reviewResult.output;
+
+      // Emit structured review result
+      emitSSE({
+        type: "review_result",
+        data: {
+          issue: issue.number,
+          success: reviewResult.success,
+          timestamp: new Date().toISOString(),
+        },
+      });
+
       if (!reviewResult.success) {
         log("review", issue.number, "Review agent failed, continuing");
       }
@@ -350,13 +405,17 @@ export async function processIssue(
     const duration = Date.now() - start;
     const prUrl = `https://github.com/${config.owner}/${config.repo}/pull/${prNumber}`;
 
-    // Update run record
+    // Update run record with all details
     if (run && db) {
       updateRun(db, run.id, {
         status: "success",
         stages_json: JSON.stringify(stages),
+        stage_durations_json: JSON.stringify(stageDurations),
         pr_url: prUrl,
         duration_seconds: Math.round(duration / 1000),
+        test_output: testOutput || undefined,
+        review_output: reviewOutput || undefined,
+        diff_stat: diffStat || undefined,
       });
     }
 
