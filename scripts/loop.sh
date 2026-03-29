@@ -56,6 +56,9 @@ MAX_TEST_RETRIES="${MAX_TEST_RETRIES:-3}"
 RUN_FULL="${RUN_FULL:-false}"
 SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-false}"
 SKIP_E2E="${SKIP_E2E:-false}"
+SKIP_VERIFY="${SKIP_VERIFY:-false}"
+VERIFY_COMMAND="${VERIFY_COMMAND:-}"
+VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-120}"
 SKIP_LEARNINGS="${SKIP_LEARNINGS:-false}"
 AUTO_MERGE="${AUTO_MERGE:-false}"
 MERGE_TO="${MERGE_TO:-}"
@@ -69,6 +72,7 @@ for arg in "$@"; do
     --once) RUN_ONCE="--once" ;;
     --run-full) RUN_FULL="true" ;;
     --skip-preflight) SKIP_PREFLIGHT="true" ;;
+    --skip-verify) SKIP_VERIFY="true" ;;
     --qa) HISTORY_QA="true" ;;
     --clean) HISTORY_CLEAN="true" ;;
     init) SUBCOMMAND="init" ;;
@@ -969,6 +973,148 @@ run_e2e_tests() {
   fi
 }
 
+run_verify() {
+  local worktree="$1" log_file="$2"
+
+  if [[ "$SKIP_VERIFY" == "true" ]]; then
+    log_info "Skipping verification (SKIP_VERIFY=true)"
+    echo "Verification skipped"
+    return 0
+  fi
+
+  if [[ "$SKIP_TESTS" == "true" ]]; then
+    log_info "Skipping verification (SKIP_TESTS=true)"
+    echo "Verification skipped"
+    return 0
+  fi
+
+  log_step "Running build verification"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would run build verification"
+    echo "Verification skipped (dry run)"
+    return 0
+  fi
+
+  # Custom verify command takes precedence
+  if [[ -n "$VERIFY_COMMAND" ]]; then
+    log_info "Running custom verify command: $VERIFY_COMMAND"
+    if (cd "$worktree" && timeout "$VERIFY_TIMEOUT" bash -c "$VERIFY_COMMAND" 2>&1 | tee -a "$log_file"); then
+      log_success "Custom verification passed"
+      return 0
+    else
+      log_error "Custom verification failed"
+      return 1
+    fi
+  fi
+
+  # Detect how to start the app
+  local start_script=""
+  for script_name in dev start preview; do
+    if (cd "$worktree" && node -e "const p=require('./package.json'); process.exit(p.scripts?.['$script_name'] ? 0 : 1)" 2>/dev/null); then
+      start_script="$script_name"
+      break
+    fi
+  done
+
+  if [[ -z "$start_script" ]]; then
+    log_info "No dev/start/preview script found in package.json, skipping verification"
+    echo "Verification skipped (no start script)"
+    return 0
+  fi
+
+  # Detect port
+  local port=3000
+  local pkg_port
+  pkg_port=$(cd "$worktree" && node -e "
+    const p=require('./package.json');
+    const s=p.scripts?.['$start_script']||'';
+    const m=s.match(/--port\\s+(\\d+)|PORT=(\\d+)|-p\\s+(\\d+)/);
+    if(m) console.log(m[1]||m[2]||m[3]);
+  " 2>/dev/null || true)
+  [[ -n "$pkg_port" ]] && port="$pkg_port"
+
+  # Check for Playwright verification tests
+  local has_playwright_tests=false
+  if [[ -d "$worktree/tests/verify" ]]; then
+    local verify_files
+    verify_files=$(find "$worktree/tests/verify" -name '*.spec.ts' -o -name '*.test.ts' 2>/dev/null | head -1)
+    [[ -n "$verify_files" ]] && has_playwright_tests=true
+  fi
+
+  # Check if Playwright is available
+  local has_playwright=false
+  if (cd "$worktree" && pnpm exec playwright --version &>/dev/null); then
+    has_playwright=true
+  fi
+
+  # Start the app in the background
+  log_info "Starting app with 'pnpm $start_script' on port $port..."
+  local app_pid=""
+  (cd "$worktree" && PORT="$port" pnpm "$start_script" >> "$log_file" 2>&1) &
+  app_pid=$!
+
+  # Wait for app to be ready (up to 30s)
+  local ready=false
+  for i in $(seq 1 30); do
+    if curl -s -o /dev/null "http://localhost:$port" 2>/dev/null; then
+      ready=true
+      break
+    fi
+    # Check if app process died
+    if ! kill -0 "$app_pid" 2>/dev/null; then
+      log_error "App process exited before becoming ready"
+      echo "App failed to start"
+      return 1
+    fi
+    sleep 1
+  done
+
+  if [[ "$ready" != "true" ]]; then
+    log_error "App did not become ready on port $port within 30s"
+    kill "$app_pid" 2>/dev/null || true
+    wait "$app_pid" 2>/dev/null || true
+    echo "App failed to start on port $port"
+    return 1
+  fi
+
+  log_success "App is ready on port $port"
+
+  local verify_exit=0
+
+  if [[ "$has_playwright_tests" == "true" && "$has_playwright" == "true" ]]; then
+    # Run Playwright verification tests
+    log_info "Running Playwright verification tests..."
+    if (cd "$worktree" && BASE_URL="http://localhost:$port" timeout "$VERIFY_TIMEOUT" pnpm exec playwright test tests/verify/ 2>&1 | tee -a "$log_file"); then
+      log_success "Playwright verification passed"
+    else
+      log_error "Playwright verification failed"
+      verify_exit=1
+    fi
+  else
+    # API verification fallback
+    log_info "No Playwright tests in tests/verify/, falling back to API verification..."
+    local status_code
+    status_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$port/" 2>/dev/null || echo "000")
+
+    if [[ "$status_code" =~ ^2[0-9][0-9]$ || "$status_code" == "304" ]]; then
+      log_success "API verification passed (HTTP $status_code)"
+      echo "API verification passed (HTTP $status_code)" >> "$log_file"
+    else
+      log_error "API verification failed (HTTP $status_code)"
+      echo "API verification failed (HTTP $status_code)" >> "$log_file"
+      verify_exit=1
+    fi
+  fi
+
+  # Kill the app process
+  log_info "Shutting down app (PID $app_pid)..."
+  kill "$app_pid" 2>/dev/null || true
+  wait "$app_pid" 2>/dev/null || true
+
+  return $verify_exit
+}
+
 run_review() {
   local issue_num="$1" title="$2" body="$3" worktree="$4" log_file="$5"
   local diff review_prompt
@@ -1335,14 +1481,64 @@ $test_output"
     fi
   done
 
-  # Step 5: Code review (sets REVIEW_OUTPUT global)
+  # Step 5: Build verification (Playwright or API checks)
+  local verify_output=""
+  local verify_passing=false
+  if [[ "$SKIP_VERIFY" != "true" && "$SKIP_TESTS" != "true" && "$DRY_RUN" != "true" ]]; then
+    for verify_attempt in $(seq 1 "$MAX_TEST_RETRIES"); do
+      log_info "Verification attempt $verify_attempt of $MAX_TEST_RETRIES"
+
+      if verify_output=$(run_verify "$worktree" "$log_file" 2>&1); then
+        verify_passing=true
+        log_success "Verification passed on attempt $verify_attempt"
+        break
+      fi
+
+      if [[ "$verify_attempt" -lt "$MAX_TEST_RETRIES" ]]; then
+        log_warn "Verification failed on attempt $verify_attempt, invoking Claude to fix..."
+        local verify_fix_prompt="Build verification failed after implementing issue #${issue_num}.
+The app was started and tested, but verification failed.
+
+Verification output:
+${verify_output}
+
+Instructions:
+1. Read the verification test files in tests/verify/ (if they exist)
+2. Fix the implementation code OR the verification tests
+3. Run pnpm test to make sure unit tests still pass
+4. Commit your fixes with message: fix: resolve verification failures for issue #${issue_num}"
+
+        (cd "$worktree" && echo "$verify_fix_prompt" | claude -p \
+          --model "$MODEL" \
+          --max-turns 20 \
+          --verbose \
+          --dangerously-skip-permissions \
+          --output-format text \
+          2>&1) | tee -a "$log_file"
+
+        # Commit any uncommitted fixes
+        local uncommitted_verify
+        uncommitted_verify=$(cd "$worktree" && git status --porcelain | wc -l | tr -d ' ')
+        if [[ "$uncommitted_verify" -gt 0 ]]; then
+          (cd "$worktree" && git add -A && git commit -m "fix: resolve verification failures for issue #${issue_num}") || true
+        fi
+      else
+        log_warn "Verification still failing after $MAX_TEST_RETRIES attempts"
+      fi
+    done
+  else
+    verify_passing=true
+    log_info "Verification skipped"
+  fi
+
+  # Step 6: Code review (sets REVIEW_OUTPUT global)
   REVIEW_OUTPUT=""
   run_review "$issue_num" "$title" "$body" "$worktree" "$log_file" || {
     log_warn "Code review failed, continuing without review"
     REVIEW_OUTPUT="Code review could not be completed"
   }
 
-  # Step 6: Create PR (sets PR_URL global)
+  # Step 7: Create PR (sets PR_URL global)
   PR_URL=""
   if ! create_pr "$issue_num" "$title" "$worktree" "$REVIEW_OUTPUT" "$test_output" "$body"; then
     log_error "Failed to create PR for issue #$issue_num"
@@ -1352,7 +1548,7 @@ $test_output"
     return 1
   fi
 
-  # Step 7: Update issue
+  # Step 8: Update issue
   local status_msg="Implementation done."
   [[ "$tests_passing" == "true" ]] && status_msg="$status_msg All tests passing." || status_msg="$status_msg Some tests failing -- see PR."
 
@@ -1367,7 +1563,7 @@ $test_output"
 ---
 *Processed by agent-loop in ${SECONDS}s*" || true
 
-  # Step 8: Extract learnings
+  # Step 9: Extract learnings
   if [[ "$SKIP_LEARNINGS" != "true" ]]; then
     log_step "Extracting learnings from run..."
     # Emit SSE event for learning extraction start
@@ -1381,10 +1577,10 @@ $test_output"
     log_info "Skipping learnings (SKIP_LEARNINGS=true)"
   fi
 
-  # Step 9: Auto-merge if enabled
+  # Step 10: Auto-merge if enabled
   merge_pr "$issue_num" || true
 
-  # Step 10: Cleanup worktree (keep branch for PR if not merged)
+  # Step 11: Cleanup worktree (keep branch for PR if not merged)
   cleanup_worktree "$issue_num"
 
   end_time=$(date +%s)

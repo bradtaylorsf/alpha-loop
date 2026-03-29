@@ -95,6 +95,7 @@ function makeConfig(overrides: Partial<LoopConfig> = {}): LoopConfig {
   return defaultConfig({
     skipTests: true,
     skipReview: true,
+    skipVerify: true,
     autoCleanup: false,
     dryRun: false,
     ...overrides,

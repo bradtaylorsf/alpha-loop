@@ -17,6 +17,7 @@ export type PipelineStage =
   | "implement"
   | "test"
   | "fix"
+  | "verify"
   | "review"
   | "pr"
   | "cleanup"
@@ -34,7 +35,10 @@ export interface LoopConfig {
   pollInterval: number;
   label: string;
   skipTests: boolean;
+  skipVerify: boolean;
   skipReview: boolean;
+  verifyCommand?: string;
+  verifyTimeout: number;
   dryRun: boolean;
   autoCleanup: boolean;
 }
@@ -73,7 +77,10 @@ export function defaultConfig(
     pollInterval: overrides.pollInterval ?? 60,
     label: overrides.label ?? "ready",
     skipTests: overrides.skipTests ?? false,
+    skipVerify: overrides.skipVerify ?? false,
     skipReview: overrides.skipReview ?? false,
+    verifyCommand: overrides.verifyCommand,
+    verifyTimeout: overrides.verifyTimeout ?? 120_000,
     dryRun: overrides.dryRun ?? false,
     autoCleanup: overrides.autoCleanup ?? true,
   };
@@ -101,6 +108,189 @@ function runTests(cwd: string): { success: boolean; output: string } {
       (err as { stderr?: string }).stderr ??
       String(err);
     return { success: false, output };
+  }
+}
+
+function detectStartCommand(cwd: string): string | undefined {
+  try {
+    const pkgJson = JSON.parse(
+      execSync("cat package.json", { cwd, encoding: "utf-8", stdio: "pipe" }),
+    );
+    const scripts = pkgJson.scripts ?? {};
+    for (const name of ["dev", "start", "preview"]) {
+      if (scripts[name]) return name;
+    }
+  } catch {
+    // No package.json or parse error
+  }
+  return undefined;
+}
+
+function waitForPort(port: number, timeoutMs: number): boolean {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      execSync(`curl -s -o /dev/null -w "%{http_code}" http://localhost:${port}`, {
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 3_000,
+      });
+      return true;
+    } catch {
+      execSync("sleep 1", { stdio: "pipe" });
+    }
+  }
+  return false;
+}
+
+function detectPort(cwd: string): number {
+  // Try to detect port from package.json scripts or common config files
+  try {
+    const pkgJson = JSON.parse(
+      execSync("cat package.json", { cwd, encoding: "utf-8", stdio: "pipe" }),
+    );
+    const scripts = pkgJson.scripts ?? {};
+    const devScript = scripts.dev ?? scripts.start ?? "";
+    const portMatch = devScript.match(/--port\s+(\d+)|PORT=(\d+)|-p\s+(\d+)/);
+    if (portMatch) {
+      return parseInt(portMatch[1] ?? portMatch[2] ?? portMatch[3], 10);
+    }
+  } catch {
+    // Best effort
+  }
+  return 3000; // Default fallback
+}
+
+interface VerifyResult {
+  success: boolean;
+  output: string;
+  method: "playwright" | "api" | "skipped";
+}
+
+function runVerify(cwd: string, config: LoopConfig): VerifyResult {
+  if (config.skipVerify) {
+    return { success: true, output: "Verification skipped", method: "skipped" };
+  }
+
+  // Custom verify command takes precedence
+  if (config.verifyCommand) {
+    try {
+      const output = execSync(config.verifyCommand, {
+        cwd,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: config.verifyTimeout,
+      });
+      return { success: true, output, method: "playwright" };
+    } catch (err: unknown) {
+      const output =
+        (err as { stdout?: string }).stdout ??
+        (err as { stderr?: string }).stderr ??
+        String(err);
+      return { success: false, output, method: "playwright" };
+    }
+  }
+
+  // Check if Playwright tests exist in tests/verify/
+  let hasPlaywrightTests = false;
+  try {
+    const files = execSync("find tests/verify -name '*.spec.ts' -o -name '*.test.ts' 2>/dev/null || true", {
+      cwd,
+      encoding: "utf-8",
+      stdio: "pipe",
+    }).trim();
+    hasPlaywrightTests = files.length > 0;
+  } catch {
+    // No tests/verify directory
+  }
+
+  // Check if @playwright/test is available
+  let hasPlaywright = false;
+  try {
+    execSync("pnpm exec playwright --version", {
+      cwd,
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 10_000,
+    });
+    hasPlaywright = true;
+  } catch {
+    // Playwright not installed
+  }
+
+  const startScript = detectStartCommand(cwd);
+  if (!startScript) {
+    return { success: true, output: "No dev/start/preview script found, skipping verification", method: "skipped" };
+  }
+
+  const port = detectPort(cwd);
+  let appProcess: ReturnType<typeof import("node:child_process").spawn> | undefined;
+
+  try {
+    // Start the app in the background
+    const { spawn } = require("node:child_process") as typeof import("node:child_process");
+    appProcess = spawn("pnpm", [startScript], {
+      cwd,
+      stdio: "pipe",
+      detached: true,
+      env: { ...process.env, PORT: String(port) },
+    });
+
+    // Wait for app to be ready (up to 30s)
+    if (!waitForPort(port, 30_000)) {
+      return { success: false, output: `App failed to start on port ${port} within 30s`, method: hasPlaywrightTests ? "playwright" : "api" };
+    }
+
+    if (hasPlaywrightTests && hasPlaywright) {
+      // Run Playwright tests against tests/verify/
+      try {
+        const output = execSync("pnpm exec playwright test tests/verify/", {
+          cwd,
+          encoding: "utf-8",
+          stdio: "pipe",
+          timeout: config.verifyTimeout,
+          env: { ...process.env, BASE_URL: `http://localhost:${port}` },
+        });
+        return { success: true, output, method: "playwright" };
+      } catch (err: unknown) {
+        const output =
+          (err as { stdout?: string }).stdout ??
+          (err as { stderr?: string }).stderr ??
+          String(err);
+        return { success: false, output, method: "playwright" };
+      }
+    } else {
+      // API verification fallback: curl key endpoints
+      try {
+        const statusCode = execSync(
+          `curl -s -o /dev/null -w "%{http_code}" http://localhost:${port}/`,
+          { cwd, encoding: "utf-8", stdio: "pipe", timeout: 10_000 },
+        ).trim();
+        const success = statusCode.startsWith("2") || statusCode === "304";
+        return {
+          success,
+          output: success
+            ? `API verification passed (HTTP ${statusCode})`
+            : `API verification failed (HTTP ${statusCode})`,
+          method: "api",
+        };
+      } catch (err: unknown) {
+        return { success: false, output: `API verification failed: ${String(err)}`, method: "api" };
+      }
+    }
+  } finally {
+    // Always kill the app process
+    if (appProcess?.pid) {
+      try {
+        process.kill(-appProcess.pid, "SIGTERM");
+      } catch {
+        try {
+          appProcess.kill("SIGTERM");
+        } catch {
+          // Best effort
+        }
+      }
+    }
   }
 }
 
@@ -334,6 +524,73 @@ export async function processIssue(
       if (!testsPassed) {
         log("test", issue.number, "Tests still failing after all retries");
         // Continue to PR with failing tests — reviewer and humans can assess
+      }
+    }
+
+    // --- Verify (build verification with Playwright or API checks) ---
+    if (!config.skipVerify) {
+      let verifyPassed = false;
+
+      for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+        transition("verify", `Verification attempt ${attempt}/${config.maxTestRetries}`);
+        const verifyResult = runVerify(worktreePath, config);
+
+        emitSSE({
+          type: "verify_result",
+          data: {
+            passed: verifyResult.success,
+            attempt,
+            maxAttempts: config.maxTestRetries,
+            timestamp: new Date().toISOString(),
+          },
+        });
+
+        if (verifyResult.method === "skipped") {
+          log("verify", issue.number, verifyResult.output);
+          verifyPassed = true;
+          break;
+        }
+
+        if (verifyResult.success) {
+          log("verify", issue.number, `Verification passed (${verifyResult.method})`);
+          verifyPassed = true;
+          break;
+        }
+
+        log("verify", issue.number, `Verification failed (${verifyResult.method}): ${verifyResult.output.slice(0, 200)}`);
+
+        if (attempt < config.maxTestRetries) {
+          transition("fix", `Fixing verification failures (attempt ${attempt})`);
+          let fixPrompt = buildVerifyFixPrompt(issue.number, verifyResult.output);
+          const fixContext = controls?.consumeContext();
+          if (fixContext) {
+            fixPrompt = injectContext(fixPrompt, fixContext);
+          }
+          const fixResult = await runner.run({
+            prompt: fixPrompt,
+            model: config.model,
+            maxTurns: 20,
+            cwd: worktreePath,
+            abortSignal: controls?.getAbortController().signal,
+          });
+          if (controls?.wasSkipped()) {
+            await github.updateLabels(issue.number, ["skipped"], ["in-progress"]);
+            await github.addComment(issue.number, "Skipped by user during session");
+            if (worktreePath && config.autoCleanup) {
+              try { removeWorktree(issue.number); } catch { /* best effort */ }
+              worktreePath = undefined;
+            }
+            return fail("Skipped by user");
+          }
+          if (!fixResult.success) {
+            log("fix", issue.number, "Fix agent failed, will retry verification anyway");
+          }
+        }
+      }
+
+      if (!verifyPassed) {
+        log("verify", issue.number, "Verification still failing after all retries");
+        // Continue to review — humans can assess
       }
     }
 
@@ -696,6 +953,20 @@ export function buildWhatToTest(issue: GitHubIssue, diffStat?: string): string {
   }
 
   return lines.join("\n");
+}
+
+function buildVerifyFixPrompt(issueNumber: number, verifyOutput: string): string {
+  return `Build verification failed after implementing issue #${issueNumber}.
+The app was started and tested with either Playwright or API checks, but verification failed.
+
+Verification output:
+${verifyOutput}
+
+Instructions:
+1. Read the verification test files in tests/verify/ (if they exist) to understand what they expect
+2. Fix the implementation code OR the verification tests as appropriate
+3. Run pnpm test to make sure unit tests still pass
+4. Commit your fixes with message: fix: resolve verification failures for issue #${issueNumber}`;
 }
 
 function buildReviewPrompt(issue: GitHubIssue, baseBranch: string): string {
