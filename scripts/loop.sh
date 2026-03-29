@@ -27,7 +27,8 @@
 #   LABEL_READY     - Label to pick up issues (default: ready)
 #   SKIP_PREFLIGHT  - Skip pre-flight test validation (default: false)
 #   SKIP_E2E        - Skip Playwright E2E tests in the loop (default: false)
-#   SKIP_LEARNINGS  - Skip learning extraction after runs (default: false)
+#   SKIP_LEARN      - Skip learning extraction after runs (default: false)
+#   SKIP_LEARNINGS  - Alias for SKIP_LEARN (default: false)
 #   RUN_FULL        - Bypass API response cache, hit real APIs (default: false)
 ###############################################################################
 
@@ -59,7 +60,8 @@ SKIP_E2E="${SKIP_E2E:-false}"
 SKIP_VERIFY="${SKIP_VERIFY:-false}"
 VERIFY_COMMAND="${VERIFY_COMMAND:-}"
 VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-120}"
-SKIP_LEARNINGS="${SKIP_LEARNINGS:-false}"
+SKIP_LEARN="${SKIP_LEARN:-false}"
+SKIP_LEARNINGS="${SKIP_LEARNINGS:-$SKIP_LEARN}"
 AUTO_MERGE="${AUTO_MERGE:-false}"
 MERGE_TO="${MERGE_TO:-}"
 RUN_ONCE=""
@@ -73,6 +75,7 @@ for arg in "$@"; do
     --run-full) RUN_FULL="true" ;;
     --skip-preflight) SKIP_PREFLIGHT="true" ;;
     --skip-verify) SKIP_VERIFY="true" ;;
+    --skip-learn) SKIP_LEARNINGS="true" ;;
     --qa) HISTORY_QA="true" ;;
     --clean) HISTORY_CLEAN="true" ;;
     init) SUBCOMMAND="init" ;;
@@ -760,11 +763,20 @@ cleanup_worktree() {
 # ---------------------------------------------------------------------------
 build_implement_prompt() {
   local issue_num="$1" title="$2" body="$3"
+  local learning_context=""
+
+  # Inject learning context from previous runs (if available)
+  if [[ "$SKIP_LEARNINGS" != "true" ]]; then
+    learning_context=$(get_learning_context 2>/dev/null) || true
+  fi
 
   cat <<EOF
 Implement GitHub issue #${issue_num}: ${title}
 
 ${body}
+${learning_context:+
+
+${learning_context}}
 
 After implementing, write tests, run pnpm test to verify, and commit with: git commit -m "feat: ${title} (closes #${issue_num})"
 EOF
@@ -789,6 +801,371 @@ For any issues you find:
 
 After fixing, output a brief review summary with what you found and what you fixed.
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# Learning Loop -- extract learnings, aggregate, inject context
+# ---------------------------------------------------------------------------
+
+# Directory for learning files
+LEARNINGS_DIR="${PROJECT_DIR}/learnings"
+
+# Build the learning extraction prompt for Claude
+build_learn_prompt() {
+  local issue_num="$1" title="$2" status="$3" retries="$4" duration="$5"
+  local diff="$6" test_output="$7" review_output="$8" verify_output="$9"
+  local body="${10:-}"
+
+  cat <<LEARNEOF
+Analyze this completed development run. Output ONLY a markdown document with the exact structure below. Keep each section to 2-3 bullet points max. Be factual and concise -- no creative writing.
+
+## Run Info
+- Issue: #${issue_num} "${title}"
+- Status: ${status}
+- Retries: ${retries}
+- Duration: ${duration}s
+
+## Issue Requirements
+${body:-"(no description)"}
+
+## Code Changes
+${diff:-"(no diff available)"}
+
+## Test Results
+${test_output:-"(no test output)"}
+
+## Review Findings
+${review_output:-"(no review output)"}
+
+## Verification Results
+${verify_output:-"(no verification output)"}
+
+Output ONLY this markdown structure, nothing else:
+
+---
+issue: ${issue_num}
+status: ${status}
+retries: ${retries}
+duration: ${duration}
+date: $(date +%Y-%m-%d)
+---
+## What Worked
+- (list what went well)
+
+## What Failed
+- (list what went wrong, or "Nothing" if all passed)
+
+## Patterns
+- (reusable patterns discovered)
+
+## Anti-Patterns
+- (mistakes to avoid in future)
+
+## Suggested Skill Updates
+- (specific skill file changes, or "None")
+LEARNEOF
+}
+
+# Extract learnings from a completed run and save to learnings/ directory
+run_learn() {
+  local issue_num="$1" title="$2" status="$3" retries="$4" duration="$5"
+  local diff="$6" test_output="$7" review_output="$8" verify_output="$9"
+  local body="${10:-}"
+
+  if [[ "$SKIP_LEARNINGS" == "true" ]]; then
+    log_info "Skipping learning extraction (SKIP_LEARNINGS=true)"
+    return 0
+  fi
+
+  log_step "Extracting learnings from run..."
+
+  mkdir -p "$LEARNINGS_DIR"
+
+  local timestamp
+  timestamp=$(date +%Y%m%d-%H%M%S)
+  local learning_file="$LEARNINGS_DIR/issue-${issue_num}-${timestamp}.md"
+
+  local prompt
+  prompt=$(build_learn_prompt "$issue_num" "$title" "$status" "$retries" "$duration" \
+    "$diff" "$test_output" "$review_output" "$verify_output" "$body")
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would extract learnings to $learning_file"
+    return 0
+  fi
+
+  local learn_output
+  learn_output=$(echo "$prompt" | claude -p \
+    --model "${REVIEW_MODEL:-opus}" \
+    --max-turns 3 \
+    --dangerously-skip-permissions \
+    --output-format text \
+    2>/dev/null) || {
+    log_warn "Learning extraction failed, skipping"
+    return 0
+  }
+
+  # Validate output has frontmatter
+  if echo "$learn_output" | head -1 | grep -q "^---"; then
+    echo "$learn_output" > "$learning_file"
+    log_success "Learning saved to $learning_file"
+  else
+    # Wrap output with frontmatter if agent didn't include it
+    cat > "$learning_file" <<FALLBACK
+---
+issue: ${issue_num}
+status: ${status}
+retries: ${retries}
+duration: ${duration}
+date: $(date +%Y-%m-%d)
+---
+${learn_output}
+FALLBACK
+    log_success "Learning saved to $learning_file (added frontmatter)"
+  fi
+
+  # Check if aggregation is due (every 5 learning files)
+  local learning_count
+  learning_count=$(find "$LEARNINGS_DIR" -maxdepth 1 -name "issue-*.md" -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$learning_count" -gt 0 && $((learning_count % 5)) -eq 0 ]]; then
+    log_info "Aggregation threshold reached ($learning_count learnings). Triggering aggregation..."
+    run_aggregate || log_warn "Aggregation failed, will retry on next threshold"
+  fi
+
+  return 0
+}
+
+# Count learning files in the learnings/ directory
+count_learnings() {
+  find "$LEARNINGS_DIR" -maxdepth 1 -name "issue-*.md" -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
+# Read the last N learning files (most recent first)
+get_recent_learnings() {
+  local count="${1:-5}"
+  find "$LEARNINGS_DIR" -maxdepth 1 -name "issue-*.md" -type f 2>/dev/null \
+    | sort -r \
+    | head -n "$count"
+}
+
+# Extract anti-patterns from learning files
+get_anti_patterns() {
+  local files
+  files=$(get_recent_learnings 10)
+  if [[ -z "$files" ]]; then
+    return 0
+  fi
+
+  echo "$files" | while IFS= read -r f; do
+    if [[ -f "$f" ]]; then
+      # Extract content between ## Anti-Patterns and the next ## heading
+      sed -n '/^## Anti-Patterns$/,/^## /{/^## Anti-Patterns$/d;/^## /d;p}' "$f"
+    fi
+  done
+}
+
+# Build learning context to inject into implementation prompts
+get_learning_context() {
+  local recent_files
+  recent_files=$(get_recent_learnings 5)
+
+  if [[ -z "$recent_files" ]]; then
+    return 0
+  fi
+
+  echo "## Learnings from Previous Runs"
+  echo ""
+
+  local i=0
+  echo "$recent_files" | while IFS= read -r f; do
+    if [[ -f "$f" ]]; then
+      ((i++)) || true
+      local issue_line
+      issue_line=$(grep "^issue:" "$f" 2>/dev/null | head -1 | sed 's/issue: *//')
+      local status_line
+      status_line=$(grep "^status:" "$f" 2>/dev/null | head -1 | sed 's/status: *//')
+      echo "### Run #${issue_line:-unknown} (${status_line:-unknown})"
+      # Extract What Worked and What Failed sections (brief)
+      sed -n '/^## What Worked$/,/^## /{/^## What Worked$/d;/^## /d;p}' "$f" 2>/dev/null
+      sed -n '/^## What Failed$/,/^## /{/^## What Failed$/d;/^## /d;p}' "$f" 2>/dev/null
+      echo ""
+    fi
+  done
+
+  local anti_patterns
+  anti_patterns=$(get_anti_patterns)
+  if [[ -n "$anti_patterns" ]]; then
+    echo ""
+    echo "## Known Anti-Patterns to Avoid"
+    echo "$anti_patterns"
+  fi
+}
+
+# Aggregate learnings every N runs and propose skill/agent updates
+run_aggregate() {
+  log_step "Running learning aggregation..."
+
+  mkdir -p "$LEARNINGS_DIR/proposed-updates"
+
+  local all_learnings=""
+  local files
+  files=$(find "$LEARNINGS_DIR" -maxdepth 1 -name "issue-*.md" -type f 2>/dev/null | sort)
+
+  if [[ -z "$files" ]]; then
+    log_info "No learning files to aggregate"
+    return 0
+  fi
+
+  # Collect all learning content
+  while IFS= read -r f; do
+    if [[ -f "$f" ]]; then
+      all_learnings="${all_learnings}
+---
+$(cat "$f")
+"
+    fi
+  done <<< "$files"
+
+  # Read current skills and agents
+  local skills_content=""
+  if [[ -d "$PROJECT_DIR/.claude/skills" ]]; then
+    for skill_file in "$PROJECT_DIR/.claude/skills"/*; do
+      if [[ -f "$skill_file" ]]; then
+        local skill_name
+        skill_name=$(basename "$skill_file")
+        skills_content="${skills_content}
+### ${skill_name}
+$(cat "$skill_file")
+"
+      fi
+    done
+  fi
+
+  local agents_content=""
+  if [[ -d "$PROJECT_DIR/.claude/agents" ]]; then
+    for agent_file in "$PROJECT_DIR/.claude/agents"/*.md; do
+      if [[ -f "$agent_file" ]]; then
+        local agent_name
+        agent_name=$(basename "$agent_file")
+        agents_content="${agents_content}
+### ${agent_name}
+$(cat "$agent_file")
+"
+      fi
+    done
+  fi
+
+  local aggregate_prompt
+  aggregate_prompt=$(cat <<AGGEOF
+Analyze the following accumulated learnings from automated development runs.
+Identify repeated patterns and anti-patterns, then propose updates to skills and agents.
+
+## All Learnings
+${all_learnings}
+
+## Current Skills
+${skills_content:-"(no skills found)"}
+
+## Current Agents
+${agents_content:-"(no agents found)"}
+
+## Instructions
+1. Identify the top 5 most important patterns and anti-patterns
+2. Generate a summary.md with the top patterns and anti-patterns
+3. Propose specific updates to skills files (cite which issues led to each change)
+4. Propose specific updates to agent files (cite which issues led to each change)
+
+Output THREE sections separated by ===SECTION===:
+1. summary.md content (markdown)
+2. Skills updates as JSON array: [{"file": "skill-name", "changes": "description of changes", "reason": "citing issue numbers"}]
+3. Agent updates as JSON array: [{"file": "agent-name.md", "changes": "description of changes", "reason": "citing issue numbers"}]
+AGGEOF
+)
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would run learning aggregation"
+    return 0
+  fi
+
+  local agg_output
+  agg_output=$(echo "$aggregate_prompt" | claude -p \
+    --model "${REVIEW_MODEL:-opus}" \
+    --max-turns 5 \
+    --dangerously-skip-permissions \
+    --output-format text \
+    2>/dev/null) || {
+    log_warn "Learning aggregation failed"
+    return 1
+  }
+
+  # Save summary
+  local timestamp
+  timestamp=$(date +%Y%m%d-%H%M%S)
+
+  # Extract summary section (everything before first ===SECTION===)
+  local summary
+  summary=$(echo "$agg_output" | sed '/===SECTION===/,$d')
+  if [[ -n "$summary" ]]; then
+    echo "$summary" > "$LEARNINGS_DIR/summary.md"
+    log_success "Updated learnings/summary.md"
+  fi
+
+  # Save proposed updates
+  local skills_update
+  skills_update=$(echo "$agg_output" | sed -n '/===SECTION===/,/===SECTION===/{//!p}' | head -50)
+  if [[ -n "$skills_update" ]]; then
+    echo "$skills_update" > "$LEARNINGS_DIR/proposed-updates/${timestamp}-skills-update.md"
+    log_success "Saved proposed skills update"
+  fi
+
+  local agents_update
+  agents_update=$(echo "$agg_output" | awk '/===SECTION===/{n++} n==2' | head -50)
+  if [[ -n "$agents_update" ]]; then
+    echo "$agents_update" > "$LEARNINGS_DIR/proposed-updates/${timestamp}-agents-update.md"
+    log_success "Saved proposed agents update"
+  fi
+
+  # Create a PR with proposed improvements (if we're in a git repo)
+  if command -v gh &>/dev/null && [[ -d "$PROJECT_DIR/.git" ]]; then
+    local improve_branch="improve/learnings-${timestamp}"
+    (
+      cd "$PROJECT_DIR"
+      git checkout -b "$improve_branch" 2>/dev/null || true
+      git add learnings/summary.md learnings/proposed-updates/ 2>/dev/null || true
+      if git diff --cached --quiet 2>/dev/null; then
+        log_info "No changes to commit for improvement PR"
+      else
+        git commit -m "improve: learning aggregation from $(count_learnings) runs
+
+Automated aggregation of development learnings.
+Includes proposed updates to skills and agents." 2>/dev/null || true
+
+        gh pr create \
+          --title "improve: Learning aggregation - proposed skill/agent updates" \
+          --body "## Learning Aggregation
+
+Based on $(count_learnings) completed runs, this PR proposes updates to skills and agents.
+
+### Summary
+See \`learnings/summary.md\` for the top patterns and anti-patterns.
+
+### Proposed Updates
+See \`learnings/proposed-updates/\` for specific change proposals.
+
+**DO NOT auto-merge** — these need human review.
+
+---
+Automated by alpha-loop learning system" \
+          --base "$BASE_BRANCH" 2>/dev/null || true
+
+        # Return to original branch
+        git checkout - 2>/dev/null || true
+      fi
+    )
+  fi
+
+  log_success "Learning aggregation complete"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1564,17 +1941,26 @@ Instructions:
 *Processed by agent-loop in ${SECONDS}s*" || true
 
   # Step 9: Extract learnings
-  if [[ "$SKIP_LEARNINGS" != "true" ]]; then
-    log_step "Extracting learnings from run..."
-    # Emit SSE event for learning extraction start
-    if command -v curl &>/dev/null && [[ -n "${API_URL:-}" ]]; then
-      curl -s -X POST "${API_URL}/api/stream" \
-        -H "Content-Type: application/json" \
-        -d "{\"type\":\"learning\",\"data\":{\"issue\":${issue_num},\"count\":0,\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" || true
-    fi
-    log_info "Learning extraction queued for issue #$issue_num"
-  else
-    log_info "Skipping learnings (SKIP_LEARNINGS=true)"
+  end_time=$(date +%s)
+  duration=$((end_time - start_time))
+
+  local run_status="success"
+  [[ "$tests_passing" != "true" ]] && run_status="failure"
+
+  # Gather the diff for learning analysis
+  local run_diff=""
+  run_diff=$(cd "$worktree" && git diff "origin/$BASE_BRANCH...HEAD" 2>/dev/null | head -500) || true
+
+  run_learn "$issue_num" "$title" "$run_status" "$attempt" "$duration" \
+    "$run_diff" "$test_output" "${REVIEW_OUTPUT:-}" "${verify_output:-}" "$body" || true
+
+  # Emit SSE event for learning extraction
+  if command -v curl &>/dev/null && [[ -n "${API_URL:-}" ]]; then
+    local learn_count
+    learn_count=$(count_learnings)
+    curl -s -X POST "${API_URL}/api/stream" \
+      -H "Content-Type: application/json" \
+      -d "{\"type\":\"learning\",\"data\":{\"issue\":${issue_num},\"count\":${learn_count},\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}}" || true
   fi
 
   # Step 10: Auto-merge if enabled
@@ -1582,9 +1968,6 @@ Instructions:
 
   # Step 11: Cleanup worktree (keep branch for PR if not merged)
   cleanup_worktree "$issue_num"
-
-  end_time=$(date +%s)
-  duration=$((end_time - start_time))
 
   log_success "Issue #$issue_num processed in ${duration}s"
   log_info "PR: $PR_URL"
