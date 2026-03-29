@@ -385,7 +385,7 @@ run_implement() {
   (cd "$worktree" && echo "$prompt" | claude -p \
     --model "$MODEL" \
     --max-turns "$MAX_TURNS" \
-    --permission-mode acceptEdits \
+    --dangerously-skip-permissions \
     --output-format text \
     2>&1) | tee -a "$log_file"
 
@@ -537,7 +537,7 @@ Instructions:
   (cd "$worktree" && echo "$fix_prompt" | claude -p \
     --model "$MODEL" \
     --max-turns 20 \
-    --permission-mode acceptEdits \
+    --dangerously-skip-permissions \
     --output-format text \
     2>&1) | tee -a "$log_file"
 

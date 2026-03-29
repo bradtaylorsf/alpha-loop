@@ -35,10 +35,9 @@ You are an autonomous coding agent implementing a GitHub issue. Follow these ste
 - Ensure test names clearly describe what they verify
 
 ### Step 6: Verify Everything Works
-- Run `pnpm test:unit` to verify unit tests pass
-- Run `pnpm test:api` to verify API tests pass
-- Run `pnpm lint` to check for linting issues
+- Run `pnpm test` to verify all tests pass
 - Run `pnpm type-check` to verify TypeScript compiles
+- Install any missing dependencies with `pnpm add` or `pnpm add -D` as needed
 
 ### Step 7: Commit Your Changes
 - Stage only the files you changed: `git add <specific files>`
