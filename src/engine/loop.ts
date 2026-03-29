@@ -471,6 +471,7 @@ export async function processIssue(
 export interface StartLoopOptions {
   db?: Database.Database;
   once?: boolean;
+  selectedIssues?: number[];
 }
 
 export async function startLoop(
@@ -493,10 +494,25 @@ export async function startLoop(
 
   try {
     while (running) {
-      const issues = await github.listIssues({
-        labels: [config.label],
-        state: "open",
-      });
+      let issues: GitHubIssue[];
+
+      if (options?.selectedIssues && options.selectedIssues.length > 0) {
+        // Use pre-selected issues (from interactive selection or --issues flag)
+        const allIssues = await github.listIssues({
+          labels: [config.label],
+          state: "open",
+          limit: 100,
+        });
+        const issueMap = new Map(allIssues.map((i) => [i.number, i]));
+        issues = options.selectedIssues
+          .map((n) => issueMap.get(n))
+          .filter((i): i is GitHubIssue => i !== undefined);
+      } else {
+        issues = await github.listIssues({
+          labels: [config.label],
+          state: "open",
+        });
+      }
 
       if (issues.length === 0) {
         log("setup", 0, `No issues labeled '${config.label}', sleeping ${config.pollInterval}s`);
