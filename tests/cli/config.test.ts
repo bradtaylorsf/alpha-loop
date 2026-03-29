@@ -48,6 +48,8 @@ function makeLoopConfig(overrides: Partial<LoopConfig> = {}): LoopConfig {
     label: "ready",
     skipTests: false,
     skipReview: false,
+    skipVerify: false,
+    verifyTimeout: 120_000,
     dryRun: false,
     autoCleanup: true,
     ...overrides,
