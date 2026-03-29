@@ -25,6 +25,7 @@
 #   SKIP_INSTALL    - Skip pnpm install in worktree (default: false)
 #   AUTO_CLEANUP    - Auto-remove worktrees (default: true)
 #   LABEL_READY     - Label to pick up issues (default: ready)
+#   SKIP_PREFLIGHT  - Skip pre-flight test validation (default: false)
 #   SKIP_E2E        - Skip Playwright E2E tests in the loop (default: false)
 #   SKIP_LEARNINGS  - Skip learning extraction after runs (default: false)
 #   RUN_FULL        - Bypass API response cache, hit real APIs (default: false)
@@ -53,6 +54,7 @@ AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 LABEL_READY="${LABEL_READY:-ready}"
 MAX_TEST_RETRIES="${MAX_TEST_RETRIES:-3}"
 RUN_FULL="${RUN_FULL:-false}"
+SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-false}"
 SKIP_E2E="${SKIP_E2E:-false}"
 SKIP_LEARNINGS="${SKIP_LEARNINGS:-false}"
 AUTO_MERGE="${AUTO_MERGE:-false}"
@@ -63,6 +65,7 @@ for arg in "$@"; do
   case "$arg" in
     --once) RUN_ONCE="--once" ;;
     --run-full) RUN_FULL="true" ;;
+    --skip-preflight) SKIP_PREFLIGHT="true" ;;
     init) SUBCOMMAND="init" ;;
   esac
 done
@@ -82,6 +85,7 @@ PROMPTS_DIR="$SCRIPT_DIR/prompts"
 # State
 ISSUES_PROCESSED=0
 ORIGINAL_DIR="$(pwd)"
+PREFLIGHT_IGNORE_FILE=""
 
 # ---------------------------------------------------------------------------
 # Colors & Logging
@@ -326,6 +330,189 @@ check_prerequisites() {
   fi
 
   log_success "Prerequisites check passed"
+}
+
+# ---------------------------------------------------------------------------
+# Pre-flight Test Validation
+# ---------------------------------------------------------------------------
+run_preflight() {
+  if [[ "$SKIP_PREFLIGHT" == "true" ]]; then
+    log_info "Skipping pre-flight tests (--skip-preflight)"
+    return 0
+  fi
+
+  if [[ "$SKIP_TESTS" == "true" ]]; then
+    log_info "Skipping pre-flight tests (SKIP_TESTS=true)"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would run pre-flight test validation"
+    return 0
+  fi
+
+  log_step "Running pre-flight test validation..."
+
+  # Determine test command from .alpha-loop.yaml or default
+  local test_cmd="${CONFIG_TEST_COMMAND:-pnpm test}"
+  log_info "Test command: $test_cmd"
+
+  # Run tests and capture output
+  local test_output=""
+  local test_exit=0
+  test_output=$(eval "$test_cmd" 2>&1) || test_exit=$?
+
+  # Parse Jest output for pass/fail/skip counts
+  local passed=0 failed=0 skipped=0
+  local total_line=""
+
+  # Jest outputs lines like: Tests:  3 failed, 39 passed, 42 total
+  total_line=$(echo "$test_output" | grep -E "Tests:.*total" | tail -1)
+
+  if [[ -n "$total_line" ]]; then
+    passed=$(echo "$total_line" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' || echo "0")
+    failed=$(echo "$total_line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' || echo "0")
+    skipped=$(echo "$total_line" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' || echo "0")
+  fi
+
+  # Default to 0 if empty
+  passed="${passed:-0}"
+  failed="${failed:-0}"
+  skipped="${skipped:-0}"
+
+  # All tests passed
+  if [[ "$test_exit" -eq 0 || "$failed" -eq 0 ]]; then
+    local summary="Pre-flight: ${GREEN}✓${NC} ${passed} passed, 0 failed"
+    [[ "$skipped" -gt 0 ]] && summary="$summary, $skipped skipped"
+    echo -e "$summary"
+    log_success "Pre-flight tests passed"
+    return 0
+  fi
+
+  # Some tests failed -- extract failing test names
+  # Jest format: ● test suite name › test name
+  # or FAIL path/to/test.ts
+  local failing_tests=""
+  failing_tests=$(echo "$test_output" | grep -E "^[[:space:]]*● " | sed 's/^[[:space:]]*//' || true)
+
+  # Also extract FAIL lines for file-level info
+  local failing_files=""
+  failing_files=$(echo "$test_output" | grep -E "^[[:space:]]*FAIL " | sed 's/^[[:space:]]*//' || true)
+
+  echo ""
+  echo -e "Pre-flight: ${GREEN}✓${NC} ${passed} passed, ${RED}✗${NC} ${failed} failed"
+  [[ "$skipped" -gt 0 ]] && echo -e "            $skipped skipped"
+  echo ""
+
+  if [[ -n "$failing_tests" ]]; then
+    echo -e "Failing tests:"
+    while IFS= read -r line; do
+      echo -e "  ${RED}✗${NC} $line"
+    done <<< "$failing_tests"
+  elif [[ -n "$failing_files" ]]; then
+    echo -e "Failing test files:"
+    while IFS= read -r line; do
+      echo -e "  ${RED}✗${NC} $line"
+    done <<< "$failing_files"
+  fi
+  echo ""
+
+  # Non-interactive mode (no TTY): default to option 2 (ignore)
+  if [[ ! -t 0 ]]; then
+    log_info "Non-interactive mode: ignoring pre-existing failures"
+    _preflight_save_ignore_file "$test_output"
+    return 0
+  fi
+
+  # Interactive prompt
+  echo -e "  ${BOLD}[1]${NC} Fix these first (auto-creates a fix session)"
+  echo -e "  ${BOLD}[2]${NC} Ignore these during this session"
+  echo -e "  ${BOLD}[3]${NC} Abort"
+  echo ""
+  read -r -p "Choose [1/2/3]: " choice
+
+  case "$choice" in
+    1)
+      log_info "Creating fix session for pre-existing test failures..."
+      _preflight_fix_tests "$test_output" "$failing_tests"
+      ;;
+    2)
+      log_info "Ignoring pre-existing test failures for this session"
+      _preflight_save_ignore_file "$test_output"
+      ;;
+    3)
+      log_info "Aborting at user request."
+      exit 0
+      ;;
+    *)
+      log_error "Invalid choice. Aborting."
+      exit 1
+      ;;
+  esac
+}
+
+_preflight_save_ignore_file() {
+  local test_output="$1"
+
+  # Save failing test names to temp file for exclusion during session
+  PREFLIGHT_IGNORE_FILE=$(mktemp "${TMPDIR:-/tmp}/preflight-ignore-XXXXXX")
+
+  # Extract failing test names (Jest ● format) into the file
+  echo "$test_output" | grep -E "^[[:space:]]*● " | sed 's/^[[:space:]]*//' > "$PREFLIGHT_IGNORE_FILE" || true
+
+  # Also save FAIL file paths as fallback
+  echo "$test_output" | grep -E "^[[:space:]]*FAIL " | sed 's/^[[:space:]]*FAIL //' >> "$PREFLIGHT_IGNORE_FILE" || true
+
+  log_info "Saved pre-existing failures to $PREFLIGHT_IGNORE_FILE"
+}
+
+_preflight_fix_tests() {
+  local test_output="$1"
+  local failing_tests="$2"
+  local test_cmd="${CONFIG_TEST_COMMAND:-pnpm test}"
+
+  local fix_prompt="The following tests are failing on the current branch BEFORE any changes were made.
+These are pre-existing failures that need to be fixed.
+
+Failing tests:
+${failing_tests}
+
+Full test output:
+${test_output}
+
+Instructions:
+1. Read the failing test files to understand what they expect
+2. Fix the implementation code OR the tests as appropriate
+3. Run ${test_cmd} to verify your fixes
+4. Commit your fixes with message: fix: resolve pre-existing test failures"
+
+  log_info "Fix-preflight agent: claude | Model: $MODEL"
+  echo "$fix_prompt" | claude -p \
+    --model "$MODEL" \
+    --max-turns 20 \
+    --dangerously-skip-permissions \
+    --verbose \
+    --output-format text \
+    2>&1
+
+  # Commit any uncommitted fixes
+  local uncommitted
+  uncommitted=$(git status --porcelain | wc -l | tr -d ' ')
+  if [[ "$uncommitted" -gt 0 ]]; then
+    git add -A && git commit -m "fix: resolve pre-existing test failures" || true
+  fi
+
+  # Verify tests now pass
+  log_info "Verifying tests pass after fix..."
+  if eval "$test_cmd" 2>&1; then
+    log_success "Pre-existing test failures fixed. Continuing to main session."
+  else
+    log_warn "Some tests still failing after fix attempt."
+    log_info "Saving remaining failures as ignored for this session."
+    local recheck_output
+    recheck_output=$(eval "$test_cmd" 2>&1) || true
+    _preflight_save_ignore_file "$recheck_output"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -698,6 +885,34 @@ run_tests() {
   fi
 
   if [[ "$test_passed" == "false" ]]; then
+    # If we have a preflight ignore file, check if all failures are pre-existing
+    if [[ -n "$PREFLIGHT_IGNORE_FILE" && -f "$PREFLIGHT_IGNORE_FILE" ]]; then
+      local new_failures=false
+      local combined_output
+      combined_output=$(cat "$log_file" 2>/dev/null || echo "")
+
+      # Extract current failing test names
+      local current_failures
+      current_failures=$(echo "$combined_output" | grep -E "^[[:space:]]*● " | sed 's/^[[:space:]]*//' || true)
+
+      if [[ -n "$current_failures" ]]; then
+        while IFS= read -r failure; do
+          if ! grep -qF "$failure" "$PREFLIGHT_IGNORE_FILE" 2>/dev/null; then
+            new_failures=true
+            break
+          fi
+        done <<< "$current_failures"
+      else
+        # No ● lines found -- can't determine, treat as new failures
+        new_failures=true
+      fi
+
+      if [[ "$new_failures" == "false" ]]; then
+        log_info "All failures are pre-existing (ignored by preflight). Treating as pass."
+        return 0
+      fi
+    fi
+
     log_error "Some tests failed"
     return 1
   fi
@@ -1184,6 +1399,7 @@ main() {
   echo -e "  Label:         ${BOLD}$LABEL_READY${NC}"
   echo -e "  Poll Interval: ${BOLD}${POLL_INTERVAL}s${NC}"
   echo -e "  Dry Run:       ${BOLD}$DRY_RUN${NC}"
+  echo -e "  Skip Preflight:${BOLD}$SKIP_PREFLIGHT${NC}"
   echo -e "  Skip Tests:    ${BOLD}$SKIP_TESTS${NC}"
   echo -e "  Skip Review:   ${BOLD}$SKIP_REVIEW${NC}"
   echo -e "  Skip Learnings:${BOLD}$SKIP_LEARNINGS${NC}"
@@ -1197,6 +1413,9 @@ main() {
 
   # Change to project directory
   cd "$PROJECT_DIR"
+
+  # Pre-flight test validation
+  run_preflight
 
   while true; do
     log_info "Polling for issues labeled '$LABEL_READY'..."
@@ -1267,6 +1486,10 @@ main() {
 # ---------------------------------------------------------------------------
 cleanup_on_exit() {
   cd "$ORIGINAL_DIR" 2>/dev/null || true
+  # Clean up preflight ignore file if it exists
+  if [[ -n "${PREFLIGHT_IGNORE_FILE:-}" && -f "$PREFLIGHT_IGNORE_FILE" ]]; then
+    rm -f "$PREFLIGHT_IGNORE_FILE" 2>/dev/null || true
+  fi
   log_info "Agent loop stopped. Processed $ISSUES_PROCESSED issue(s)."
 }
 trap cleanup_on_exit EXIT
