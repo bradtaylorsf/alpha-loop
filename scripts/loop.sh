@@ -1284,7 +1284,7 @@ build_review_prompt() {
   cat <<EOF
 Review the code changes for issue #${issue_num}: ${title}
 
-Run git diff origin/master...HEAD to see what changed.
+Run git diff origin/$BASE_BRANCH...HEAD to see what changed. Then read the actual files that were modified.
 
 Original requirements:
 ${body}
@@ -1293,18 +1293,50 @@ ${vision_context:+
 ## Product Vision (guide your review decisions)
 ${vision_context}}
 
-Review for:
-- Correctness vs requirements
-- Security issues
-- Missing tests
-- Code quality
-- UX decisions align with target users and project priorities
+## Review Checklist
+
+### 1. Functional Completeness (MOST IMPORTANT)
+- Does the implementation FULLY address the issue requirements?
+- Are there any acceptance criteria that were NOT implemented?
+- If backend API endpoints were created, are they called from the frontend?
+- If frontend components were created, do they have working backend endpoints?
+- Are there any dead code paths (created but never wired in)?
+- Does the feature work end-to-end (data flows from UI → API → database → back to UI)?
+
+### 2. Integration Gaps
+- Are new routes/endpoints registered in the server entry point?
+- Are new components imported and rendered in the app?
+- Are new database tables/columns used by the API?
+- Are there missing imports, missing route registrations, or orphaned files?
+
+### 3. Code Quality
+- Security issues (injection, XSS, auth bypass)
+- Missing error handling for user-facing operations
+- Missing tests for new functionality
+- Code follows project conventions
+
+### 4. UX Review
+- Do UI changes match the target user profile?
+- Are error states handled (loading, empty, error)?
+- Is the feature discoverable (can users find it)?
+
+## Actions
 
 For any issues you find:
-- CRITICAL or WARNING issues: fix them directly, run tests, and commit with "fix: address review findings for #${issue_num}"
-- Issues you cannot fix: note them for the output
+- CRITICAL (gaps, missing wiring, broken features): FIX THEM directly, run tests, commit with "fix: address review findings for #${issue_num}"
+- WARNING (quality, security): FIX THEM directly if possible
+- INFO (suggestions, minor improvements): Note them in your report but don't block
 
-After fixing, output a brief review summary with what you found and what you fixed.
+After fixing, output a structured review report:
+
+### Findings Fixed
+- (list what you found and fixed)
+
+### Remaining Gaps
+- (anything you couldn't fix — these need human attention)
+
+### Verification Notes
+- (what a human should manually check)
 EOF
 }
 
@@ -1961,7 +1993,7 @@ run_e2e_tests() {
 }
 
 run_verify() {
-  local worktree="$1" log_file="$2"
+  local worktree="$1" log_file="$2" issue_num="$3" title="$4" body="$5"
 
   if [[ "$SKIP_VERIFY" == "true" ]]; then
     log_info "Skipping verification (SKIP_VERIFY=true)"
@@ -1969,44 +2001,30 @@ run_verify() {
     return 0
   fi
 
-  if [[ "$SKIP_TESTS" == "true" ]]; then
-    log_info "Skipping verification (SKIP_TESTS=true)"
-    echo "Verification skipped"
-    return 0
-  fi
-
-  log_step "Running build verification"
+  log_step "Running live verification for issue #$issue_num"
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_dry "Would run build verification"
+    log_dry "Would run live verification"
     echo "Verification skipped (dry run)"
     return 0
   fi
 
-  # Custom verify command takes precedence
-  if [[ -n "$VERIFY_COMMAND" ]]; then
-    log_info "Running custom verify command: $VERIFY_COMMAND"
-    if (cd "$worktree" && timeout "$VERIFY_TIMEOUT" bash -c "$VERIFY_COMMAND" 2>&1 | tee -a "$log_file"); then
-      log_success "Custom verification passed"
-      return 0
-    else
-      log_error "Custom verification failed"
-      return 1
-    fi
+  # Detect how to start the app
+  local dev_cmd="${CONFIG_DEV_COMMAND:-}"
+  local start_script=""
+  if [[ -z "$dev_cmd" ]]; then
+    for script_name in dev start preview; do
+      if (cd "$worktree" && node -e "const p=require('./package.json'); process.exit(p.scripts?.['$script_name'] ? 0 : 1)" 2>/dev/null); then
+        start_script="$script_name"
+        dev_cmd="pnpm $script_name"
+        break
+      fi
+    done
   fi
 
-  # Detect how to start the app
-  local start_script=""
-  for script_name in dev start preview; do
-    if (cd "$worktree" && node -e "const p=require('./package.json'); process.exit(p.scripts?.['$script_name'] ? 0 : 1)" 2>/dev/null); then
-      start_script="$script_name"
-      break
-    fi
-  done
-
-  if [[ -z "$start_script" ]]; then
-    log_info "No dev/start/preview script found in package.json, skipping verification"
-    echo "Verification skipped (no start script)"
+  if [[ -z "$dev_cmd" ]]; then
+    log_info "No dev/start/preview command found, skipping verification"
+    echo "Verification skipped (no start command)"
     return 0
   fi
 
@@ -2015,40 +2033,26 @@ run_verify() {
   local pkg_port
   pkg_port=$(cd "$worktree" && node -e "
     const p=require('./package.json');
-    const s=p.scripts?.['$start_script']||'';
+    const scripts=p.scripts||{};
+    const s=scripts['${start_script:-dev}']||scripts.dev||scripts.start||'';
     const m=s.match(/--port\\s+(\\d+)|PORT=(\\d+)|-p\\s+(\\d+)/);
     if(m) console.log(m[1]||m[2]||m[3]);
   " 2>/dev/null || true)
   [[ -n "$pkg_port" ]] && port="$pkg_port"
 
-  # Check for Playwright verification tests
-  local has_playwright_tests=false
-  if [[ -d "$worktree/tests/verify" ]]; then
-    local verify_files
-    verify_files=$(find "$worktree/tests/verify" -name '*.spec.ts' -o -name '*.test.ts' 2>/dev/null | head -1)
-    [[ -n "$verify_files" ]] && has_playwright_tests=true
-  fi
-
-  # Check if Playwright is available
-  local has_playwright=false
-  if (cd "$worktree" && pnpm exec playwright --version &>/dev/null); then
-    has_playwright=true
-  fi
-
   # Start the app in the background
-  log_info "Starting app with 'pnpm $start_script' on port $port..."
+  log_info "Starting app with '$dev_cmd' on port $port..."
   local app_pid=""
-  (cd "$worktree" && PORT="$port" pnpm "$start_script" >> "$log_file" 2>&1) &
+  (cd "$worktree" && PORT="$port" eval "$dev_cmd" >> "$log_file" 2>&1) &
   app_pid=$!
 
-  # Wait for app to be ready (up to 30s)
+  # Wait for app to be ready (up to 60s)
   local ready=false
-  for i in $(seq 1 30); do
+  for i in $(seq 1 60); do
     if curl -s -o /dev/null "http://localhost:$port" 2>/dev/null; then
       ready=true
       break
     fi
-    # Check if app process died
     if ! kill -0 "$app_pid" 2>/dev/null; then
       log_error "App process exited before becoming ready"
       echo "App failed to start"
@@ -2058,7 +2062,7 @@ run_verify() {
   done
 
   if [[ "$ready" != "true" ]]; then
-    log_error "App did not become ready on port $port within 30s"
+    log_error "App did not become ready on port $port within 60s"
     kill "$app_pid" 2>/dev/null || true
     wait "$app_pid" 2>/dev/null || true
     echo "App failed to start on port $port"
@@ -2067,39 +2071,116 @@ run_verify() {
 
   log_success "App is ready on port $port"
 
-  local verify_exit=0
+  # Get the diff to understand what changed
+  local diff_stat=""
+  diff_stat=$(cd "$worktree" && git diff --stat "origin/$BASE_BRANCH...HEAD" 2>/dev/null) || true
 
-  if [[ "$has_playwright_tests" == "true" && "$has_playwright" == "true" ]]; then
-    # Run Playwright verification tests
-    log_info "Running Playwright verification tests..."
-    if (cd "$worktree" && BASE_URL="http://localhost:$port" timeout "$VERIFY_TIMEOUT" pnpm exec playwright test tests/verify/ 2>&1 | tee -a "$log_file"); then
-      log_success "Playwright verification passed"
-    else
-      log_error "Playwright verification failed"
-      verify_exit=1
-    fi
-  else
-    # API verification fallback
-    log_info "No Playwright tests in tests/verify/, falling back to API verification..."
-    local status_code
-    status_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:$port/" 2>/dev/null || echo "000")
+  # Get vision context for verification decisions
+  local vision_context=""
+  vision_context=$(get_vision_context 2>/dev/null) || true
 
-    if [[ "$status_code" =~ ^2[0-9][0-9]$ || "$status_code" == "304" ]]; then
-      log_success "API verification passed (HTTP $status_code)"
-      echo "API verification passed (HTTP $status_code)" >> "$log_file"
-    else
-      log_error "API verification failed (HTTP $status_code)"
-      echo "API verification failed (HTTP $status_code)" >> "$log_file"
-      verify_exit=1
-    fi
-  fi
+  # Build the verification prompt — agent uses the app like a real user
+  local verify_prompt
+  verify_prompt=$(cat <<VERIFYEOF
+You are a QA tester verifying that issue #${issue_num} was implemented correctly.
 
-  # Kill the app process
+## Issue: ${title}
+
+${body}
+
+## What Changed
+${diff_stat}
+
+${vision_context:+## Product Vision
+${vision_context}
+}
+## Your Task
+
+The app is running at http://localhost:${port}. Use the Playwright browser tools to:
+
+1. Open the app in the browser
+2. Navigate to the feature that was changed
+3. Test the ACTUAL user flow described in the issue:
+   - Can you do what the issue says should work?
+   - Does the UI render correctly?
+   - Do form submissions work?
+   - Do API calls return correct data?
+   - Are there any console errors?
+4. Take screenshots of key states (before/after if applicable)
+5. Check for functional gaps:
+   - Is the backend wired to the frontend?
+   - Are there dead endpoints with no UI?
+   - Are there UI elements that call missing endpoints?
+   - Does the feature work end-to-end?
+
+## Report
+
+After testing, output a verification report:
+
+### Status: PASS or FAIL
+
+### What Was Tested
+- (list each thing you tested)
+
+### What Worked
+- (list what functioned correctly)
+
+### What Failed
+- (list what didn't work, with details)
+
+### Screenshots
+- (describe what you captured)
+
+### Gaps Found
+- (any disconnects between frontend and backend, missing pieces, etc.)
+
+IMPORTANT: Actually USE the app. Navigate to pages, click buttons, fill forms, submit data.
+Do NOT just check if the server responds. Verify the feature works as a user would use it.
+VERIFYEOF
+)
+
+  log_info "Verification agent: claude | Model: $MODEL | Testing live at http://localhost:$port"
+
+  local verify_output
+  set +e
+  verify_output=$(cd "$worktree" && echo "$verify_prompt" | claude -p \
+    --model "$MODEL" \
+    --dangerously-skip-permissions \
+    --verbose \
+    --output-format text \
+    2>&1)
+  local verify_exit=$?
+  set -e
+
+  echo "$verify_output" | tee -a "$log_file"
+
+  # Save verification output for the PR
+  VERIFY_OUTPUT="$verify_output"
+
+  # Kill the app process and its children
   log_info "Shutting down app (PID $app_pid)..."
   kill "$app_pid" 2>/dev/null || true
+  # Kill any child processes (vite, node, etc.)
+  pkill -P "$app_pid" 2>/dev/null || true
   wait "$app_pid" 2>/dev/null || true
 
-  return $verify_exit
+  # Check if verification passed based on agent output
+  if echo "$verify_output" | grep -qi "Status:.*FAIL"; then
+    log_error "Live verification FAILED"
+    return 1
+  elif echo "$verify_output" | grep -qi "Status:.*PASS"; then
+    log_success "Live verification PASSED"
+    return 0
+  else
+    # If agent didn't clearly state pass/fail, check exit code
+    if [[ "$verify_exit" -eq 0 ]]; then
+      log_success "Verification completed (agent exit 0)"
+      return 0
+    else
+      log_warn "Verification unclear (agent exit $verify_exit)"
+      return 1
+    fi
+  fi
 }
 
 run_review() {
@@ -2490,7 +2571,7 @@ $test_output"
     for verify_attempt in $(seq 1 "$MAX_TEST_RETRIES"); do
       log_info "Verification attempt $verify_attempt of $MAX_TEST_RETRIES"
 
-      if verify_output=$(run_verify "$worktree" "$log_file" 2>&1); then
+      if verify_output=$(run_verify "$worktree" "$log_file" "$issue_num" "$title" "$impl_body" 2>&1); then
         verify_passing=true
         log_success "Verification passed on attempt $verify_attempt"
         break
