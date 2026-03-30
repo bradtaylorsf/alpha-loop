@@ -1,10 +1,15 @@
 {
   "name": "alpha-loop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Agent-agnostic automated development loop: Plan -> Build -> Test -> Review -> Ship",
   "type": "module",
   "packageManager": "pnpm@9.0.0",
+  "bin": {
+    "alpha-loop": "./dist/cli.js"
+  },
   "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
     "loop": "bash scripts/loop.sh",
     "loop:once": "bash scripts/loop.sh --once",
     "loop:dry": "DRY_RUN=true bash scripts/loop.sh --once",
@@ -13,6 +18,7 @@
     "test:watch": "jest --watch"
   },
   "dependencies": {
+    "commander": "^13.0.0",
     "yaml": "^2.8.3"
   },
   "devDependencies": {
