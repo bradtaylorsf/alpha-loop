@@ -1,7 +1,7 @@
 /**
  * Worktree Manager — create and clean up isolated git worktrees.
  */
-import { existsSync, copyFileSync } from 'node:fs';
+import { existsSync, copyFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { exec } from './shell.js';
 import * as logger from './logger.js';
@@ -38,7 +38,9 @@ const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.l
 export async function setupWorktree(options: SetupWorktreeOptions): Promise<WorktreeResult> {
   const { issueNum, projectDir, baseBranch, sessionBranch, autoMerge, skipInstall, dryRun } = options;
   const branch = `agent/issue-${issueNum}`;
-  const worktreePath = resolve(projectDir, '..', `issue-${issueNum}`);
+  const worktreesDir = resolve(projectDir, '.worktrees');
+  mkdirSync(worktreesDir, { recursive: true });
+  const worktreePath = resolve(worktreesDir, `issue-${issueNum}`);
 
   logger.info(`Creating worktree at ${worktreePath} (branch: ${branch})`);
 
@@ -120,7 +122,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
  */
 export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<void> {
   const { issueNum, projectDir, autoCleanup = true, dryRun } = options;
-  const worktreePath = resolve(projectDir, '..', `issue-${issueNum}`);
+  const worktreePath = resolve(projectDir, '.worktrees', `issue-${issueNum}`);
 
   if (!autoCleanup) {
     logger.info('Skipping worktree cleanup (autoCleanup=false)');

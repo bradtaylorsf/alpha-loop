@@ -1,0 +1,191 @@
+========================================
+Processing Issue #75: Port engine core: agent runner, worktree manager, and GitHub helpers
+Started: Mon Mar 30 13:15:11 PDT 2026
+========================================
+Now I have everything I need. Here's the structured plan:
+
+---
+
+## Understanding
+
+This issue ports four core engine modules from `scripts/loop.sh` (bash) to TypeScript in `src/lib/`: agent spawning, git worktree management, GitHub CLI helpers, and prompt building. These are the building blocks that the main loop (issue #76) will compose. The `src/lib/` directory doesn't exist yet — this creates it. Dependencies on #73 (CLI scaffold) and #74 (utility subcommands for `shell.ts`) mean `shell.ts` must provide `exec()` and `run()` functions that these modules call.
+
+## Acceptance Criteria
+
+### Agent Runner (`src/lib/agent.ts`)
+- [ ] `spawnAgent()` with `agent: 'claude'` constructs args: `claude -p --model X --max-turns N --dangerously-skip-permissions --verbose --output-format text`
+- [ ] `spawnAgent()` with `agent: 'codex'` constructs args: `codex -q --model X --auto-edit`
+- [ ] `spawnAgent()` with `agent: 'opencode'` constructs args: `opencode run --model X`
+- [ ] Prompt piped via stdin (like `echo "$prompt" | claude -p`)
+- [ ] Output streams to terminal in real-time via `spawn` (not buffered `exec`)
+- [ ] Full output captured and returned in `AgentResult.output`
+- [ ] `AgentResult.duration` tracks wall-clock ms accurately
+- [ ] `logFile` option writes output to file (like bash `tee`)
+- [ ] Non-zero exit code doesn't throw — returned in `AgentResult.exitCode`
+- [ ] Logs agent name, model, and cwd before spawning (matches loop.sh line 1853 pattern)
+
+### Worktree Manager (`src/lib/worktree.ts`)
+- [ ] `setupWorktree()` creates worktree at `{projectDir}/../issue-{num}` with branch `agent/issue-{num}`
+- [ ] Branches from `sessionBranch` when `autoMerge=true` AND session branch exists (origin or local)
+- [ ] Branches from `baseBranch` when `autoMerge=false` or session branch doesn't exist
+- [ ] Cleans up existing worktree+branch before creating new one (loop.sh:766-770)
+- [ ] Deletes remote branch from previous failed runs (loop.sh:773)
+- [ ] Fetches origin before creating worktree (loop.sh:794)
+- [ ] Falls back to local branch if `origin/X` doesn't work (loop.sh:798-805)
+- [ ] Copies `.env`, `.env.local`, `.env.development`, `.env.development.local` files (loop.sh:808-813)
+- [ ] Runs `pnpm install --frozen-lockfile` (fallback to `pnpm install`) unless `skipInstall=true`
+- [ ] `cleanupWorktree()` removes worktree but keeps branch
+- [ ] `cleanupWorktree()` force-removes + prunes on failure (loop.sh:845-849)
+- [ ] `cleanupWorktree()` skips if `autoCleanup=false`
+- [ ] Dry run mode logs without acting
+
+### GitHub Helpers (`src/lib/github.ts`)
+- [ ] `pollIssues()` returns `Issue[]` with number, title, body, labels from `gh issue list --json`
+- [ ] `labelIssue()` adds and optionally removes labels via `gh issue edit`
+- [ ] `commentIssue()` posts comment via `gh issue comment`
+- [ ] `createPR()` pushes branch, creates PR via `gh pr create`, returns URL
+- [ ] `createPR()` detects existing PR via `gh pr list --head` and updates via `gh pr edit`
+- [ ] `createPR()` truncates review body at 30k chars (loop.sh:2443-2446)
+- [ ] `mergePR()` merges with `--squash --delete-branch` by default
+- [ ] `mergePR()` creates session branch if needed before merging (loop.sh:2521-2533)
+- [ ] `updateProjectStatus()` updates GitHub Project board status field
+- [ ] All functions handle `gh` CLI errors with clear error messages
+- [ ] Dry run support where applicable
+
+### Prompt Builder (`src/lib/prompts.ts`)
+- [ ] `buildImplementPrompt()` produces prompt matching loop.sh:1260-1289
+- [ ] Optional sections (vision, project context, previous result, learning) omitted when empty
+- [ ] `buildReviewPrompt()` includes full 4-section checklist (Functional Completeness, Integration Gaps, Code Quality, UX Review)
+- [ ] `buildReviewPrompt()` includes Actions section with CRITICAL/WARNING/INFO severity levels
+- [ ] `buildLearnPrompt()` includes all run metadata (issue, status, retries, duration, date)
+- [ ] `buildLearnPrompt()` includes all input sections (requirements, diff, test output, review, verification)
+- [ ] All prompts are pure functions with no side effects
+
+## Implementation Plan
+
+### Step 1: Create `src/lib/agent.ts`
+- Export `AgentResult` type: `{ exitCode: number; output: string; duration: number }`
+- Export `spawnAgent()` async function using `node:child_process` `spawn`
+- Build CLI args via a switch on `options.agent` ('claude' | 'codex' | 'opencode')
+- Write prompt to stdin, pipe stdout/stderr to both `process.stdout` and a buffer (tee behavior)
+- If `logFile` provided, also write to a `node:fs` write stream
+- Track duration with `Date.now()` before/after
+- Resolve promise on `close` event with structured `AgentResult`
+- Reference: `reference/cli-runner.reference.ts` for process lifecycle patterns (SIGTERM/SIGKILL, event handling)
+
+### Step 2: Create `src/lib/worktree.ts`
+- Export `WorktreeResult` type: `{ path: string; branch: string }`
+- Export `setupWorktree()` — uses `exec()` from `shell.ts` for all git commands
+- Implement the full setup sequence: cleanup existing → delete remote branch → fetch → determine source branch → `git worktree add` with fallback → copy `.env` files → `pnpm install`
+- Export `cleanupWorktree()` — remove worktree, force fallback with `rm -rf` + `git worktree prune`
+- Reference: `reference/worktree-manager.reference.ts` for retry logic on git locks, safety validation, `copyEnvFilesToWorktree()`
+
+### Step 3: Create `src/lib/github.ts`
+- Export `Issue` type and all helper functions
+- All functions use `exec()` from `shell.ts` to call `gh` CLI
+- `pollIssues()`: `gh issue list --repo X --label Y --state open --json number,title,body,labels`
+- `labelIssue()`: `gh issue edit N --repo X --add-label Y [--remove-label Z]`
+- `commentIssue()`: `gh issue comment N --repo X --body Y`
+- `createPR()`: check for existing PR first, then create or update. Include PR body template from loop.sh:2460-2486
+- `mergePR()`: find PR by branch, create session branch if needed, `gh pr merge --squash --delete-branch`
+- `updateProjectStatus()`: complex multi-step `gh project` commands (item lookup → field lookup → item-edit)
+- Reference: `reference/github-client.reference.ts` for error handling patterns
+
+### Step 4: Create `src/lib/prompts.ts`
+- Pure string template functions, no imports needed beyond standard lib
+- `buildImplementPrompt()`: template literal with conditional sections using ternary/filter
+- `buildReviewPrompt()`: template literal with full checklist from loop.sh:1309-1353
+- `buildLearnPrompt()`: template literal with frontmatter and all analysis sections from loop.sh:1369-1416
+- Each optional section only included when the corresponding parameter is truthy/non-empty
+
+### Step 5: Create tests
+- `tests/lib/agent.test.ts` — mock `node:child_process` `spawn`, verify arg construction for each agent type, verify output capture, verify duration tracking, verify logFile write
+- `tests/lib/worktree.test.ts` — mock `shell.ts` `exec`, verify git command sequences for setup and cleanup, verify autoMerge branching logic, verify env file copy, verify dry run
+- `tests/lib/github.test.ts` — mock `shell.ts` `exec`, verify `gh` command construction, verify JSON parsing of issue list output, verify create-vs-update PR logic
+- `tests/lib/prompts.test.ts` — no mocks needed, verify prompt content with all/no optional context, verify checklist presence in review prompt, verify metadata in learn prompt
+
+## Test Plan
+
+- **Unit tests** (10 test files as specified in issue): mock `spawn` and `exec`, verify command construction and output handling
+- **Key test scenarios**:
+  - `spawnAgent()` with each agent type → verify correct CLI args array
+  - `spawnAgent()` → verify stdin receives prompt, stdout captured in result
+  - `setupWorktree()` with `autoMerge=true` + existing session branch → verify `git worktree add` uses session branch
+  - `setupWorktree()` with `autoMerge=false` → verify uses base branch
+  - `setupWorktree()` with `dryRun=true` → verify no git commands executed
+  - `cleanupWorktree()` → verify `git worktree remove` called, branch NOT deleted
+  - `pollIssues()` → feed mock JSON output, verify parsed `Issue[]`
+  - `createPR()` when PR exists → verify `gh pr edit` path taken
+  - `createPR()` when no PR exists → verify `gh pr create` path taken
+  - `buildImplementPrompt()` with all optional context → verify all sections present
+  - `buildImplementPrompt()` with no optional context → verify sections omitted (no empty headers)
+  - `buildReviewPrompt()` → verify all 4 checklist sections present
+  - `buildLearnPrompt()` → verify frontmatter and all metadata sections
+- **Run**: `pnpm test` — all tests must pass with `forceExit: true`
+
+## What to Test Manually
+
+1. After implementation, run `pnpm test` and verify all tests pass cleanly (no hung processes)
+2. Verify `src/lib/agent.ts` compiles: `npx tsx src/lib/agent.ts` (should import cleanly)
+3. If `shell.ts` exists from #74, verify the import chain works: `agent.ts` → `shell.ts`
+4. Spot-check prompt output: call `buildImplementPrompt()` with sample data and verify it matches the format from loop.sh
+5. Verify TypeScript strict mode passes: `npx tsc --noEmit`
+
+## Risks
+
+1. **Dependency on issues #73 and #74**: `shell.ts` with `exec()` and `run()` must exist. If not merged yet, agent.ts can use `spawn` directly, but worktree.ts and github.ts need a shell execution helper. **Mitigation**: If `shell.ts` doesn't exist, create a minimal stub or import `child_process` directly with a TODO to refactor.
+2. **`spawn` tee behavior complexity**: Simultaneously streaming to terminal, capturing in buffer, and writing to log file requires careful stream handling. Streams must be properly closed to avoid resource leaks in tests. **Mitigation**: Use `data` events on stdout/stderr, not pipe chains. Close write streams in `finally` block.
+3. **Test isolation for `spawn` mocks**: Mocking `node:child_process` in ESM with ts-jest can be tricky. **Mitigation**: Use `jest.mock()` with factory functions; verify the mock approach works with the existing `jest.config.cjs` (which uses `useESM: false`).
+4. **GitHub Project board commands are complex**: `updateProjectStatus()` requires 4 sequential `gh` calls (item-list → field-list → project view → item-edit). Any of these can fail. **Mitigation**: Wrap in try/catch, log warnings on failure but don't crash the loop.
+5. **PR body size limit**: GitHub has a ~65k character limit on PR bodies. The loop.sh truncates at 30k. **Mitigation**: Port the same truncation logic.
+Done. Here's what was implemented:
+
+**4 new modules in `src/lib/`:**
+
+| Module | Description |
+|--------|-------------|
+| `agent.ts` | Spawns AI agents (claude/codex/opencode) via `child_process.spawn` with real-time output streaming, log file support, and structured result capture |
+| `worktree.ts` | Creates/cleans up git worktrees with session branch chaining (auto-merge), env file copying, and dependency installation |
+| `github.ts` | GitHub helpers via `gh` CLI — poll issues, label management, comments, PR create/update, merge, project board status |
+| `prompts.ts` | Pure prompt builders matching loop.sh templates for implement, review, and learn phases |
+
+**2 dependency stubs** (`shell.ts`, `logger.ts`) for issues #73/#74 that haven't landed yet.
+
+**4 test files** with 57 tests, all passing. Key coverage:
+- Agent arg construction for all 3 agent types
+- Worktree setup with auto-merge branching logic and dry run
+- GitHub PR create vs update path, body truncation
+- Prompt content with all/no optional context sections
+env: eval: No such file or directory
+All tests pass (57/57). The `env: eval: No such file or directory` error from the original output is an environment/shell issue in the CI worktree runner, not a test failure caused by the issue #75 changes. There are no broken tests to fix.
+env: eval: No such file or directory
+Tests are all passing locally — 5 suites, 57 tests, all green. The `env: eval: No such file or directory` error from the original output appears to be an environment/shell issue in the CI runner, not a test code failure.
+
+Since there are no actual test failures to fix, there's nothing to commit.
+env: eval: No such file or directory
+## Review Report
+
+### Findings Fixed
+
+- **CRITICAL: Dry run mode executed destructive operations in `setupWorktree`** — `git worktree remove`, `git branch -D`, and `git push origin --delete` all ran before the dry run guard at line 57. A user running `setupWorktree({ dryRun: true })` would still delete the existing worktree, local branch, and remote branch. Fixed by moving the dry run check before all destructive operations. Test strengthened to verify no destructive commands execute in dry run mode.
+
+### Remaining Gaps
+
+- **`mergePR` signature differs from spec** — The spec defines `mergePR(repo, prNum, method)` but the implementation takes `(repo, head, method)` and looks up the PR by branch name. This is actually more practical for the loop's use case (the loop knows the branch, not the PR number), but diverges from the spec. Should be documented or the spec updated.
+
+- **`updateProjectStatus` signature differs from spec** — The spec defines `(repo, issueNum, status)` but the implementation requires `(repo, projectNum, owner, issueNum, status)`. The extra params are necessary for the GitHub Projects API, so the spec was underspecified.
+
+- **No git lock retry logic** — The reference `worktree-manager.reference.ts` includes retry patterns for git lock contention (`index.lock` files). The new implementation doesn't retry on lock errors, which could cause intermittent failures in concurrent scenarios.
+
+- **No branch name sanitization** — The reference file has `isGitSafeName()` validation against directory traversal, control characters, and flag injection. The new code passes branch names directly into shell commands without validation. Low risk since branch names are generated from issue numbers (`agent/issue-{num}`), but external callers could supply unsafe values.
+
+- **`createPR` auto-escalates to force push** — If a normal push fails for any reason (not just "branch exists"), the code immediately tries `--force`. This could silently overwrite remote work. Consider checking the error message before force-pushing.
+
+- **No test for `updateProjectStatus`** — This function has multi-step logic (find item, get field, get project ID, update) but no unit tests.
+
+### Verification Notes
+
+- All 57 tests pass, including the strengthened dry run test
+- The `shell.ts` and `logger.ts` are stubs (labeled for issues #73 and #74) — this is expected if those issues haven't merged yet, but they should be replaced when the real implementations land
+- The agent runner streams to `process.stdout` directly — verify this works correctly when the loop captures output (the reference implementation uses event emitters instead)
+- The `commentIssue` function passes body through `JSON.stringify` for shell safety, which is good. The `labelIssue` and `pollIssues` functions use double-quoted interpolation for repo/label values — safe for expected inputs but not hardened against adversarial values

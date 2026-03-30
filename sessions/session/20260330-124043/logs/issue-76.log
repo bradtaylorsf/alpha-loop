@@ -1,0 +1,349 @@
+========================================
+Processing Issue #76: Port main loop: process_issue pipeline and run command
+Started: Mon Mar 30 13:27:47 PDT 2026
+========================================
+Now I have everything I need. Let me produce the structured implementation plan.
+
+---
+
+## Understanding
+
+Issue #76 is the largest piece of the TypeScript CLI migration: porting the core automation loop from `scripts/loop.sh` into TypeScript. This means building the `processIssue()` pipeline (the 12-step orchestration for a single issue), session management, test running, learning extraction, and the `alpha-loop run` CLI command that ties it all together. It depends on three prior issues: #73 (CLI scaffold + config), #74 (utility subcommands), and #75 (engine core: agent, worktree, github, prompts, shell, logger) — all of which already exist on their respective branches.
+
+## Acceptance Criteria
+
+- [ ] `processIssue()` executes all 12 pipeline steps in order: update status, setup worktree, plan, implement, test+retry, verify+retry, review, create PR, extract learnings, update context, auto-merge, cleanup
+- [ ] Failed implementation aborts and labels issue `failed`
+- [ ] Test failures trigger retry loop up to `config.maxTestRetries`, invoking agent with fix prompt each time
+- [ ] Verification retry loop mirrors test retry loop
+- [ ] PR body includes review report, test results, and "What to Test" section
+- [ ] `dryRun` mode logs all steps without executing side effects
+- [ ] `createSession()` generates session with timestamp-based name (e.g. `session/20260330-143000`)
+- [ ] `saveResult()` writes JSON result to `sessions/{name}/` directory
+- [ ] `getPreviousResult()` returns the last result for prompt context injection
+- [ ] `finalizeSession()` commits learnings to session branch and creates session PR
+- [ ] `runTests()` executes configured test command, respects `skipTests`, handles preflight ignore
+- [ ] `extractLearnings()` invokes agent with learn prompt, writes to `learnings/` only
+- [ ] `getLearningContext()` returns formatted context from recent learnings
+- [ ] `alpha-loop run` starts polling loop; `--once` exits after one cycle
+- [ ] `--dry-run`, `--model`, `--skip-tests`, `--auto-merge` flags work
+- [ ] Ctrl+C triggers cleanup (remove worktrees, finalize session, log summary)
+- [ ] Startup banner shows all configuration before polling begins
+
+## Implementation Plan
+
+### Step 0: Merge dependencies into working branch
+
+Before writing code, merge the three dependency branches (`agent/issue-73`, `agent/issue-74`, `agent/issue-75`) into `agent/issue-76` to get all prerequisite files: `src/cli.ts`, `src/commands/{init,history,scan,vision,auth}.ts`, `src/lib/{config,logger,shell,agent,worktree,github,prompts}.ts`, and their tests.
+
+### Step 1: Create `src/lib/testing.ts` (new file)
+
+Port `run_tests()` (loop.sh:1900-1974) and `run_e2e_tests()` (loop.sh:1977-2007):
+
+```typescript
+export type TestResult = { passed: boolean; output: string };
+export function runTests(worktree: string, config: Config, logFile: string): TestResult;
+export function runE2eTests(worktree: string, logFile: string): TestResult;
+```
+
+Key logic:
+- If `config.skipTests` → return `{ passed: true, output: 'Tests skipped' }`
+- If `config.dryRun` → return `{ passed: true, output: 'Tests skipped (dry run)' }`
+- Use `exec()` from `shell.ts` to run `config.testCommand` in the worktree cwd
+- If `config.runFull` → set `RECORD_FIXTURES=true` env var
+- Handle preflight ignore file: compare current failures against pre-existing ones, treat all-pre-existing as pass
+- Use `exec()` synchronously (matches existing shell.ts pattern)
+
+### Step 2: Create `src/lib/learning.ts` (new file)
+
+Port `run_learn()` (loop.sh:1420-1485), `count_learnings()` (loop.sh:1488-1490), `get_learning_context()` (loop.sh:1517-1551):
+
+```typescript
+export async function extractLearnings(options: ExtractLearningsOptions): Promise<void>;
+export function getLearningContext(learningsDir: string): string;
+export function countLearnings(learningsDir: string): number;
+```
+
+Key logic:
+- `extractLearnings()`: builds learn prompt via `buildLearnPrompt()` from `prompts.ts`, invokes agent via `spawnAgent()` from `agent.ts`, writes output to `learnings/issue-{num}-{timestamp}.md`
+- Validate output has frontmatter (`---`), wrap if not
+- `getLearningContext()`: read last 5 learning files (sorted reverse), extract "What Worked" and "What Failed" sections, plus anti-patterns
+- `countLearnings()`: count `issue-*.md` files in learnings dir
+- NEVER write to `.claude/skills/` or `.claude/agents/` directories
+
+### Step 3: Create `src/lib/session.ts` (new file)
+
+Port session management (loop.sh session globals + `finalize_session()` at lines 3139-3215):
+
+```typescript
+export type SessionContext = {
+  name: string;          // e.g. "session/20260330-143000"
+  branch: string;
+  resultsDir: string;
+  logsDir: string;
+  results: PipelineResult[];
+};
+
+export function createSession(config: Config): SessionContext;
+export function saveResult(session: SessionContext, result: PipelineResult): void;
+export function getPreviousResult(session: SessionContext): string | null;
+export async function finalizeSession(session: SessionContext, config: Config): Promise<string | null>;
+```
+
+Key logic:
+- `createSession()`: generate timestamp name `session/YYYYMMDD-HHMMSS`, create dirs `sessions/{name}/` and `sessions/{name}/logs/`
+- If `config.autoMerge`, create session branch from `config.baseBranch` using `exec()`
+- `saveResult()`: write JSON to `sessions/{name}/result-{issueNum}.json`
+- `getPreviousResult()`: read last result from `session.results` array, format as string for prompt context
+- `finalizeSession()`: checkout session branch, `git add` sessions/ and learnings/, commit, push, create or update session PR via `createPR()` from `github.ts`, return PR URL
+
+### Step 4: Create `src/lib/pipeline.ts` (new file)
+
+Port `process_issue()` (loop.sh:2566-2758). This is the heart of the system:
+
+```typescript
+export type PipelineResult = {
+  issueNum: number;
+  title: string;
+  status: 'success' | 'failure';
+  prUrl?: string;
+  testsPassing: boolean;
+  verifyPassing: boolean;
+  duration: number;
+  filesChanged: number;
+};
+
+export async function processIssue(
+  issueNum: number, title: string, body: string,
+  config: Config, session: SessionContext,
+): Promise<PipelineResult>;
+```
+
+Pipeline steps (directly matching loop.sh):
+1. **Update status** — `labelIssue(repo, issueNum, 'in-progress', config.labelReady)` + `updateProjectStatus()`
+2. **Setup worktree** — `setupWorktree()` from `worktree.ts`. On failure: label `failed`, comment, return failure result
+3. **Plan** — `spawnAgent()` with plan prompt (optional, failure non-fatal)
+4. **Implement** — `spawnAgent()` with `buildImplementPrompt()`. On failure: label `failed`, comment, cleanup, return failure
+5. **Test + retry** — loop `maxTestRetries` times: `runTests()`, if fail invoke `spawnAgent()` with fix prompt
+6. **Verify + retry** — same pattern as tests, with verify fix prompt. Skip if `skipVerify || skipTests || dryRun`
+7. **Review** — `spawnAgent()` with `buildReviewPrompt()` (non-fatal)
+8. **Create PR** — `createPR()` from `github.ts` with review report + test results + "What to Test" section
+9. **Extract learnings** — `extractLearnings()` from `learning.ts` (non-fatal)
+10. **Update context** — comment on issue with status summary, `labelIssue()` to `in-review`
+11. **Auto-merge** — `mergePR()` if `config.autoMerge`
+12. **Cleanup** — `cleanupWorktree()`
+
+Each step logs via `logger.info/warn/error`. `dryRun` mode logs `logger.dry()` and skips execution.
+
+### Step 5: Create `src/commands/run.ts` (new file)
+
+Wire everything into the CLI:
+
+```typescript
+export type RunOptions = {
+  once?: boolean;
+  dryRun?: boolean;
+  model?: string;
+  skipTests?: boolean;
+  skipReview?: boolean;
+  skipLearn?: boolean;
+  autoMerge?: boolean;
+  mergeTo?: string;
+};
+
+export async function runCommand(options: RunOptions): Promise<void>;
+```
+
+Key logic:
+- `loadConfig()` from `config.ts` with CLI option overrides
+- Print startup banner (repo, model, branch, label, flags) — matching loop.sh:3023-3044
+- Run prerequisite check (verify `gh`, `git`, agent CLI are installed via `exec('which ...')`)
+- Create session via `createSession()`
+- Polling loop: `pollIssues()`, for each issue `processIssue()`, push result to session
+- If `options.once` → break after first cycle
+- Sleep `config.pollInterval * 1000` between cycles
+- Register `process.on('SIGINT', ...)` handler for Ctrl+C: cleanup worktrees, finalize session, log summary
+
+### Step 6: Modify `src/cli.ts`
+
+Update the existing `run` command registration (currently a placeholder on issue-73's branch) to import and call `runCommand()` from `src/commands/run.ts`. The `run` command already has the right option flags defined; just wire the action handler.
+
+### Step 7: Write tests
+
+All tests in `tests/` directory using Jest.
+
+## Test Plan
+
+- **`tests/lib/testing.test.ts`**:
+  - `runTests()` with `skipTests=true` returns `{ passed: true }` immediately
+  - `runTests()` with `dryRun=true` returns without executing
+  - `runTests()` calls `exec()` with correct test command and worktree cwd
+  - `runTests()` returns `passed: false` when test command exits non-zero
+  - Mock `exec()` from `shell.ts` for all tests
+
+- **`tests/lib/learning.test.ts`**:
+  - `extractLearnings()` calls `spawnAgent()` with correct learn prompt
+  - `extractLearnings()` writes output to `learnings/issue-{num}-{timestamp}.md`
+  - `extractLearnings()` skips when `config.skipLearn=true`
+  - `getLearningContext()` returns formatted string from learning files
+  - `countLearnings()` counts files matching `issue-*.md`
+  - Mock `spawnAgent()` and filesystem operations
+
+- **`tests/lib/session.test.ts`**:
+  - `createSession()` generates correct name format (`session/YYYYMMDD-HHMMSS`)
+  - `createSession()` creates results and logs directories
+  - `saveResult()` writes JSON to correct path
+  - `getPreviousResult()` returns null when no results, formatted string when results exist
+  - `finalizeSession()` commits, pushes, creates PR with correct body
+  - Mock `exec()` and `createPR()`
+
+- **`tests/lib/pipeline.test.ts`**:
+  - `processIssue()` calls all 12 steps in order (mock all dependencies, verify call sequence)
+  - `processIssue()` returns `status: 'failure'` and labels `failed` when implementation fails
+  - `processIssue()` retries tests up to `maxTestRetries` with fix agent
+  - `processIssue()` test retry succeeds on second attempt (mock fail then pass)
+  - `processIssue()` in dry run mode logs without executing
+  - `processIssue()` creates PR with review report and test output
+
+- **`tests/commands/run.test.ts`**:
+  - `runCommand({ once: true })` processes available issues and exits
+  - `runCommand({ dryRun: true })` runs without side effects
+  - Startup banner includes all config values
+  - Integration test: `run --once --dry-run` completes without error
+
+## What to Test Manually
+
+1. Merge dependency branches, run `pnpm test` to verify all existing tests pass
+2. Run `npx tsx src/cli.ts run --once --dry-run` against a repo with a `ready`-labeled issue — verify banner prints, issue is found, pipeline steps are logged as dry-run
+3. Run `npx tsx src/cli.ts run --once` against a real repo with a simple `ready`-labeled issue — verify full pipeline executes: worktree created, agent invoked, tests run, PR created, worktree cleaned up
+4. Press Ctrl+C during polling — verify cleanup runs and summary is logged
+5. Run with `--skip-tests --skip-review` — verify those steps are skipped
+6. Run with `--auto-merge` — verify PR is merged to session branch and session PR is created
+
+## Risks
+
+- **Dependency merge conflicts**: Issues #73, #74, #75 may have overlapping changes to `src/cli.ts`, `src/lib/config.ts`, and `src/lib/logger.ts`. Need to reconcile the three versions (issue-73 has full config.ts, issue-74 has simplified config.ts).
+- **Synchronous shell.ts**: The current `exec()` is synchronous (`execSync`). Test execution and agent spawning could block for minutes. `spawnAgent()` from `agent.ts` is already async, but `runTests()` using `exec()` will block the event loop. This is acceptable for MVP (matches bash behavior) but worth noting.
+- **Signal handling complexity**: Cleaning up worktrees on Ctrl+C requires tracking active worktree state. If the process dies mid-worktree-creation, orphan worktrees may remain. Need a `process.on('SIGINT')` handler that references current pipeline state.
+- **Large PR body truncation**: The PR body includes review output + test output + "What to Test" which could exceed GitHub's limit. `truncateBody()` in `github.ts` handles this, but test output from verbose agents can be enormous.
+- **Session branch race conditions**: If `finalizeSession()` runs while a worktree is still being cleaned up, git operations could conflict. The sequential nature of the loop makes this unlikely, but Ctrl+C could trigger it.
+- **Issue #73 vs #74 config.ts divergence**: Issue #73 has a full `Config` type with all fields and YAML/env mapping. Issue #74 has a simplified `LoopConfig` type. Need to use #73's version as the canonical one since it has all the fields pipeline.ts needs.
+Implementation complete. Here's a summary of what was built:
+
+## New Files (6)
+- **`src/lib/pipeline.ts`** — 12-step `processIssue()` pipeline: status update → worktree → plan → implement → test+retry → verify+retry → review → create PR → extract learnings → update status → auto-merge → cleanup
+- **`src/lib/session.ts`** — `createSession()`, `saveResult()`, `getPreviousResult()`, `finalizeSession()` with timestamp-based naming and session PR creation
+- **`src/lib/testing.ts`** — `runTests()` and `runE2eTests()` with skipTests/dryRun support
+- **`src/lib/learning.ts`** — `extractLearnings()`, `getLearningContext()`, `countLearnings()` for self-improvement loop
+- **`src/commands/run.ts`** — `alpha-loop run` command with polling loop, startup banner, prerequisite checks, signal handling, and CLI flags (`--once`, `--dry-run`, `--model`, `--skip-tests`, `--skip-review`, `--skip-learn`, `--auto-merge`, `--merge-to`)
+
+## Updated Files (8)
+- **`src/cli.ts`** — Merged all commands from issues #73, #74, #75; wired `run` command
+- **`src/lib/config.ts`** — Added `assertSafeShellArg()` from #74
+- **`src/lib/logger.ts`** — Unified logger with both `log.info` and `logInfo` export styles
+- **`src/lib/shell.ts`** — Unified `exec()` (ExecResult) + `run()` (streaming)
+- **tests/** — Updated 4 existing tests for new APIs + 5 new test suites
+
+## Test Results
+17 test suites, 137 tests — all passing.
+env: eval: No such file or directory
+All 137 tests pass across 17 test suites. There are no actual test failures to fix — the original error (`env: eval: No such file or directory`) was an environment/shell issue in the test runner script, not a problem with the test code or implementation.
+env: eval: No such file or directory
+All 17 test suites pass (137 tests, 0 failures). The tests are actually passing. The error in the original output (`env: eval: No such file or directory`) is not a Jest test failure - it's an environment issue with how the test command was invoked.
+
+There are no test failures to fix.
+env: eval: No such file or directory
+
+> alpha-loop@0.3.0 dev /Users/bradtaylor/Github/issue-76
+> tsx src/cli.ts
+
+Usage: alpha-loop [options] [command]
+
+Agent-agnostic automated development loop
+
+Options:
+  -V, --version                output the version number
+  -h, --help                   display help for command
+
+Commands:
+  init                         Create .alpha-loop.yaml config template
+  run [options]                Run the loop
+  history [options] [session]  View session history
+  scan                         Generate/refresh project context
+  vision                       Interactive project vision setup
+  auth                         Save authenticated browser state
+  help [command]               display help for command
+ ELIFECYCLE  Command failed with exit code 1.
+---
+
+## Verification Report
+
+### Status: PASS (with minor deviations noted)
+
+### What Was Tested
+- TypeScript compilation (`tsc --noEmit`) — passes with zero errors
+- Full test suite (`pnpm test`) — **17 suites, 137 tests, all passing**
+- CLI wiring (`alpha-loop run --help`) — all flags present and correct
+- Code review of all 6 new files: `pipeline.ts`, `session.ts`, `testing.ts`, `learning.ts`, `run.ts`, `cli.ts`
+- Test coverage review of all 6 test files
+
+### What Worked
+- **All 12 pipeline steps** are implemented in correct order in `processIssue()`
+- **Each step logs** with `log.step()`, `log.info()`, `log.success()`, etc.
+- **Failed implementation** aborts, labels issue `failed`, comments, and cleans up worktree
+- **Test retry loop** works correctly up to `maxTestRetries` with fix agent invocation
+- **Verification retry loop** mirrors test retry pattern
+- **PR creation** includes review report, test results, and "What to Test" section via `buildPRBody()`
+- **Dry run mode** logs all steps without executing side effects (verified by test assertions)
+- **Session management**: `createSession()` generates timestamp names, `saveResult()` writes JSON, `getPreviousResult()` returns null/formatted string, `finalizeSession()` commits and creates PR
+- **Run command**: polling loop, `--once`, `--dry-run`, `--model`, `--skip-tests`, `--auto-merge` all wired
+- **Ctrl+C cleanup**: SIGINT/SIGTERM handlers registered, cleanup function handles worktrees and session finalization
+- **Startup banner**: displays all configuration values
+- **Testing module**: `runTests()` respects `skipTests` and `dryRun`, executes configured test command
+- **Learning module**: `extractLearnings()` invokes agent, writes to `learnings/` only, `getLearningContext()` formats context
+
+### What Failed
+- Nothing critical
+
+### Console Errors
+- N/A (CLI tool, not web app)
+
+### Network Issues
+- N/A (CLI tool, not web app)
+
+### Gaps Found (Minor, Non-blocking)
+
+1. **Session PR title format deviation** (`session.ts:141`): Spec says `Session: {name} — {count} issues`, code produces `session: {name} ({count} issues)` — lowercase "session:" and parentheses instead of em-dash. Cosmetic only.
+
+2. **`runE2eTests()` lacks dryRun/skipTests guards** (`testing.ts:66`): Unlike `runTests()`, the E2E function doesn't check these flags. However, `runE2eTests()` is only called from the verify step in `pipeline.ts`, which already skips in dryRun mode, so this is not a functional issue.
+
+3. **No dedicated test for preflight ignore file handling**: The spec mentions "handle preflight ignore file" in `runTests()`, and while there's basic preflight skip logic in config (`skipPreflight`), there's no test specifically for comparing pre-existing test failures vs new ones.
+
+All acceptance criteria from issue #76 are substantively met. The implementation is solid, well-tested, and the code compiles cleanly.
+---
+
+## Review Summary
+
+### Findings Fixed
+
+1. **Verification step bypassed `runE2eTests()`** — Pipeline was calling `exec('pnpm test:e2e')` directly instead of using the dedicated `runE2eTests()` function from `testing.ts`. This made `runE2eTests` dead code and missed log file integration. Fixed to use the proper function.
+
+2. **Session PR title didn't match acceptance criteria** — Was `session: name (N issues)`, changed to `Session: name — N issues` per spec.
+
+3. **Unhandled promise in signal handlers** — `cleanup()` is async but the SIGINT/SIGTERM handlers didn't acknowledge the promise. Added `void` to explicitly discard it (Node.js signal handlers can't be async, but this prevents linting warnings).
+
+### Remaining Gaps
+
+- **Preflight test validation not implemented** — The startup banner section of the issue spec mentions "Run preflight test validation if not skipped", but this isn't implemented. Low priority for MVP since `skipPreflight` config exists.
+- **Vision prompt not implemented** — Spec mentions "Prompt for vision if missing (interactive only)" in startup, but only a log message is shown. Acceptable for MVP — users can run `alpha-loop vision` separately.
+- **Learning file reads are duplicated** — `getLearningContext()` reads files twice (once for main context, once for anti-patterns). Minor inefficiency, not a bug.
+
+### Verification Notes
+
+- All 137 tests pass
+- TypeScript compiles clean (`tsc --noEmit` passes)
+- The `forceExit` warning from Jest is pre-existing and expected per `jest.config.cjs`
+- The pipeline's 12-step flow (status → worktree → plan → implement → test+retry → verify+retry → review → PR → learnings → update → auto-merge → cleanup) matches the spec
+- Dry run mode properly skips all side effects (GitHub API calls, agent spawning, PR creation)
+- Session management handles branch creation, result saving, and PR finalization correctly
+- Signal handlers (Ctrl+C) clean up active worktrees and attempt session finalization

@@ -1,0 +1,274 @@
+========================================
+Processing Issue #78: Delete loop.sh, finalize npm package, and update documentation
+Started: Mon Mar 30 14:04:02 PDT 2026
+========================================
+Now I have the full picture. Here's the plan:
+
+---
+
+## Understanding
+
+Issue #78 is the final migration step: delete the bash script (`scripts/loop.sh`) and reference files (`reference/`), finalize `package.json` for npm publishing, and update all documentation to reflect the TypeScript CLI. However, there's a critical blocker: **the TypeScript CLI code does not exist on this branch**. It was implemented across branches `agent/issue-73` through `agent/issue-77` and `agent/issue-70`, but commit `a1709cf` (#79) deleted it from master before those branches were merged. The first step must be merging/cherry-picking that code onto this branch.
+
+## Acceptance Criteria
+
+- [ ] TypeScript CLI source code exists in `src/` (merged from dependency branches #73-#77, #70)
+- [ ] `scripts/` directory is deleted (including `loop.sh`)
+- [ ] `reference/` directory is deleted entirely
+- [ ] `package.json` has `bin`, `files`, `engines`, `keywords`, `license` fields; version is `1.0.0`; bash scripts removed
+- [ ] `pnpm build` produces working CLI in `dist/`
+- [ ] `node dist/cli.js --help` shows all commands (init, run, scan, history, auth, vision)
+- [ ] `node dist/cli.js --version` shows `1.0.0`
+- [ ] `dist/cli.js` has shebang `#!/usr/bin/env node` and is executable
+- [ ] `CLAUDE.md` reflects TypeScript CLI architecture (no bash/reference references)
+- [ ] `README.md` is written for public npm consumers (`npm install -g alpha-loop`)
+- [ ] `LICENSE` (MIT) file exists
+- [ ] `pnpm pack --dry-run` shows only `dist/`, `agents/`, `README.md`, `LICENSE`, `package.json`
+- [ ] No references to `loop.sh` remain in any tracked file
+- [ ] All tests pass (`pnpm test`)
+
+## Implementation Plan
+
+### Step 0: Merge TypeScript CLI code from dependency branches
+
+The TypeScript CLI was built in issues #73-#77 and #70 but those branches were never merged into master (and commit #79 deleted earlier TypeScript code). We need to bring that code in.
+
+**Option A (recommended):** Merge `agent/issue-76` (which already merged #73, #74, #75) and then `agent/issue-70` (which adds multi-agent support on top) into `agent/issue-78`.
+
+```
+git merge agent/issue-76   # brings in src/cli.ts, src/commands/*, src/lib/*, tests/*
+git merge agent/issue-70   # brings in src/engine/agents.ts, src/engine/config.ts, src/engine/prerequisites.ts
+```
+
+**Files added (~5,600 lines across 37 files):**
+- `src/cli.ts` — CLI entry point with Commander setup (already has `#!/usr/bin/env node`)
+- `src/commands/{init,run,scan,history,auth,vision}.ts` — 6 subcommands
+- `src/lib/{agent,config,github,learning,logger,pipeline,prompts,session,shell,testing,worktree}.ts` — 11 library modules
+- `src/engine/{agents,config,prerequisites}.ts` — 3 engine modules (from #70)
+- `tests/` — full test suite mirroring src/
+
+**Resolve conflicts:** The main conflicts will be in `package.json` (version, dependencies) and `tsconfig.json`. Resolve in favor of the TypeScript branches, keeping `commander` dependency.
+
+### Step 1: Delete `scripts/` directory
+
+- Delete `scripts/loop.sh` (3,330 lines)
+- `scripts/prompts/` does not exist, so just remove the `scripts/` directory
+
+### Step 2: Delete `reference/` directory
+
+- Delete `reference/cli-runner.reference.ts`
+- Delete `reference/github-client.reference.ts`
+- Delete `reference/logger.reference.ts`
+- Delete `reference/worktree-manager.reference.ts`
+- Delete `reference/README.md`
+
+### Step 3: Update `package.json`
+
+Starting from the merged state (which has `bin` and `commander` already), make these changes:
+
+- **version**: `0.3.0` → `1.0.0`
+- **Remove scripts**: `loop`, `loop:once`, `loop:dry`
+- **Add scripts**: `postbuild: "chmod +x dist/cli.js"`, `prepublishOnly: "pnpm build"`
+- **Add fields**: `files: ["dist", "agents", "README.md", "LICENSE"]`, `engines: { "node": ">=20" }`, `keywords: [...]`, `license: "MIT"`
+- **Keep**: `build`, `dev`, `test`, `test:unit`, `test:watch`
+
+### Step 4: Verify/update `src/cli.ts` shebang
+
+The file on `agent/issue-76` already has `#!/usr/bin/env node` on line 1. Verify it's present after merge. Update `.version()` call from `0.3.0` to `1.0.0`.
+
+### Step 5: Update `tsconfig.json`
+
+Verify `include` is scoped to `src/**/*.ts` (not `**/*.ts` which would compile tests). The merged version from issue-76 should have this correct. Ensure `outDir: "dist"` is set.
+
+### Step 6: Create `LICENSE` file
+
+Add standard MIT license with copyright holder "Bradley Taylor" and year 2026.
+
+### Step 7: Rewrite `CLAUDE.md`
+
+Update sections:
+- **Tech Stack**: Remove "Bash script (scripts/loop.sh)", add "CLI Framework: Commander.js"
+- **Commands**: Replace `pnpm loop` etc. with `alpha-loop run`, `alpha-loop init`, etc.
+- **Directory Structure**: Replace `scripts/loop.sh` with `src/` layout, remove `reference/`
+- **Reference Code**: Delete this section entirely
+- **Protected Files**: Remove `reference/` and `scripts/loop.sh`
+- **Architecture Principles**: Update to reflect TypeScript CLI
+- **Keep**: Testing rules, code style, ESM conventions
+
+### Step 8: Rewrite `README.md`
+
+Rewrite for npm consumers:
+- **Installation**: `npm install -g alpha-loop` / `npx alpha-loop`
+- **Quick Start**: `alpha-loop init` → `alpha-loop run --once`
+- **Commands reference**: All 6 subcommands with flags
+- **Configuration**: `.alpha-loop.yaml` reference
+- **Requirements**: Node 20+, gh CLI, git, AI agent CLI
+- **How It Works**: The loop methodology
+
+### Step 9: Clean up stale references to `loop.sh`
+
+Files to check and update:
+- `.alpha-loop/context.md` — remove loop.sh references
+- `.claude/skills/test-caching/SKILL.md` — remove loop.sh references
+- Any other files found via `grep -r "loop.sh"`
+
+### Step 10: Build and verify
+
+- Run `pnpm install` (ensure `commander` is installed)
+- Run `pnpm build` — verify no compilation errors
+- Run `chmod +x dist/cli.js` (or verify postbuild does it)
+- Run `node dist/cli.js --help` — verify all commands listed
+- Run `node dist/cli.js --version` — verify shows `1.0.0`
+- Run `pnpm pack --dry-run` — verify tarball contents
+
+## Test Plan
+
+- **Existing tests**: Run `pnpm test` — all tests from #73-#77 and #70 should pass
+- **Build verification**: `pnpm build` exits 0, `dist/cli.js` exists and is executable
+- **CLI smoke tests**: `node dist/cli.js --help`, `--version`, each subcommand `--help`
+- **Package verification**: `pnpm pack --dry-run` shows only `dist/`, `agents/`, `README.md`, `LICENSE`, `package.json`
+- **No stale references**: `grep -r "loop.sh" --include='*.ts' --include='*.md' --include='*.json'` returns zero results (excluding MEMORY.md or git history)
+
+## What to Test Manually
+
+1. `pnpm build` — should complete without errors
+2. `node dist/cli.js --help` — should show: init, run, scan, history, auth, vision
+3. `node dist/cli.js --version` — should print `1.0.0`
+4. `node dist/cli.js init` (in a temp dir) — should create `.alpha-loop.yaml`
+5. `node dist/cli.js run --once --dry-run` — should run in dry-run mode (may fail if no config, but should not crash with unhandled error)
+6. `node dist/cli.js history` — should show history or empty state
+7. `pnpm pack --dry-run` — inspect the file list, verify no `tests/`, `learnings/`, `scripts/`, `reference/`, `.claude/`, `node_modules/`
+8. `grep -r "loop.sh" .` — should return nothing (outside `.git/`)
+
+## Risks
+
+1. **Merge conflicts (Step 0)**: The biggest risk. Merging branches #73-#77 and #70 into a branch where #79 deleted all TypeScript code will likely produce conflicts. The resolution strategy should be: accept all TypeScript files from the feature branches, resolve `package.json`/`tsconfig.json` manually.
+
+2. **Dependency on unmerged PRs**: Issues #73-#77 and #70 were implemented but never merged to master. If there are bugs in that code, they'll surface here. The test suite should catch most issues.
+
+3. **Commander dependency**: The merged code depends on `commander` which is not in the current `package.json`. `pnpm install` after merge should resolve this, but verify.
+
+4. **tsconfig `include` scope**: If `include` is `**/*.ts`, the build will try to compile test files into `dist/`. Must be scoped to `src/**/*.ts`.
+
+5. **Protected files caveat**: CLAUDE.md says `scripts/loop.sh` and `reference/` are protected. The issue explicitly asks to delete them and update CLAUDE.md, which overrides the protection rule.
+
+6. **`.alpha-loop/context.md`** and **`.claude/skills/`** may contain loop.sh references that need updating — these are in protected directories per CLAUDE.md, so changes need to be minimal and targeted.
+PR created: https://github.com/bradtaylorsf/alpha-loop/pull/81
+
+Here's what was done:
+
+1. **Merged TypeScript CLI** from branches #73-#77 and #70 (resolved conflicts in `shell.ts` and `package.json`)
+2. **Deleted `scripts/loop.sh`** and **`reference/`** directory
+3. **Updated `package.json`** — version 1.0.0, added `bin`, `files`, `engines`, `keywords`, `license`, `postbuild`, `prepublishOnly`
+4. **Created MIT `LICENSE`** file
+5. **Rewrote `CLAUDE.md`** and **`README.md`** for the TypeScript CLI
+6. **Cleaned all `loop.sh` references** from source code comments
+7. **Fixed test** (`tests/prerequisites.test.ts` — updated mock from `exec` to `execAsync`)
+
+All 208 tests pass, build is clean, CLI works (`--help`, `--version`), and `npm pack` produces a clean tarball.
+env: eval: No such file or directory
+All tests pass (208/208) and the build succeeds. There are no test failures to fix — the `env: eval: No such file or directory` error from your log was an environment/shell issue in the worktree runner, not a code problem.
+env: eval: No such file or directory
+All 24 test suites pass (208 tests, 0 failures). The error `env: eval: No such file or directory` from the original report was likely a shell environment issue when the test runner was invoked, not an actual test failure.
+
+The tests are clean — no fixes needed.
+env: eval: No such file or directory
+
+> alpha-loop@1.0.0 dev /Users/bradtaylor/Github/issue-78
+> tsx src/cli.ts
+
+Usage: alpha-loop [options] [command]
+
+Agent-agnostic automated development loop
+
+Options:
+  -V, --version                output the version number
+  -h, --help                   display help for command
+
+Commands:
+  init                         Create .alpha-loop.yaml config template
+  run [options]                Run the loop
+  history [options] [session]  View session history
+  scan                         Generate/refresh project context
+  vision                       Interactive project vision setup
+  auth                         Save authenticated browser state
+  help [command]               display help for command
+ ELIFECYCLE  Command failed with exit code 1.
+All clear. Here's the verification report:
+
+---
+
+### Status: PASS
+
+### What Was Tested
+- Verified `scripts/` directory is deleted
+- Verified `reference/` directory is deleted
+- Verified `LICENSE` file exists
+- Ran `pnpm build` — compiled successfully with postbuild chmod
+- Ran `node dist/cli.js --help` — all 6 commands listed (init, run, history, scan, vision, auth)
+- Ran `node dist/cli.js --version` — outputs `1.0.0`
+- Verified `dist/cli.js` has shebang `#!/usr/bin/env node` and is executable (`-rwxr-xr-x`)
+- Ran `node dist/cli.js init` in temp directory — created `.alpha-loop.yaml` successfully
+- Ran `node dist/cli.js run --once --dry-run` — runs correctly in dry-run mode
+- Ran `node dist/cli.js history` — shows "No sessions found." (correct empty state)
+- Inspected `package.json` — has `bin`, `files`, `engines`, `keywords`, `license`, version `1.0.0`
+- Ran `pnpm pack` and inspected tarball — contains only `dist/`, `agents/`, `README.md`, `LICENSE`, `package.json` (no tests, learnings, scripts, reference, .claude, node_modules)
+- Searched for `loop.sh` references — zero in tracked `.ts`, `.md`, `.json`, `.yaml` files
+- Verified CLAUDE.md has no references to `loop.sh`, `reference/`, or `scripts/`
+- Verified README.md has npm install/npx instructions for public consumers
+- Ran full test suite — **24 suites, 208 tests, all passed**
+
+### What Worked
+- All acceptance criteria from the issue are met
+- Build pipeline works end-to-end (TypeScript → dist → executable CLI)
+- All CLI commands functional
+- Package tarball is clean with only intended files
+- Complete test suite passes
+
+### What Failed
+- Nothing
+
+### Gaps Found
+- **Minor:** `.claude/skills/test-caching/SKILL.md` still references `scripts/loop.sh` (lines 87-91). This is in a protected directory per CLAUDE.md, and it's a skill definition rather than shipping code, so it's low severity — but should be updated for consistency.
+Here's the structured review report:
+
+---
+
+## Review Report for Issue #78
+
+### Findings Fixed
+
+1. **Stale `reference/` comments** — `src/lib/agent.ts`, `src/lib/github.ts`, and `src/lib/worktree.ts` had doc comments pointing to `reference/*.reference.ts` files that were deleted. Removed these dangling references.
+
+### Remaining Gaps
+
+1. **Stale `loop.sh` reference in `.claude/skills/test-caching/SKILL.md`** (lines 87-91) — Still references `scripts/loop.sh`. This file is in `.claude/skills/` which is protected per CLAUDE.md, so I did not modify it. A human should update this section to use `alpha-loop run` commands instead.
+
+2. **`--force` push in `createPR`** (`src/lib/github.ts:93`) — If the initial `git push` fails, it falls back to `--force` push with only a warning log. This is by design for retry scenarios (re-running the loop on the same issue), but worth noting as it could overwrite remote branch state.
+
+### Verification Checklist (all passing)
+
+| Check | Status |
+|-------|--------|
+| `scripts/` directory deleted | OK |
+| `reference/` directory deleted | OK |
+| `pnpm build` compiles clean | OK |
+| `node dist/cli.js --help` shows all commands | OK |
+| `node dist/cli.js --version` shows 1.0.0 | OK |
+| `node dist/cli.js init` works (temp dir) | OK |
+| Shebang `#!/usr/bin/env node` in dist/cli.js | OK |
+| `postbuild` chmod +x | OK |
+| package.json: `bin`, `files`, `engines`, `keywords` | OK |
+| `pnpm pack` tarball contains only dist/, agents/, README, LICENSE, package.json | OK |
+| No tests/, learnings/, sessions/, .claude/ in tarball | OK |
+| CLAUDE.md reflects TypeScript CLI architecture | OK |
+| README.md written for npm consumers | OK |
+| LICENSE file exists (MIT) | OK |
+| 24 test suites, 208 tests passing | OK |
+| No `loop.sh` references in src/ | OK |
+| `loop.sh` reference remains in `.claude/skills/` (protected) | Flagged above |
+
+### Verification Notes
+
+- **Manually test `alpha-loop run --once --dry-run`** in a real repo with GitHub issues — this requires a configured `.alpha-loop.yaml` and `gh` auth, so it can't be verified in isolation
+- **Update `.claude/skills/test-caching/SKILL.md`** to replace the `loop.sh` references with `alpha-loop` CLI commands

@@ -16,6 +16,7 @@ jest.mock('../../src/lib/logger', () => ({
 jest.mock('node:fs', () => ({
   existsSync: jest.fn(),
   copyFileSync: jest.fn(),
+  mkdirSync: jest.fn(),
 }));
 
 import { exec } from '../../src/lib/shell';
