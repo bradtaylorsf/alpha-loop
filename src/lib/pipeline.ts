@@ -1,0 +1,497 @@
+/**
+ * Process Issue Pipeline — the 12-step orchestration for a single issue.
+ */
+import { mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { log } from './logger.js';
+import { exec } from './shell.js';
+import { spawnAgent } from './agent.js';
+import { setupWorktree, cleanupWorktree } from './worktree.js';
+import {
+  labelIssue,
+  commentIssue,
+  createPR,
+  mergePR,
+  updateProjectStatus,
+} from './github.js';
+import { buildImplementPrompt, buildReviewPrompt } from './prompts.js';
+import { runTests, runE2eTests } from './testing.js';
+import { extractLearnings, getLearningContext } from './learning.js';
+import { saveResult, getPreviousResult } from './session.js';
+import type { Config } from './config.js';
+import type { SessionContext } from './session.js';
+
+export type PipelineResult = {
+  issueNum: number;
+  title: string;
+  status: 'success' | 'failure';
+  prUrl?: string;
+  testsPassing: boolean;
+  verifyPassing: boolean;
+  duration: number;
+  filesChanged: number;
+};
+
+/**
+ * Process a single issue through the full pipeline.
+ * Steps: status → worktree → plan → implement → test+retry → verify+retry →
+ *        review → PR → learnings → update → auto-merge → cleanup
+ */
+export async function processIssue(
+  issueNum: number,
+  title: string,
+  body: string,
+  config: Config,
+  session: SessionContext,
+): Promise<PipelineResult> {
+  const startTime = Date.now();
+  const projectDir = process.cwd();
+
+  // Setup logging
+  mkdirSync(session.logsDir, { recursive: true });
+  const logFile = join(session.logsDir, `issue-${issueNum}.log`);
+
+  log.step(`Processing Issue #${issueNum}: ${title}`);
+
+  // --- Step 1: Update status ---
+  log.step('Step 1: Updating issue status');
+  if (!config.dryRun) {
+    updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In progress');
+    labelIssue(config.repo, issueNum, 'in-progress', config.labelReady);
+  } else {
+    log.dry('Would update issue status to in-progress');
+  }
+
+  // --- Step 2: Setup worktree ---
+  log.step('Step 2: Setting up worktree');
+  let worktreePath: string;
+  let worktreeBranch: string;
+
+  try {
+    const wt = await setupWorktree({
+      issueNum,
+      projectDir,
+      baseBranch: config.baseBranch,
+      sessionBranch: session.branch,
+      autoMerge: config.autoMerge,
+      skipInstall: config.skipInstall,
+      dryRun: config.dryRun,
+    });
+    worktreePath = wt.path;
+    worktreeBranch = wt.branch;
+  } catch (err) {
+    log.error(`Failed to set up worktree for issue #${issueNum}: ${err}`);
+    if (!config.dryRun) {
+      labelIssue(config.repo, issueNum, 'failed', 'in-progress');
+      commentIssue(config.repo, issueNum, 'Agent loop failed: could not create worktree. Check logs.');
+    }
+    return failureResult(issueNum, title, startTime);
+  }
+
+  // --- Step 3: Plan (optional, non-fatal) ---
+  log.step('Step 3: Planning');
+  let implBody = body;
+  if (!config.dryRun) {
+    try {
+      const planResult = await spawnAgent({
+        agent: 'claude',
+        model: config.model,
+        prompt: `Analyze this GitHub issue and enrich it with implementation details.\n\nIssue #${issueNum}: ${title}\n\n${body}\n\nOutput the enriched issue body with acceptance criteria, implementation notes, and any edge cases to handle.`,
+        cwd: worktreePath,
+        logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
+      });
+      if (planResult.exitCode === 0 && planResult.output.trim()) {
+        implBody = body + '\n\n## Agent Planning Notes\n\n' + planResult.output.trim();
+      }
+    } catch {
+      log.warn('Planning stage failed, proceeding with original issue description');
+    }
+  } else {
+    log.dry('Would run planning agent');
+  }
+
+  // --- Step 4: Implement ---
+  log.step('Step 4: Implementing');
+  if (!config.dryRun) {
+    // Load vision and project context
+    const visionContext = loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md'));
+    const projectContext = loadFileIfExists(join(projectDir, '.alpha-loop', 'context.md'));
+    const previousResult = getPreviousResult(session);
+    const learningContext = getLearningContext(join(projectDir, 'learnings'));
+
+    const implementPrompt = buildImplementPrompt({
+      issueNum,
+      title,
+      body: implBody,
+      visionContext: visionContext ?? undefined,
+      projectContext: projectContext ?? undefined,
+      previousResult: previousResult ?? undefined,
+      learningContext: learningContext || undefined,
+    });
+
+    const implResult = await spawnAgent({
+      agent: 'claude',
+      model: config.model,
+      prompt: implementPrompt,
+      cwd: worktreePath,
+      maxTurns: config.maxTurns,
+      logFile: join(session.logsDir, `issue-${issueNum}-implement.log`),
+    });
+
+    if (implResult.exitCode !== 0) {
+      log.error(`Implementation failed for issue #${issueNum}`);
+      labelIssue(config.repo, issueNum, 'failed', 'in-progress');
+      commentIssue(config.repo, issueNum, 'Agent loop failed during implementation. See logs for details.');
+      await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+      return failureResult(issueNum, title, startTime);
+    }
+
+    // Auto-commit if agent didn't
+    const statusResult = exec('git status --porcelain', { cwd: worktreePath });
+    if (statusResult.stdout.trim()) {
+      exec('git add -A', { cwd: worktreePath });
+      exec(`git commit -m "feat: implement issue #${issueNum} - ${title}"`, { cwd: worktreePath });
+    }
+  } else {
+    log.dry('Would run implementation agent');
+  }
+
+  // --- Step 5: Test + retry loop ---
+  log.step('Step 5: Running tests');
+  let testOutput = '';
+  let testsPassing = false;
+
+  for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+    log.info(`Test attempt ${attempt} of ${config.maxTestRetries}`);
+
+    const testResult = runTests(worktreePath, config, logFile);
+    testOutput = testResult.output;
+
+    if (testResult.passed) {
+      testsPassing = true;
+      log.success(`All tests passed on attempt ${attempt}`);
+      break;
+    }
+
+    if (attempt < config.maxTestRetries) {
+      log.warn(`Tests failed on attempt ${attempt}, invoking agent to fix...`);
+      if (!config.dryRun) {
+        const fixPrompt = `Tests are failing for issue #${issueNum}. Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully\n2. Fix the implementation code or the tests\n3. Run the tests again to verify\n4. Commit your fixes with message: fix: resolve test failures for issue #${issueNum}`;
+
+        await spawnAgent({
+          agent: 'claude',
+          model: config.model,
+          prompt: fixPrompt,
+          cwd: worktreePath,
+          maxTurns: config.maxTurns,
+          logFile: join(session.logsDir, `issue-${issueNum}-fix-${attempt}.log`),
+        });
+
+        // Auto-commit fixes
+        const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
+        if (fixStatus.stdout.trim()) {
+          exec('git add -A', { cwd: worktreePath });
+          exec(`git commit -m "fix: resolve test failures for issue #${issueNum}"`, { cwd: worktreePath });
+        }
+      }
+    } else {
+      log.warn(`Tests still failing after ${config.maxTestRetries} attempts`);
+      testOutput = `TESTS FAILED after ${config.maxTestRetries} fix attempts. Latest output:\n${testOutput}`;
+    }
+  }
+
+  // --- Step 6: Verify + retry loop ---
+  log.step('Step 6: Verification');
+  let verifyOutput = '';
+  let verifyPassing = false;
+
+  if (config.skipVerify || config.skipTests || config.dryRun) {
+    verifyPassing = true;
+    log.info('Verification skipped');
+  } else {
+    for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+      log.info(`Verification attempt ${attempt} of ${config.maxTestRetries}`);
+
+      // Run E2E/verify tests
+      const e2eResult = runE2eTests(worktreePath, logFile);
+      verifyOutput = e2eResult.output;
+
+      if (e2eResult.passed) {
+        verifyPassing = true;
+        log.success(`Verification passed on attempt ${attempt}`);
+        break;
+      }
+
+      if (attempt < config.maxTestRetries) {
+        log.warn(`Verification failed on attempt ${attempt}, invoking agent to fix...`);
+        const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum}.\nThe app was started and tested, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification test files in tests/verify/ (if they exist)\n2. Fix the implementation code OR the verification tests\n3. Run pnpm test to make sure unit tests still pass\n4. Commit your fixes with message: fix: resolve verification failures for issue #${issueNum}`;
+
+        await spawnAgent({
+          agent: 'claude',
+          model: config.model,
+          prompt: verifyFixPrompt,
+          cwd: worktreePath,
+          maxTurns: config.maxTurns,
+          logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
+        });
+
+        // Auto-commit fixes
+        const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
+        if (fixStatus.stdout.trim()) {
+          exec('git add -A', { cwd: worktreePath });
+          exec(`git commit -m "fix: resolve verification failures for issue #${issueNum}"`, { cwd: worktreePath });
+        }
+      } else {
+        log.warn(`Verification still failing after ${config.maxTestRetries} attempts`);
+      }
+    }
+  }
+
+  // --- Step 7: Review ---
+  log.step('Step 7: Code review');
+  let reviewOutput = '';
+
+  if (config.skipReview) {
+    log.info('Code review skipped');
+  } else if (config.dryRun) {
+    log.dry('Would run code review');
+  } else {
+    try {
+      const reviewPrompt = buildReviewPrompt({
+        issueNum,
+        title,
+        body,
+        baseBranch: config.baseBranch,
+        visionContext: loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md')) ?? undefined,
+      });
+
+      const reviewResult = await spawnAgent({
+        agent: 'claude',
+        model: config.reviewModel,
+        prompt: reviewPrompt,
+        cwd: worktreePath,
+        maxTurns: config.maxTurns,
+        logFile: join(session.logsDir, `issue-${issueNum}-review.log`),
+      });
+
+      reviewOutput = reviewResult.output;
+    } catch {
+      log.warn('Code review failed, continuing without review');
+      reviewOutput = 'Code review could not be completed';
+    }
+  }
+
+  // --- Step 8: Create PR ---
+  log.step('Step 8: Creating PR');
+  let prUrl: string | undefined;
+
+  if (!config.dryRun) {
+    const prBase = config.autoMerge ? session.branch : config.baseBranch;
+    const prBody = buildPRBody(issueNum, title, reviewOutput, testOutput, testsPassing, verifyPassing, body);
+
+    try {
+      prUrl = createPR({
+        repo: config.repo,
+        base: prBase,
+        head: worktreeBranch,
+        title: `feat: ${title} (closes #${issueNum})`,
+        body: prBody,
+        cwd: worktreePath,
+      });
+      log.success(`PR created: ${prUrl}`);
+    } catch (err) {
+      log.error(`Failed to create PR for issue #${issueNum}: ${err}`);
+      labelIssue(config.repo, issueNum, 'failed', 'in-progress');
+      commentIssue(config.repo, issueNum, `Agent loop failed: could not create PR. Branch: ${worktreeBranch}`);
+      await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+      return failureResult(issueNum, title, startTime);
+    }
+  } else {
+    log.dry('Would create PR');
+  }
+
+  // --- Step 9: Extract learnings ---
+  log.step('Step 9: Extracting learnings');
+  const duration = Math.round((Date.now() - startTime) / 1000);
+
+  // Get diff for learning analysis
+  let runDiff = '';
+  if (!config.dryRun) {
+    const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+    runDiff = diffResult.stdout.slice(0, 10000); // Limit diff size
+  }
+
+  await extractLearnings({
+    issueNum,
+    title,
+    status: testsPassing ? 'success' : 'failure',
+    retries: config.maxTestRetries,
+    duration,
+    diff: runDiff,
+    testOutput,
+    reviewOutput,
+    verifyOutput,
+    body,
+    config,
+  });
+
+  // --- Step 10: Update issue status ---
+  log.step('Step 10: Updating issue status');
+  if (!config.dryRun) {
+    const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
+    updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'Done');
+    labelIssue(config.repo, issueNum, 'in-review', 'in-progress');
+    commentIssue(config.repo, issueNum,
+      `Automated implementation complete.\n\n**PR**: ${prUrl ?? 'N/A'}\n**Tests**: ${testsStatus}\n**Review**: Attached to PR body.\n\n---\n*Processed by alpha-loop in ${duration}s*`,
+    );
+  } else {
+    log.dry('Would update issue status to in-review');
+  }
+
+  // --- Step 11: Auto-merge ---
+  if (config.autoMerge && !config.dryRun && prUrl) {
+    log.step('Step 11: Auto-merging PR');
+    try {
+      mergePR(config.repo, worktreeBranch);
+
+      // Update local repo to include merged changes
+      exec('git fetch origin', { cwd: projectDir });
+      const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
+      if (currentBranch !== session.branch) {
+        exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+      }
+      exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+    } catch (err) {
+      log.warn(`Auto-merge failed: ${err}`);
+    }
+  } else if (config.dryRun) {
+    log.dry('Would auto-merge PR');
+  }
+
+  // --- Step 12: Cleanup ---
+  log.step('Step 12: Cleanup');
+  await cleanupWorktree({
+    issueNum,
+    projectDir,
+    autoCleanup: config.autoCleanup,
+    dryRun: config.dryRun,
+  });
+
+  // Count files changed
+  let filesChanged = 0;
+  if (runDiff) {
+    filesChanged = (runDiff.match(/^diff --git/gm) ?? []).length;
+  }
+
+  const result: PipelineResult = {
+    issueNum,
+    title,
+    status: testsPassing ? 'success' : 'failure',
+    prUrl,
+    testsPassing,
+    verifyPassing,
+    duration,
+    filesChanged,
+  };
+
+  // Save result to session
+  saveResult(session, result);
+
+  log.success(`Issue #${issueNum} processed in ${duration}s`);
+  if (prUrl) log.info(`PR: ${prUrl}`);
+
+  return result;
+}
+
+function failureResult(issueNum: number, title: string, startTime: number): PipelineResult {
+  return {
+    issueNum,
+    title,
+    status: 'failure',
+    testsPassing: false,
+    verifyPassing: false,
+    duration: Math.round((Date.now() - startTime) / 1000),
+    filesChanged: 0,
+  };
+}
+
+function loadFileIfExists(filePath: string): string | null {
+  if (!existsSync(filePath)) return null;
+  try {
+    return readFileSync(filePath, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function buildPRBody(
+  issueNum: number,
+  title: string,
+  reviewOutput: string,
+  testOutput: string,
+  testsPassing: boolean,
+  verifyPassing: boolean,
+  body: string,
+): string {
+  const sections: string[] = [
+    `Closes #${issueNum}`,
+    '',
+    `## Summary`,
+    `Automated implementation of: ${title}`,
+    '',
+  ];
+
+  if (reviewOutput) {
+    sections.push(
+      '<details>',
+      '<summary>Code Review</summary>',
+      '',
+      reviewOutput,
+      '',
+      '</details>',
+      '',
+    );
+  }
+
+  sections.push(
+    `## Test Results`,
+    `- Unit tests: ${testsPassing ? 'PASSING' : 'FAILING'}`,
+    `- Verification: ${verifyPassing ? 'PASSING' : 'FAILING'}`,
+  );
+
+  if (testOutput) {
+    sections.push(
+      '',
+      '<details>',
+      '<summary>Test Output</summary>',
+      '',
+      '```',
+      testOutput.slice(0, 5000),
+      '```',
+      '',
+      '</details>',
+    );
+  }
+
+  // Extract "What to Test" from issue body if present
+  const whatToTestMatch = body.match(/## What to Test[\s\S]*?(?=\n## |$)/);
+  if (whatToTestMatch) {
+    sections.push('', whatToTestMatch[0]);
+  } else {
+    sections.push(
+      '',
+      '## What to Test',
+      '- Verify the changes work as described in the issue',
+      '- Check for edge cases and error handling',
+      '- Review the code for security concerns',
+    );
+  }
+
+  sections.push(
+    '',
+    '---',
+    '*Automated by alpha-loop*',
+  );
+
+  return sections.join('\n');
+}

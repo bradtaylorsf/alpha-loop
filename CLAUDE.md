@@ -10,7 +10,7 @@ Agent-agnostic automated development loop that implements The Loop methodology:
 | Layer | Technology |
 |-------|------------|
 | **Runtime** | Node.js, TypeScript, ESM |
-| **Loop Engine** | Bash script (scripts/loop.sh) |
+| **CLI Framework** | Commander.js |
 | **AI Agents** | Any CLI agent (Claude, Codex, OpenCode) |
 | **Source of Truth** | GitHub (Issues = kanban, PRs = reviews, Actions = CI) |
 | **Package Manager** | pnpm |
@@ -18,26 +18,61 @@ Agent-agnostic automated development loop that implements The Loop methodology:
 ## Commands
 
 ```bash
-pnpm loop          # Run the loop continuously
-pnpm loop:once     # Process one issue and exit
-pnpm loop:dry      # Dry run (preview, no changes)
-pnpm test          # Run all tests
+alpha-loop init          # Create .alpha-loop.yaml config template
+alpha-loop run           # Run the loop continuously
+alpha-loop run --once    # Process one issue and exit
+alpha-loop run --dry-run # Dry run (preview, no changes)
+alpha-loop scan          # Generate/refresh project context
+alpha-loop vision        # Interactive project vision setup
+alpha-loop auth          # Save authenticated browser state
+alpha-loop history       # View session history
+alpha-loop history <name> --qa    # Show QA checklist for session
+alpha-loop history --clean        # Remove old session data
+pnpm test               # Run all tests
+pnpm build              # Build TypeScript to dist/
 ```
 
 ## Directory Structure
 
 ```
 alpha-loop/
-├── scripts/
-│   └── loop.sh              # Main loop script (the product)
-├── agents/                  # Agent definitions (YAML+Markdown)
-├── learnings/               # Self-improvement data
-│   └── proposed-updates/    # Proposed agent prompt updates
-├── reference/               # Battle-tested code from previous project
+├── src/
+│   ├── cli.ts                  # CLI entry point (Commander setup)
+│   ├── commands/               # Subcommand handlers
+│   │   ├── auth.ts             # Browser auth state management
+│   │   ├── history.ts          # Session history viewer
+│   │   ├── init.ts             # Config template creation
+│   │   ├── run.ts              # Main loop execution
+│   │   ├── scan.ts             # Project context generation
+│   │   └── vision.ts           # Vision document setup
+│   ├── engine/                 # Multi-agent engine
+│   │   ├── agents.ts           # Agent registry and selection
+│   │   ├── config.ts           # Engine configuration with Zod
+│   │   └── prerequisites.ts    # System requirement checks
+│   └── lib/                    # Shared libraries
+│       ├── agent.ts            # Agent runner abstraction
+│       ├── config.ts           # YAML config loading
+│       ├── context.ts          # Project context management
+│       ├── github.ts           # GitHub API (issues, PRs, labels)
+│       ├── learning.ts         # Learning extraction/application
+│       ├── logger.ts           # Structured logging
+│       ├── pipeline.ts         # Issue processing pipeline
+│       ├── preflight.ts        # Pre-run test validation
+│       ├── prerequisites.ts    # Tool availability checks
+│       ├── prompts.ts          # Agent prompt generation
+│       ├── session.ts          # Session management
+│       ├── shell.ts            # Shell execution helpers
+│       ├── testing.ts          # Test runner integration
+│       ├── vision.ts           # Vision document helpers
+│       └── worktree.ts         # Git worktree management
+├── tests/                      # Test suite (mirrors src/ structure)
+├── agents/                     # Agent definitions (YAML+Markdown)
+├── learnings/                  # Self-improvement data
+│   └── proposed-updates/       # Proposed agent prompt updates
 ├── .claude/
-│   ├── agents/              # Agent definitions for Claude
-│   └── skills/              # Reusable skill definitions
-└── config.yaml              # Loop configuration
+│   ├── agents/                 # Agent definitions for Claude
+│   └── skills/                 # Reusable skill definitions
+└── .alpha-loop.yaml            # Loop configuration
 ```
 
 ## Architecture Principles
@@ -48,33 +83,15 @@ alpha-loop/
 4. **Self-improving** -- Extract learnings, update agent prompts automatically
 5. **Simple enough to understand** -- A course graduate should be able to read this codebase
 
-## Reference Code
-
-The `reference/` directory contains battle-tested implementations from a previous version of this project. **Always check these files before writing new engine code.** They contain edge-case handling and patterns that were debugged over many iterations:
-
-- `reference/cli-runner.reference.ts` -- JSONL stream parsing, OAuth, process lifecycle
-- `reference/github-client.reference.ts` -- PR status tracking, rate limit handling
-- `reference/worktree-manager.reference.ts` -- Retry logic for git locks, cleanup on error
-- `reference/logger.reference.ts` -- Structured logging
-
-When building future TypeScript modules, adopt patterns from these reference files rather than reinventing solutions.
-
-## Planned: TypeScript CLI Migration
-
-A TypeScript CLI is planned to replace parts of the bash loop (see issues #73-#78). The TypeScript toolchain (typescript, tsx, ts-jest, jest) is kept in devDependencies for this purpose.
-
 ## Protected Files -- DO NOT MODIFY OR DELETE
 
-- `reference/` -- Battle-tested code from previous project. Read-only reference.
 - `CLAUDE.md` -- This file. Do not modify unless explicitly asked.
 - `.claude/agents/` -- Agent definitions. Do not modify unless explicitly asked.
 - `.claude/skills/` -- Skill definitions. Do not modify unless explicitly asked.
-- `scripts/loop.sh` -- The loop script. Do not modify unless explicitly asked.
 
 ## Code Style
 
-- The current product is bash (`scripts/loop.sh`)
-- TypeScript strict mode, ESM with .js extensions in imports (for future TypeScript code)
+- TypeScript strict mode, ESM with .js extensions in imports
 - Functional style, no classes (except where wrapping external APIs)
 - pnpm only (not npm or yarn)
 - Use `node:` prefix for built-in modules (e.g., `node:path`, `node:child_process`)

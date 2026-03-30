@@ -1,19 +1,45 @@
 {
   "name": "alpha-loop",
-  "version": "0.2.0",
-  "description": "Agent-agnostic automated development loop: Plan -> Build -> Test -> Review -> Ship",
+  "version": "1.0.0",
+  "description": "Agent-agnostic automated development loop: Plan → Build → Test → Review → Ship",
   "type": "module",
   "packageManager": "pnpm@9.0.0",
+  "bin": {
+    "alpha-loop": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "agents",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "loop": "bash scripts/loop.sh",
-    "loop:once": "bash scripts/loop.sh --once",
-    "loop:dry": "DRY_RUN=true bash scripts/loop.sh --once",
+    "build": "tsc",
+    "postbuild": "chmod +x dist/cli.js",
+    "dev": "tsx src/cli.ts",
     "test": "jest --runInBand",
     "test:unit": "jest --runInBand",
-    "test:watch": "jest --watch"
+    "test:watch": "jest --watch",
+    "prepublishOnly": "pnpm build"
   },
+  "keywords": [
+    "ai",
+    "agent",
+    "automation",
+    "development",
+    "loop",
+    "claude",
+    "codex",
+    "github"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
   "dependencies": {
-    "yaml": "^2.8.3"
+    "commander": "^14.0.3",
+    "yaml": "^2.8.3",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/jest": "^29.5.11",
