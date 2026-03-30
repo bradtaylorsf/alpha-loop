@@ -979,7 +979,7 @@ ${issue_body}"
   log_step "Generating project vision..."
 
   local vision_prompt
-  vision_prompt=$(cat <<VEOF
+  read -r -d '' vision_prompt <<VEOF || true
 Synthesize the following inputs into a concise project vision document. This will be read by AI agents before every task to guide their decisions.
 
 Project description: ${project_description}
@@ -1009,7 +1009,6 @@ Output ONLY this markdown structure. Be specific and actionable. Under 500 words
 ## What Good Looks Like
 (3-4 bullet points describing the quality bar — what a successful implementation looks like for this project)
 VEOF
-)
 
   if [[ "$DRY_RUN" == "true" ]]; then
     log_dry "Would generate project vision"
@@ -1080,7 +1079,7 @@ generate_project_context() {
   log_step "Scanning codebase for project context..."
 
   local scan_prompt
-  scan_prompt=$(cat <<'SCANEOF'
+  read -r -d '' scan_prompt <<'SCANEOF' || true
 Analyze this codebase and produce a concise project context file. Read the key files (package.json, entry points, config files, README, CLAUDE.md) and output ONLY this markdown structure:
 
 ## Architecture
@@ -1104,7 +1103,6 @@ Analyze this codebase and produce a concise project context file. Read the key f
 
 Keep each section to 3-5 bullet points. Be specific to THIS codebase, not generic advice. Under 400 words total.
 SCANEOF
-)
 
   if [[ "$DRY_RUN" == "true" ]]; then
     log_dry "Would generate project context"
@@ -1595,7 +1593,7 @@ $(cat "$agent_file")
   fi
 
   local aggregate_prompt
-  aggregate_prompt=$(cat <<AGGEOF
+  read -r -d '' aggregate_prompt <<AGGEOF || true
 Analyze the following accumulated learnings from automated development runs.
 Identify repeated patterns and anti-patterns, then propose updates to skills and agents.
 
@@ -1619,7 +1617,6 @@ Output THREE sections separated by ===SECTION===:
 2. Skills updates as JSON array: [{"file": "skill-name", "changes": "description of changes", "reason": "citing issue numbers"}]
 3. Agent updates as JSON array: [{"file": "agent-name.md", "changes": "description of changes", "reason": "citing issue numbers"}]
 AGGEOF
-)
 
   if [[ "$DRY_RUN" == "true" ]]; then
     log_dry "Would run learning aggregation"
@@ -1730,7 +1727,7 @@ run_plan() {
   project_context=$(get_project_context 2>/dev/null) || true
 
   local plan_prompt
-  plan_prompt=$(cat <<PLANEOF
+  read -r -d '' plan_prompt <<PLANEOF || true
 You are a senior developer planning the implementation of a GitHub issue. Your job is to:
 
 1. Analyze the issue and understand what needs to be done
@@ -1787,7 +1784,6 @@ IMPORTANT:
 - The acceptance criteria should be things that can be verified programmatically or visually.
 - Do NOT make any code changes. This is planning only.
 PLANEOF
-)
 
   log_info "Agent: claude | Model: $MODEL | Planning (read-only)"
 
@@ -2090,7 +2086,7 @@ run_verify() {
 
   # Build the verification prompt — agent uses playwright-cli to test the app
   local verify_prompt
-  verify_prompt=$(cat <<VERIFYEOF
+  read -r -d '' verify_prompt <<VERIFYEOF || true
 You are a QA tester verifying that issue #${issue_num} was implemented correctly.
 
 ## Issue: ${title}
@@ -2167,7 +2163,6 @@ After testing, output a verification report:
 IMPORTANT: Use playwright-cli commands to actually interact with the app.
 Navigate, click, type, submit forms. Verify the feature works as a real user would use it.
 VERIFYEOF
-)
 
   log_info "Verification agent: claude + playwright-cli | Testing live at http://localhost:$port"
 
