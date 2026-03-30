@@ -87,7 +87,7 @@ export function buildAgentArgs(config: AgentConfig & { model: string }, prompt: 
   }
 
   // Max turns (only if agent supports it and value is provided)
-  if (config.maxTurns && agentDef.supportsMaxTurns && agentDef.maxTurnsFlag) {
+  if (config.maxTurns != null && agentDef.supportsMaxTurns && agentDef.maxTurnsFlag) {
     args.push(agentDef.maxTurnsFlag, String(config.maxTurns));
   }
 

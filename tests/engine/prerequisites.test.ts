@@ -29,6 +29,13 @@ describe('isCommandAvailable', () => {
     mockExecSync.mockImplementation(() => { throw new Error('not found'); });
     expect(isCommandAvailable('nonexistent')).toBe(false);
   });
+
+  it('rejects command names with shell metacharacters', () => {
+    expect(isCommandAvailable('claude; rm -rf /')).toBe(false);
+    expect(isCommandAvailable('claude && echo pwned')).toBe(false);
+    expect(isCommandAvailable('$(whoami)')).toBe(false);
+    expect(mockExecSync).not.toHaveBeenCalled();
+  });
 });
 
 describe('checkAgents', () => {

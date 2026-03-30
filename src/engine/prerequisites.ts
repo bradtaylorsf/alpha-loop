@@ -32,6 +32,10 @@ export interface PrerequisiteResult {
  * Checks whether a CLI command is available on the system PATH.
  */
 export function isCommandAvailable(command: string): boolean {
+  // Validate command name to prevent shell injection from user-controlled config
+  if (!/^[a-zA-Z0-9_-]+$/.test(command)) {
+    return false;
+  }
   try {
     execSync(`which ${command}`, { stdio: 'ignore' });
     return true;
