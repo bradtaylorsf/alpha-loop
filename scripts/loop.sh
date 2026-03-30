@@ -304,6 +304,23 @@ apply_config() {
     POLL_INTERVAL="$CONFIG_POLL_INTERVAL"
   fi
 
+  # Merge strategy from config: "session" -> auto-merge to session branch
+  if [[ "$AUTO_MERGE" == "false" && -n "${CONFIG_MERGE_STRATEGY:-}" ]]; then
+    case "$CONFIG_MERGE_STRATEGY" in
+      session)
+        AUTO_MERGE="true"
+        # SESSION_BRANCH is already set to session/timestamp by default
+        ;;
+      master|main)
+        AUTO_MERGE="true"
+        SESSION_BRANCH="$BASE_BRANCH"
+        ;;
+      none|false)
+        AUTO_MERGE="false"
+        ;;
+    esac
+  fi
+
   # Final check: if repo is still the hardcoded default or empty, error out
   if [[ -z "$REPO" || "$REPO" == "owner/repo" ]]; then
     log_error "Could not determine repository."
@@ -2349,9 +2366,18 @@ merge_pr() {
 
   log_success "PR #$pr_num merged into $SESSION_BRANCH"
 
-  # Pull the latest into local repo so next worktree gets the merged code
+  # Switch to session branch and pull latest so:
+  # 1. Next worktree branches from the merged code (stacking)
+  # 2. Local dev server hot-reloads with the new changes
   git -C "$PROJECT_DIR" fetch origin 2>/dev/null || true
+  local current_branch
+  current_branch=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  if [[ "$current_branch" != "$SESSION_BRANCH" ]]; then
+    log_info "Switching to session branch: $SESSION_BRANCH"
+    git -C "$PROJECT_DIR" checkout "$SESSION_BRANCH" 2>/dev/null || true
+  fi
   git -C "$PROJECT_DIR" pull origin "$SESSION_BRANCH" 2>/dev/null || true
+  log_info "Local repo updated — hot reload should pick up changes"
 }
 
 # ---------------------------------------------------------------------------
