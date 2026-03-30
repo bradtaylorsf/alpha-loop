@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { exec } from '../lib/shell.js';
-import { loadConfig } from '../lib/config.js';
+import { assertSafeShellArg, loadConfig } from '../lib/config.js';
 import { logInfo, logStep, logSuccess, logWarn } from '../lib/logger.js';
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
@@ -124,7 +124,7 @@ export async function visionCommand(): Promise<void> {
         const issueNum = issueMatch[1];
         logInfo(`Fetching issue #${issueNum}...`);
         try {
-          const repo = config.repo;
+          const repo = assertSafeShellArg(config.repo, 'repo');
           const issueJson = exec(`gh issue view ${issueNum} --repo ${repo} --json title,body`);
           const issueData = JSON.parse(issueJson);
           northStarContent = `### North Star: #${issueNum} \u2014 ${issueData.title}\n\n${issueData.body}`;
@@ -174,7 +174,7 @@ Output ONLY this markdown structure. Be specific and actionable. Under 500 words
 (3-4 bullet points describing the quality bar — what a successful implementation looks like for this project)`;
 
     try {
-      const model = config.model ?? 'opus';
+      const model = assertSafeShellArg(config.model ?? 'opus', 'model');
       const visionOutput = exec(
         `echo ${JSON.stringify(visionPrompt)} | claude -p --model ${model} --dangerously-skip-permissions --output-format text 2>/dev/null`,
         { cwd: projectDir },

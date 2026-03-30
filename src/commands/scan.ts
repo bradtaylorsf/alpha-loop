@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { exec } from '../lib/shell.js';
 import { logError, logStep, logSuccess, logWarn } from '../lib/logger.js';
-import { loadConfig } from '../lib/config.js';
+import { assertSafeShellArg, loadConfig } from '../lib/config.js';
 
 const SCAN_PROMPT = `Analyze this codebase and produce a concise project context file. Read the key files (package.json, entry points, config files, README, CLAUDE.md) and output ONLY this markdown structure:
 
@@ -38,7 +38,7 @@ export function scanCommand(): void {
   logStep('Scanning codebase for project context...');
 
   try {
-    const model = config.model ?? 'opus';
+    const model = assertSafeShellArg(config.model ?? 'opus', 'model');
     const output = exec(
       `echo ${JSON.stringify(SCAN_PROMPT)} | claude -p --model ${model} --dangerously-skip-permissions --output-format text 2>/dev/null`,
       { cwd: projectDir },

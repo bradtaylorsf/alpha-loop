@@ -10,6 +10,7 @@ jest.mock('../../src/lib/shell', () => ({
 
 jest.mock('../../src/lib/config', () => ({
   loadConfig: jest.fn().mockReturnValue({ model: 'opus' }),
+  assertSafeShellArg: jest.fn((value: string) => value),
 }));
 
 import { scanCommand } from '../../src/commands/scan';

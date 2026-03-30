@@ -17,6 +17,14 @@ export interface LoopConfig {
   port?: number;
 }
 
+/** Validate a string contains only safe shell characters (alphanumeric, hyphens, dots, underscores, slashes). */
+export function assertSafeShellArg(value: string, name: string): string {
+  if (!/^[a-zA-Z0-9._\-/]+$/.test(value)) {
+    throw new Error(`Invalid ${name}: contains unsafe characters: ${value}`);
+  }
+  return value;
+}
+
 const DEFAULT_CONFIG: LoopConfig = {
   repo: '',
   model: 'opus',
