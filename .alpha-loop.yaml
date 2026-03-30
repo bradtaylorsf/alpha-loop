@@ -3,10 +3,36 @@
 
 repo: bradtaylorsf/alpha-loop
 project: 2
-model: opus
+model: opus                      # global default model
 review_model: opus
 max_turns: 30
 label: ready
 base_branch: master
 test_command: pnpm test
 poll_interval: 60
+
+# Per-stage agent/model configuration (optional).
+# If a stage is not listed, it falls back to global model + agent: claude.
+# stages:
+#   implement:
+#     agent: claude              # which CLI to invoke (claude, codex, opencode)
+#     model: opus                # model to pass via --model flag
+#     maxTurns: 30
+#   fix:
+#     agent: claude
+#     model: opus
+#     maxTurns: 20
+#   review:
+#     agent: codex               # different agent for code review
+#     model: codex
+#   verify:
+#     agent: codex
+#     model: codex
+#   learn:
+#     agent: claude
+#     model: opus
+#     maxTurns: 5
+#   aggregate:
+#     agent: claude
+#     model: opus
+#     maxTurns: 10
