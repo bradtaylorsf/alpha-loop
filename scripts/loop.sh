@@ -2023,7 +2023,7 @@ run_verify() {
   local start_script=""
   if [[ -z "$dev_cmd" ]]; then
     for script_name in dev start preview; do
-      if (cd "$worktree" && node -e "const p=require('./package.json'); process.exit(p.scripts?.['$script_name'] ? 0 : 1)" 2>/dev/null); then
+      if grep -q "\"$script_name\":" "$worktree/package.json" 2>/dev/null; then
         start_script="$script_name"
         dev_cmd="pnpm $script_name"
         break
@@ -2037,17 +2037,13 @@ run_verify() {
     return 0
   fi
 
-  # Detect port
+  # Detect port from package.json scripts or dev script
   local port=3000
-  local pkg_port
   set +e
-  pkg_port=$(cd "$worktree" && node -e "
-    const p=require('./package.json');
-    const scripts=p.scripts||{};
-    const s=scripts['${start_script:-dev}']||scripts.dev||scripts.start||'';
-    const m=s.match(/--port\\s+(\\d+)|PORT=(\\d+)|-p\\s+(\\d+)/);
-    if(m) console.log(m[1]||m[2]||m[3]);
-  " 2>/dev/null)
+  local pkg_port=""
+  if [[ -f "$worktree/package.json" ]]; then
+    pkg_port=$(grep -oE 'PORT[=:-]+[[:space:]]*[0-9]{4}|--port[[:space:]]+[0-9]{4}|-p[[:space:]]+[0-9]{4}' "$worktree/package.json" "$worktree/scripts/dev.sh" 2>/dev/null | grep -oE '[0-9]{4}' | head -1) || true
+  fi
   set -e
   [[ -n "$pkg_port" ]] && port="$pkg_port"
 
