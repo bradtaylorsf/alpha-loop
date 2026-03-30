@@ -1,6 +1,5 @@
 /**
  * GitHub Helpers — interact with GitHub via the `gh` CLI.
- * Port of loop.sh's GitHub interaction functions.
  * Reference: reference/github-client.reference.ts
  */
 import { exec } from './shell.js';

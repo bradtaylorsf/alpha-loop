@@ -4,7 +4,7 @@ import { execAsync, type ExecResult } from './shell.js';
 
 const CONTEXT_DIR = '.alpha-loop';
 const CONTEXT_FILE = join(CONTEXT_DIR, 'context.md');
-// Issue spec says 4 hours (loop.sh uses 7 days — we follow the issue spec)
+// Context expires after 4 hours
 const CONTEXT_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 
 const SCAN_PROMPT = `Analyze this codebase and produce a concise project context file. Read the key files (package.json, entry points, config files, README, CLAUDE.md) and output ONLY this markdown structure:

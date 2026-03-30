@@ -1,6 +1,5 @@
 /**
  * Worktree Manager — create and clean up isolated git worktrees.
- * Port of loop.sh's setup_worktree() and cleanup_worktree().
  * Reference: reference/worktree-manager.reference.ts
  */
 import { existsSync, copyFileSync } from 'node:fs';

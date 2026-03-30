@@ -1,6 +1,5 @@
 /**
  * Learning Extractor — extract and aggregate learnings from completed runs.
- * Port of loop.sh's run_learn(), count_learnings(), get_learning_context().
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

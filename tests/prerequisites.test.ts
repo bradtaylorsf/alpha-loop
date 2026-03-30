@@ -4,7 +4,7 @@ import * as shell from '../src/lib/shell.js';
 jest.mock('../src/lib/shell.js');
 
 const mockCommandExists = shell.commandExists as jest.MockedFunction<typeof shell.commandExists>;
-const mockExec = shell.exec as jest.MockedFunction<typeof shell.exec>;
+const mockExecAsync = shell.execAsync as jest.MockedFunction<typeof shell.execAsync>;
 
 const ok = { stdout: '', stderr: '', exitCode: 0 };
 const fail = { stdout: '', stderr: 'error', exitCode: 1 };
@@ -13,7 +13,7 @@ beforeEach(() => {
   jest.resetAllMocks();
   // Default: all tools present and checks pass
   mockCommandExists.mockReturnValue(true);
-  mockExec.mockResolvedValue(ok);
+  mockExecAsync.mockResolvedValue(ok);
 });
 
 describe('checkPrerequisites', () => {
@@ -29,7 +29,7 @@ describe('checkPrerequisites', () => {
   });
 
   it('fails when not in a git repo', async () => {
-    mockExec.mockImplementation(async (cmd) => {
+    mockExecAsync.mockImplementation(async (cmd) => {
       if (cmd.includes('rev-parse')) return fail;
       return ok;
     });
@@ -45,7 +45,7 @@ describe('checkPrerequisites', () => {
   });
 
   it('fails when gh is not authenticated', async () => {
-    mockExec.mockImplementation(async (cmd) => {
+    mockExecAsync.mockImplementation(async (cmd) => {
       if (cmd.includes('gh auth')) return fail;
       return ok;
     });

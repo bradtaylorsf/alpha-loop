@@ -1,6 +1,5 @@
 /**
  * Run Command — the main loop: poll issues, process them, finalize session.
- * Port of loop.sh's main() function.
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';

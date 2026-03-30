@@ -9,7 +9,7 @@ import { authCommand } from './commands/auth.js';
 program
   .name('alpha-loop')
   .description('Agent-agnostic automated development loop')
-  .version('0.3.0');
+  .version('1.0.0');
 
 program
   .command('init')

@@ -1,6 +1,5 @@
 /**
  * Process Issue Pipeline — the 12-step orchestration for a single issue.
- * Direct port of loop.sh's process_issue() function (lines 2566-2758).
  */
 import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';

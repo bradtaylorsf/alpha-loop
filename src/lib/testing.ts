@@ -1,6 +1,5 @@
 /**
  * Test Runner — execute tests in worktrees with retry support.
- * Port of loop.sh's run_tests() and run_e2e_tests().
  */
 import { appendFileSync } from 'node:fs';
 import { exec } from './shell.js';

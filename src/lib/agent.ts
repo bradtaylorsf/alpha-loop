@@ -1,6 +1,5 @@
 /**
  * Agent Runner — spawn AI agents with real-time output streaming.
- * Port of loop.sh's run_implement/run_review/run_fix_tests/run_verify pattern.
  * Reference: reference/cli-runner.reference.ts
  */
 import { spawn } from 'node:child_process';

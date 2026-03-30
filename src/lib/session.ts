@@ -1,6 +1,5 @@
 /**
  * Session Management — create sessions, save results, finalize with PR.
- * Port of loop.sh's session globals and finalize_session().
  */
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';

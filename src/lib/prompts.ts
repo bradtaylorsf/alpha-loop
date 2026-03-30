@@ -1,6 +1,5 @@
 /**
  * Prompt Builder — construct prompts for AI agents.
- * Port of loop.sh's build_implement_prompt(), build_review_prompt(), build_learn_prompt().
  * Pure string template functions with no side effects.
  */
 
@@ -37,7 +36,6 @@ export type LearnPromptOptions = {
 
 /**
  * Build the implementation prompt for an AI agent.
- * Matches loop.sh lines 1260-1289.
  */
 export function buildImplementPrompt(options: ImplementPromptOptions): string {
   const { issueNum, title, body, visionContext, projectContext, previousResult, learningContext } = options;
@@ -83,7 +81,6 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
 
 /**
  * Build the code review prompt for an AI agent.
- * Matches loop.sh lines 1297-1353.
  */
 export function buildReviewPrompt(options: ReviewPromptOptions): string {
   const { issueNum, title, body, baseBranch, visionContext } = options;
@@ -154,7 +151,6 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
 
 /**
  * Build the learning extraction prompt.
- * Matches loop.sh lines 1369-1416.
  */
 export function buildLearnPrompt(options: LearnPromptOptions): string {
   const {
