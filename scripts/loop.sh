@@ -545,7 +545,6 @@ Instructions:
   log_info "Fix-preflight agent: claude | Model: $MODEL"
   echo "$fix_prompt" | claude -p \
     --model "$MODEL" \
-    --max-turns 20 \
     --dangerously-skip-permissions \
     --verbose \
     --output-format text \
@@ -971,7 +970,6 @@ VEOF
   set +e
   vision_output=$(echo "$vision_prompt" | claude -p \
     --model "${MODEL:-opus}" \
-    --max-turns 3 \
     --dangerously-skip-permissions \
     --output-format text \
     2>/dev/null)
@@ -1066,7 +1064,6 @@ SCANEOF
   local context_output
   context_output=$(cd "$worktree" && echo "$scan_prompt" | claude -p \
     --model "${MODEL:-opus}" \
-    --max-turns 5 \
     --dangerously-skip-permissions \
     --output-format text \
     2>/dev/null) || {
@@ -1358,7 +1355,6 @@ run_learn() {
   local learn_output
   learn_output=$(echo "$prompt" | claude -p \
     --model "${REVIEW_MODEL:-opus}" \
-    --max-turns 3 \
     --dangerously-skip-permissions \
     --output-format text \
     2>/dev/null) || {
@@ -1551,7 +1547,6 @@ AGGEOF
   local agg_output
   agg_output=$(echo "$aggregate_prompt" | claude -p \
     --model "${REVIEW_MODEL:-opus}" \
-    --max-turns 5 \
     --dangerously-skip-permissions \
     --output-format text \
     2>/dev/null) || {
@@ -1717,7 +1712,6 @@ PLANEOF
   local plan_output
   plan_output=$(cd "$worktree" && echo "$plan_prompt" | claude -p \
     --model "$MODEL" \
-    --max-turns 15 \
     --dangerously-skip-permissions \
     --output-format text \
     2>&1) || true
@@ -1762,11 +1756,10 @@ run_implement() {
 
   # Run Claude in the worktree directory
   # CRITICAL: cd into worktree so Claude operates on the isolated copy
-  log_info "Agent: claude | Model: $MODEL | Max turns: $MAX_TURNS | CWD: $worktree"
+  log_info "Agent: claude | Model: $MODEL | CWD: $worktree"
 
   (cd "$worktree" && echo "$prompt" | claude -p \
     --model "$MODEL" \
-    --max-turns "$MAX_TURNS" \
     --dangerously-skip-permissions \
     --verbose \
     --output-format text \
@@ -2098,7 +2091,6 @@ run_review() {
   log_info "Review agent: claude | Model: $REVIEW_MODEL | CWD: $worktree"
   REVIEW_OUTPUT=$(cd "$worktree" && echo "$review_prompt" | claude -p \
     --model "$REVIEW_MODEL" \
-    --max-turns "$MAX_TURNS" \
     --dangerously-skip-permissions \
     --verbose \
     --output-format text \
@@ -2128,7 +2120,6 @@ Instructions:
   log_info "Fix-tests agent: claude | Model: $MODEL"
   (cd "$worktree" && echo "$fix_prompt" | claude -p \
     --model "$MODEL" \
-    --max-turns 20 \
     --verbose \
     --dangerously-skip-permissions \
     --output-format text \
@@ -2465,7 +2456,6 @@ Instructions:
 
         (cd "$worktree" && echo "$verify_fix_prompt" | claude -p \
           --model "$MODEL" \
-          --max-turns 20 \
           --verbose \
           --dangerously-skip-permissions \
           --output-format text \
