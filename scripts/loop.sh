@@ -800,6 +800,14 @@ setup_worktree() {
     return 1
   }
 
+  # Copy env files from main repo to worktree (gitignored files don't exist in worktrees)
+  for env_file in .env .env.local .env.development .env.development.local; do
+    if [[ -f "$PROJECT_DIR/$env_file" ]]; then
+      cp "$PROJECT_DIR/$env_file" "$WORKTREE_PATH/$env_file"
+      log_info "Copied $env_file to worktree"
+    fi
+  done
+
   # Install dependencies unless skipped
   if [[ "$SKIP_INSTALL" != "true" ]]; then
     log_info "Installing dependencies in worktree..."
