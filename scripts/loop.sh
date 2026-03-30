@@ -794,11 +794,15 @@ setup_worktree() {
   git -C "$PROJECT_DIR" fetch origin 2>/dev/null || true
 
   # Create worktree from the appropriate branch
-  git -C "$PROJECT_DIR" worktree add "$WORKTREE_PATH" -b "$branch" "origin/$from_branch" 2>/dev/null || \
-  git -C "$PROJECT_DIR" worktree add "$WORKTREE_PATH" -b "$branch" "$from_branch" || {
-    log_error "Failed to create worktree"
+  log_info "Branching worktree from: $from_branch"
+  if git -C "$PROJECT_DIR" worktree add "$WORKTREE_PATH" -b "$branch" "origin/$from_branch" 2>/dev/null; then
+    log_info "Created worktree from origin/$from_branch"
+  elif git -C "$PROJECT_DIR" worktree add "$WORKTREE_PATH" -b "$branch" "$from_branch" 2>/dev/null; then
+    log_info "Created worktree from local $from_branch"
+  else
+    log_error "Failed to create worktree from $from_branch"
     return 1
-  }
+  fi
 
   # Copy env files from main repo to worktree (gitignored files don't exist in worktrees)
   for env_file in .env .env.local .env.development .env.development.local; do
@@ -1673,10 +1677,13 @@ AGGEOF
     local improve_branch="improve/learnings-${timestamp}"
     (
       cd "$PROJECT_DIR"
+      git stash --include-untracked 2>/dev/null || true
       git checkout -b "$improve_branch" 2>/dev/null || true
       git add learnings/summary.md learnings/proposed-updates/ 2>/dev/null || true
       if git diff --cached --quiet 2>/dev/null; then
         log_info "No changes to commit for improvement PR"
+        git checkout - 2>/dev/null || true
+        git stash pop 2>/dev/null || true
       else
         git commit -m "improve: learning aggregation from $(count_learnings) runs
 
@@ -1703,6 +1710,7 @@ Automated by alpha-loop learning system" \
 
         # Return to original branch
         git checkout - 2>/dev/null || true
+        git stash pop 2>/dev/null || true
       fi
     )
   fi
@@ -2421,6 +2429,11 @@ ${what_to_test}
 Automated by [agent-loop](scripts/loop.sh) | [Issue #${issue_num}](https://github.com/${REPO}/issues/${issue_num})
 PREOF
 )" 2>/dev/null || true
+    if [[ "$AUTO_MERGE" == "true" && "$SESSION_BRANCH" != "$BASE_BRANCH" ]]; then
+      gh pr edit "$existing_pr" --repo "$REPO" --base "$SESSION_BRANCH" 2>/dev/null || {
+        log_warn "Could not update existing PR base to $SESSION_BRANCH"
+      }
+    fi
     log_success "PR updated: $PR_URL"
     return 0
   fi
@@ -2434,9 +2447,14 @@ PREOF
   fi
 
   # Create PR
+  local pr_base="$BASE_BRANCH"
+  if [[ "$AUTO_MERGE" == "true" && "$SESSION_BRANCH" != "$BASE_BRANCH" ]]; then
+    pr_base="$SESSION_BRANCH"
+  fi
+
   PR_URL=$(gh pr create \
     --repo "$REPO" \
-    --base "$BASE_BRANCH" \
+    --base "$pr_base" \
     --head "$branch" \
     --title "feat: ${title} (closes #${issue_num})" \
     --body "$(cat <<PREOF
@@ -2504,8 +2522,14 @@ merge_pr() {
     # Ensure session branch exists
     if ! git -C "$PROJECT_DIR" rev-parse --verify "$SESSION_BRANCH" &>/dev/null; then
       log_info "Creating session branch: $SESSION_BRANCH"
-      git -C "$PROJECT_DIR" branch "$SESSION_BRANCH" "origin/$BASE_BRANCH" 2>/dev/null || true
-      git -C "$PROJECT_DIR" push origin "$SESSION_BRANCH" 2>/dev/null || true
+      git -C "$PROJECT_DIR" branch "$SESSION_BRANCH" "origin/$BASE_BRANCH" 2>/dev/null || {
+        log_error "Failed to create session branch: $SESSION_BRANCH"
+        return 1
+      }
+      git -C "$PROJECT_DIR" push origin "$SESSION_BRANCH" 2>/dev/null || {
+        log_error "Failed to push session branch: $SESSION_BRANCH"
+        return 1
+      }
     fi
 
     # Rebase the PR onto the session branch
@@ -3110,9 +3134,91 @@ main() {
 }
 
 # ---------------------------------------------------------------------------
+# Session Finalization -- commit learnings, create session PR
+# ---------------------------------------------------------------------------
+finalize_session() {
+  # Only finalize if we used a session branch and processed issues
+  if [[ "$AUTO_MERGE" != "true" ]]; then
+    return 0
+  fi
+  if [[ "$SESSION_BRANCH" == "$BASE_BRANCH" ]]; then
+    return 0
+  fi
+  if [[ "$ISSUES_PROCESSED" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would finalize session: $SESSION_BRANCH -> $BASE_BRANCH"
+    return 0
+  fi
+
+  log_step "Finalizing session: $SESSION_BRANCH"
+
+  # Ensure we're on the session branch
+  cd "$PROJECT_DIR"
+  git fetch origin 2>/dev/null || true
+  git checkout "$SESSION_BRANCH" 2>/dev/null || {
+    log_warn "Could not checkout session branch for finalization"
+    return 1
+  }
+
+  # Commit session results and learnings
+  local session_dir="$PROJECT_DIR/sessions/$SESSION_NAME"
+  if [[ -d "$session_dir" ]]; then
+    git add "sessions/$SESSION_NAME/" 2>/dev/null || true
+  fi
+  if [[ -d "$LEARNINGS_DIR" ]]; then
+    git add learnings/ 2>/dev/null || true
+  fi
+
+  if ! git diff --cached --quiet 2>/dev/null; then
+    git commit -m "chore: session results and learnings from $SESSION_NAME
+
+Processed $ISSUES_PROCESSED issue(s) in this session." 2>/dev/null || true
+    git push origin "$SESSION_BRANCH" 2>/dev/null || true
+  fi
+
+  # Create or update final PR from session branch to base branch
+  local existing_session_pr
+  existing_session_pr=$(gh pr list --repo "$REPO" --head "$SESSION_BRANCH" --base "$BASE_BRANCH" --json number --limit 1 2>/dev/null | jq -r '.[0].number // empty')
+
+  local pr_body="## Session Summary
+
+**Branch:** $SESSION_BRANCH
+**Issues processed:** $ISSUES_PROCESSED
+**Completed:** $(date +%Y-%m-%dT%H:%M:%S)
+
+This PR collects all changes from this session for final review before merging to $BASE_BRANCH.
+
+---
+Automated by [agent-loop](scripts/loop.sh)"
+
+  if [[ -n "$existing_session_pr" ]]; then
+    log_info "Session PR already exists: #$existing_session_pr"
+    gh pr edit "$existing_session_pr" --repo "$REPO" --body "$pr_body" 2>/dev/null || true
+  else
+    local session_pr_url
+    session_pr_url=$(gh pr create \
+      --repo "$REPO" \
+      --base "$BASE_BRANCH" \
+      --head "$SESSION_BRANCH" \
+      --title "session: $SESSION_NAME ($ISSUES_PROCESSED issues)" \
+      --body "$pr_body" 2>&1) || {
+      log_warn "Could not create session finalization PR"
+    }
+    if [[ -n "${session_pr_url:-}" ]]; then
+      log_success "Session PR created: $session_pr_url"
+    fi
+  fi
+
+  log_success "Session finalized: $SESSION_BRANCH -> $BASE_BRANCH ($ISSUES_PROCESSED issues)"
+}
+
+# ---------------------------------------------------------------------------
 # Cleanup on exit
 # ---------------------------------------------------------------------------
 cleanup_on_exit() {
+  finalize_session 2>/dev/null || true
   cd "$ORIGINAL_DIR" 2>/dev/null || true
   # Clean up preflight ignore file if it exists
   if [[ -n "${PREFLIGHT_IGNORE_FILE:-}" && -f "$PREFLIGHT_IGNORE_FILE" ]]; then
