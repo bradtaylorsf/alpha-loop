@@ -3172,8 +3172,15 @@ if [[ "$SUBCOMMAND" == "auth" ]]; then
   echo "verification runs."
   echo ""
 
-  # Detect app URL
-  APP_URL="http://localhost:3000"
+  # Detect app URL from dev_command in config or package.json
+  APP_PORT=""
+  if [[ -n "${CONFIG_DEV_COMMAND:-}" ]]; then
+    APP_PORT=$(echo "$CONFIG_DEV_COMMAND" | grep -oE '\-\-port\s+([0-9]+)|PORT=([0-9]+)|-p\s+([0-9]+)' | grep -oE '[0-9]+' | head -1) || true
+  fi
+  if [[ -z "$APP_PORT" && -f "$PROJECT_DIR/package.json" ]]; then
+    APP_PORT=$(grep -oE '\-\-port\s+([0-9]+)|PORT=([0-9]+)|-p\s+([0-9]+)|VITE_PORT:-([0-9]+)|SERVER_PORT.*([0-9]{4})' "$PROJECT_DIR/package.json" "$PROJECT_DIR/scripts/dev.sh" 2>/dev/null | grep -oE '[0-9]{4}' | head -1) || true
+  fi
+  APP_URL="http://localhost:${APP_PORT:-3000}"
   read -r -p "App URL [$APP_URL]: " custom_url
   [[ -n "$custom_url" ]] && APP_URL="$custom_url"
 
