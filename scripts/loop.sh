@@ -1635,6 +1635,118 @@ Automated by alpha-loop learning system" \
 # ---------------------------------------------------------------------------
 # Pipeline Steps
 # ---------------------------------------------------------------------------
+
+# Planning stage: analyze the issue, enrich with acceptance criteria, update on GitHub
+run_plan() {
+  local issue_num="$1" title="$2" body="$3" worktree="$4" log_file="$5"
+
+  log_step "Planning issue #$issue_num: $title"
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "Would run planning stage"
+    return 0
+  fi
+
+  local vision_context=""
+  vision_context=$(get_vision_context 2>/dev/null) || true
+  local project_context=""
+  project_context=$(get_project_context 2>/dev/null) || true
+
+  local plan_prompt
+  plan_prompt=$(cat <<PLANEOF
+You are a senior developer planning the implementation of a GitHub issue. Your job is to:
+
+1. Analyze the issue and understand what needs to be done
+2. Explore the codebase to understand the relevant files and patterns
+3. Create a structured implementation plan with clear acceptance criteria
+
+## Issue #${issue_num}: ${title}
+
+${body}
+${vision_context:+
+
+## Product Vision
+${vision_context}}
+${project_context:+
+
+## Technical Context
+${project_context}}
+
+## Your Task
+
+Read the codebase, understand the issue, and output a structured plan in this EXACT format:
+
+---
+
+## Understanding
+(2-3 sentences explaining what the issue is really asking for and why)
+
+## Acceptance Criteria
+- [ ] (specific, testable criterion 1)
+- [ ] (specific, testable criterion 2)
+- [ ] (etc.)
+
+## Implementation Plan
+1. (specific file to modify and what to change)
+2. (specific file to modify and what to change)
+3. (etc.)
+
+## Test Plan
+- (what tests to write or update)
+- (how to verify the fix works)
+
+## What to Test Manually
+- (step-by-step instructions a human can follow to verify)
+- (include URLs, clicks, expected results)
+
+## Risks
+- (anything that could go wrong or needs careful handling)
+
+---
+
+IMPORTANT:
+- Read the actual code before planning. Don't guess at file names or structures.
+- Be specific: name exact files, functions, and line numbers where possible.
+- The acceptance criteria should be things that can be verified programmatically or visually.
+- Do NOT make any code changes. This is planning only.
+PLANEOF
+)
+
+  log_info "Agent: claude | Model: $MODEL | Planning (read-only)"
+
+  local plan_output
+  plan_output=$(cd "$worktree" && echo "$plan_prompt" | claude -p \
+    --model "$MODEL" \
+    --max-turns 15 \
+    --dangerously-skip-permissions \
+    --output-format text \
+    2>&1) || true
+
+  echo "$plan_output" | tee -a "$log_file"
+
+  # Extract the plan to update the GitHub issue with enriched description
+  if [[ -n "$plan_output" ]]; then
+    # Update the issue on GitHub with the plan appended
+    local enriched_body
+    enriched_body="${body}
+
+---
+
+## Agent Planning Notes
+
+${plan_output}"
+
+    # Update the issue description on GitHub (preserves original, appends plan)
+    gh issue edit "$issue_num" --repo "$REPO" --body "$enriched_body" 2>/dev/null || {
+      log_warn "Could not update issue #$issue_num with plan (non-fatal)"
+    }
+    log_success "Updated issue #$issue_num with implementation plan"
+
+    # Save the enriched body so implement stage uses it
+    ENRICHED_BODY="$enriched_body"
+  fi
+}
+
 run_implement() {
   local issue_num="$1" title="$2" body="$3" worktree="$4" log_file="$5"
   local prompt
@@ -1702,6 +1814,7 @@ run_tests() {
   local worktree="$1" log_file="$2"
   local test_output=""
   local test_passed=true
+  local test_cmd="${CONFIG_TEST_COMMAND:-pnpm test}"
 
   if [[ "$SKIP_TESTS" == "true" ]]; then
     log_info "Skipping tests (SKIP_TESTS=true)"
@@ -1712,7 +1825,7 @@ run_tests() {
   log_step "Running tests in worktree"
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_dry "Would run pnpm test:unit && pnpm test:api"
+    log_dry "Would run: $test_cmd"
     echo "Tests skipped (dry run)"
     return 0
   fi
@@ -1726,23 +1839,16 @@ run_tests() {
     log_info "Running tests with cached API responses"
   fi
 
-  # Run unit tests
-  log_info "Running unit tests..."
-  if (cd "$worktree" && env $test_env pnpm test:unit 2>&1 | tee -a "$log_file"); then
-    log_success "Unit tests passed"
+  # Run the configured test command
+  log_info "Test command: $test_cmd"
+  set +e
+  if (cd "$worktree" && env $test_env eval "$test_cmd" 2>&1 | tee -a "$log_file"); then
+    log_success "Tests passed"
   else
-    log_warn "Unit tests had failures"
+    log_warn "Tests had failures"
     test_passed=false
   fi
-
-  # Run API tests
-  log_info "Running API tests..."
-  if (cd "$worktree" && env $test_env pnpm test:api 2>&1 | tee -a "$log_file"); then
-    log_success "API tests passed"
-  else
-    log_warn "API tests had failures"
-    test_passed=false
-  fi
+  set -e
 
   if [[ "$test_passed" == "false" ]]; then
     # If we have a preflight ignore file, check if all failures are pre-existing
@@ -1992,7 +2098,7 @@ run_review() {
   log_info "Review agent: claude | Model: $REVIEW_MODEL | CWD: $worktree"
   REVIEW_OUTPUT=$(cd "$worktree" && echo "$review_prompt" | claude -p \
     --model "$REVIEW_MODEL" \
-    --max-turns 15 \
+    --max-turns "$MAX_TURNS" \
     --dangerously-skip-permissions \
     --verbose \
     --output-format text \
@@ -2291,8 +2397,16 @@ process_issue() {
   fi
   worktree="$WORKTREE_PATH"
 
-  # Step 3: Implement
-  if ! run_implement "$issue_num" "$title" "$body" "$worktree" "$log_file"; then
+  # Step 3: Plan (analyze issue, enrich with acceptance criteria)
+  ENRICHED_BODY=""
+  run_plan "$issue_num" "$title" "$body" "$worktree" "$log_file" || {
+    log_warn "Planning stage failed, proceeding with original issue description"
+  }
+  # Use enriched body if planning produced one, otherwise use original
+  local impl_body="${ENRICHED_BODY:-$body}"
+
+  # Step 4: Implement
+  if ! run_implement "$issue_num" "$title" "$impl_body" "$worktree" "$log_file"; then
     log_error "Implementation failed for issue #$issue_num"
     label_issue "$issue_num" "failed" "in-progress" || true
     comment_issue "$issue_num" "Agent loop failed during implementation. See logs for details." || true
