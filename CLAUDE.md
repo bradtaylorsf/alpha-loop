@@ -10,11 +10,9 @@ Agent-agnostic automated development loop that implements The Loop methodology:
 | Layer | Technology |
 |-------|------------|
 | **Runtime** | Node.js, TypeScript, ESM |
-| **Server** | Express (minimal -- monitoring + config only) |
-| **Loop Engine** | Bash script + TypeScript orchestrator |
+| **Loop Engine** | Bash script (scripts/loop.sh) |
 | **AI Agents** | Any CLI agent (Claude, Codex, OpenCode) |
 | **Source of Truth** | GitHub (Issues = kanban, PRs = reviews, Actions = CI) |
-| **Database** | SQLite (run history + learnings only) |
 | **Package Manager** | pnpm |
 
 ## Commands
@@ -23,37 +21,23 @@ Agent-agnostic automated development loop that implements The Loop methodology:
 pnpm loop          # Run the loop continuously
 pnpm loop:once     # Process one issue and exit
 pnpm loop:dry      # Dry run (preview, no changes)
-pnpm dev           # Start server (4000) + dashboard (4001)
-pnpm dev:server    # Server only (4000)
-pnpm dev:client    # Dashboard only (4001)
 pnpm test          # Run all tests
-pnpm build         # Build server + client
 ```
-
-## Ports
-
-| Port | Service |
-|------|---------|
-| 4000 | Express API server |
-| 4001 | Vite dev server (React dashboard) |
 
 ## Directory Structure
 
 ```
 alpha-loop/
-├── src/
-│   ├── engine/          # The Loop Engine
-│   │   ├── runner.ts    # Agent-agnostic CLI runner
-│   │   ├── worktree.ts  # Git worktree isolation
-│   │   └── github.ts    # GitHub Issues + PRs
-│   ├── server/          # Minimal Express (monitoring)
-│   │   └── routes/      # status, config, runs, agents
-│   └── learning/        # Self-improvement system
-├── agents/              # Agent definitions (YAML+Markdown)
 ├── scripts/
-│   ├── loop.sh          # Main loop script
-│   └── prompts/         # Prompt templates
-└── config.yaml          # Loop configuration
+│   └── loop.sh              # Main loop script (the product)
+├── agents/                  # Agent definitions (YAML+Markdown)
+├── learnings/               # Self-improvement data
+│   └── proposed-updates/    # Proposed agent prompt updates
+├── reference/               # Battle-tested code from previous project
+├── .claude/
+│   ├── agents/              # Agent definitions for Claude
+│   └── skills/              # Reusable skill definitions
+└── config.yaml              # Loop configuration
 ```
 
 ## Architecture Principles
@@ -73,7 +57,11 @@ The `reference/` directory contains battle-tested implementations from a previou
 - `reference/worktree-manager.reference.ts` -- Retry logic for git locks, cleanup on error
 - `reference/logger.reference.ts` -- Structured logging
 
-When improving existing `src/engine/` modules, adopt patterns from these reference files rather than reinventing solutions.
+When building future TypeScript modules, adopt patterns from these reference files rather than reinventing solutions.
+
+## Planned: TypeScript CLI Migration
+
+A TypeScript CLI is planned to replace parts of the bash loop (see issues #73-#78). The TypeScript toolchain (typescript, tsx, ts-jest, jest) is kept in devDependencies for this purpose.
 
 ## Protected Files -- DO NOT MODIFY OR DELETE
 
@@ -85,7 +73,8 @@ When improving existing `src/engine/` modules, adopt patterns from these referen
 
 ## Code Style
 
-- TypeScript strict mode, ESM with .js extensions in imports
+- The current product is bash (`scripts/loop.sh`)
+- TypeScript strict mode, ESM with .js extensions in imports (for future TypeScript code)
 - Functional style, no classes (except where wrapping external APIs)
 - pnpm only (not npm or yarn)
 - Use `node:` prefix for built-in modules (e.g., `node:path`, `node:child_process`)
