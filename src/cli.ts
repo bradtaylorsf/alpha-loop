@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import { program } from 'commander';
 import { initCommand } from './commands/init.js';
+import { historyCommand } from './commands/history.js';
+import { scanCommand } from './commands/scan.js';
+import { visionCommand } from './commands/vision.js';
+import { authCommand } from './commands/auth.js';
 
 program
   .name('alpha-loop')
@@ -17,21 +21,37 @@ program
   .description('Run the loop')
   .option('--once', 'Process one issue and exit')
   .option('--dry-run', 'Preview without changes')
-  .option('--model <model>', 'AI model to use', 'opus')
+  .option('--model <model>', 'AI model to use')
   .option('--skip-tests', 'Skip test execution')
   .option('--skip-review', 'Skip code review')
   .option('--skip-learn', 'Skip learning extraction')
   .option('--auto-merge', 'Auto-merge PRs to session branch')
   .option('--merge-to <branch>', 'Use existing branch instead of creating session branch')
-  .action(() => {
-    // Placeholder — implemented in issue #76
-    console.log('Run command not yet implemented');
+  .action(async (options) => {
+    const { runCommand } = await import('./commands/run.js');
+    await runCommand(options);
   });
 
-// Future subcommands (implemented in subsequent issues):
-// scan   — scan for ready issues
-// history — show loop history
-// auth   — authenticate with GitHub
-// vision — run vision analysis
+program
+  .command('history [session]')
+  .description('View session history')
+  .option('--qa', 'Show QA checklist for session')
+  .option('--clean', 'Remove old session data')
+  .action(historyCommand);
+
+program
+  .command('scan')
+  .description('Generate/refresh project context')
+  .action(scanCommand);
+
+program
+  .command('vision')
+  .description('Interactive project vision setup')
+  .action(visionCommand);
+
+program
+  .command('auth')
+  .description('Save authenticated browser state')
+  .action(authCommand);
 
 program.parse();

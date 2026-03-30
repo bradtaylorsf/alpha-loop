@@ -124,6 +124,14 @@ function coerce(value: string, current: unknown): unknown {
   return value;
 }
 
+/** Validate a string contains only safe shell characters. */
+export function assertSafeShellArg(value: string, name: string): string {
+  if (!/^[a-zA-Z0-9._\-/]+$/.test(value)) {
+    throw new Error(`Invalid ${name}: contains unsafe characters: ${value}`);
+  }
+  return value;
+}
+
 export function detectRepo(): string | null {
   try {
     const url = execSync('git remote get-url origin', {

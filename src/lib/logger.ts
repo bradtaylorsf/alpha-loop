@@ -4,6 +4,7 @@ const YELLOW = '\x1b[1;33m';
 const BLUE = '\x1b[0;34m';
 const CYAN = '\x1b[0;36m';
 const GRAY = '\x1b[0;90m';
+const BOLD = '\x1b[1m';
 const NC = '\x1b[0m';
 
 function timestamp(): string {
@@ -36,3 +37,10 @@ export const warn = log.warn;
 export const error = log.error;
 export const debug = log.debug;
 export const dry = log.dry;
+
+// Aliases used by issue-74 commands
+export const logInfo = log.info;
+export const logSuccess = log.success;
+export const logWarn = log.warn;
+export const logError = log.error;
+export const logStep = log.step;
