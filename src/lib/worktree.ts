@@ -42,6 +42,13 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
   const branch = `agent/issue-${issueNum}`;
   const worktreePath = resolve(projectDir, '..', `issue-${issueNum}`);
 
+  logger.info(`Creating worktree at ${worktreePath} (branch: ${branch})`);
+
+  if (dryRun) {
+    logger.dry(`Would create worktree: ${worktreePath}`);
+    return { path: worktreePath, branch };
+  }
+
   // Clean up existing worktree if present
   if (existsSync(worktreePath)) {
     logger.warn(`Worktree already exists at ${worktreePath}, removing...`);
@@ -51,13 +58,6 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
 
   // Delete remote branch from previous failed runs
   exec(`git push origin --delete "${branch}"`, { cwd: projectDir });
-
-  logger.info(`Creating worktree at ${worktreePath} (branch: ${branch})`);
-
-  if (dryRun) {
-    logger.dry(`Would create worktree: ${worktreePath}`);
-    return { path: worktreePath, branch };
-  }
 
   // Determine source branch: use session branch when auto-merging and it exists
   let fromBranch = baseBranch;

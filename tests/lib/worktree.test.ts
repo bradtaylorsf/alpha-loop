@@ -167,11 +167,17 @@ describe('setupWorktree', () => {
 
     expect(logger.dry).toHaveBeenCalledWith(expect.stringContaining('Would create worktree'));
 
-    // Should not have created a worktree
-    const worktreeAddCalls = mockExec.mock.calls.filter(
-      (call) => typeof call[0] === 'string' && call[0].includes('git worktree add'),
+    // Should not have run any destructive git commands
+    const destructiveCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && (
+        call[0].includes('git worktree add') ||
+        call[0].includes('git worktree remove') ||
+        call[0].includes('git branch -D') ||
+        call[0].includes('git push origin --delete') ||
+        call[0].includes('pnpm install')
+      ),
     );
-    expect(worktreeAddCalls).toHaveLength(0);
+    expect(destructiveCalls).toHaveLength(0);
   });
 
   test('falls back to local branch when origin/ fails', async () => {
