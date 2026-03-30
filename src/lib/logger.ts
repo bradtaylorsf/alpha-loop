@@ -3,6 +3,7 @@ const GREEN = '\x1b[0;32m';
 const YELLOW = '\x1b[1;33m';
 const BLUE = '\x1b[0;34m';
 const CYAN = '\x1b[0;36m';
+const GRAY = '\x1b[0;90m';
 const NC = '\x1b[0m';
 
 function timestamp(): string {
@@ -17,6 +18,8 @@ function fmt(label: string, color: string, msg: string): void {
   console.error(`${color}[${label}]${NC}  ${timestamp()} ${msg}`);
 }
 
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
 export const log = {
   info: (msg: string): void => fmt('INFO', BLUE, msg),
   success: (msg: string): void => fmt('OK', GREEN, msg),
@@ -24,4 +27,12 @@ export const log = {
   error: (msg: string): void => fmt('ERROR', RED, msg),
   step: (msg: string): void => fmt('STEP', CYAN, msg),
   dry: (msg: string): void => fmt('DRY', YELLOW, msg),
+  debug: (msg: string): void => fmt('DEBUG', GRAY, msg),
 };
+
+// Named exports for modules that import { info, warn, error } style
+export const info = log.info;
+export const warn = log.warn;
+export const error = log.error;
+export const debug = log.debug;
+export const dry = log.dry;
