@@ -3161,8 +3161,8 @@ if [[ "$SUBCOMMAND" == "auth" ]]; then
     exit 1
   fi
 
-  local auth_dir="${PROJECT_DIR}/.alpha-loop/auth"
-  mkdir -p "$auth_dir"
+  AUTH_DIR="${PROJECT_DIR}/.alpha-loop/auth"
+  mkdir -p "$AUTH_DIR"
 
   echo ""
   echo -e "${BOLD}${CYAN}Save authenticated browser state${NC}"
@@ -3173,34 +3173,34 @@ if [[ "$SUBCOMMAND" == "auth" ]]; then
   echo ""
 
   # Detect app URL
-  local app_url="http://localhost:3000"
-  read -r -p "App URL [$app_url]: " custom_url
-  [[ -n "$custom_url" ]] && app_url="$custom_url"
+  APP_URL="http://localhost:3000"
+  read -r -p "App URL [$APP_URL]: " custom_url
+  [[ -n "$custom_url" ]] && APP_URL="$custom_url"
 
   echo ""
-  echo "Opening browser at $app_url..."
+  echo "Opening browser at $APP_URL..."
   echo "Log in, then come back here and press Enter to save state."
   echo ""
 
   # Open browser with persistent profile
-  playwright-cli open "$app_url" --headed --persistent 2>/dev/null &
-  local browser_pid=$!
+  playwright-cli open "$APP_URL" --headed --persistent 2>/dev/null &
+  BROWSER_PID=$!
 
   read -r -p "Press Enter after you've logged in... "
 
   # Save the browser state
-  playwright-cli state-save "$auth_dir/state.json" 2>/dev/null || {
+  playwright-cli state-save "$AUTH_DIR/state.json" 2>/dev/null || {
     log_warn "Could not save state via playwright-cli, trying cookie export..."
-    playwright-cli cookie-export "$auth_dir/cookies.json" 2>/dev/null || true
-    playwright-cli localstorage-export "$auth_dir/localstorage.json" 2>/dev/null || true
+    playwright-cli cookie-export "$AUTH_DIR/cookies.json" 2>/dev/null || true
+    playwright-cli localstorage-export "$AUTH_DIR/localstorage.json" 2>/dev/null || true
   }
 
   # Close the browser
   playwright-cli close-all 2>/dev/null || true
-  kill "$browser_pid" 2>/dev/null || true
+  kill "$BROWSER_PID" 2>/dev/null || true
 
-  if [[ -f "$auth_dir/state.json" ]] || [[ -f "$auth_dir/cookies.json" ]]; then
-    log_success "Auth state saved to $auth_dir"
+  if [[ -f "$AUTH_DIR/state.json" ]] || [[ -f "$AUTH_DIR/cookies.json" ]]; then
+    log_success "Auth state saved to $AUTH_DIR"
     echo ""
     echo "Future verification runs will load this state automatically."
     echo "Re-run 'auth' if your session expires."
