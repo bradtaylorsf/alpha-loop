@@ -1,6 +1,5 @@
 /**
  * GitHub Helpers — interact with GitHub via the `gh` CLI.
- * Reference: reference/github-client.reference.ts
  */
 import { exec } from './shell.js';
 import * as logger from './logger.js';

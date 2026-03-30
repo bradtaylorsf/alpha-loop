@@ -1,6 +1,5 @@
 /**
  * Worktree Manager — create and clean up isolated git worktrees.
- * Reference: reference/worktree-manager.reference.ts
  */
 import { existsSync, copyFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';

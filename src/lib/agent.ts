@@ -1,6 +1,5 @@
 /**
  * Agent Runner — spawn AI agents with real-time output streaming.
- * Reference: reference/cli-runner.reference.ts
  */
 import { spawn } from 'node:child_process';
 import { createWriteStream, type WriteStream } from 'node:fs';
