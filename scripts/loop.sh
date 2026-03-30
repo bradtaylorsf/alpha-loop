@@ -81,6 +81,7 @@ for arg in "$@"; do
     init) SUBCOMMAND="init" ;;
     scan) SUBCOMMAND="scan" ;;
     vision) SUBCOMMAND="vision" ;;
+    auth) SUBCOMMAND="auth" ;;
     history) SUBCOMMAND="history" ;;
     *)
       # Capture the session name argument for history subcommand
@@ -2009,6 +2010,14 @@ run_verify() {
     return 0
   fi
 
+  # Check if playwright-cli is available
+  if ! command -v playwright-cli &>/dev/null; then
+    log_warn "playwright-cli not installed. Install with: npm install -g @playwright/cli@latest"
+    log_info "Skipping live verification (no playwright-cli)"
+    echo "Verification skipped (playwright-cli not installed)"
+    return 0
+  fi
+
   # Detect how to start the app
   local dev_cmd="${CONFIG_DEV_COMMAND:-}"
   local start_script=""
@@ -2031,13 +2040,15 @@ run_verify() {
   # Detect port
   local port=3000
   local pkg_port
+  set +e
   pkg_port=$(cd "$worktree" && node -e "
     const p=require('./package.json');
     const scripts=p.scripts||{};
     const s=scripts['${start_script:-dev}']||scripts.dev||scripts.start||'';
     const m=s.match(/--port\\s+(\\d+)|PORT=(\\d+)|-p\\s+(\\d+)/);
     if(m) console.log(m[1]||m[2]||m[3]);
-  " 2>/dev/null || true)
+  " 2>/dev/null)
+  set -e
   [[ -n "$pkg_port" ]] && port="$pkg_port"
 
   # Start the app in the background
@@ -2071,15 +2082,22 @@ run_verify() {
 
   log_success "App is ready on port $port"
 
+  # Load saved auth state if it exists
+  local auth_state_dir="${PROJECT_DIR}/.alpha-loop/auth"
+  if [[ -d "$auth_state_dir" ]]; then
+    log_info "Loading saved auth state..."
+    playwright-cli state-load "$auth_state_dir/state.json" 2>/dev/null || true
+  fi
+
   # Get the diff to understand what changed
   local diff_stat=""
   diff_stat=$(cd "$worktree" && git diff --stat "origin/$BASE_BRANCH...HEAD" 2>/dev/null) || true
 
-  # Get vision context for verification decisions
+  # Get vision context
   local vision_context=""
   vision_context=$(get_vision_context 2>/dev/null) || true
 
-  # Build the verification prompt — agent uses the app like a real user
+  # Build the verification prompt — agent uses playwright-cli to test the app
   local verify_prompt
   verify_prompt=$(cat <<VERIFYEOF
 You are a QA tester verifying that issue #${issue_num} was implemented correctly.
@@ -2096,22 +2114,40 @@ ${vision_context}
 }
 ## Your Task
 
-The app is running at http://localhost:${port}. Use the Playwright browser tools to:
+The app is running at http://localhost:${port}. Use the playwright-cli to test it.
 
-1. Open the app in the browser
-2. Navigate to the feature that was changed
-3. Test the ACTUAL user flow described in the issue:
+### Playwright CLI Commands Available
+- \`playwright-cli open http://localhost:${port}\` — Open the app in a browser
+- \`playwright-cli goto <url>\` — Navigate to a page
+- \`playwright-cli snapshot\` — Get a snapshot of the current page with element refs
+- \`playwright-cli click <ref>\` — Click an element (use ref from snapshot, e.g. \`e15\`)
+- \`playwright-cli type <text>\` — Type text into the focused element
+- \`playwright-cli screenshot\` — Take a screenshot of the current page
+- \`playwright-cli fill <ref> <text>\` — Fill a form field
+- \`playwright-cli select <ref> <value>\` — Select a dropdown option
+- \`playwright-cli wait <selector>\` — Wait for an element to appear
+- \`playwright-cli console\` — Check browser console for errors
+- \`playwright-cli network\` — Check network requests/responses
+
+### Testing Steps
+
+1. Open the app: \`playwright-cli open http://localhost:${port}\`
+2. Take a snapshot to see the page structure: \`playwright-cli snapshot\`
+3. Navigate to the feature that was changed
+4. Test the ACTUAL user flow described in the issue:
    - Can you do what the issue says should work?
    - Does the UI render correctly?
-   - Do form submissions work?
-   - Do API calls return correct data?
-   - Are there any console errors?
-4. Take screenshots of key states (before/after if applicable)
-5. Check for functional gaps:
+   - Do form submissions work end-to-end?
+   - Check console for errors: \`playwright-cli console\`
+   - Check network for failed requests: \`playwright-cli network\`
+5. Take screenshots at key states: \`playwright-cli screenshot\`
+6. Check for functional gaps:
    - Is the backend wired to the frontend?
-   - Are there dead endpoints with no UI?
-   - Are there UI elements that call missing endpoints?
-   - Does the feature work end-to-end?
+   - Are there UI elements that don't respond?
+   - Does data persist after submission?
+
+### Auth / Login
+${auth_state_dir:+Auth state is pre-loaded. If you need to log in, use the credentials from the environment or .env file.}
 
 ## Report
 
@@ -2120,30 +2156,39 @@ After testing, output a verification report:
 ### Status: PASS or FAIL
 
 ### What Was Tested
-- (list each thing you tested)
+- (list each action you took with playwright-cli)
 
 ### What Worked
 - (list what functioned correctly)
 
 ### What Failed
-- (list what didn't work, with details)
+- (list what didn't work, with details and screenshots)
 
-### Screenshots
-- (describe what you captured)
+### Console Errors
+- (any browser console errors found)
+
+### Network Issues
+- (any failed API calls or missing endpoints)
 
 ### Gaps Found
 - (any disconnects between frontend and backend, missing pieces, etc.)
 
-IMPORTANT: Actually USE the app. Navigate to pages, click buttons, fill forms, submit data.
-Do NOT just check if the server responds. Verify the feature works as a user would use it.
+IMPORTANT: Use playwright-cli commands to actually interact with the app.
+Navigate, click, type, submit forms. Verify the feature works as a real user would use it.
 VERIFYEOF
 )
 
-  log_info "Verification agent: claude | Model: $MODEL | Testing live at http://localhost:$port"
+  log_info "Verification agent: claude + playwright-cli | Testing live at http://localhost:$port"
+
+  # Save screenshots to session directory
+  local screenshot_dir="${PROJECT_DIR}/sessions/${SESSION_NAME}/screenshots/issue-${issue_num}"
+  mkdir -p "$screenshot_dir"
 
   local verify_output
   set +e
-  verify_output=$(cd "$worktree" && echo "$verify_prompt" | claude -p \
+  verify_output=$(cd "$worktree" && \
+    PLAYWRIGHT_SCREENSHOTS_DIR="$screenshot_dir" \
+    echo "$verify_prompt" | claude -p \
     --model "$MODEL" \
     --dangerously-skip-permissions \
     --verbose \
@@ -2160,24 +2205,30 @@ VERIFYEOF
   # Kill the app process and its children
   log_info "Shutting down app (PID $app_pid)..."
   kill "$app_pid" 2>/dev/null || true
-  # Kill any child processes (vite, node, etc.)
   pkill -P "$app_pid" 2>/dev/null || true
   wait "$app_pid" 2>/dev/null || true
 
+  # Close playwright-cli browser sessions
+  playwright-cli close-all 2>/dev/null || true
+
   # Check if verification passed based on agent output
+  set +e
   if echo "$verify_output" | grep -qi "Status:.*FAIL"; then
     log_error "Live verification FAILED"
+    set -e
     return 1
   elif echo "$verify_output" | grep -qi "Status:.*PASS"; then
     log_success "Live verification PASSED"
+    set -e
     return 0
   else
-    # If agent didn't clearly state pass/fail, check exit code
     if [[ "$verify_exit" -eq 0 ]]; then
       log_success "Verification completed (agent exit 0)"
+      set -e
       return 0
     else
       log_warn "Verification unclear (agent exit $verify_exit)"
+      set -e
       return 1
     fi
   fi
@@ -3100,6 +3151,71 @@ fi
 # Handle vision subcommand -- interactive project vision setup
 if [[ "$SUBCOMMAND" == "vision" ]]; then
   run_vision
+  exit 0
+fi
+
+# Handle auth subcommand -- save authenticated browser state for verification
+if [[ "$SUBCOMMAND" == "auth" ]]; then
+  if ! command -v playwright-cli &>/dev/null; then
+    log_error "playwright-cli not installed. Install with: npm install -g @playwright/cli@latest"
+    exit 1
+  fi
+
+  local auth_dir="${PROJECT_DIR}/.alpha-loop/auth"
+  mkdir -p "$auth_dir"
+
+  echo ""
+  echo -e "${BOLD}${CYAN}Save authenticated browser state${NC}"
+  echo ""
+  echo "This will open a browser. Log in to your app, then the state"
+  echo "(cookies, localStorage, sessions) will be saved for future"
+  echo "verification runs."
+  echo ""
+
+  # Detect app URL
+  local app_url="http://localhost:3000"
+  read -r -p "App URL [$app_url]: " custom_url
+  [[ -n "$custom_url" ]] && app_url="$custom_url"
+
+  echo ""
+  echo "Opening browser at $app_url..."
+  echo "Log in, then come back here and press Enter to save state."
+  echo ""
+
+  # Open browser with persistent profile
+  playwright-cli open "$app_url" --headed --persistent 2>/dev/null &
+  local browser_pid=$!
+
+  read -r -p "Press Enter after you've logged in... "
+
+  # Save the browser state
+  playwright-cli state-save "$auth_dir/state.json" 2>/dev/null || {
+    log_warn "Could not save state via playwright-cli, trying cookie export..."
+    playwright-cli cookie-export "$auth_dir/cookies.json" 2>/dev/null || true
+    playwright-cli localstorage-export "$auth_dir/localstorage.json" 2>/dev/null || true
+  }
+
+  # Close the browser
+  playwright-cli close-all 2>/dev/null || true
+  kill "$browser_pid" 2>/dev/null || true
+
+  if [[ -f "$auth_dir/state.json" ]] || [[ -f "$auth_dir/cookies.json" ]]; then
+    log_success "Auth state saved to $auth_dir"
+    echo ""
+    echo "Future verification runs will load this state automatically."
+    echo "Re-run 'auth' if your session expires."
+
+    # Add to .gitignore if not already there
+    if [[ -f "$PROJECT_DIR/.gitignore" ]]; then
+      if ! grep -q ".alpha-loop/auth" "$PROJECT_DIR/.gitignore" 2>/dev/null; then
+        echo ".alpha-loop/auth/" >> "$PROJECT_DIR/.gitignore"
+        log_info "Added .alpha-loop/auth/ to .gitignore"
+      fi
+    fi
+  else
+    log_error "Failed to save auth state"
+  fi
+
   exit 0
 fi
 
