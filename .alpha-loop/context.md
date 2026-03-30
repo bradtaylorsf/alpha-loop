@@ -1,24 +1,26 @@
 Here's the project context:
 
 ## Architecture
-- **Entry points**: `scripts/loop.sh` (bash loop) and `src/cli/index.ts` (TypeScript CLI) both orchestrate the pipeline. The CLI creates a `GitHubClient`, an `AgentRunner`, and a `Server`, then calls `startLoop()` in `src/engine/loop.ts`.
-- **Express server** in `src/server/index.ts` mounts three route groups under `/api`: `status`, `stream` (SSE), and `config`. Server listens on port 4000.
-- **Database**: SQLite via `better-sqlite3`, created in `src/server/db.ts`. Stores `runs` (issue processing history) and `sessions`. Queried via prepared statements (`createRun`, `updateRun`).
-- **Engine** (`src/engine/`): `loop.ts` is the pipeline orchestrator (setup → implement → test → fix → verify → review → PR → cleanup). `runner.ts` defines the `AgentRunner` interface; concrete runners live in `engine/runners/` (claude, codex). `worktree.ts` manages git worktree isolation. `github.ts` handles Issues/PRs via Octokit.
-- **Learning** (`src/learning/`): `extractor.ts` pulls learnings from completed runs; `improver.ts` applies them to agent prompts.
+- **Entry points**: `scripts/loop.sh` starts the loop, calling `src/engine/loop.ts` which orchestrates the pipeline (setup → implement → test → fix → verify → review → PR → cleanup). Express server in `src/server/index.ts` mounts routes from `routes/{status,stream,config}.ts` on `/api`.
+- **Agent runners**: `src/engine/runner.ts` defines the `AgentRunner` interface; concrete implementations in `src/engine/runners/{claude,codex}.ts`. Any CLI agent can be plugged in by implementing `buildArgs()` + `run()`.
+- **Database**: SQLite via `better-sqlite3`, schema initialized in `src/server/db.ts`. Tables: `runs` (pipeline execution history), `sessions` (ordered issue batches), `learnings` (extracted patterns/anti-patterns). Query via prepared statements on the `Database` instance.
+- **GitHub integration**: `src/engine/github.ts` handles issues (kanban via labels) and PRs. `src/engine/worktree.ts` provides git worktree isolation per issue.
+- **Learning loop**: `src/learning/extractor.ts` extracts learnings post-run; `src/learning/improver.ts` feeds them back into agent prompts.
 
 ## Conventions
-- TypeScript strict mode, ESM, `.js` extensions in imports. Functional style (no classes except API wrappers). `node:` prefix for built-ins.
-- Tests in `tests/` mirror `src/` structure, use Jest with `ts-jest`, `forceExit: true`, 30s timeout. Run with `pnpm test`. Tests must close all HTTP connections; use `jest.useFakeTimers()` for timer-based tests.
-- New agent runners: add to `src/engine/runners/`, export from `runners/index.ts`. New API routes: create in `src/server/routes/`, mount in `src/server/index.ts` under `/api`.
+- TypeScript strict mode, ESM (`"type": "module"`), `.js` extensions in imports, `node:` prefix for builtins.
+- Functional style — no classes except API wrappers. Config validated with Zod.
+- Tests in `tests/` directory (mirrors `src/` structure), Jest with `forceExit: true`, `testTimeout: 30000`, run via `pnpm test` (`jest --runInBand`). Must close all HTTP connections in teardown; use `jest.useFakeTimers()` for timer-based tests.
+- New routes: create in `src/server/routes/`, import and mount in `src/server/index.ts` under `/api`.
+- New agent runners: implement `AgentRunner` interface, add to `src/engine/runners/`.
 
 ## Critical Rules
-- **Protected files**: `reference/`, `CLAUDE.md`, `.claude/agents/`, `.claude/skills/`, `scripts/loop.sh` — do not modify without explicit ask.
-- **Reference code**: Always check `reference/*.reference.ts` before writing new engine code — contains battle-tested edge-case handling.
-- **Import extensions**: All relative imports must use `.js` extension (ESM requirement).
-- **Test hygiene**: Never leave open HTTP connections or real timers in tests — causes Jest hangs. `forceExit` is a safety net, not a fix.
+- **Protected files**: `reference/`, `CLAUDE.md`, `.claude/agents/`, `.claude/skills/`, `scripts/loop.sh` — do not modify without explicit instruction.
+- **Reference directory**: Always check `reference/*.reference.ts` before writing new engine code — contains battle-tested edge-case handling for JSONL parsing, git locks, rate limits.
+- **Server teardown**: Tests that create servers MUST close them in `afterEach`/`afterAll` or Jest hangs.
+- **GitHub is the database**: Issues = kanban state, labels = state machine, PRs = reviews. Don't duplicate this state.
 - **pnpm only** — never use npm or yarn.
 
 ## Active State
-- Test status: _(to be filled by loop)_
-- Recent changes: _(to be filled by loop)_
+- Test status: (will be filled in by the loop)
+- Recent changes: (will be filled in by the loop)
