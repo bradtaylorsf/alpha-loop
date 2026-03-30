@@ -192,6 +192,7 @@ load_config() {
         merge_strategy) CONFIG_MERGE_STRATEGY="$value" ;;
         test_command)   CONFIG_TEST_COMMAND="$value" ;;
         dev_command)    CONFIG_DEV_COMMAND="$value" ;;
+        port)           CONFIG_PORT="$value" ;;
         base_branch)    CONFIG_BASE_BRANCH="$value" ;;
         poll_interval)  CONFIG_POLL_INTERVAL="$value" ;;
       esac
@@ -236,6 +237,7 @@ label: ready
 merge_strategy: session
 test_command: pnpm test
 dev_command: pnpm dev
+port: 3000
 EOF
 
   log_success "Created $config_file"
@@ -2037,15 +2039,8 @@ run_verify() {
     return 0
   fi
 
-  # Detect port from package.json scripts or dev script
-  local port=3000
-  set +e
-  local pkg_port=""
-  if [[ -f "$worktree/package.json" ]]; then
-    pkg_port=$(grep -oE 'PORT[=:-]+[[:space:]]*[0-9]{4}|--port[[:space:]]+[0-9]{4}|-p[[:space:]]+[0-9]{4}' "$worktree/package.json" "$worktree/scripts/dev.sh" 2>/dev/null | grep -oE '[0-9]{4}' | head -1) || true
-  fi
-  set -e
-  [[ -n "$pkg_port" ]] && port="$pkg_port"
+  # Use port from config, or default to 3000
+  local port="${CONFIG_PORT:-3000}"
 
   # Start the app in the background
   log_info "Starting app with '$dev_cmd' on port $port..."
@@ -3168,15 +3163,7 @@ if [[ "$SUBCOMMAND" == "auth" ]]; then
   echo "verification runs."
   echo ""
 
-  # Detect app URL from dev_command in config or package.json
-  APP_PORT=""
-  if [[ -n "${CONFIG_DEV_COMMAND:-}" ]]; then
-    APP_PORT=$(echo "$CONFIG_DEV_COMMAND" | grep -oE '\-\-port\s+([0-9]+)|PORT=([0-9]+)|-p\s+([0-9]+)' | grep -oE '[0-9]+' | head -1) || true
-  fi
-  if [[ -z "$APP_PORT" && -f "$PROJECT_DIR/package.json" ]]; then
-    APP_PORT=$(grep -oE '\-\-port\s+([0-9]+)|PORT=([0-9]+)|-p\s+([0-9]+)|VITE_PORT:-([0-9]+)|SERVER_PORT.*([0-9]{4})' "$PROJECT_DIR/package.json" "$PROJECT_DIR/scripts/dev.sh" 2>/dev/null | grep -oE '[0-9]{4}' | head -1) || true
-  fi
-  APP_URL="http://localhost:${APP_PORT:-3000}"
+  APP_URL="http://localhost:${CONFIG_PORT:-3000}"
   read -r -p "App URL [$APP_URL]: " custom_url
   [[ -n "$custom_url" ]] && APP_URL="$custom_url"
 
