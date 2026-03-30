@@ -593,6 +593,12 @@ Instructions:
 poll_issues() {
   local limit="${1:-1}"
 
+  # If no project configured, fall back to label-based polling
+  if [[ -z "$PROJECT_NUM" || "$PROJECT_NUM" == "0" ]]; then
+    poll_issues_by_label "$limit"
+    return
+  fi
+
   # Read from the GitHub Project board -- items come in the board's display order
   # (the order you set by dragging in the project view)
   # Filter to "Todo" status only, then take the first N items
@@ -617,8 +623,32 @@ poll_issues() {
   ' 2>/dev/null || echo "[]"
 }
 
+# Fallback: poll issues by label when no project board is configured
+poll_issues_by_label() {
+  local limit="${1:-1}"
+  local label="${LABEL_READY:-ready}"
+
+  gh issue list --repo "$REPO" \
+    --label "$label" \
+    --state open \
+    --json number,title,body,labels \
+    --limit "$limit" 2>/dev/null | jq --argjson limit "$limit" '
+    [.[] | {
+      number: .number,
+      title: .title,
+      body: .body,
+      labels: [.labels[].name]
+    }] | sort_by(.number) | .[0:$limit]
+  ' 2>/dev/null || echo "[]"
+}
+
 update_project_status() {
   local issue_num="$1" new_status="$2"
+
+  # Skip if no project board configured
+  if [[ -z "$PROJECT_NUM" || "$PROJECT_NUM" == "0" ]]; then
+    return 0
+  fi
 
   if [[ "$DRY_RUN" == "true" ]]; then
     log_dry "Would update project status for #$issue_num to '$new_status'"
