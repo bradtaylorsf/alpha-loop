@@ -34,7 +34,7 @@ describe('auth', () => {
   });
 
   it('shows error when playwright-cli is not installed', async () => {
-    mockExec.mockImplementation(() => { throw new Error('not found'); });
+    mockExec.mockReturnValue({ stdout: '', stderr: 'not found', exitCode: 1 });
 
     await authCommand();
 

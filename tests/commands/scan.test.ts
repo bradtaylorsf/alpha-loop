@@ -37,7 +37,11 @@ describe('scan', () => {
   });
 
   it('generates context.md from Claude output', () => {
-    mockExec.mockReturnValue('## Architecture\n- Entry point: src/index.ts');
+    mockExec.mockReturnValue({
+      stdout: '## Architecture\n- Entry point: src/index.ts',
+      stderr: '',
+      exitCode: 0,
+    });
 
     scanCommand();
 
@@ -51,7 +55,7 @@ describe('scan', () => {
     fs.mkdirSync(contextDir, { recursive: true });
     fs.writeFileSync(path.join(contextDir, 'context.md'), 'old content');
 
-    mockExec.mockReturnValue('new content');
+    mockExec.mockReturnValue({ stdout: 'new content', stderr: '', exitCode: 0 });
 
     scanCommand();
 
@@ -60,7 +64,7 @@ describe('scan', () => {
   });
 
   it('handles Claude CLI failure gracefully', () => {
-    mockExec.mockImplementation(() => { throw new Error('claude not found'); });
+    mockExec.mockReturnValue({ stdout: '', stderr: 'claude not found', exitCode: 1 });
 
     scanCommand();
 

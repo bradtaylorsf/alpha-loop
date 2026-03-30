@@ -1,0 +1,181 @@
+/**
+ * Session Management — create sessions, save results, finalize with PR.
+ * Port of loop.sh's session globals and finalize_session().
+ */
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { log } from './logger.js';
+import { exec } from './shell.js';
+import { createPR } from './github.js';
+import type { Config } from './config.js';
+import type { PipelineResult } from './pipeline.js';
+
+export type SessionContext = {
+  name: string;
+  branch: string;
+  resultsDir: string;
+  logsDir: string;
+  results: PipelineResult[];
+};
+
+/**
+ * Create a new session context with timestamp-based name.
+ * Optionally creates a session branch when autoMerge is enabled.
+ */
+export function createSession(config: Config): SessionContext {
+  const now = new Date();
+  const timestamp = formatSessionTimestamp(now);
+  const name = `session/${timestamp}`;
+  const branch = config.mergeTo || name;
+
+  const projectDir = process.cwd();
+  const resultsDir = join(projectDir, 'sessions', name);
+  const logsDir = join(resultsDir, 'logs');
+
+  mkdirSync(resultsDir, { recursive: true });
+  mkdirSync(logsDir, { recursive: true });
+
+  // Create session branch if auto-merge is enabled
+  if (config.autoMerge && !config.dryRun) {
+    const branchExists = exec(`git rev-parse --verify "${branch}"`, { cwd: projectDir });
+    if (branchExists.exitCode !== 0) {
+      // Try to create from remote base branch first, fall back to local
+      const fromRemote = exec(
+        `git checkout -b "${branch}" "origin/${config.baseBranch}"`,
+        { cwd: projectDir },
+      );
+      if (fromRemote.exitCode !== 0) {
+        exec(`git checkout -b "${branch}" "${config.baseBranch}"`, { cwd: projectDir });
+      }
+      // Switch back to the original branch
+      exec(`git checkout -`, { cwd: projectDir });
+      log.info(`Created session branch: ${branch}`);
+    } else {
+      log.info(`Session branch already exists: ${branch}`);
+    }
+  }
+
+  return { name, branch, resultsDir, logsDir, results: [] };
+}
+
+/**
+ * Save a pipeline result to the session directory as JSON.
+ */
+export function saveResult(session: SessionContext, result: PipelineResult): void {
+  const filePath = join(session.resultsDir, `result-${result.issueNum}.json`);
+  writeFileSync(filePath, JSON.stringify(result, null, 2) + '\n');
+  log.info(`Session result saved: ${filePath}`);
+}
+
+/**
+ * Get the previous issue result formatted for prompt context.
+ * Returns null if no previous results exist.
+ */
+export function getPreviousResult(session: SessionContext): string | null {
+  if (session.results.length === 0) return null;
+
+  const prev = session.results[session.results.length - 1];
+  return `## Previous Issue in This Session
+- Issue #${prev.issueNum}: ${prev.title}
+- Status: ${prev.status}
+- Tests: ${prev.testsPassing ? 'PASSING' : 'FAILING'}
+- Files changed: ${prev.filesChanged}
+- Duration: ${prev.duration}s
+${prev.prUrl ? `- PR: ${prev.prUrl}` : ''}
+
+Build on what was already done. Avoid duplicating work.`;
+}
+
+/**
+ * Finalize session: commit learnings to session branch, create session PR.
+ * Only runs when autoMerge is enabled and issues were processed.
+ */
+export async function finalizeSession(
+  session: SessionContext,
+  config: Config,
+): Promise<string | null> {
+  if (!config.autoMerge) return null;
+  if (session.branch === config.baseBranch) return null;
+  if (session.results.length === 0) return null;
+
+  if (config.dryRun) {
+    log.dry(`Would finalize session: ${session.branch} -> ${config.baseBranch}`);
+    return null;
+  }
+
+  log.step(`Finalizing session: ${session.branch}`);
+
+  const projectDir = process.cwd();
+
+  // Ensure we're on the session branch
+  exec('git fetch origin', { cwd: projectDir });
+  const checkout = exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+  if (checkout.exitCode !== 0) {
+    log.warn('Could not checkout session branch for finalization');
+    return null;
+  }
+
+  // Stage session results and learnings
+  const sessionsPath = join('sessions', session.name);
+  if (existsSync(join(projectDir, sessionsPath))) {
+    exec(`git add "${sessionsPath}/"`, { cwd: projectDir });
+  }
+  const learningsDir = join(projectDir, 'learnings');
+  if (existsSync(learningsDir)) {
+    exec('git add learnings/', { cwd: projectDir });
+  }
+
+  // Commit if there are staged changes
+  const diffResult = exec('git diff --cached --quiet', { cwd: projectDir });
+  if (diffResult.exitCode !== 0) {
+    const issueCount = session.results.length;
+    exec(
+      `git commit -m "chore: session results and learnings from ${session.name}\n\nProcessed ${issueCount} issue(s) in this session."`,
+      { cwd: projectDir },
+    );
+    exec(`git push origin "${session.branch}"`, { cwd: projectDir });
+  }
+
+  // Create or update session PR
+  const issueCount = session.results.length;
+  const prTitle = `session: ${session.name} (${issueCount} issues)`;
+  const prBody = `## Session Summary
+
+**Branch:** ${session.branch}
+**Issues processed:** ${issueCount}
+**Completed:** ${new Date().toISOString()}
+
+### Issues
+${session.results.map((r) => `- #${r.issueNum}: ${r.title} — ${r.status}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
+
+---
+This PR collects all changes from this session for final review before merging to ${config.baseBranch}.
+
+Automated by alpha-loop`;
+
+  try {
+    const prUrl = createPR({
+      repo: config.repo,
+      base: config.baseBranch,
+      head: session.branch,
+      title: prTitle,
+      body: prBody,
+      cwd: projectDir,
+    });
+    log.success(`Session PR: ${prUrl}`);
+    return prUrl;
+  } catch (err) {
+    log.warn(`Could not create session PR: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
+function formatSessionTimestamp(date: Date): string {
+  const y = date.getFullYear();
+  const mo = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const h = String(date.getHours()).padStart(2, '0');
+  const mi = String(date.getMinutes()).padStart(2, '0');
+  const s = String(date.getSeconds()).padStart(2, '0');
+  return `${y}${mo}${d}-${h}${mi}${s}`;
+}

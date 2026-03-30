@@ -2,22 +2,27 @@ import { exec, run } from '../../src/lib/shell';
 
 describe('shell', () => {
   describe('exec', () => {
-    it('runs a command and returns trimmed stdout', () => {
-      expect(exec('echo hello')).toBe('hello');
+    it('runs a command and returns structured result', () => {
+      const result = exec('echo hello');
+      expect(result.stdout).toBe('hello');
+      expect(result.exitCode).toBe(0);
     });
 
-    it('throws on non-zero exit code', () => {
-      expect(() => exec('exit 1')).toThrow();
+    it('returns non-zero exit code on failure (does not throw)', () => {
+      const result = exec('exit 1');
+      expect(result.exitCode).not.toBe(0);
     });
 
-    it('throws with stderr content on failure', () => {
-      expect(() => exec('echo "bad thing" >&2 && exit 1')).toThrow();
+    it('captures stderr on failure', () => {
+      const result = exec('echo "bad thing" >&2 && exit 1');
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain('bad thing');
     });
 
     it('respects cwd option', () => {
       const result = exec('pwd', { cwd: '/tmp' });
       // /tmp may resolve to /private/tmp on macOS
-      expect(result).toMatch(/\/tmp$/);
+      expect(result.stdout).toMatch(/\/tmp$/);
     });
   });
 
