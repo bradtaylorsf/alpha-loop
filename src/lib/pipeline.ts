@@ -16,7 +16,7 @@ import {
   updateProjectStatus,
 } from './github.js';
 import { buildImplementPrompt, buildReviewPrompt } from './prompts.js';
-import { runTests } from './testing.js';
+import { runTests, runE2eTests } from './testing.js';
 import { extractLearnings, getLearningContext } from './learning.js';
 import { saveResult, getPreviousResult } from './session.js';
 import type { Config } from './config.js';
@@ -214,10 +214,10 @@ export async function processIssue(
       log.info(`Verification attempt ${attempt} of ${config.maxTestRetries}`);
 
       // Run E2E/verify tests
-      const verifyResult = exec('pnpm test:e2e', { cwd: worktreePath, timeout: 600_000 });
-      verifyOutput = verifyResult.stdout + (verifyResult.stderr ? `\n${verifyResult.stderr}` : '');
+      const e2eResult = runE2eTests(worktreePath, logFile);
+      verifyOutput = e2eResult.output;
 
-      if (verifyResult.exitCode === 0) {
+      if (e2eResult.passed) {
         verifyPassing = true;
         log.success(`Verification passed on attempt ${attempt}`);
         break;

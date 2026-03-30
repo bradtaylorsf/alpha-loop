@@ -142,8 +142,8 @@ export async function runCommand(options: RunOptions): Promise<void> {
     process.exit(0);
   };
 
-  process.on('SIGINT', () => { cleanup(); });
-  process.on('SIGTERM', () => { cleanup(); });
+  process.on('SIGINT', () => { void cleanup(); });
+  process.on('SIGTERM', () => { void cleanup(); });
 
   // Generate/refresh project context if stale
   const contextFile = join(process.cwd(), '.alpha-loop', 'context.md');

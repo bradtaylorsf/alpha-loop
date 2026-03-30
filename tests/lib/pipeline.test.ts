@@ -37,6 +37,7 @@ jest.mock('../../src/lib/github', () => ({
 
 jest.mock('../../src/lib/testing', () => ({
   runTests: jest.fn(),
+  runE2eTests: jest.fn(),
 }));
 
 jest.mock('../../src/lib/learning', () => ({

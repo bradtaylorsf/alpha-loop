@@ -228,7 +228,7 @@ describe('finalizeSession', () => {
     expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
       repo: 'owner/repo',
       base: 'master',
-      title: expect.stringContaining('session:'),
+      title: expect.stringContaining('Session:'),
       body: expect.stringContaining('#1: First issue'),
     }));
   });

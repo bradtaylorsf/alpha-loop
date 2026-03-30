@@ -138,7 +138,7 @@ export async function finalizeSession(
 
   // Create or update session PR
   const issueCount = session.results.length;
-  const prTitle = `session: ${session.name} (${issueCount} issues)`;
+  const prTitle = `Session: ${session.name} — ${issueCount} issues`;
   const prBody = `## Session Summary
 
 **Branch:** ${session.branch}
