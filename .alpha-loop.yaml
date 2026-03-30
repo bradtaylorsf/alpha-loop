@@ -1,0 +1,12 @@
+# Alpha Loop configuration
+# This repo uses itself to build itself
+
+repo: bradtaylorsf/alpha-loop
+project: 2
+model: opus
+review_model: opus
+max_turns: 30
+label: ready
+base_branch: master
+test_command: pnpm test
+poll_interval: 60
