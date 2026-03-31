@@ -5,6 +5,47 @@ import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
 import { syncAgentAssets } from './sync.js';
 
+/**
+ * Find the templates directory shipped with alpha-loop.
+ * Works whether running from src/ (tsx) or dist/ (compiled) or as an npm package.
+ */
+function findTemplatesDir(): string | null {
+  // Walk up from this file's location to find the alpha-loop package root.
+  // src/commands/init.ts -> src/ -> package root (has templates/)
+  // dist/commands/init.js -> dist/ -> package root (has templates/)
+  const scriptDir = typeof __dirname !== 'undefined' ? __dirname : '';
+
+  const candidates: string[] = [];
+
+  // Walk up from script location
+  if (scriptDir) {
+    let dir = scriptDir;
+    for (let i = 0; i < 5; i++) {
+      candidates.push(join(dir, 'templates'));
+      const parent = join(dir, '..');
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  // Also check relative to the entry script (process.argv[1])
+  // e.g., npx tsx /path/to/alpha-loop/src/cli.ts → /path/to/alpha-loop/templates
+  if (process.argv[1]) {
+    let dir = join(process.argv[1], '..');
+    for (let i = 0; i < 5; i++) {
+      candidates.push(join(dir, 'templates'));
+      const parent = join(dir, '..');
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
+
 const CONFIG_FILE = '.alpha-loop.yaml';
 
 const ISSUE_TEMPLATE = `name: Agent-Ready Task
@@ -138,6 +179,53 @@ export function initCommand(): void {
     }
   } else {
     log.info('playwright-cli not found — skipping skill install. Install with: npm install -g @playwright/cli@latest');
+  }
+
+  // Install base skills and agents from alpha-loop's templates
+  // These are the universal skills every project needs for the loop to work well
+  const templatesDir = findTemplatesDir();
+  if (templatesDir) {
+    // Install skills to skills/ (source of truth)
+    const templateSkills = join(templatesDir, 'skills');
+    if (existsSync(templateSkills)) {
+      const skillNames = exec(`ls "${templateSkills}"`).stdout.trim().split('\n').filter(Boolean);
+      let installed = 0;
+      for (const name of skillNames) {
+        const dest = join('skills', name);
+        if (!existsSync(dest)) {
+          mkdirSync('skills', { recursive: true });
+          copyDir(join(templateSkills, name), dest);
+          installed++;
+        }
+      }
+      if (installed > 0) {
+        log.success(`Installed ${installed} base skill(s): ${skillNames.filter(n => !existsSync(join('skills', n)) || installed > 0).join(', ')}`);
+      }
+    }
+
+    // Install agents to agents/ (will be synced by AGENTS.md convention)
+    // Also install directly to .claude/agents/ and .codex/agents/ for immediate use
+    const templateAgents = join(templatesDir, 'agents');
+    if (existsSync(templateAgents)) {
+      const agentFiles = exec(`ls "${templateAgents}"`).stdout.trim().split('\n').filter(Boolean);
+      for (const file of agentFiles) {
+        // .claude/agents/ for Claude
+        const claudeDest = join('.claude', 'agents', file);
+        if (!existsSync(claudeDest)) {
+          mkdirSync(join('.claude', 'agents'), { recursive: true });
+          exec(`cp "${join(templateAgents, file)}" "${claudeDest}"`);
+        }
+        // .codex/agents/ for Codex (TOML format would be different, but .md works as fallback)
+        const codexDest = join('.codex', 'agents', file);
+        if (!existsSync(codexDest)) {
+          mkdirSync(join('.codex', 'agents'), { recursive: true });
+          exec(`cp "${join(templateAgents, file)}" "${codexDest}"`);
+        }
+      }
+      log.success(`Installed agent definitions: ${agentFiles.join(', ')}`);
+    }
+  } else {
+    log.warn('Templates directory not found — skipping base skills/agents install');
   }
 
   // Install GitHub issue template for structured agent-ready issues

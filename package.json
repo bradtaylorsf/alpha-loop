@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "templates",
     "agents",
     "README.md",
     "LICENSE"
