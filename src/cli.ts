@@ -19,13 +19,13 @@ program
 
 program
   .command('run')
-  .description('Run the loop')
-  .option('--once', 'Process one issue and exit')
+  .description('Run the loop — fetches matching issues and processes them all, then exits')
   .option('--dry-run', 'Preview without changes')
   .option('--model <model>', 'AI model to use')
   .option('--skip-tests', 'Skip test execution')
   .option('--skip-review', 'Skip code review')
   .option('--skip-learn', 'Skip learning extraction')
+  .option('--milestone <name>', 'Only process issues in this milestone')
   .option('--auto-merge', 'Auto-merge PRs to session branch')
   .option('--merge-to <branch>', 'Use existing branch instead of creating session branch')
   .action(async (options) => {

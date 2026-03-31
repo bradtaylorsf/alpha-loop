@@ -56,6 +56,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     runFull: false,
     maxIssues: 0,
     maxSessionDuration: 0,
+    milestone: '',
     ...overrides,
   };
 }

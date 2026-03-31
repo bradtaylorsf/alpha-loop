@@ -105,6 +105,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     runFull: false,
     maxIssues: 0,
     maxSessionDuration: 0,
+    milestone: '',
     ...overrides,
   };
 }
@@ -135,7 +136,7 @@ afterEach(() => {
 });
 
 describe('runCommand', () => {
-  test('processes available issues and exits with --once', async () => {
+  test('processes all matching issues and exits', async () => {
     mockPollIssues.mockReturnValue([
       { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
     ]);
@@ -149,7 +150,7 @@ describe('runCommand', () => {
       filesChanged: 5,
     });
 
-    await runCommand({ once: true });
+    await runCommand({});
 
     expect(mockProcessIssue).toHaveBeenCalledWith(
       42, 'Test issue', 'Body',
@@ -159,10 +160,10 @@ describe('runCommand', () => {
     expect(mockFinalizeSession).toHaveBeenCalled();
   });
 
-  test('exits with --once when no issues found', async () => {
+  test('exits cleanly when no issues found', async () => {
     mockPollIssues.mockReturnValue([]);
 
-    await runCommand({ once: true });
+    await runCommand({});
 
     expect(mockProcessIssue).not.toHaveBeenCalled();
     expect(mockFinalizeSession).toHaveBeenCalled();
@@ -172,7 +173,6 @@ describe('runCommand', () => {
     mockPollIssues.mockReturnValue([]);
 
     await runCommand({
-      once: true,
       dryRun: true,
       model: 'sonnet',
       skipTests: true,
@@ -190,15 +190,15 @@ describe('runCommand', () => {
   test('exits when repo is not configured', async () => {
     mockLoadConfig.mockReturnValue(makeConfig({ repo: '' }) as any);
 
-    await runCommand({ once: true });
+    await runCommand({});
 
     expect(mockExit).toHaveBeenCalledWith(1);
   });
 
-  test('checks prerequisites before polling', async () => {
+  test('checks prerequisites before fetching issues', async () => {
     mockPollIssues.mockReturnValue([]);
 
-    await runCommand({ once: true });
+    await runCommand({});
 
     // Should check for gh, git, claude
     expect(mockExec).toHaveBeenCalledWith('which gh');

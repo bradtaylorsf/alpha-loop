@@ -1,6 +1,6 @@
 # Alpha Loop
 
-Agent-agnostic automated development loop. Pulls issues from your GitHub project board, implements them with an AI coding agent, runs tests, reviews the code, and creates PRs — then moves to the next issue.
+Agent-agnostic automated development loop. Fetches issues from your GitHub project board (optionally filtered by milestone), implements them with an AI coding agent, runs tests, reviews the code, and creates PRs — then moves to the next issue until all matching issues are done.
 
 **The Loop:** Plan (GitHub Issues) -> Build (AI Agent) -> Test -> Review -> Verify -> Learn -> Ship (PR)
 
@@ -40,11 +40,12 @@ alpha-loop vision
 # 4. Generate project context
 alpha-loop scan
 
-# 5. Run the loop on one batch of issues
-alpha-loop run --once
-
-# 6. Run continuously (respects max_issues and max_session_duration limits)
+# 5. Run the loop — you'll be prompted to pick a milestone
 alpha-loop run
+
+# Or target a specific milestone directly
+alpha-loop run --milestone "v1.0"
+
 ```
 
 ## How It Works
@@ -65,6 +66,22 @@ Alpha Loop implements a 12-step pipeline for each issue:
 12. **Cleanup** — Removes the worktree
 
 After all issues are processed, Alpha Loop generates a **session summary** that aggregates learnings across issues and produces actionable recommendations.
+
+### Milestone-Based Workflow
+
+When you start the loop interactively, Alpha Loop shows your open milestones and lets you pick which one to work on:
+
+```
+  Open Milestones
+
+  0  All issues (no milestone filter)
+  1  v1.0 — MVP (5 open, 3/8 done · due 2026-04-15)
+  2  v1.1 — Polish (10 open, 0/10 done)
+
+  Select milestone [0-2]: 1
+```
+
+This lets you plan work in GitHub milestones and control exactly how much the loop processes per session. You can also pass `--milestone "v1.0"` to skip the prompt, or set `milestone: v1.0` in your config file.
 
 ### Session Branches
 
@@ -89,8 +106,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | Command | Description |
 |---------|-------------|
 | `alpha-loop init` | Create `.alpha-loop.yaml` config and install agent skills/templates |
-| `alpha-loop run` | Run the loop continuously |
-| `alpha-loop run --once` | Process one batch of issues and exit |
+| `alpha-loop run` | Fetch matching issues, process them all, then exit |
 | `alpha-loop run --dry-run` | Preview without making changes |
 | `alpha-loop scan` | Generate/refresh project context (`.alpha-loop/context.md`) |
 | `alpha-loop vision` | Interactive project vision setup (`.alpha-loop/vision.md`) |
@@ -107,9 +123,9 @@ During live verification, the agent takes screenshots at key states and saves th
 alpha-loop run [options]
 
 Options:
-  --once              Process one batch of issues and exit
   --dry-run           Preview without making changes
   --model <model>     AI model to use (e.g., opus, sonnet)
+  --milestone <name>  Only process issues in this milestone (skips interactive prompt)
   --skip-tests        Skip test execution
   --skip-review       Skip code review step
   --skip-learn        Skip learning extraction
@@ -152,8 +168,8 @@ max_session_duration: 7200  # 2 hours in seconds
 | `test_command` | `pnpm test` | Command to run tests |
 | `dev_command` | `pnpm dev` | Command to start the dev server for verification |
 | `port` | `3000` | Port the dev server runs on |
-| `poll_interval` | `60` | Seconds between polling for new issues |
 | `max_test_retries` | `3` | Times to retry failing tests/verification |
+| `milestone` | (none) | Only process issues in this milestone |
 | `max_issues` | `0` | Max issues to process per session (0 = unlimited) |
 | `max_session_duration` | `0` | Max session duration in seconds (0 = unlimited) |
 | `auto_merge` | `true` | Auto-merge issue PRs into the session branch |
@@ -178,10 +194,10 @@ All config options can be set via environment variables (uppercase, same names):
 | `REVIEW_MODEL` | `review_model` |
 | `MAX_TURNS` | `max_turns` |
 | `MAX_TEST_RETRIES` | `max_test_retries` |
+| `MILESTONE` | `milestone` |
 | `MAX_ISSUES` | `max_issues` |
 | `MAX_SESSION_DURATION` | `max_session_duration` |
 | `BASE_BRANCH` | `base_branch` |
-| `POLL_INTERVAL` | `poll_interval` |
 | `TEST_COMMAND` | `test_command` |
 | `DEV_COMMAND` | `dev_command` |
 | `PORT` | `port` |
@@ -209,9 +225,15 @@ Create these labels on your repo (or let the loop create them):
 | `done` | Merged and complete |
 | `failed` | Loop failed after retries |
 
+### Milestones
+
+Use GitHub milestones to group issues into planned releases or sprints. When you start the loop, you'll be prompted to pick a milestone — only issues in that milestone will be processed.
+
+Create milestones at `github.com/<owner>/<repo>/milestones/new`. Set due dates to keep yourself on track.
+
 ### GitHub Project Board
 
-Alpha Loop reads issues from a GitHub Project board (v2). Issues are processed in board order, so you control priority by reordering.
+Alpha Loop reads issues from a GitHub Project board (v2). Issues are processed in board order, so you control priority by reordering. When combined with milestones, only "Todo" items in the selected milestone are processed.
 
 Set the `project` number in your config (find it in your project URL: `github.com/users/<owner>/projects/<number>`).
 
@@ -255,7 +277,7 @@ pnpm build
 pnpm test
 
 # Run in development mode
-pnpm dev -- run --once --dry-run
+pnpm dev -- run --dry-run
 ```
 
 ### Tech Stack

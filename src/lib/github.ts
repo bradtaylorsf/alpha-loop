@@ -14,29 +14,62 @@ export type Issue = {
   labels: string[];
 };
 
+export type Milestone = {
+  number: number;
+  title: string;
+  description: string;
+  openIssues: number;
+  closedIssues: number;
+  dueOn: string | null;
+  state: string;
+};
+
+/**
+ * List open milestones for a repository.
+ */
+export function listMilestones(repo: string): Milestone[] {
+  const result = exec(
+    `gh api "repos/${repo}/milestones?state=open&sort=due_on&direction=asc" --jq '[.[] | {number, title, description, openIssues: .open_issues, closedIssues: .closed_issues, dueOn: .due_on, state}]'`,
+  );
+  if (result.exitCode !== 0) {
+    logger.warn(`Failed to list milestones: ${result.stderr}`);
+    return [];
+  }
+  try {
+    return JSON.parse(result.stdout) as Milestone[];
+  } catch {
+    logger.warn('Failed to parse milestones JSON');
+    return [];
+  }
+}
+
 /**
  * Fetch issues to process. When a project board is configured, reads from
  * the board in display order (the order you set by dragging), filtered to
  * "Todo" status. Falls back to label-based polling when no project is set.
+ *
+ * When a milestone is specified, only issues in that milestone are returned.
  */
-export function pollIssues(repo: string, label: string, limit = 10, options?: { project?: number; repoOwner?: string }): Issue[] {
+export function pollIssues(repo: string, label: string, limit = 10, options?: { project?: number; repoOwner?: string; milestone?: string }): Issue[] {
   const project = options?.project;
   const repoOwner = options?.repoOwner ?? repo.split('/')[0];
+  const milestone = options?.milestone;
 
   // If project board is configured, use it for ordering
   if (project && project > 0) {
-    return pollIssuesByProject(repoOwner, project, limit);
+    return pollIssuesByProject(repoOwner, project, limit, { repo, milestone });
   }
 
   // Fallback: poll by label
-  return pollIssuesByLabel(repo, label, limit);
+  return pollIssuesByLabel(repo, label, limit, milestone);
 }
 
 /**
  * Poll from GitHub Project board — items come in the board's display order.
- * Filters to "Todo" status only.
+ * Filters to "Todo" status only. When a milestone is specified, cross-references
+ * with the GitHub API to only include issues in that milestone.
  */
-function pollIssuesByProject(owner: string, project: number, limit: number): Issue[] {
+function pollIssuesByProject(owner: string, project: number, limit: number, options?: { repo?: string; milestone?: string }): Issue[] {
   const result = exec(
     `gh project item-list ${project} --owner "${owner}" --format json --limit 100`,
   );
@@ -53,8 +86,18 @@ function pollIssuesByProject(owner: string, project: number, limit: number): Iss
       }>;
     };
 
-    return data.items
-      .filter((item) => item.status === 'Todo' && item.content?.type === 'Issue')
+    let items = data.items
+      .filter((item) => item.status === 'Todo' && item.content?.type === 'Issue');
+
+    // Filter by milestone if specified
+    if (options?.milestone && options?.repo) {
+      const milestoneIssues = getMilestoneIssueNumbers(options.repo, options.milestone);
+      if (milestoneIssues) {
+        items = items.filter((item) => milestoneIssues.has(item.content.number));
+      }
+    }
+
+    return items
       .slice(0, limit)
       .map((item) => ({
         number: item.content.number,
@@ -69,11 +112,29 @@ function pollIssuesByProject(owner: string, project: number, limit: number): Iss
 }
 
 /**
- * Fallback: poll issues by label when no project board is configured.
+ * Get the set of open issue numbers belonging to a milestone.
  */
-function pollIssuesByLabel(repo: string, label: string, limit: number): Issue[] {
+function getMilestoneIssueNumbers(repo: string, milestone: string): Set<number> | null {
   const result = exec(
-    `gh issue list --repo "${repo}" --label "${label}" --state open --json number,title,body,labels --limit ${limit}`,
+    `gh issue list --repo "${repo}" --milestone "${milestone}" --state open --json number --limit 100`,
+  );
+  if (result.exitCode !== 0) return null;
+  try {
+    const issues = JSON.parse(result.stdout) as Array<{ number: number }>;
+    return new Set(issues.map((i) => i.number));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fallback: poll issues by label when no project board is configured.
+ * Optionally filters by milestone.
+ */
+function pollIssuesByLabel(repo: string, label: string, limit: number, milestone?: string): Issue[] {
+  const milestoneFlag = milestone ? ` --milestone "${milestone}"` : '';
+  const result = exec(
+    `gh issue list --repo "${repo}" --label "${label}" --state open${milestoneFlag} --json number,title,body,labels --limit ${limit}`,
   );
   if (result.exitCode !== 0) {
     logger.warn(`Failed to poll issues: ${result.stderr}`);

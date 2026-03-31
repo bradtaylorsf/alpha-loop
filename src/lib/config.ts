@@ -27,6 +27,7 @@ export type Config = {
   skipE2e: boolean;
   maxIssues: number;
   maxSessionDuration: number;
+  milestone: string;
   autoMerge: boolean;
   mergeTo: string;
   autoCleanup: boolean;
@@ -58,6 +59,7 @@ const DEFAULTS: Config = {
   skipE2e: false,
   maxIssues: 0,
   maxSessionDuration: 0,
+  milestone: '',
   autoMerge: true,
   mergeTo: '',
   autoCleanup: true,
@@ -89,6 +91,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   skip_e2e: 'skipE2e',
   max_issues: 'maxIssues',
   max_session_duration: 'maxSessionDuration',
+  milestone: 'milestone',
   auto_merge: 'autoMerge',
   merge_to: 'mergeTo',
   auto_cleanup: 'autoCleanup',
@@ -120,6 +123,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   SKIP_E2E: 'skipE2e',
   MAX_ISSUES: 'maxIssues',
   MAX_SESSION_DURATION: 'maxSessionDuration',
+  MILESTONE: 'milestone',
   AUTO_MERGE: 'autoMerge',
   MERGE_TO: 'mergeTo',
   AUTO_CLEANUP: 'autoCleanup',

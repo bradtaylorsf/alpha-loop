@@ -6,7 +6,7 @@ import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
 import { exec } from '../lib/shell.js';
 import { loadConfig, type Config } from '../lib/config.js';
-import { pollIssues } from '../lib/github.js';
+import { pollIssues, listMilestones, type Milestone } from '../lib/github.js';
 import { processIssue } from '../lib/pipeline.js';
 import { createSession, finalizeSession, type SessionContext } from '../lib/session.js';
 import { cleanupWorktree } from '../lib/worktree.js';
@@ -17,9 +17,9 @@ import { runPreflight } from '../lib/preflight.js';
 import { syncAgentAssets } from './sync.js';
 
 export type RunOptions = {
-  once?: boolean;
   dryRun?: boolean;
   model?: string;
+  milestone?: string;
   skipTests?: boolean;
   skipReview?: boolean;
   skipLearn?: boolean;
@@ -66,7 +66,6 @@ function printBanner(config: Config, session: SessionContext): void {
   console.error(`  Max Turns:      ${BOLD}${config.maxTurns}${NC}`);
   console.error(`  Base Branch:    ${BOLD}${config.baseBranch}${NC}`);
   console.error(`  Label:          ${BOLD}${config.labelReady}${NC}`);
-  console.error(`  Poll Interval:  ${BOLD}${config.pollInterval}s${NC}`);
   console.error(`  Dry Run:        ${BOLD}${config.dryRun}${NC}`);
   console.error(`  Skip Tests:     ${BOLD}${config.skipTests}${NC}`);
   console.error(`  Skip Review:    ${BOLD}${config.skipReview}${NC}`);
@@ -79,10 +78,6 @@ function printBanner(config: Config, session: SessionContext): void {
   console.error('');
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function askYesNo(prompt: string): Promise<boolean> {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -91,6 +86,63 @@ function askYesNo(prompt: string): Promise<boolean> {
       resolve(answer.toLowerCase() !== 'n');
     });
   });
+}
+
+function askChoice(prompt: string, max: number): Promise<number> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(prompt, (answer) => {
+      rl.close();
+      const num = parseInt(answer.trim(), 10);
+      if (isNaN(num) || num < 0 || num > max) {
+        resolve(-1); // invalid
+      } else {
+        resolve(num);
+      }
+    });
+  });
+}
+
+/**
+ * Show open milestones and let the user pick one, or choose "all in order".
+ * Returns the milestone title to filter by, or empty string for all issues.
+ */
+async function pickMilestone(repo: string): Promise<string> {
+  const milestones = listMilestones(repo);
+
+  if (milestones.length === 0) {
+    log.info('No open milestones found — processing all ready issues');
+    return '';
+  }
+
+  const BOLD = '\x1b[1m';
+  const DIM = '\x1b[2m';
+  const NC = '\x1b[0m';
+
+  console.error('');
+  console.error(`${BOLD}  Open Milestones${NC}`);
+  console.error('');
+  console.error(`  ${BOLD}0${NC}  All issues (no milestone filter)`);
+  for (let i = 0; i < milestones.length; i++) {
+    const m = milestones[i];
+    const progress = m.openIssues + m.closedIssues > 0
+      ? `${m.closedIssues}/${m.openIssues + m.closedIssues} done`
+      : 'empty';
+    const due = m.dueOn ? ` · due ${m.dueOn.split('T')[0]}` : '';
+    console.error(`  ${BOLD}${i + 1}${NC}  ${m.title} ${DIM}(${m.openIssues} open, ${progress}${due})${NC}`);
+  }
+  console.error('');
+
+  const choice = await askChoice(`  Select milestone [0-${milestones.length}]: `, milestones.length);
+
+  if (choice <= 0) {
+    log.info('Processing all ready issues (no milestone filter)');
+    return '';
+  }
+
+  const selected = milestones[choice - 1];
+  log.success(`Milestone selected: ${selected.title} (${selected.openIssues} open issues)`);
+  return selected.title;
 }
 
 /**
@@ -104,6 +156,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
   if (options.skipTests) overrides.skipTests = true;
   if (options.skipReview) overrides.skipReview = true;
   if (options.skipLearn) overrides.skipLearn = true;
+  if (options.milestone) overrides.milestone = options.milestone;
   if (options.autoMerge) overrides.autoMerge = true;
   if (options.mergeTo) overrides.mergeTo = options.mergeTo;
 
@@ -167,6 +220,15 @@ export async function runCommand(options: RunOptions): Promise<void> {
     log.success('Agent assets synced before run');
   }
 
+  // Milestone selection (interactive or from config/CLI flag)
+  let activeMilestone = config.milestone;
+  if (!activeMilestone && !config.dryRun && process.stdin.isTTY) {
+    activeMilestone = await pickMilestone(config.repo);
+  }
+  if (activeMilestone) {
+    log.info(`Filtering issues by milestone: ${activeMilestone}`);
+  }
+
   // Pre-flight test validation
   log.step('Running pre-flight test validation...');
   const preflightResult = await runPreflight({
@@ -220,56 +282,38 @@ export async function runCommand(options: RunOptions): Promise<void> {
     }
   }
 
-  // Main polling loop
-  let issuesProcessed = 0;
-  const sessionStartTime = Date.now();
+  // Fetch all matching issues
+  const milestoneMsg = activeMilestone ? ` in milestone '${activeMilestone}'` : '';
+  log.info(`Fetching issues${milestoneMsg}...`);
 
-  const hasReachedLimit = (): string | null => {
-    if (config.maxIssues > 0 && issuesProcessed >= config.maxIssues) {
-      return `max_issues limit reached (${config.maxIssues})`;
-    }
-    if (config.maxSessionDuration > 0) {
-      const elapsed = Math.round((Date.now() - sessionStartTime) / 1000);
-      if (elapsed >= config.maxSessionDuration) {
-        return `max_session_duration reached (${elapsed}s / ${config.maxSessionDuration}s)`;
-      }
-    }
-    return null;
-  };
+  const issues = pollIssues(config.repo, config.labelReady, 100, {
+    project: config.project,
+    repoOwner: config.repoOwner,
+    milestone: activeMilestone || undefined,
+  });
 
-  while (true) {
-    // Check limits before polling
-    const limitReason = hasReachedLimit();
-    if (limitReason) {
-      log.info(`Stopping: ${limitReason}`);
-      break;
+  if (issues.length === 0) {
+    log.info('No issues found. Nothing to do.');
+  } else {
+    const issueLimit = config.maxIssues > 0 ? Math.min(issues.length, config.maxIssues) : issues.length;
+    const issuesToProcess = issues.slice(0, issueLimit);
+
+    if (config.maxIssues > 0 && issues.length > config.maxIssues) {
+      log.info(`Found ${issues.length} issue(s), processing first ${issueLimit} (max_issues=${config.maxIssues})`);
+    } else {
+      log.info(`Found ${issuesToProcess.length} issue(s) to process`);
     }
 
-    log.info(`Polling for issues labeled '${config.labelReady}'...`);
+    const sessionStartTime = Date.now();
 
-    const issues = pollIssues(config.repo, config.labelReady, 100, {
-      project: config.project,
-      repoOwner: config.repoOwner,
-    });
-
-    if (issues.length === 0) {
-      if (options.once) {
-        log.info('No issues found. Exiting (--once mode).');
-        break;
-      }
-      log.info(`No issues found. Sleeping ${config.pollInterval}s...`);
-      await sleep(config.pollInterval * 1000);
-      continue;
-    }
-
-    log.info(`Found ${issues.length} issue(s) to process`);
-
-    for (const issue of issues) {
-      // Check limits before each issue
-      const issueLimitReason = hasReachedLimit();
-      if (issueLimitReason) {
-        log.info(`Stopping mid-batch: ${issueLimitReason}`);
-        break;
+    for (const issue of issuesToProcess) {
+      // Check duration limit before each issue
+      if (config.maxSessionDuration > 0) {
+        const elapsed = Math.round((Date.now() - sessionStartTime) / 1000);
+        if (elapsed >= config.maxSessionDuration) {
+          log.info(`Stopping: max_session_duration reached (${elapsed}s / ${config.maxSessionDuration}s)`);
+          break;
+        }
       }
 
       log.info('==========================================');
@@ -292,19 +336,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
       }
 
       activeIssueNum = null;
-      issuesProcessed++;
     }
-
-    // Check limits after processing batch
-    if (hasReachedLimit()) break;
-
-    if (options.once) {
-      log.info(`Processed ${issuesProcessed} issue(s). Exiting (--once mode).`);
-      break;
-    }
-
-    log.info(`Cycle complete. Processed ${issuesProcessed} issue(s) total. Sleeping ${config.pollInterval}s...`);
-    await sleep(config.pollInterval * 1000);
   }
 
   // Generate session summary (aggregates learnings across all issues)
