@@ -37,6 +37,18 @@ jest.mock('../../src/lib/worktree', () => ({
   cleanupWorktree: jest.fn(),
 }));
 
+jest.mock('../../src/lib/vision', () => ({
+  hasVision: jest.fn().mockReturnValue(true),
+}));
+
+jest.mock('../../src/lib/context', () => ({
+  contextNeedsRefresh: jest.fn().mockReturnValue(false),
+}));
+
+jest.mock('../../src/lib/preflight', () => ({
+  runPreflight: jest.fn().mockResolvedValue({ passed: true, preExistingFailures: [] }),
+}));
+
 jest.mock('node:fs', () => ({
   existsSync: jest.fn().mockReturnValue(false),
   readFileSync: jest.fn(),

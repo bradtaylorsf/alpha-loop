@@ -3,6 +3,7 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
 import { exec } from '../lib/shell.js';
 import { loadConfig, type Config } from '../lib/config.js';
@@ -10,6 +11,9 @@ import { pollIssues } from '../lib/github.js';
 import { processIssue } from '../lib/pipeline.js';
 import { createSession, finalizeSession, type SessionContext } from '../lib/session.js';
 import { cleanupWorktree } from '../lib/worktree.js';
+import { hasVision } from '../lib/vision.js';
+import { contextNeedsRefresh } from '../lib/context.js';
+import { runPreflight } from '../lib/preflight.js';
 
 export type RunOptions = {
   once?: boolean;
@@ -74,6 +78,16 @@ function printBanner(config: Config, session: SessionContext): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function askYesNo(prompt: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(prompt, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase() !== 'n');
+    });
+  });
 }
 
 /**
@@ -144,10 +158,42 @@ export async function runCommand(options: RunOptions): Promise<void> {
   process.on('SIGINT', () => { void cleanup(); });
   process.on('SIGTERM', () => { void cleanup(); });
 
-  // Generate/refresh project context if stale
-  const contextFile = join(process.cwd(), '.alpha-loop', 'context.md');
-  if (!existsSync(contextFile)) {
-    log.info('No project context found. Run "alpha-loop scan" to generate one.');
+  // Pre-flight test validation
+  log.step('Running pre-flight test validation...');
+  const preflightResult = await runPreflight({
+    testCommand: config.testCommand,
+    skipPreflight: config.skipPreflight,
+    skipTests: config.skipTests,
+    dryRun: config.dryRun,
+  });
+  if (preflightResult.passed) {
+    if (!config.skipPreflight && !config.skipTests && !config.dryRun) {
+      log.success('Pre-flight tests passed');
+    }
+  } else {
+    log.warn(`Pre-flight: ${preflightResult.preExistingFailures.length} pre-existing failure(s) will be ignored`);
+    for (const f of preflightResult.preExistingFailures) {
+      log.warn(`  ${f}`);
+    }
+  }
+
+  // Prompt for project vision if it doesn't exist (interactive only)
+  if (!hasVision() && process.stdin.isTTY) {
+    log.warn('No project vision found. The agent will make better decisions with one.');
+    const answer = await askYesNo('Set up project vision now? [Y/n]: ');
+    if (answer) {
+      const { visionCommand } = await import('./vision.js');
+      await visionCommand();
+    }
+  }
+
+  // Generate or refresh project context if needed
+  if (contextNeedsRefresh()) {
+    log.info('Project context is stale or missing. Generating...');
+    const { scanCommand } = await import('./scan.js');
+    scanCommand();
+  } else {
+    log.info('Project context is fresh');
   }
 
   // Main polling loop
