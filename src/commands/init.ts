@@ -7,6 +7,75 @@ import { syncAgentAssets } from './sync.js';
 
 const CONFIG_FILE = '.alpha-loop.yaml';
 
+const ISSUE_TEMPLATE = `name: Agent-Ready Task
+description: A well-structured task for the automated agent loop to implement
+title: ""
+labels: ["ready"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template creates issues that the automated agent loop can pick up and implement.
+        Be specific -- the agent will use these fields to plan, implement, and verify.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Clear description of what needs to be done
+      placeholder: Describe the change, feature, or fix...
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Specific, testable criteria that define "done"
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+        - [ ] Criterion 3
+    validations:
+      required: true
+
+  - type: textarea
+    id: test-requirements
+    attributes:
+      label: Test Requirements
+      description: What tests should be written or updated?
+      placeholder: |
+        - Unit tests for...
+        - E2E test for...
+
+  - type: textarea
+    id: affected-files
+    attributes:
+      label: Affected Files/Areas
+      description: Known files or areas of the codebase that will be touched
+      placeholder: |
+        - src/...
+        - tests/...
+
+  - type: dropdown
+    id: complexity
+    attributes:
+      label: Complexity
+      options:
+        - trivial (< 30 min)
+        - small (1-2 hours)
+        - medium (half day)
+        - large (full day)
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any background, constraints, or references the agent should know
+`;
+
 function configTemplate(repo: string): string {
   return `# Alpha Loop configuration
 repo: ${repo}
@@ -69,6 +138,15 @@ export function initCommand(): void {
     }
   } else {
     log.info('playwright-cli not found — skipping skill install. Install with: npm install -g @playwright/cli@latest');
+  }
+
+  // Install GitHub issue template for structured agent-ready issues
+  const templateDir = join('.github', 'ISSUE_TEMPLATE');
+  const templateFile = join(templateDir, 'agent-ready.yml');
+  if (!existsSync(templateFile)) {
+    mkdirSync(templateDir, { recursive: true });
+    writeFileSync(templateFile, ISSUE_TEMPLATE);
+    log.success('Created GitHub issue template: .github/ISSUE_TEMPLATE/agent-ready.yml');
   }
 
   // Sync agent assets so skills land in both .claude/skills/ and .agents/skills/
