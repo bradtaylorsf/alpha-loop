@@ -113,6 +113,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     mergeTo: '',
     autoCleanup: true,
     runFull: false,
+    maxIssues: 0,
+    maxSessionDuration: 0,
     ...overrides,
   };
 }

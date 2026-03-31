@@ -135,11 +135,7 @@ export async function finalizeSession(
     return null;
   }
 
-  // Stage session results and learnings
-  const sessionsPath = join('sessions', session.name);
-  if (existsSync(join(projectDir, sessionsPath))) {
-    exec(`git add "${sessionsPath}/"`, { cwd: projectDir });
-  }
+  // Stage learnings (sessions/ is gitignored — kept locally for debugging)
   const learningsDir = join(projectDir, 'learnings');
   if (existsSync(learningsDir)) {
     exec('git add learnings/', { cwd: projectDir });
@@ -148,9 +144,9 @@ export async function finalizeSession(
   // Commit if there are staged changes
   const diffResult = exec('git diff --cached --quiet', { cwd: projectDir });
   if (diffResult.exitCode !== 0) {
-    const issueCount = session.results.length;
+    const commitIssueCount = session.results.length;
     exec(
-      `git commit -m "chore: session results and learnings from ${session.name}\n\nProcessed ${issueCount} issue(s) in this session."`,
+      `git commit -m "chore: learnings from ${session.name}\n\nProcessed ${commitIssueCount} issue(s) in this session."`,
       { cwd: projectDir },
     );
     exec(`git push origin "${session.branch}"`, { cwd: projectDir });
@@ -158,15 +154,19 @@ export async function finalizeSession(
 
   // Create or update session PR
   const issueCount = session.results.length;
-  const prTitle = `Session: ${session.name} — ${issueCount} issues`;
+  const successCount = session.results.filter((r) => r.status === 'success').length;
+  const failureCount = issueCount - successCount;
+  const totalDuration = session.results.reduce((sum, r) => sum + r.duration, 0);
+  const prTitle = `Session: ${session.name} — ${successCount}/${issueCount} succeeded`;
   const prBody = `## Session Summary
 
 **Branch:** ${session.branch}
-**Issues processed:** ${issueCount}
+**Issues processed:** ${issueCount} (${successCount} succeeded, ${failureCount} failed)
+**Total duration:** ${Math.round(totalDuration / 60)} minutes
 **Completed:** ${new Date().toISOString()}
 
 ### Issues
-${session.results.map((r) => `- #${r.issueNum}: ${r.title} — ${r.status}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
+${session.results.map((r) => `- #${r.issueNum}: ${r.title} — ${r.status === 'success' ? 'SUCCESS' : 'FAILURE'}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
 
 ---
 This PR collects all changes from this session for final review before merging to ${config.baseBranch}.
@@ -185,7 +185,21 @@ Automated by alpha-loop`;
     log.success(`Session PR: ${prUrl}`);
     return prUrl;
   } catch (err) {
-    log.warn(`Could not create session PR: ${err instanceof Error ? err.message : err}`);
+    // If createPR failed (e.g. nothing to compare), try creating via gh directly
+    log.warn(`createPR failed: ${err instanceof Error ? err.message : err}`);
+    try {
+      const fallback = exec(
+        `gh pr create --repo "${config.repo}" --base "${config.baseBranch}" --head "${session.branch}" --title "${prTitle}" --body "Session finalization — see branch for details"`,
+        { cwd: projectDir },
+      );
+      if (fallback.exitCode === 0 && fallback.stdout.trim()) {
+        log.success(`Session PR (fallback): ${fallback.stdout.trim()}`);
+        return fallback.stdout.trim();
+      }
+    } catch {
+      // Fall through
+    }
+    log.warn('Could not create session PR — check branch manually');
     return null;
   }
 }

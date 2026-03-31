@@ -25,6 +25,8 @@ export type Config = {
   skipVerify: boolean;
   skipLearn: boolean;
   skipE2e: boolean;
+  maxIssues: number;
+  maxSessionDuration: number;
   autoMerge: boolean;
   mergeTo: string;
   autoCleanup: boolean;
@@ -54,6 +56,8 @@ const DEFAULTS: Config = {
   skipVerify: false,
   skipLearn: false,
   skipE2e: false,
+  maxIssues: 0,
+  maxSessionDuration: 0,
   autoMerge: true,
   mergeTo: '',
   autoCleanup: true,
@@ -83,6 +87,8 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   skip_verify: 'skipVerify',
   skip_learn: 'skipLearn',
   skip_e2e: 'skipE2e',
+  max_issues: 'maxIssues',
+  max_session_duration: 'maxSessionDuration',
   auto_merge: 'autoMerge',
   merge_to: 'mergeTo',
   auto_cleanup: 'autoCleanup',
@@ -112,6 +118,8 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   SKIP_VERIFY: 'skipVerify',
   SKIP_LEARN: 'skipLearn',
   SKIP_E2E: 'skipE2e',
+  MAX_ISSUES: 'maxIssues',
+  MAX_SESSION_DURATION: 'maxSessionDuration',
   AUTO_MERGE: 'autoMerge',
   MERGE_TO: 'mergeTo',
   AUTO_CLEANUP: 'autoCleanup',

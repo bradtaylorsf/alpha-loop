@@ -165,6 +165,93 @@ export function getLearningContext(learningsDir: string): string {
   return sections.join('\n');
 }
 
+/**
+ * Generate a session summary that aggregates learnings across all processed issues.
+ * Produces a markdown summary with patterns, anti-patterns, and recommendations.
+ */
+export async function generateSessionSummary(options: {
+  sessionName: string;
+  results: Array<{ issueNum: number; title: string; status: string; duration: number }>;
+  learningsDir: string;
+  config: Config;
+}): Promise<string | null> {
+  const { sessionName, results, learningsDir, config } = options;
+
+  if (config.skipLearn || config.dryRun || results.length === 0) return null;
+
+  log.step('Generating session summary...');
+
+  // Collect all learnings from this session
+  const learningContents: string[] = [];
+  for (const result of results) {
+    const files = readdirSync(learningsDir)
+      .filter((f) => f.startsWith(`issue-${result.issueNum}-`) && f.endsWith('.md'));
+    for (const file of files) {
+      learningContents.push(readFileSync(join(learningsDir, file), 'utf-8'));
+    }
+  }
+
+  if (learningContents.length === 0) return null;
+
+  const successCount = results.filter((r) => r.status === 'success').length;
+  const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+
+  const prompt = `Analyze these learnings from a development session and produce a concise session summary with actionable recommendations.
+
+## Session: ${sessionName}
+- Issues processed: ${results.length} (${successCount} succeeded, ${results.length - successCount} failed)
+- Total duration: ${Math.round(totalDuration / 60)} minutes
+
+## Individual Learnings
+
+${learningContents.join('\n\n---\n\n')}
+
+Output ONLY this markdown structure:
+
+# Session Summary: ${sessionName}
+
+## Overview
+- (2-3 sentences summarizing the session)
+
+## Recurring Patterns
+- (patterns that appeared across multiple issues — these should be reinforced)
+
+## Recurring Anti-Patterns
+- (problems that kept happening — these need fixing)
+
+## Recommendations
+- (specific, actionable improvements for the agent prompts, project config, or workflow)
+- (e.g., "Update the implement prompt to always check for X before Y")
+- (e.g., "Add a pre-check for port conflicts before starting verification")
+
+## Metrics
+| Metric | Value |
+|--------|-------|
+| Issues processed | ${results.length} |
+| Success rate | ${Math.round((successCount / results.length) * 100)}% |
+| Avg duration | ${Math.round(totalDuration / results.length)}s |
+| Total duration | ${Math.round(totalDuration / 60)} min |`;
+
+  const agentResult = await spawnAgent({
+    agent: 'claude',
+    model: config.reviewModel,
+    prompt,
+    cwd: process.cwd(),
+    logFile: undefined,
+  });
+
+  if (agentResult.exitCode !== 0 || !agentResult.output.trim()) {
+    log.warn('Session summary generation failed');
+    return null;
+  }
+
+  const summaryFile = join(learningsDir, `session-summary-${sessionName.replace(/\//g, '-')}.md`);
+  writeFileSync(summaryFile, agentResult.output.trim() + '\n');
+  log.success(`Session summary saved: ${summaryFile}`);
+
+  return agentResult.output.trim();
+}
+
 function formatTimestamp(date: Date): string {
   const y = date.getFullYear();
   const mo = String(date.getMonth() + 1).padStart(2, '0');

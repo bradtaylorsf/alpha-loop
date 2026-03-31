@@ -122,6 +122,10 @@ export async function runVerify(options: {
     exec(`playwright-cli state-load "${authStateDir}/state.json"`);
   }
 
+  // Save screenshots to session directory
+  const screenshotDir = join(sessionDir, 'screenshots', `issue-${issueNum}`);
+  mkdirSync(screenshotDir, { recursive: true });
+
   // Get the diff to understand what changed
   const diffStat = exec(`git diff --stat "origin/${config.baseBranch}...HEAD"`, { cwd: worktree });
 
@@ -150,7 +154,7 @@ The app is running at http://localhost:${port}. Use the playwright-cli to test i
 - \`playwright-cli snapshot\` — Get a snapshot of the current page with element refs
 - \`playwright-cli click <ref>\` — Click an element (use ref from snapshot, e.g. \`e15\`)
 - \`playwright-cli type <text>\` — Type text into the focused element
-- \`playwright-cli screenshot\` — Take a screenshot of the current page
+- \`playwright-cli screenshot --path <file>\` — Take a screenshot and save to file
 - \`playwright-cli fill <ref> <text>\` — Fill a form field
 - \`playwright-cli select <ref> <value>\` — Select a dropdown option
 - \`playwright-cli wait <selector>\` — Wait for an element to appear
@@ -168,7 +172,7 @@ The app is running at http://localhost:${port}. Use the playwright-cli to test i
    - Do form submissions work end-to-end?
    - Check console for errors: \`playwright-cli console\`
    - Check network for failed requests: \`playwright-cli network\`
-5. Take screenshots at key states: \`playwright-cli screenshot\`
+5. Take screenshots at key states (save to the screenshot directory below)
 6. Check for functional gaps:
    - Is the backend wired to the frontend?
    - Are there UI elements that don't respond?
@@ -201,14 +205,17 @@ After testing, output a verification report:
 ### Gaps Found
 - (any disconnects between frontend and backend, missing pieces, etc.)
 
+### Screenshots
+Save screenshots to this directory: ${screenshotDir}
+Use descriptive filenames:
+- \`playwright-cli screenshot --path "${screenshotDir}/01-initial-load.png"\`
+- \`playwright-cli screenshot --path "${screenshotDir}/02-after-action.png"\`
+- \`playwright-cli screenshot --path "${screenshotDir}/03-final-state.png"\`
+
 IMPORTANT: Use playwright-cli commands to actually interact with the app.
 Navigate, click, type, submit forms. Verify the feature works as a real user would use it.`;
 
   log.info(`Verification agent: claude + playwright-cli | Testing live at http://localhost:${port}`);
-
-  // Save screenshots to session directory
-  const screenshotDir = join(sessionDir, 'screenshots', `issue-${issueNum}`);
-  mkdirSync(screenshotDir, { recursive: true });
 
   // Run the verification agent
   const agentResult = await spawnAgent({

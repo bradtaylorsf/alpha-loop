@@ -129,6 +129,10 @@ test_command: pnpm test
 dev_command: pnpm dev
 port: 3000
 auto_merge: true
+
+# Safety limits (0 = unlimited)
+max_issues: 20
+max_session_duration: 7200  # 2 hours in seconds
 `;
 }
 

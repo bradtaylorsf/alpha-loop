@@ -1,7 +1,6 @@
 /**
  * Run Command — the main loop: poll issues, process them, finalize session.
  */
-import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
@@ -11,6 +10,7 @@ import { pollIssues } from '../lib/github.js';
 import { processIssue } from '../lib/pipeline.js';
 import { createSession, finalizeSession, type SessionContext } from '../lib/session.js';
 import { cleanupWorktree } from '../lib/worktree.js';
+import { generateSessionSummary } from '../lib/learning.js';
 import { hasVision } from '../lib/vision.js';
 import { contextNeedsRefresh } from '../lib/context.js';
 import { runPreflight } from '../lib/preflight.js';
@@ -72,6 +72,8 @@ function printBanner(config: Config, session: SessionContext): void {
   console.error(`  Skip Review:    ${BOLD}${config.skipReview}${NC}`);
   console.error(`  Skip Learn:     ${BOLD}${config.skipLearn}${NC}`);
   console.error(`  Test Retries:   ${BOLD}${config.maxTestRetries}${NC}`);
+  console.error(`  Max Issues:     ${BOLD}${config.maxIssues || 'unlimited'}${NC}`);
+  console.error(`  Max Duration:   ${BOLD}${config.maxSessionDuration ? config.maxSessionDuration + 's' : 'unlimited'}${NC}`);
   console.error(`  Auto Merge:     ${BOLD}${config.autoMerge}${NC}`);
   console.error(`  Session:        ${BOLD}${session.branch}${NC}`);
   console.error('');
@@ -146,8 +148,8 @@ export async function runCommand(options: RunOptions): Promise<void> {
     // Finalize session
     try {
       await finalizeSession(session, config);
-    } catch {
-      // Best effort finalization
+    } catch (err) {
+      log.error(`Session finalization failed: ${err instanceof Error ? err.message : err}`);
     }
 
     const issueCount = session.results.length;
@@ -220,8 +222,29 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
   // Main polling loop
   let issuesProcessed = 0;
+  const sessionStartTime = Date.now();
+
+  const hasReachedLimit = (): string | null => {
+    if (config.maxIssues > 0 && issuesProcessed >= config.maxIssues) {
+      return `max_issues limit reached (${config.maxIssues})`;
+    }
+    if (config.maxSessionDuration > 0) {
+      const elapsed = Math.round((Date.now() - sessionStartTime) / 1000);
+      if (elapsed >= config.maxSessionDuration) {
+        return `max_session_duration reached (${elapsed}s / ${config.maxSessionDuration}s)`;
+      }
+    }
+    return null;
+  };
 
   while (true) {
+    // Check limits before polling
+    const limitReason = hasReachedLimit();
+    if (limitReason) {
+      log.info(`Stopping: ${limitReason}`);
+      break;
+    }
+
     log.info(`Polling for issues labeled '${config.labelReady}'...`);
 
     const issues = pollIssues(config.repo, config.labelReady, 100, {
@@ -242,6 +265,13 @@ export async function runCommand(options: RunOptions): Promise<void> {
     log.info(`Found ${issues.length} issue(s) to process`);
 
     for (const issue of issues) {
+      // Check limits before each issue
+      const issueLimitReason = hasReachedLimit();
+      if (issueLimitReason) {
+        log.info(`Stopping mid-batch: ${issueLimitReason}`);
+        break;
+      }
+
       log.info('==========================================');
       log.info(`Processing issue #${issue.number}: ${issue.title}`);
       log.info('==========================================');
@@ -265,6 +295,9 @@ export async function runCommand(options: RunOptions): Promise<void> {
       issuesProcessed++;
     }
 
+    // Check limits after processing batch
+    if (hasReachedLimit()) break;
+
     if (options.once) {
       log.info(`Processed ${issuesProcessed} issue(s). Exiting (--once mode).`);
       break;
@@ -272,6 +305,17 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
     log.info(`Cycle complete. Processed ${issuesProcessed} issue(s) total. Sleeping ${config.pollInterval}s...`);
     await sleep(config.pollInterval * 1000);
+  }
+
+  // Generate session summary (aggregates learnings across all issues)
+  if (session.results.length > 0) {
+    const learningsDir = join(process.cwd(), 'learnings');
+    await generateSessionSummary({
+      sessionName: session.name,
+      results: session.results,
+      learningsDir,
+      config,
+    });
   }
 
   // Finalize session

@@ -37,6 +37,10 @@ jest.mock('../../src/lib/worktree', () => ({
   cleanupWorktree: jest.fn(),
 }));
 
+jest.mock('../../src/lib/learning', () => ({
+  generateSessionSummary: jest.fn().mockResolvedValue(null),
+}));
+
 jest.mock('../../src/lib/vision', () => ({
   hasVision: jest.fn().mockReturnValue(true),
 }));
@@ -99,6 +103,8 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     mergeTo: '',
     autoCleanup: true,
     runFull: false,
+    maxIssues: 0,
+    maxSessionDuration: 0,
     ...overrides,
   };
 }
