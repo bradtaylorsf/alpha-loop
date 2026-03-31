@@ -1,4 +1,4 @@
-import { runTests, runE2eTests } from '../../src/lib/testing';
+import { runTests } from '../../src/lib/testing';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
@@ -104,21 +104,5 @@ describe('runTests', () => {
   });
 });
 
-describe('runE2eTests', () => {
-  test('returns passed=true on successful exit', () => {
-    mockExec.mockReturnValue({ stdout: 'E2E passed', stderr: '', exitCode: 0 });
-
-    const result = runE2eTests('/work', '/log');
-
-    expect(result.passed).toBe(true);
-    expect(mockExec).toHaveBeenCalledWith('pnpm test:e2e', expect.objectContaining({ cwd: '/work' }));
-  });
-
-  test('returns passed=false on failure', () => {
-    mockExec.mockReturnValue({ stdout: 'E2E failed', stderr: '', exitCode: 1 });
-
-    const result = runE2eTests('/work', '/log');
-
-    expect(result.passed).toBe(false);
-  });
-});
+// Note: Live verification tests are in tests/lib/verify.test.ts
+// runE2eTests was removed — verification now uses playwright-cli via src/lib/verify.ts

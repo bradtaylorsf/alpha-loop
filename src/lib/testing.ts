@@ -59,32 +59,5 @@ export function runTests(worktree: string, config: Config, logFile: string): Tes
   return { passed: false, output };
 }
 
-/**
- * Run E2E tests (Playwright or similar).
- */
-export function runE2eTests(worktree: string, logFile: string): TestResult {
-  log.step('Running E2E tests...');
-
-  const result = exec('pnpm test:e2e', {
-    cwd: worktree,
-    timeout: 600_000, // 10 minute timeout
-  });
-
-  const output = result.stdout + (result.stderr ? `\n${result.stderr}` : '');
-
-  if (logFile) {
-    try {
-      appendFileSync(logFile, `\n--- E2E Test Output ---\n${output}\n`);
-    } catch {
-      // Non-fatal
-    }
-  }
-
-  if (result.exitCode === 0) {
-    log.success('E2E tests passed');
-    return { passed: true, output };
-  }
-
-  log.warn('E2E tests failed');
-  return { passed: false, output };
-}
+// Note: Live verification (playwright-cli) is in src/lib/verify.ts
+// This module only handles unit/integration test execution.

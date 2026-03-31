@@ -15,7 +15,8 @@ import {
   updateProjectStatus,
 } from './github.js';
 import { buildImplementPrompt, buildReviewPrompt } from './prompts.js';
-import { runTests, runE2eTests } from './testing.js';
+import { runTests } from './testing.js';
+import { runVerify } from './verify.js';
 import { extractLearnings, getLearningContext } from './learning.js';
 import { saveResult, getPreviousResult } from './session.js';
 import type { Config } from './config.js';
@@ -200,50 +201,52 @@ export async function processIssue(
     }
   }
 
-  // --- Step 6: Verify + retry loop ---
-  log.step('Step 6: Verification');
+  // --- Step 6: Live verification with playwright-cli ---
+  log.step('Step 6: Live verification');
   let verifyOutput = '';
   let verifyPassing = false;
 
-  if (config.skipVerify || config.skipTests || config.dryRun) {
-    verifyPassing = true;
-    log.info('Verification skipped');
-  } else {
-    for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
-      log.info(`Verification attempt ${attempt} of ${config.maxTestRetries}`);
+  for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+    log.info(`Verification attempt ${attempt} of ${config.maxTestRetries}`);
 
-      // Run E2E/verify tests
-      const e2eResult = runE2eTests(worktreePath, logFile);
-      verifyOutput = e2eResult.output;
+    const verifyResult = await runVerify({
+      worktree: worktreePath,
+      logFile,
+      issueNum,
+      title,
+      body,
+      config,
+      sessionDir: session.resultsDir,
+    });
+    verifyOutput = verifyResult.output;
 
-      if (e2eResult.passed) {
-        verifyPassing = true;
-        log.success(`Verification passed on attempt ${attempt}`);
-        break;
+    if (verifyResult.passed) {
+      verifyPassing = true;
+      log.success(`Verification passed on attempt ${attempt}`);
+      break;
+    }
+
+    if (attempt < config.maxTestRetries) {
+      log.warn(`Verification failed on attempt ${attempt}, invoking agent to fix...`);
+      const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum}.\nThe app was started and tested with playwright-cli, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification output above to understand what failed\n2. Fix the implementation code so the feature works correctly\n3. Run the test command to make sure unit tests still pass\n4. Commit your fixes with message: fix: resolve verification failures for issue #${issueNum}`;
+
+      await spawnAgent({
+        agent: 'claude',
+        model: config.model,
+        prompt: verifyFixPrompt,
+        cwd: worktreePath,
+        maxTurns: config.maxTurns,
+        logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
+      });
+
+      // Auto-commit fixes
+      const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
+      if (fixStatus.stdout.trim()) {
+        exec('git add -A', { cwd: worktreePath });
+        exec(`git commit -m "fix: resolve verification failures for issue #${issueNum}"`, { cwd: worktreePath });
       }
-
-      if (attempt < config.maxTestRetries) {
-        log.warn(`Verification failed on attempt ${attempt}, invoking agent to fix...`);
-        const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum}.\nThe app was started and tested, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification test files in tests/verify/ (if they exist)\n2. Fix the implementation code OR the verification tests\n3. Run pnpm test to make sure unit tests still pass\n4. Commit your fixes with message: fix: resolve verification failures for issue #${issueNum}`;
-
-        await spawnAgent({
-          agent: 'claude',
-          model: config.model,
-          prompt: verifyFixPrompt,
-          cwd: worktreePath,
-          maxTurns: config.maxTurns,
-          logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
-        });
-
-        // Auto-commit fixes
-        const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
-        if (fixStatus.stdout.trim()) {
-          exec('git add -A', { cwd: worktreePath });
-          exec(`git commit -m "fix: resolve verification failures for issue #${issueNum}"`, { cwd: worktreePath });
-        }
-      } else {
-        log.warn(`Verification still failing after ${config.maxTestRetries} attempts`);
-      }
+    } else {
+      log.warn(`Verification still failing after ${config.maxTestRetries} attempts`);
     }
   }
 
