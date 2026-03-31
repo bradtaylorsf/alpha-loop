@@ -5,6 +5,7 @@ import { historyCommand } from './commands/history.js';
 import { scanCommand } from './commands/scan.js';
 import { visionCommand } from './commands/vision.js';
 import { authCommand } from './commands/auth.js';
+import { syncCommand } from './commands/sync.js';
 
 program
   .name('alpha-loop')
@@ -53,5 +54,11 @@ program
   .command('auth')
   .description('Save authenticated browser state')
   .action(authCommand);
+
+program
+  .command('sync')
+  .description('Sync AGENTS.md → CLAUDE.md and skills/ → .agents/skills/ + .claude/skills/')
+  .option('--check', 'Check for drift without syncing (exits non-zero if drift found)')
+  .action(syncCommand);
 
 program.parse();

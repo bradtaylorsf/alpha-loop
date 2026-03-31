@@ -49,6 +49,10 @@ jest.mock('../../src/lib/preflight', () => ({
   runPreflight: jest.fn().mockResolvedValue({ passed: true, preExistingFailures: [] }),
 }));
 
+jest.mock('../../src/commands/sync', () => ({
+  syncAgentAssets: jest.fn().mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] }),
+}));
+
 jest.mock('node:fs', () => ({
   existsSync: jest.fn().mockReturnValue(false),
   readFileSync: jest.fn(),

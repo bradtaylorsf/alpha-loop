@@ -14,6 +14,7 @@ import { cleanupWorktree } from '../lib/worktree.js';
 import { hasVision } from '../lib/vision.js';
 import { contextNeedsRefresh } from '../lib/context.js';
 import { runPreflight } from '../lib/preflight.js';
+import { syncAgentAssets } from './sync.js';
 
 export type RunOptions = {
   once?: boolean;
@@ -157,6 +158,12 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
   process.on('SIGINT', () => { void cleanup(); });
   process.on('SIGTERM', () => { void cleanup(); });
+
+  // Sync agent assets (AGENTS.md → CLAUDE.md, skills/ → .agents/skills/ + .claude/skills/)
+  const syncResult = syncAgentAssets();
+  if (syncResult.synced) {
+    log.success('Agent assets synced before run');
+  }
 
   // Pre-flight test validation
   log.step('Running pre-flight test validation...');
