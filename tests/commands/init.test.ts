@@ -56,9 +56,13 @@ describe('init command', () => {
     expect(content).toContain('repo: owner/repo');
   });
 
-  it('exits with error when config already exists', () => {
+  it('skips config creation when config already exists', () => {
     writeFileSync(join(tempDir, '.alpha-loop.yaml'), 'repo: existing/repo\n');
 
-    expect(() => initCommand()).toThrow('process.exit(1)');
+    initCommand();
+
+    // Config should not be overwritten
+    const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    expect(content).toContain('repo: existing/repo');
   });
 });

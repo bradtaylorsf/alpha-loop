@@ -141,21 +141,23 @@ function copyDir(src: string, dest: string): void {
 }
 
 export function initCommand(): void {
+  // Create config if it doesn't exist
   if (existsSync(CONFIG_FILE)) {
-    log.warn(`${CONFIG_FILE} already exists. Remove it first to regenerate.`);
-    process.exit(1);
-  }
-
-  let repo = detectRepo();
-  if (repo) {
-    log.success(`Auto-detected repo: ${repo}`);
+    log.info(`${CONFIG_FILE} already exists — skipping config creation`);
   } else {
-    repo = 'owner/repo';
-    log.warn('Could not auto-detect repo from git remote. Using placeholder.');
+    let repo = detectRepo();
+    if (repo) {
+      log.success(`Auto-detected repo: ${repo}`);
+    } else {
+      repo = 'owner/repo';
+      log.warn('Could not auto-detect repo from git remote. Using placeholder.');
+    }
+
+    writeFileSync(CONFIG_FILE, configTemplate(repo));
+    log.success(`Created ${CONFIG_FILE}`);
   }
 
-  writeFileSync(CONFIG_FILE, configTemplate(repo));
-  log.success(`Created ${CONFIG_FILE}`);
+  // Everything below is idempotent — safe to re-run
 
   // Install playwright-cli skills if playwright-cli is available
   const which = exec('which playwright-cli');
