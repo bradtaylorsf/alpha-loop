@@ -128,7 +128,7 @@ base_branch: main
 test_command: pnpm test
 dev_command: pnpm dev
 port: 3000
-auto_merge: false
+auto_merge: true
 `;
 }
 

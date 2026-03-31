@@ -54,7 +54,7 @@ const DEFAULTS: Config = {
   skipVerify: false,
   skipLearn: false,
   skipE2e: false,
-  autoMerge: false,
+  autoMerge: true,
   mergeTo: '',
   autoCleanup: true,
   runFull: false,

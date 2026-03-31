@@ -121,7 +121,7 @@ max_turns: 30
     expect(config.maxTestRetries).toBe(3);
     expect(config.dryRun).toBe(false);
     expect(config.skipTests).toBe(false);
-    expect(config.autoMerge).toBe(false);
+    expect(config.autoMerge).toBe(true);
     expect(config.autoCleanup).toBe(true);
   });
 

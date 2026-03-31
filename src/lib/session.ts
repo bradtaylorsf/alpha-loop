@@ -46,6 +46,8 @@ export function createSession(config: Config): SessionContext {
       if (fromRemote.exitCode !== 0) {
         exec(`git checkout -b "${branch}" "${config.baseBranch}"`, { cwd: projectDir });
       }
+      // Push session branch to remote so PRs can target it
+      exec(`git push origin "${branch}"`, { cwd: projectDir });
       // Switch back to the original branch
       exec(`git checkout -`, { cwd: projectDir });
       log.info(`Created session branch: ${branch}`);
