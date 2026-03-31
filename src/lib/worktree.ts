@@ -53,8 +53,10 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
   if (existsSync(worktreePath)) {
     logger.warn(`Worktree already exists at ${worktreePath}, removing...`);
     exec(`git worktree remove "${worktreePath}" --force`, { cwd: projectDir });
-    exec(`git branch -D "${branch}"`, { cwd: projectDir });
   }
+
+  // Delete local branch from previous runs (may exist even without worktree)
+  exec(`git branch -D "${branch}"`, { cwd: projectDir });
 
   // Delete remote branch from previous failed runs
   exec(`git push origin --delete "${branch}"`, { cwd: projectDir });

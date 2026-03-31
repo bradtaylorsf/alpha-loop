@@ -203,6 +203,21 @@ export async function runCommand(options: RunOptions): Promise<void> {
     log.info('Project context is fresh');
   }
 
+  // If vision or context were created/updated, commit them so worktrees get them
+  if (!config.dryRun) {
+    const statusResult = exec('git status --porcelain .alpha-loop/ AGENTS.md CLAUDE.md');
+    if (statusResult.stdout.trim()) {
+      log.info('New files generated — committing so worktrees include them...');
+      exec('git add .alpha-loop/ AGENTS.md CLAUDE.md 2>/dev/null || true');
+      const diffCheck = exec('git diff --cached --quiet');
+      if (diffCheck.exitCode !== 0) {
+        exec('git commit -m "chore: add project vision and context for alpha-loop"');
+        exec(`git push origin "${config.baseBranch}"`);
+        log.success('Vision and context committed to ' + config.baseBranch);
+      }
+    }
+  }
+
   // Main polling loop
   let issuesProcessed = 0;
 

@@ -34,11 +34,14 @@ export function createSession(config: Config): SessionContext {
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(logsDir, { recursive: true });
 
-  // Create session branch if auto-merge is enabled
+  // Create session branch and draft PR if auto-merge is enabled
   if (config.autoMerge && !config.dryRun) {
+    // Fetch latest to ensure we have remote refs
+    exec('git fetch origin', { cwd: projectDir });
+
     const branchExists = exec(`git rev-parse --verify "${branch}"`, { cwd: projectDir });
     if (branchExists.exitCode !== 0) {
-      // Try to create from remote base branch first, fall back to local
+      // Create from remote base branch first, fall back to local
       const fromRemote = exec(
         `git checkout -b "${branch}" "origin/${config.baseBranch}"`,
         { cwd: projectDir },
@@ -51,6 +54,22 @@ export function createSession(config: Config): SessionContext {
       // Switch back to the original branch
       exec(`git checkout -`, { cwd: projectDir });
       log.info(`Created session branch: ${branch}`);
+
+      // Create a draft PR immediately so the session is visible in GitHub
+      try {
+        const draftPR = createPR({
+          repo: config.repo,
+          base: config.baseBranch,
+          head: branch,
+          title: `Session: ${name}`,
+          body: `## Session In Progress\n\n**Branch:** ${branch}\n**Started:** ${new Date().toISOString()}\n\nThis PR will be updated as issues are processed.\n\n---\n*Automated by alpha-loop*`,
+          cwd: projectDir,
+        });
+        log.success(`Session PR (draft): ${draftPR}`);
+      } catch {
+        // Non-fatal — PR can be created later during finalization
+        log.warn('Could not create draft session PR — will create during finalization');
+      }
     } else {
       log.info(`Session branch already exists: ${branch}`);
     }
