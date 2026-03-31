@@ -209,7 +209,10 @@ export async function runCommand(options: RunOptions): Promise<void> {
   while (true) {
     log.info(`Polling for issues labeled '${config.labelReady}'...`);
 
-    const issues = pollIssues(config.repo, config.labelReady);
+    const issues = pollIssues(config.repo, config.labelReady, 100, {
+      project: config.project,
+      repoOwner: config.repoOwner,
+    });
 
     if (issues.length === 0) {
       if (options.once) {

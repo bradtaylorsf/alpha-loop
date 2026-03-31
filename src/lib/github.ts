@@ -12,9 +12,63 @@ export type Issue = {
 };
 
 /**
- * Fetch open issues with a specific label.
+ * Fetch issues to process. When a project board is configured, reads from
+ * the board in display order (the order you set by dragging), filtered to
+ * "Todo" status. Falls back to label-based polling when no project is set.
  */
-export function pollIssues(repo: string, label: string, limit = 10): Issue[] {
+export function pollIssues(repo: string, label: string, limit = 10, options?: { project?: number; repoOwner?: string }): Issue[] {
+  const project = options?.project;
+  const repoOwner = options?.repoOwner ?? repo.split('/')[0];
+
+  // If project board is configured, use it for ordering
+  if (project && project > 0) {
+    return pollIssuesByProject(repoOwner, project, limit);
+  }
+
+  // Fallback: poll by label
+  return pollIssuesByLabel(repo, label, limit);
+}
+
+/**
+ * Poll from GitHub Project board — items come in the board's display order.
+ * Filters to "Todo" status only.
+ */
+function pollIssuesByProject(owner: string, project: number, limit: number): Issue[] {
+  const result = exec(
+    `gh project item-list ${project} --owner "${owner}" --format json --limit 100`,
+  );
+  if (result.exitCode !== 0) {
+    logger.warn(`Failed to poll project board: ${result.stderr}`);
+    return [];
+  }
+  try {
+    const data = JSON.parse(result.stdout) as {
+      items: Array<{
+        status: string;
+        content: { type: string; number: number; title: string; body: string };
+        labels?: Array<{ name: string }>;
+      }>;
+    };
+
+    return data.items
+      .filter((item) => item.status === 'Todo' && item.content?.type === 'Issue')
+      .slice(0, limit)
+      .map((item) => ({
+        number: item.content.number,
+        title: item.content.title,
+        body: item.content.body ?? '',
+        labels: (item.labels ?? []).map((l) => l.name),
+      }));
+  } catch {
+    logger.warn('Failed to parse project board JSON');
+    return [];
+  }
+}
+
+/**
+ * Fallback: poll issues by label when no project board is configured.
+ */
+function pollIssuesByLabel(repo: string, label: string, limit: number): Issue[] {
   const result = exec(
     `gh issue list --repo "${repo}" --label "${label}" --state open --json number,title,body,labels --limit ${limit}`,
   );
@@ -29,12 +83,15 @@ export function pollIssues(repo: string, label: string, limit = 10): Issue[] {
       body: string;
       labels: Array<{ name: string }>;
     }>;
-    return raw.map((issue) => ({
-      number: issue.number,
-      title: issue.title,
-      body: issue.body ?? '',
-      labels: (issue.labels ?? []).map((l) => l.name),
-    }));
+    return raw
+      .map((issue) => ({
+        number: issue.number,
+        title: issue.title,
+        body: issue.body ?? '',
+        labels: (issue.labels ?? []).map((l) => l.name),
+      }))
+      .sort((a, b) => a.number - b.number)
+      .slice(0, limit);
   } catch {
     logger.warn('Failed to parse issues JSON');
     return [];
