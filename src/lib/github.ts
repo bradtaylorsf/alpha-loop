@@ -1,6 +1,9 @@
 /**
  * GitHub Helpers — interact with GitHub via the `gh` CLI.
  */
+import { writeFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { exec } from './shell.js';
 import * as logger from './logger.js';
 
@@ -151,43 +154,42 @@ export function createPR(options: CreatePROptions): string {
     }
   }
 
-  // Check if PR already exists for this branch
-  const existingResult = exec(
-    `gh pr list --repo "${repo}" --head "${head}" --json number,url --limit 1`,
-  );
-  if (existingResult.exitCode === 0 && existingResult.stdout) {
-    try {
-      const existing = JSON.parse(existingResult.stdout) as Array<{ number: number; url: string }>;
-      if (existing.length > 0) {
-        const prUrl = existing[0].url;
-        logger.info(`PR already exists: ${prUrl}, updating...`);
-
-        // Truncate body if too long
-        const truncatedBody = truncateBody(body);
-
-        exec(
-          `gh pr edit ${existing[0].number} --repo "${repo}" --body ${JSON.stringify(truncatedBody)}`,
-        );
-        return prUrl;
-      }
-    } catch {
-      // Fall through to create
-    }
-  }
-
-  // Truncate body if too long
+  // Write body to a temp file to avoid shell argument length/escaping issues
   const truncatedBody = truncateBody(body);
+  const bodyFile = join(tmpdir(), `alpha-loop-pr-body-${Date.now()}`);
+  writeFileSync(bodyFile, truncatedBody, 'utf-8');
 
-  // Create new PR
-  const createResult = exec(
-    `gh pr create --repo "${repo}" --base "${base}" --head "${head}" --title ${JSON.stringify(title)} --body ${JSON.stringify(truncatedBody)}`,
-  );
-  if (createResult.exitCode !== 0) {
-    throw new Error(`Failed to create PR: ${createResult.stderr}`);
+  try {
+    // Check if PR already exists for this branch
+    const existingResult = exec(
+      `gh pr list --repo "${repo}" --head "${head}" --json number,url --limit 1`,
+    );
+    if (existingResult.exitCode === 0 && existingResult.stdout) {
+      try {
+        const existing = JSON.parse(existingResult.stdout) as Array<{ number: number; url: string }>;
+        if (existing.length > 0) {
+          const prUrl = existing[0].url;
+          logger.info(`PR already exists: ${prUrl}, updating...`);
+          exec(`gh pr edit ${existing[0].number} --repo "${repo}" --body-file "${bodyFile}"`);
+          return prUrl;
+        }
+      } catch {
+        // Fall through to create
+      }
+    }
+
+    // Create new PR using --body-file to avoid shell escaping issues
+    const createResult = exec(
+      `gh pr create --repo "${repo}" --base "${base}" --head "${head}" --title ${JSON.stringify(title)} --body-file "${bodyFile}"`,
+    );
+    if (createResult.exitCode !== 0) {
+      throw new Error(`Failed to create PR: ${createResult.stderr}`);
+    }
+
+    return createResult.stdout.trim();
+  } finally {
+    try { unlinkSync(bodyFile); } catch { /* cleanup best-effort */ }
   }
-
-  // gh pr create outputs the URL
-  return createResult.stdout.trim();
 }
 
 /**

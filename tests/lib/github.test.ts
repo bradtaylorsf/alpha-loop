@@ -186,13 +186,12 @@ describe('createPR', () => {
 
     createPR({ ...baseOptions, body: longBody });
 
-    // The gh pr create call should have truncated body
+    // The gh pr create call should use --body-file (not inline body)
     const createCall = mockExec.mock.calls.find(
       (call) => typeof call[0] === 'string' && call[0].includes('gh pr create'),
     );
     expect(createCall).toBeDefined();
-    // Body is JSON.stringify'd in the command, so check for truncation marker
-    expect(createCall?.[0]).toContain('truncated');
+    expect(createCall?.[0]).toContain('--body-file');
   });
 
   test('tries force push on initial push failure', () => {
