@@ -427,6 +427,57 @@ function loadFileIfExists(filePath: string): string | null {
   }
 }
 
+/**
+ * Extract just the review summary from the full agent output.
+ * Looks for the structured report section the reviewer agent produces.
+ */
+function extractReviewSummary(reviewOutput: string): string {
+  if (!reviewOutput) return 'No review available';
+
+  // Look for the structured review report (reviewer agent outputs this format)
+  const patterns = [
+    /### Review Summary[\s\S]*$/m,
+    /### Findings Fixed[\s\S]*$/m,
+    /## Review Report[\s\S]*$/m,
+    /\*\*Verdict:.*$/m,
+  ];
+
+  for (const pattern of patterns) {
+    const match = reviewOutput.match(pattern);
+    if (match) return match[0].trim();
+  }
+
+  // Fallback: take the last 500 chars which usually has the summary
+  const lines = reviewOutput.trim().split('\n');
+  const lastLines = lines.slice(-20).join('\n');
+  if (lastLines.length > 0) return lastLines;
+
+  return 'Review completed — see logs for details';
+}
+
+/**
+ * Extract a one-line test summary from raw test output.
+ * e.g., "30 passed, 0 failed" from Jest/Vitest output.
+ */
+function extractTestSummary(testOutput: string): string {
+  if (!testOutput) return '';
+
+  // Jest: "Tests:  30 passed, 30 total"
+  const jestMatch = testOutput.match(/Tests:\s+(.+total)/);
+  if (jestMatch) return jestMatch[1].trim();
+
+  // Vitest: "Tests  30 passed (30)"
+  const vitestMatch = testOutput.match(/Tests\s+(.+\(\d+\))/);
+  if (vitestMatch) return vitestMatch[1].trim();
+
+  // Fallback: count "passed" and "failed" lines
+  const passed = (testOutput.match(/passed/gi) || []).length;
+  const failed = (testOutput.match(/failed/gi) || []).length;
+  if (passed > 0 || failed > 0) return `${passed} passed, ${failed} failed`;
+
+  return '';
+}
+
 function buildPRBody(
   issueNum: number,
   title: string,
@@ -436,65 +487,49 @@ function buildPRBody(
   verifyPassing: boolean,
   body: string,
 ): string {
-  const sections: string[] = [
+  const testSummary = extractTestSummary(testOutput);
+  const reviewSummary = extractReviewSummary(reviewOutput);
+
+  const lines: string[] = [
     `Closes #${issueNum}`,
     '',
     `## Summary`,
-    `Automated implementation of: ${title}`,
     '',
+    `Automated implementation of **${title}**`,
+    '',
+    '## Test Results',
+    '',
+    `| Check | Status |`,
+    `|-------|--------|`,
+    `| Unit tests | ${testsPassing ? 'PASS' : 'FAIL'} |`,
+    `| Verification | ${verifyPassing ? 'PASS' : 'FAIL'} |`,
   ];
 
-  if (reviewOutput) {
-    sections.push(
-      '<details>',
-      '<summary>Code Review</summary>',
-      '',
-      reviewOutput,
-      '',
-      '</details>',
-      '',
-    );
+  if (testSummary) {
+    lines.push(`| Details | ${testSummary} |`);
   }
 
-  sections.push(
-    `## Test Results`,
-    `- Unit tests: ${testsPassing ? 'PASSING' : 'FAILING'}`,
-    `- Verification: ${verifyPassing ? 'PASSING' : 'FAILING'}`,
-  );
+  lines.push('');
 
-  if (testOutput) {
-    sections.push(
-      '',
-      '<details>',
-      '<summary>Test Output</summary>',
-      '',
-      '```',
-      testOutput.slice(0, 5000),
-      '```',
-      '',
-      '</details>',
-    );
-  }
-
-  // Extract "What to Test" from issue body if present
-  const whatToTestMatch = body.match(/## What to Test[\s\S]*?(?=\n## |$)/);
-  if (whatToTestMatch) {
-    sections.push('', whatToTestMatch[0]);
-  } else {
-    sections.push(
-      '',
-      '## What to Test',
-      '- Verify the changes work as described in the issue',
-      '- Check for edge cases and error handling',
-      '- Review the code for security concerns',
-    );
-  }
-
-  sections.push(
+  // Code review — just the summary, not the full agent output
+  lines.push(
+    '## Code Review',
     '',
-    '---',
-    '*Automated by alpha-loop*',
+    reviewSummary,
+    '',
   );
 
-  return sections.join('\n');
+  // What to test — from issue body or generic
+  const whatToTestMatch = body.match(/## Test Requirements[\s\S]*?(?=\n## |$)/);
+  if (whatToTestMatch) {
+    lines.push(whatToTestMatch[0].trim(), '');
+  }
+
+  // Session log reference
+  lines.push(
+    '---',
+    `*Automated by [alpha-loop](https://github.com/bradtaylorsf/alpha-loop) · Full logs in \`sessions/\`*`,
+  );
+
+  return lines.join('\n');
 }
