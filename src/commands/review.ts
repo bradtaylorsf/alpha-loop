@@ -26,10 +26,9 @@ type ProposedChange = {
 
 /** Directories that proposed changes are allowed to target. */
 const ALLOWED_PREFIXES = [
-  'skills/',
-  '.claude/agents/',
-  'AGENTS.md',
-  'CLAUDE.md',
+  '.alpha-loop/templates/skills/',
+  '.alpha-loop/templates/agents/',
+  '.alpha-loop/templates/instructions.md',
   '.alpha-loop.yaml',
 ];
 
@@ -214,12 +213,12 @@ ${harnessConfig}
 
 Analyze the learnings and propose specific improvements. Focus on:
 
-1. **Agent prompts** (\`.claude/agents/implementer.md\`, \`.claude/agents/reviewer.md\`, \`AGENTS.md\`):
+1. **Agent prompts** (\`.alpha-loop/templates/agents/implementer.md\`, \`.alpha-loop/templates/agents/reviewer.md\`, \`.alpha-loop/templates/instructions.md\`):
    - Are there recurring patterns or anti-patterns that should be baked into the prompts?
    - Are there common mistakes the agent makes that a prompt instruction would prevent?
    - Are there successful strategies that should be reinforced?
 
-2. **Skill definitions** (in \`skills/\`, synced to \`.claude/skills/\` and \`.agents/skills/\`):
+2. **Skill definitions** (in \`.alpha-loop/templates/skills/\`, synced to harness-specific paths):
    - Should any skills be added, updated, or removed based on the learnings?
    - Are there recurring test patterns (Playwright, Jest) that deserve a skill?
    - Are there common environment issues (ports, auth, seeding) that should be documented?
@@ -256,7 +255,7 @@ Respond with ONLY a JSON array of proposed changes. Each change must have this e
 \`\`\`
 
 Rules:
-- \`path\` must be one of: \`.claude/agents/*.md\`, \`skills/*\`, \`AGENTS.md\`, \`CLAUDE.md\`, or \`.alpha-loop.yaml\`
+- \`path\` must be one of: \`.alpha-loop/templates/agents/*.md\`, \`.alpha-loop/templates/skills/*\`, \`.alpha-loop/templates/instructions.md\`, or \`.alpha-loop.yaml\`
 - \`content\` is the COMPLETE new file content (not a diff)
 - \`category\` must be one of: \`agent\`, \`skill\`, \`config\`, \`testing\`
 - Only propose changes that are clearly supported by the learnings data
@@ -376,7 +375,7 @@ async function applyChanges(
   metrics: Metrics,
   timestamp: string,
   projectDir: string,
-  config: { repo: string; baseBranch: string; model: string; reviewModel: string },
+  config: { repo: string; baseBranch: string; model: string; reviewModel: string; harnesses: string[] },
 ): Promise<void> {
   const branch = `improve/learnings-${timestamp}`;
 
@@ -409,15 +408,15 @@ async function applyChanges(
     return;
   }
 
-  // Sync skills/ → .claude/skills/ and .agents/skills/ so editor copies stay current
-  const syncResult = syncAgentAssets({ projectDir });
+  // Sync skills to all configured harnesses so editor copies stay current
+  const syncResult = syncAgentAssets(config.harnesses, { projectDir });
   if (syncResult.synced) {
     log.success('Synced agent assets after applying changes');
   }
 
   // Stage and commit changes (including synced copies)
   const stageResult = exec(
-    `git add ${appliedPaths.map((p) => JSON.stringify(p)).join(' ')} .claude/ .agents/ CLAUDE.md 2>/dev/null || true`,
+    `git add ${appliedPaths.map((p) => JSON.stringify(p)).join(' ')} .alpha-loop/templates/ .claude/ .agents/ CLAUDE.md AGENTS.md 2>/dev/null || true`,
     { cwd: projectDir },
   );
   if (stageResult.exitCode !== 0) {
@@ -528,23 +527,18 @@ export async function reviewCommand(options: ReviewOptions): Promise<void> {
   const metrics = computeMetrics(learnings);
   log.info(`Metrics: ${metrics.total} runs, ${metrics.successes} succeeded, ${metrics.failures} failed`);
 
-  // --- Gather agent definitions ---
-  // --- Gather agent definitions ---
-  // .claude/agents/ contains the alpha-loop agent prompts (implementer, reviewer, etc.)
-  // AGENTS.md / CLAUDE.md contain the main agent instructions doc
-  const claudeAgentsDir = join(projectDir, '.claude', 'agents');
-  const agentDefs = readDirFiles(claudeAgentsDir, ['.md', '.yaml', '.yml']);
-  // Also include AGENTS.md if it exists (the main instructions doc)
-  const agentsMdPath = join(projectDir, 'AGENTS.md');
-  if (existsSync(agentsMdPath)) {
-    agentDefs.push({ path: agentsMdPath, content: readFileSync(agentsMdPath, 'utf-8') });
+  // --- Gather agent definitions from .alpha-loop/templates/ (source of truth) ---
+  const templateAgentsDir = join(projectDir, '.alpha-loop', 'templates', 'agents');
+  const agentDefs = readDirFiles(templateAgentsDir, ['.md', '.yaml', '.yml']);
+  const instructionsPath = join(projectDir, '.alpha-loop', 'templates', 'instructions.md');
+  if (existsSync(instructionsPath)) {
+    agentDefs.push({ path: instructionsPath, content: readFileSync(instructionsPath, 'utf-8') });
   }
   log.info(`Found ${agentDefs.length} agent definition(s)`);
 
-  // --- Gather skill definitions ---
-  // skills/ is the source of truth (synced to .claude/skills/ and .agents/skills/)
-  const sourceSkillsDir = join(projectDir, 'skills');
-  const allSkills = readDirFiles(sourceSkillsDir, []);
+  // --- Gather skill definitions from .alpha-loop/templates/ (source of truth) ---
+  const templateSkillsDir = join(projectDir, '.alpha-loop', 'templates', 'skills');
+  const allSkills = readDirFiles(templateSkillsDir, []);
   log.info(`Found ${allSkills.length} skill definition(s)`);
 
   // --- Gather harness config ---
@@ -613,6 +607,7 @@ export async function reviewCommand(options: ReviewOptions): Promise<void> {
       baseBranch: config.baseBranch,
       model: config.model,
       reviewModel: config.reviewModel,
+      harnesses: config.harnesses,
     });
   } else {
     const savedPath = saveProposals(safeProposals, metrics, timestamp, projectDir);

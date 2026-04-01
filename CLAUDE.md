@@ -72,19 +72,24 @@ alpha-loop/
 │       ├── vision.ts           # Vision document helpers
 │       └── worktree.ts         # Git worktree management
 ├── tests/                      # Test suite (mirrors src/ structure)
-├── agents/                     # Agent definitions (YAML+Markdown)
-├── learnings/                  # Self-improvement data
-│   └── proposed-updates/       # Proposed agent prompt updates
-├── .claude/
-│   ├── agents/                 # Agent definitions for Claude
-│   └── skills/                 # Reusable skill definitions
-└── .alpha-loop.yaml            # Loop configuration
+├── .alpha-loop.yaml            # Loop configuration (includes harnesses list)
+├── .alpha-loop/
+│   ├── templates/              # Source of truth for skills, agents, instructions
+│   │   ├── skills/             # Skill definitions (synced to harness-specific paths)
+│   │   ├── agents/             # Agent prompt files (implementer.md, reviewer.md)
+│   │   └── instructions.md     # Main instructions (synced to CLAUDE.md, AGENTS.md)
+│   ├── learnings/              # Tracked in git — team-shared knowledge
+│   │   └── proposed-updates/   # Proposed improvements from `alpha-loop review`
+│   └── sessions/               # Gitignored — local logs, screenshots
+├── .claude/                    # Auto-synced from templates (Claude Code)
+├── .agents/                    # Auto-synced from templates (Codex, Cursor, etc.)
+└── .codex/                     # Auto-synced from templates (Codex agents)
 ```
 
 ## Architecture Principles
 
 1. **GitHub is the database** -- Issues are the kanban, labels are the state machine, PRs are reviews
-2. **Agent-agnostic** -- Support any CLI agent (Claude, Codex, OpenCode)
+2. **Agent-agnostic** -- Support 40+ coding harnesses via configurable sync
 3. **The Loop is the product** -- Plan -> Build -> Test -> Review -> Ship
 4. **Self-improving** -- Extract learnings, update agent prompts automatically
 5. **Simple enough to understand** -- A course graduate should be able to read this codebase
@@ -92,8 +97,8 @@ alpha-loop/
 ## Protected Files -- DO NOT MODIFY OR DELETE
 
 - `CLAUDE.md` -- This file. Do not modify unless explicitly asked.
-- `.claude/agents/` -- Agent definitions. Do not modify unless explicitly asked.
-- `.claude/skills/` -- Skill definitions. Do not modify unless explicitly asked.
+- `.alpha-loop/templates/` -- Source of truth for skills, agents, and instructions. Modify via `alpha-loop review --apply`, not directly.
+- `.claude/`, `.agents/`, `.codex/` -- Auto-synced from templates. Do not edit directly.
 
 ## Code Style
 

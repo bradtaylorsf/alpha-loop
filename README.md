@@ -137,7 +137,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop history <name>` | View a specific session |
 | `alpha-loop history <name> --qa` | Show QA checklist for session |
 | `alpha-loop history --clean` | Remove old session data |
-| `alpha-loop sync` | Sync agent assets (AGENTS.md, skills) across agent directories |
+| `alpha-loop sync` | Sync templates to configured harnesses (Claude, Codex, Cursor, etc.) |
 | `alpha-loop resume` | Resume stranded work — push branches, review, open PRs |
 | `alpha-loop resume --issue <N>` | Resume a specific issue |
 | `alpha-loop review` | Analyze learnings and propose self-improvements |
@@ -208,6 +208,7 @@ max_session_duration: 7200  # 2 hours in seconds
 | `skip_install` | `false` | Skip `pnpm install` in worktrees |
 | `skip_preflight` | `false` | Skip pre-flight test validation |
 | `auto_cleanup` | `true` | Auto-remove worktrees after processing |
+| `harnesses` | `['claude-code', 'codex']` | Coding harnesses to sync skills/agents to |
 
 ### Environment Variables
 

@@ -1,6 +1,6 @@
 import { existsSync, writeFileSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { detectRepo } from '../lib/config.js';
+import { detectRepo, loadConfig } from '../lib/config.js';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
 import { syncAgentAssets } from './sync.js';
@@ -116,6 +116,12 @@ test_command: pnpm test
 dev_command: pnpm dev
 port: 3000
 auto_merge: true
+
+# Coding harnesses to sync skills/agents to (run 'alpha-loop sync' after changes)
+# See full list: https://github.com/nicepkg/playwright-cli
+harnesses:
+  - claude-code
+  - codex
 
 # Safety limits (0 = unlimited)
 max_issues: 20
@@ -276,8 +282,12 @@ export function initCommand(): void {
     log.success('Created GitHub issue template: .github/ISSUE_TEMPLATE/agent-ready.yml');
   }
 
-  // Sync agent assets so skills land in both .claude/skills/ and .agents/skills/
-  const syncResult = syncAgentAssets();
+  // Sync agent assets to all configured harnesses (default to claude-code + codex on first init)
+  const initConfig = loadConfig();
+  const initHarnesses = initConfig.harnesses.length > 0
+    ? initConfig.harnesses
+    : ['claude-code', 'codex'];
+  const syncResult = syncAgentAssets(initHarnesses);
   if (syncResult.synced) {
     log.success('Agent assets synced across .claude/ and .agents/');
   }

@@ -32,6 +32,7 @@ export type Config = {
   autoCleanup: boolean;
   runFull: boolean;
   verbose: boolean;
+  harnesses: string[];
 };
 
 const DEFAULTS: Config = {
@@ -64,10 +65,12 @@ const DEFAULTS: Config = {
   autoCleanup: true,
   runFull: false,
   verbose: false,
+  harnesses: [],
 };
 
 /** Map from YAML key (snake_case) to Config key (camelCase). */
 const YAML_KEY_MAP: Record<string, keyof Config> = {
+  harnesses: 'harnesses',
   repo: 'repo',
   project: 'project',
   model: 'model',
