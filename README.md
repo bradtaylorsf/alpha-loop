@@ -290,8 +290,8 @@ What needs to be done.
 |-----------|-------------|---------|
 | `.alpha-loop/vision.md` | Yes | Project vision document |
 | `.alpha-loop/context.md` | Yes | Auto-generated project context |
-| `.alpha-loop/learnings/` | Yes | Learning files from each issue + session summaries |
-| `.alpha-loop/sessions/` | No (gitignored) | Session logs, results JSON, screenshots |
+| `.alpha-loop/learnings/` | Yes | Learning files, session manifests, and session summaries (shared with team) |
+| `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |
 

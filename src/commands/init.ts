@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { detectRepo } from '../lib/config.js';
 import { exec } from '../lib/shell.js';
@@ -131,6 +131,46 @@ function copyDir(src: string, dest: string): void {
   exec(`cp -R "${src}/"* "${dest}/" 2>/dev/null || true`);
 }
 
+const GITIGNORE_ENTRIES = [
+  '# Alpha-loop ephemeral data (not shared)',
+  '.alpha-loop/sessions/',
+  '.alpha-loop/auth/',
+  '.worktrees/',
+];
+
+/**
+ * Ensure .gitignore tracks learnings but ignores sessions, auth, and worktrees.
+ * Also removes stale entries that previously ignored learnings.
+ */
+function ensureGitignore(): void {
+  const gitignorePath = '.gitignore';
+  let content = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : '';
+  let changed = false;
+
+  // Remove old entry that ignored learnings (they should be tracked now)
+  if (content.includes('.alpha-loop/learnings/')) {
+    content = content
+      .split('\n')
+      .filter((line) => line.trim() !== '.alpha-loop/learnings/')
+      .join('\n');
+    changed = true;
+    log.info('Removed .alpha-loop/learnings/ from .gitignore (learnings are now tracked)');
+  }
+
+  // Add required ignore entries
+  const missing = GITIGNORE_ENTRIES.filter((entry) => !content.includes(entry));
+  if (missing.length > 0) {
+    const suffix = (content.endsWith('\n') || content === '') ? '' : '\n';
+    content += suffix + missing.join('\n') + '\n';
+    changed = true;
+  }
+
+  if (changed) {
+    writeFileSync(gitignorePath, content);
+    log.success('Updated .gitignore for alpha-loop');
+  }
+}
+
 export function initCommand(): void {
   // Create config if it doesn't exist
   if (existsSync(CONFIG_FILE)) {
@@ -149,6 +189,12 @@ export function initCommand(): void {
   }
 
   // Everything below is idempotent — safe to re-run
+
+  // Ensure .gitignore has the right alpha-loop entries:
+  // - Track learnings (team-shared knowledge)
+  // - Ignore sessions (local logs, screenshots, ephemeral data)
+  // - Ignore auth (browser state with credentials)
+  ensureGitignore();
 
   // Install playwright-cli skills if playwright-cli is available
   const which = exec('which playwright-cli');

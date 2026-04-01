@@ -137,11 +137,31 @@ export async function finalizeSession(
     return null;
   }
 
-  // Stage learnings
+  // Save session manifest to learnings directory (tracked in git, shared with team)
   const learningsDir = join(projectDir, '.alpha-loop', 'learnings');
-  if (existsSync(learningsDir)) {
-    exec('git add .alpha-loop/learnings/', { cwd: projectDir });
-  }
+  mkdirSync(learningsDir, { recursive: true });
+
+  const manifestName = `session-${session.name.replace(/\//g, '-')}.json`;
+  const manifest = {
+    name: session.name,
+    branch: session.branch,
+    completed: new Date().toISOString(),
+    results: session.results.map((r) => ({
+      issueNum: r.issueNum,
+      title: r.title,
+      status: r.status,
+      prUrl: r.prUrl,
+      testsPassing: r.testsPassing,
+      verifyPassing: r.verifyPassing,
+      duration: r.duration,
+      filesChanged: r.filesChanged,
+    })),
+  };
+  writeFileSync(join(learningsDir, manifestName), JSON.stringify(manifest, null, 2) + '\n');
+  log.info(`Session manifest saved: ${manifestName}`);
+
+  // Stage learnings (including session manifest)
+  exec('git add .alpha-loop/learnings/', { cwd: projectDir });
 
   // Commit if there are staged changes
   const diffResult = exec('git diff --cached --quiet', { cwd: projectDir });

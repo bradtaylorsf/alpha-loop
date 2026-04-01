@@ -3,6 +3,13 @@ import * as path from 'node:path';
 import { log } from '../lib/logger.js';
 import type { PipelineResult } from '../lib/pipeline.js';
 
+type SessionManifest = {
+  name: string;
+  branch: string;
+  completed: string;
+  results: PipelineResult[];
+};
+
 function formatDuration(seconds: number | undefined): string {
   if (!seconds || seconds <= 0) return '';
   const mins = Math.floor(seconds / 60);
@@ -60,10 +67,65 @@ function findSessionDirs(sessionsRoot: string): Array<{ dir: string; name: strin
   return sessions;
 }
 
-export function historyList(sessionsDir: string): void {
-  const sessions = findSessionDirs(sessionsDir);
+/**
+ * Load session manifests from the learnings directory (checked into git, shared with team).
+ * These are created during session finalization.
+ */
+function loadManifests(): Map<string, SessionManifest> {
+  const learningsDir = path.join(process.cwd(), '.alpha-loop', 'learnings');
+  const manifests = new Map<string, SessionManifest>();
+  if (!fs.existsSync(learningsDir)) return manifests;
 
-  if (sessions.length === 0) {
+  for (const file of fs.readdirSync(learningsDir)) {
+    if (!file.startsWith('session-') || !file.endsWith('.json')) continue;
+    try {
+      const content = fs.readFileSync(path.join(learningsDir, file), 'utf-8');
+      const manifest = JSON.parse(content) as SessionManifest;
+      if (manifest.name) {
+        manifests.set(manifest.name, manifest);
+      }
+    } catch { /* skip invalid */ }
+  }
+  return manifests;
+}
+
+export function historyList(sessionsDir: string): void {
+  const localSessions = findSessionDirs(sessionsDir);
+  const manifests = loadManifests();
+
+  // Build a unified list: local sessions + manifests not covered by local data
+  const seenNames = new Set(localSessions.map((s) => s.name));
+
+  type SessionEntry = { name: string; timestamp: string; results: PipelineResult[]; source: 'local' | 'manifest' };
+  const entries: SessionEntry[] = [];
+
+  // Add local sessions
+  for (const session of localSessions) {
+    entries.push({
+      name: session.name,
+      timestamp: session.timestamp,
+      results: loadResults(session.dir),
+      source: 'local',
+    });
+  }
+
+  // Add manifests that don't have local session directories
+  for (const [name, manifest] of manifests) {
+    if (seenNames.has(name)) continue;
+    // Extract timestamp from name (e.g., "session/20260401-004637" -> "20260401-004637")
+    const ts = name.split('/').pop() ?? name;
+    entries.push({
+      name,
+      timestamp: ts,
+      results: manifest.results,
+      source: 'manifest',
+    });
+  }
+
+  // Sort newest first
+  entries.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+
+  if (entries.length === 0) {
     console.log('No sessions found.');
     return;
   }
@@ -71,16 +133,15 @@ export function historyList(sessionsDir: string): void {
   console.log('Sessions:');
   console.log('');
 
-  for (const session of sessions) {
-    const results = loadResults(session.dir);
-    const issueCount = results.length;
-    const successCount = results.filter((r) => r.status === 'success').length;
+  for (const entry of entries) {
+    const issueCount = entry.results.length;
+    const successCount = entry.results.filter((r) => r.status === 'success').length;
     const failedCount = issueCount - successCount;
-    const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+    const totalDuration = entry.results.reduce((sum, r) => sum + r.duration, 0);
     const durStr = formatDuration(totalDuration);
 
     // Parse date from timestamp (YYYYMMDD-HHMMSS)
-    const ts = session.timestamp;
+    const ts = entry.timestamp;
     const date = ts.length >= 8
       ? `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`
       : ts;
@@ -92,29 +153,42 @@ export function historyList(sessionsDir: string): void {
     if (issueCount === 0) statusParts = '(empty)';
 
     console.log(
-      `  ${session.name.padEnd(30)} ${date}  ${String(issueCount).padStart(2)} ${issueWord.padEnd(7)} ${statusParts.padEnd(10)} ${durStr}`,
+      `  ${entry.name.padEnd(30)} ${date}  ${String(issueCount).padStart(2)} ${issueWord.padEnd(7)} ${statusParts.padEnd(10)} ${durStr}`,
     );
   }
 }
 
 export function historyDetail(sessionsDir: string, sessionName: string): void {
-  // Try exact match first, then search by timestamp suffix
-  let sessionDir = path.join(sessionsDir, sessionName);
-  if (!fs.existsSync(sessionDir)) {
-    // Search for a matching timestamp across groups
+  let results: PipelineResult[] = [];
+  let sessionDir: string | undefined;
+
+  // Try local session directories first
+  const localDir = path.join(sessionsDir, sessionName);
+  if (fs.existsSync(localDir)) {
+    sessionDir = localDir;
+    results = loadResults(localDir);
+  } else {
     const all = findSessionDirs(sessionsDir);
     const match = all.find((s) => s.name === sessionName || s.timestamp === sessionName);
-    if (!match) {
-      log.error(`Session not found: ${sessionName}`);
-      process.exitCode = 1;
-      return;
+    if (match) {
+      sessionDir = match.dir;
+      results = loadResults(match.dir);
     }
-    sessionDir = match.dir;
   }
 
-  const results = loadResults(sessionDir);
+  // Fall back to manifest from learnings (checked-in data from teammates)
   if (results.length === 0) {
-    log.error(`No results found in session: ${sessionName}`);
+    const manifests = loadManifests();
+    const manifest = manifests.get(sessionName)
+      ?? [...manifests.values()].find((m) => m.name.endsWith(sessionName));
+    if (manifest) {
+      results = manifest.results;
+      sessionName = manifest.name;
+    }
+  }
+
+  if (results.length === 0) {
+    log.error(`Session not found: ${sessionName}`);
     process.exitCode = 1;
     return;
   }
@@ -155,14 +229,20 @@ export function historyDetail(sessionsDir: string, sessionName: string): void {
 
   console.log('');
 
-  // Show paths to useful files
-  const logsDir = path.join(sessionDir, 'logs');
-  if (fs.existsSync(logsDir)) {
-    console.log(`Logs:         ${path.relative(process.cwd(), logsDir)}/`);
-  }
-  const screenshotsDir = path.join(sessionDir, 'screenshots');
-  if (fs.existsSync(screenshotsDir)) {
-    console.log(`Screenshots:  ${path.relative(process.cwd(), screenshotsDir)}/`);
+  // Show paths to useful files (only available for local sessions)
+  if (sessionDir) {
+    const logsDir = path.join(sessionDir, 'logs');
+    if (fs.existsSync(logsDir)) {
+      console.log(`Logs:         ${path.relative(process.cwd(), logsDir)}/`);
+    }
+    const screenshotsDir = path.join(sessionDir, 'screenshots');
+    if (fs.existsSync(screenshotsDir)) {
+      console.log(`Screenshots:  ${path.relative(process.cwd(), screenshotsDir)}/`);
+    }
+    const qaPath = path.join(sessionDir, 'qa-checklist.md');
+    if (fs.existsSync(qaPath)) {
+      console.log(`QA Checklist: ${path.relative(process.cwd(), qaPath)}`);
+    }
   }
 
   // Check for session summary in learnings
@@ -171,12 +251,6 @@ export function historyDetail(sessionsDir: string, sessionName: string): void {
   const summaryPath = path.join(learningsDir, summaryName);
   if (fs.existsSync(summaryPath)) {
     console.log(`Summary:      ${path.relative(process.cwd(), summaryPath)}`);
-  }
-
-  // Show QA checklist if it exists
-  const qaPath = path.join(sessionDir, 'qa-checklist.md');
-  if (fs.existsSync(qaPath)) {
-    console.log(`QA Checklist: ${path.relative(process.cwd(), qaPath)}`);
   }
 }
 
