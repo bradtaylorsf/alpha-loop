@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { detectRepo } from '../lib/config.js';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
@@ -13,31 +14,20 @@ function findTemplatesDir(): string | null {
   // Walk up from this file's location to find the alpha-loop package root.
   // src/commands/init.ts -> src/ -> package root (has templates/)
   // dist/commands/init.js -> dist/ -> package root (has templates/)
-  const scriptDir = typeof __dirname !== 'undefined' ? __dirname : '';
+  //
+  // Use import.meta.url (ESM) which resolves through symlinks to the actual file,
+  // unlike __dirname (unavailable in ESM) or process.argv[1] (follows symlink path).
+  const thisDir = dirname(fileURLToPath(import.meta.url));
 
   const candidates: string[] = [];
 
-  // Walk up from script location
-  if (scriptDir) {
-    let dir = scriptDir;
-    for (let i = 0; i < 5; i++) {
-      candidates.push(join(dir, 'templates'));
-      const parent = join(dir, '..');
-      if (parent === dir) break;
-      dir = parent;
-    }
-  }
-
-  // Also check relative to the entry script (process.argv[1])
-  // e.g., npx tsx /path/to/alpha-loop/src/cli.ts → /path/to/alpha-loop/templates
-  if (process.argv[1]) {
-    let dir = join(process.argv[1], '..');
-    for (let i = 0; i < 5; i++) {
-      candidates.push(join(dir, 'templates'));
-      const parent = join(dir, '..');
-      if (parent === dir) break;
-      dir = parent;
-    }
+  // Walk up from this file's actual location
+  let dir = thisDir;
+  for (let i = 0; i < 5; i++) {
+    candidates.push(join(dir, 'templates'));
+    const parent = join(dir, '..');
+    if (parent === dir) break;
+    dir = parent;
   }
 
   for (const c of candidates) {
