@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { exec } from '../lib/shell.js';
 import { assertSafeShellArg, loadConfig } from '../lib/config.js';
-import { logInfo, logStep, logSuccess, logWarn } from '../lib/logger.js';
+import { log } from '../lib/logger.js';
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
   return new Promise((resolve) => {
@@ -34,7 +34,7 @@ const PRIORITIES: Record<string, string> = {
 
 export async function visionCommand(): Promise<void> {
   if (!process.stdin.isTTY) {
-    logInfo('Not running in an interactive terminal. Skipping vision setup.');
+    log.info('Not running in an interactive terminal. Skipping vision setup.');
     return;
   }
 
@@ -122,15 +122,15 @@ export async function visionCommand(): Promise<void> {
       const issueMatch = northStarInput.match(/^(\d+)$/) ?? northStarInput.match(/issues\/(\d+)/);
       if (issueMatch) {
         const issueNum = issueMatch[1];
-        logInfo(`Fetching issue #${issueNum}...`);
+        log.info(`Fetching issue #${issueNum}...`);
         const repo = assertSafeShellArg(config.repo, 'repo');
         const result = exec(`gh issue view ${issueNum} --repo ${repo} --json title,body`);
         if (result.exitCode === 0 && result.stdout) {
           const issueData = JSON.parse(result.stdout);
           northStarContent = `### North Star: #${issueNum} \u2014 ${issueData.title}\n\n${issueData.body}`;
-          logSuccess(`Fetched issue #${issueNum}: ${issueData.title}`);
+          log.success(`Fetched issue #${issueNum}: ${issueData.title}`);
         } else {
-          logWarn(`Could not fetch issue #${issueNum}`);
+          log.warn(`Could not fetch issue #${issueNum}`);
           northStarContent = northStarInput;
         }
       } else {
@@ -144,7 +144,7 @@ export async function visionCommand(): Promise<void> {
     console.log('');
 
     // Synthesize with Claude
-    logStep('Generating project vision...');
+    log.step('Generating project vision...');
 
     const visionPrompt = `Synthesize the following inputs into a concise project vision document. This will be read by AI agents before every task to guide their decisions.
 
@@ -183,7 +183,7 @@ Output ONLY this markdown structure. Be specific and actionable. Under 500 words
       fs.writeFileSync(visionFile, visionResult.stdout + '\n');
     } else {
       // Fallback: write raw inputs
-      logWarn('Claude synthesis failed, saving raw inputs');
+      log.warn('Claude synthesis failed, saving raw inputs');
       const raw = [
         '## What We\'re Building',
         projectDescription,
@@ -204,7 +204,7 @@ Output ONLY this markdown structure. Be specific and actionable. Under 500 words
       fs.writeFileSync(visionFile, raw + '\n');
     }
 
-    logSuccess(`Project vision saved to ${visionFile}`);
+    log.success(`Project vision saved to ${visionFile}`);
     console.log('');
     console.log(fs.readFileSync(visionFile, 'utf-8'));
   } finally {

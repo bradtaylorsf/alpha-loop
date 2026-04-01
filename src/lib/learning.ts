@@ -4,6 +4,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './logger.js';
+import { formatTimestamp } from './shell.js';
 import { spawnAgent } from './agent.js';
 import { buildLearnPrompt } from './prompts.js';
 import type { Config } from './config.js';
@@ -69,7 +70,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
   });
 
   if (result.exitCode !== 0 || !result.output.trim()) {
-    log.warn('Learning extraction failed, skipping');
+    log.warn(`Learning extraction failed (exit ${result.exitCode}, output ${result.output.length} chars), skipping`);
     return;
   }
 
@@ -252,12 +253,3 @@ Output ONLY this markdown structure:
   return agentResult.output.trim();
 }
 
-function formatTimestamp(date: Date): string {
-  const y = date.getFullYear();
-  const mo = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  const h = String(date.getHours()).padStart(2, '0');
-  const mi = String(date.getMinutes()).padStart(2, '0');
-  const s = String(date.getSeconds()).padStart(2, '0');
-  return `${y}${mo}${d}-${h}${mi}${s}`;
-}

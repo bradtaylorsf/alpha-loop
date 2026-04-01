@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { exec, run } from '../lib/shell.js';
 import { loadConfig } from '../lib/config.js';
-import { logError, logInfo, logSuccess, logWarn } from '../lib/logger.js';
+import { log } from '../lib/logger.js';
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
   return new Promise((resolve) => {
@@ -15,7 +15,7 @@ export async function authCommand(): Promise<void> {
   // Check for playwright-cli
   const whichResult = exec('which playwright-cli');
   if (whichResult.exitCode !== 0) {
-    logError('playwright-cli not installed. Install with: npm install -g @playwright/cli@latest');
+    log.error('playwright-cli not installed. Install with: npm install -g @playwright/cli@latest');
     process.exitCode = 1;
     return;
   }
@@ -57,7 +57,7 @@ export async function authCommand(): Promise<void> {
     // Save browser state
     const saveResult = exec(`playwright-cli state-save "${authDir}/state.json"`);
     if (saveResult.exitCode !== 0) {
-      logWarn('Could not save state via playwright-cli, trying cookie export...');
+      log.warn('Could not save state via playwright-cli, trying cookie export...');
       exec(`playwright-cli cookie-export "${authDir}/cookies.json"`);
       exec(`playwright-cli localstorage-export "${authDir}/localstorage.json"`);
     }
@@ -71,7 +71,7 @@ export async function authCommand(): Promise<void> {
     const cookiesExist = fs.existsSync(path.join(authDir, 'cookies.json'));
 
     if (stateExists || cookiesExist) {
-      logSuccess(`Auth state saved to ${authDir}`);
+      log.success(`Auth state saved to ${authDir}`);
       console.log('');
       console.log('Future verification runs will load this state automatically.');
       console.log("Re-run 'auth' if your session expires.");
@@ -79,7 +79,7 @@ export async function authCommand(): Promise<void> {
       // Add to .gitignore
       ensureGitignore(projectDir);
     } else {
-      logError('Failed to save auth state');
+      log.error('Failed to save auth state');
       process.exitCode = 1;
     }
   } finally {
@@ -89,11 +89,15 @@ export async function authCommand(): Promise<void> {
 
 function ensureGitignore(projectDir: string): void {
   const gitignorePath = path.join(projectDir, '.gitignore');
-  if (!fs.existsSync(gitignorePath)) return;
+  if (!fs.existsSync(gitignorePath)) {
+    fs.writeFileSync(gitignorePath, '.alpha-loop/auth/\n');
+    log.info('Created .gitignore with .alpha-loop/auth/');
+    return;
+  }
 
   const content = fs.readFileSync(gitignorePath, 'utf-8');
   if (!content.includes('.alpha-loop/auth')) {
     fs.appendFileSync(gitignorePath, '\n.alpha-loop/auth/\n');
-    logInfo('Added .alpha-loop/auth/ to .gitignore');
+    log.info('Added .alpha-loop/auth/ to .gitignore');
   }
 }

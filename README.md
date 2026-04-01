@@ -89,7 +89,7 @@ When `auto_merge` is enabled (default), Alpha Loop creates a session branch (e.g
 
 ### Learnings
 
-Each completed issue produces a learning file in `learnings/` with:
+Each completed issue produces a learning file in `.alpha-loop/learnings/` with:
 - What worked and what failed
 - Reusable patterns discovered
 - Anti-patterns to avoid
@@ -99,7 +99,7 @@ These learnings are automatically fed into future implementation prompts, so the
 
 ### Screenshots
 
-During live verification, the agent takes screenshots at key states and saves them to `sessions/<name>/screenshots/issue-<N>/`. These are kept locally (not committed to git) for debugging.
+During live verification, the agent takes screenshots at key states and saves them to `.alpha-loop/sessions/<name>/screenshots/issue-<N>/`. These are kept locally (not committed to git) for debugging.
 
 ## Commands
 
@@ -142,7 +142,6 @@ Running `alpha-loop init` creates a `.alpha-loop.yaml` file:
 repo: owner/repo-name
 model: opus
 review_model: opus
-max_turns: 30
 label: ready
 base_branch: main
 test_command: pnpm test
@@ -162,7 +161,6 @@ max_session_duration: 7200  # 2 hours in seconds
 | `repo` | (auto-detected) | GitHub repo in `owner/name` format |
 | `model` | `opus` | AI model for implementation and verification |
 | `review_model` | `opus` | AI model for code review and learning extraction |
-| `max_turns` | `30` | Max agent turns per issue |
 | `label` | `ready` | GitHub label that marks issues as ready for the loop |
 | `base_branch` | `master` | Branch to create PRs against |
 | `test_command` | `pnpm test` | Command to run tests |
@@ -192,7 +190,6 @@ All config options can be set via environment variables (uppercase, same names):
 | `REPO` | `repo` |
 | `MODEL` | `model` |
 | `REVIEW_MODEL` | `review_model` |
-| `MAX_TURNS` | `max_turns` |
 | `MAX_TEST_RETRIES` | `max_test_retries` |
 | `MILESTONE` | `milestone` |
 | `MAX_ISSUES` | `max_issues` |
@@ -262,9 +259,11 @@ What needs to be done.
 
 | Directory | Git-tracked? | Purpose |
 |-----------|-------------|---------|
-| `learnings/` | Yes | Learning files from each issue + session summaries |
-| `sessions/` | No (gitignored) | Session logs, results JSON, screenshots — local debugging |
-| `.alpha-loop/` | Yes | Project vision and context |
+| `.alpha-loop/vision.md` | Yes | Project vision document |
+| `.alpha-loop/context.md` | Yes | Auto-generated project context |
+| `.alpha-loop/learnings/` | Yes | Learning files from each issue + session summaries |
+| `.alpha-loop/sessions/` | No (gitignored) | Session logs, results JSON, screenshots |
+| `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |
 
 ## Development

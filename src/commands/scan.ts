@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { exec } from '../lib/shell.js';
-import { logError, logStep, logSuccess, logWarn } from '../lib/logger.js';
+import { log } from '../lib/logger.js';
 import { assertSafeShellArg, loadConfig } from '../lib/config.js';
 
 const SCAN_PROMPT = `Analyze this codebase and produce a concise project context file. Read the key files (package.json, entry points, config files, README, CLAUDE.md) and output ONLY this markdown structure:
@@ -35,7 +35,7 @@ export function scanCommand(): void {
 
   fs.mkdirSync(contextDir, { recursive: true });
 
-  logStep('Scanning codebase for project context...');
+  log.step('Scanning codebase for project context...');
 
   const model = assertSafeShellArg(config.model ?? 'opus', 'model');
   const result = exec(
@@ -45,12 +45,12 @@ export function scanCommand(): void {
 
   if (result.exitCode === 0 && result.stdout) {
     fs.writeFileSync(contextFile, result.stdout + '\n');
-    logSuccess(`Project context saved to ${contextFile}`);
+    log.success(`Project context saved to ${contextFile}`);
   } else if (result.stdout) {
     fs.writeFileSync(contextFile, result.stdout + '\n');
-    logWarn('Claude exited with errors but produced output');
-    logSuccess(`Project context saved to ${contextFile}`);
+    log.warn('Claude exited with errors but produced output');
+    log.success(`Project context saved to ${contextFile}`);
   } else {
-    logError(`Project context generation failed: ${result.stderr || 'empty output'}`);
+    log.error(`Project context generation failed: ${result.stderr || 'empty output'}`);
   }
 }

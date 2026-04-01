@@ -6,6 +6,9 @@ import { exec } from './shell.js';
 import { log } from './logger.js';
 import type { Config } from './config.js';
 
+/** Test runner timeout (5 minutes). */
+const TEST_TIMEOUT_MS = 300_000;
+
 export type TestResult = {
   passed: boolean;
   output: string;
@@ -36,7 +39,7 @@ export function runTests(worktree: string, config: Config, logFile: string): Tes
   const result = exec(config.testCommand, {
     cwd: worktree,
     env: Object.keys(env).length > 0 ? env : undefined,
-    timeout: 300_000, // 5 minute timeout
+    timeout: TEST_TIMEOUT_MS,
   });
 
   // Append test output to log file

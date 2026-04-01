@@ -5,7 +5,10 @@ import { writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { exec } from './shell.js';
-import * as logger from './logger.js';
+import { log } from './logger.js';
+
+/** Max PR body length. GitHub supports 65536 but we leave room for metadata. */
+const MAX_PR_BODY_CHARS = 60_000;
 
 export type Issue = {
   number: number;
@@ -32,13 +35,13 @@ export function listMilestones(repo: string): Milestone[] {
     `gh api "repos/${repo}/milestones?state=open&sort=due_on&direction=asc" --jq '[.[] | {number, title, description, openIssues: .open_issues, closedIssues: .closed_issues, dueOn: .due_on, state}]'`,
   );
   if (result.exitCode !== 0) {
-    logger.warn(`Failed to list milestones: ${result.stderr}`);
+    log.warn(`Failed to list milestones: ${result.stderr}`);
     return [];
   }
   try {
     return JSON.parse(result.stdout) as Milestone[];
   } catch {
-    logger.warn('Failed to parse milestones JSON');
+    log.warn('Failed to parse milestones JSON');
     return [];
   }
 }
@@ -74,7 +77,7 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
     `gh project item-list ${project} --owner "${owner}" --format json --limit 100`,
   );
   if (result.exitCode !== 0) {
-    logger.warn(`Failed to poll project board: ${result.stderr}`);
+    log.warn(`Failed to poll project board: ${result.stderr}`);
     return [];
   }
   try {
@@ -106,7 +109,7 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
         labels: (item.labels ?? []).map((l) => l.name),
       }));
   } catch {
-    logger.warn('Failed to parse project board JSON');
+    log.warn('Failed to parse project board JSON');
     return [];
   }
 }
@@ -137,7 +140,7 @@ function pollIssuesByLabel(repo: string, label: string, limit: number, milestone
     `gh issue list --repo "${repo}" --label "${label}" --state open${milestoneFlag} --json number,title,body,labels --limit ${limit}`,
   );
   if (result.exitCode !== 0) {
-    logger.warn(`Failed to poll issues: ${result.stderr}`);
+    log.warn(`Failed to poll issues: ${result.stderr}`);
     return [];
   }
   try {
@@ -157,7 +160,7 @@ function pollIssuesByLabel(repo: string, label: string, limit: number, milestone
       .sort((a, b) => a.number - b.number)
       .slice(0, limit);
   } catch {
-    logger.warn('Failed to parse issues JSON');
+    log.warn('Failed to parse issues JSON');
     return [];
   }
 }
@@ -172,7 +175,7 @@ export function labelIssue(repo: string, issueNum: number, addLabel: string, rem
   }
   const result = exec(args[0]);
   if (result.exitCode !== 0) {
-    logger.warn(`Failed to update labels on issue #${issueNum}: ${result.stderr}`);
+    log.warn(`Failed to update labels on issue #${issueNum}: ${result.stderr}`);
   }
 }
 
@@ -184,7 +187,7 @@ export function commentIssue(repo: string, issueNum: number, body: string): void
     `gh issue comment ${issueNum} --repo "${repo}" --body ${JSON.stringify(body)}`,
   );
   if (result.exitCode !== 0) {
-    logger.warn(`Failed to comment on issue #${issueNum}: ${result.stderr}`);
+    log.warn(`Failed to comment on issue #${issueNum}: ${result.stderr}`);
   }
 }
 
@@ -208,7 +211,7 @@ export function createPR(options: CreatePROptions): string {
   const pushResult = exec(`git push -u origin "${head}"`, { cwd });
   if (pushResult.exitCode !== 0) {
     // Try force push if branch exists from previous attempt
-    logger.warn('Push failed, trying force push...');
+    log.warn('Push failed, trying force push...');
     const forceResult = exec(`git push -u origin "${head}" --force`, { cwd });
     if (forceResult.exitCode !== 0) {
       throw new Error(`Failed to push branch ${head}: ${forceResult.stderr}`);
@@ -230,7 +233,7 @@ export function createPR(options: CreatePROptions): string {
         const existing = JSON.parse(existingResult.stdout) as Array<{ number: number; url: string }>;
         if (existing.length > 0) {
           const prUrl = existing[0].url;
-          logger.info(`PR already exists: ${prUrl}, updating...`);
+          log.info(`PR already exists: ${prUrl}, updating...`);
           exec(`gh pr edit ${existing[0].number} --repo "${repo}" --body-file "${bodyFile}"`);
           return prUrl;
         }
@@ -262,7 +265,7 @@ export function mergePR(repo: string, head: string, method: 'squash' | 'merge' =
     `gh pr list --repo "${repo}" --head "${head}" --json number --limit 1`,
   );
   if (listResult.exitCode !== 0 || !listResult.stdout) {
-    logger.warn(`No PR found to merge for branch ${head}`);
+    log.warn(`No PR found to merge for branch ${head}`);
     return;
   }
 
@@ -270,12 +273,12 @@ export function mergePR(repo: string, head: string, method: 'squash' | 'merge' =
   try {
     const prs = JSON.parse(listResult.stdout) as Array<{ number: number }>;
     if (prs.length === 0) {
-      logger.warn(`No PR found to merge for branch ${head}`);
+      log.warn(`No PR found to merge for branch ${head}`);
       return;
     }
     prNum = prs[0].number;
   } catch {
-    logger.warn('Failed to parse PR list');
+    log.warn('Failed to parse PR list');
     return;
   }
 
@@ -286,7 +289,7 @@ export function mergePR(repo: string, head: string, method: 'squash' | 'merge' =
   if (result.exitCode !== 0) {
     throw new Error(`Failed to merge PR #${prNum}: ${result.stderr}`);
   }
-  logger.info(`PR #${prNum} merged`);
+  log.info(`PR #${prNum} merged`);
 }
 
 /**
@@ -305,7 +308,7 @@ export function updateProjectStatus(
     `gh project item-list ${projectNum} --owner "${owner}" --format json --limit 100`,
   );
   if (itemResult.exitCode !== 0) {
-    logger.warn(`Could not list project items: ${itemResult.stderr}`);
+    log.warn(`Could not list project items: ${itemResult.stderr}`);
     return;
   }
 
@@ -317,12 +320,12 @@ export function updateProjectStatus(
     const item = data.items.find((i) => i.content?.number === issueNum);
     itemId = item?.id;
   } catch {
-    logger.warn('Failed to parse project items');
+    log.warn('Failed to parse project items');
     return;
   }
 
   if (!itemId) {
-    logger.warn(`Could not find project item for issue #${issueNum}`);
+    log.warn(`Could not find project item for issue #${issueNum}`);
     return;
   }
 
@@ -331,7 +334,7 @@ export function updateProjectStatus(
     `gh project field-list ${projectNum} --owner "${owner}" --format json`,
   );
   if (fieldResult.exitCode !== 0) {
-    logger.warn(`Could not list project fields: ${fieldResult.stderr}`);
+    log.warn(`Could not list project fields: ${fieldResult.stderr}`);
     return;
   }
 
@@ -352,12 +355,12 @@ export function updateProjectStatus(
       optionId = option?.id;
     }
   } catch {
-    logger.warn('Failed to parse project fields');
+    log.warn('Failed to parse project fields');
     return;
   }
 
   if (!fieldId || !optionId) {
-    logger.warn(`Could not resolve project field/option for status '${status}'`);
+    log.warn(`Could not resolve project field/option for status '${status}'`);
     return;
   }
 
@@ -366,7 +369,7 @@ export function updateProjectStatus(
     `gh project view ${projectNum} --owner "${owner}" --format json`,
   );
   if (projectResult.exitCode !== 0) {
-    logger.warn(`Could not view project: ${projectResult.stderr}`);
+    log.warn(`Could not view project: ${projectResult.stderr}`);
     return;
   }
 
@@ -375,12 +378,12 @@ export function updateProjectStatus(
     const data = JSON.parse(projectResult.stdout) as { id: string };
     projectId = data.id;
   } catch {
-    logger.warn('Failed to parse project data');
+    log.warn('Failed to parse project data');
     return;
   }
 
   if (!projectId) {
-    logger.warn('Could not get project ID');
+    log.warn('Could not get project ID');
     return;
   }
 
@@ -389,17 +392,17 @@ export function updateProjectStatus(
     `gh project item-edit --project-id "${projectId}" --id "${itemId}" --field-id "${fieldId}" --single-select-option-id "${optionId}"`,
   );
   if (editResult.exitCode !== 0) {
-    logger.warn(`Failed to update project status for #${issueNum}: ${editResult.stderr}`);
+    log.warn(`Failed to update project status for #${issueNum}: ${editResult.stderr}`);
     return;
   }
 
-  logger.info(`Project board: #${issueNum} -> ${status}`);
+  log.info(`Project board: #${issueNum} -> ${status}`);
 }
 
 /**
  * Truncate PR body at 30k chars to stay within GitHub limits.
  */
 function truncateBody(body: string): string {
-  if (body.length <= 30000) return body;
-  return body.slice(0, 30000) + '\n\n... (body truncated, see full log)';
+  if (body.length <= MAX_PR_BODY_CHARS) return body;
+  return body.slice(0, MAX_PR_BODY_CHARS) + '\n\n... (body truncated, see full log)';
 }

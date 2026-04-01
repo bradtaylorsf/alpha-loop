@@ -5,11 +5,15 @@ jest.mock('../../src/lib/shell', () => ({
 }));
 
 jest.mock('../../src/lib/logger', () => ({
-  info: jest.fn(),
-  warn: jest.fn(),
-  error: jest.fn(),
-  debug: jest.fn(),
-  dry: jest.fn(),
+  log: {
+    info: jest.fn(),
+    success: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    step: jest.fn(),
+    dry: jest.fn(),
+    debug: jest.fn(),
+  },
 }));
 
 import { exec } from '../../src/lib/shell';
@@ -257,10 +261,10 @@ describe('mergePR', () => {
   test('warns when no PR found', () => {
     mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });
 
-    const logger = require('../../src/lib/logger');
+    const { log: mockLog } = require('../../src/lib/logger');
     mergePR('owner/repo', 'agent/issue-42');
 
-    expect(logger.warn).toHaveBeenCalledWith(
+    expect(mockLog.warn).toHaveBeenCalledWith(
       expect.stringContaining('No PR found'),
     );
   });

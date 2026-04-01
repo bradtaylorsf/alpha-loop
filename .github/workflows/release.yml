@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+
+  release:
+    name: Release
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      # Determine version bump from commit messages
+      # feat: -> minor, fix: -> patch, breaking change -> major
+      - name: Determine version bump
+        id: version
+        run: |
+          CURRENT=$(node -p "require('./package.json').version")
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+
+          # Get commits since last tag (or all commits if no tags)
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            # First release — publish current version as-is
+            echo "bump=none" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          COMMITS=$(git log "$LAST_TAG"..HEAD --oneline --format="%s")
+
+          # Skip if no new commits since last tag
+          if [ -z "$COMMITS" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Determine bump type
+          if echo "$COMMITS" | grep -qiE "BREAKING CHANGE|^.*!:"; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qE "^feat"; then
+            BUMP="minor"
+          else
+            BUMP="patch"
+          fi
+
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Bump version
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          BUMP=${{ steps.version.outputs.bump }}
+          CURRENT=${{ steps.version.outputs.current }}
+
+          if [ "$BUMP" = "none" ]; then
+            # First release — use current version from package.json
+            NEW_VERSION="$CURRENT"
+          else
+            # Bump version using node (no external deps needed)
+            NEW_VERSION=$(node -e "
+              const [major, minor, patch] = '$CURRENT'.split('.').map(Number);
+              const bump = '$BUMP';
+              if (bump === 'major') console.log((major+1)+'.0.0');
+              else if (bump === 'minor') console.log(major+'.'+(minor+1)+'.0');
+              else console.log(major+'.'+minor+'.'+(patch+1));
+            ")
+
+            # Update package.json version
+            node -e "
+              const pkg = require('./package.json');
+              pkg.version = '$NEW_VERSION';
+              require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            "
+
+            # Update version in cli.ts
+            sed -i "s/.version('[^']*')/.version('$NEW_VERSION')/" src/cli.ts
+          fi
+
+          echo "NEW_VERSION=$NEW_VERSION" >> "$GITHUB_ENV"
+
+          # Rebuild with correct version
+          pnpm build
+
+      - name: Publish to npm
+        if: steps.version.outputs.skip != 'true'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag and push
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Only commit if version was bumped (not first release)
+          if [ "${{ steps.version.outputs.bump }}" != "none" ]; then
+            git add package.json src/cli.ts
+            git commit -m "chore: release v$NEW_VERSION [skip ci]"
+          fi
+
+          git tag "v$NEW_VERSION"
+          git push origin master --tags
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            NOTES=$(git log --oneline --format="- %s" | head -20)
+          else
+            NOTES=$(git log "$LAST_TAG"..HEAD^ --oneline --format="- %s")
+          fi
+
+          gh release create "v$NEW_VERSION" \
+            --title "v$NEW_VERSION" \
+            --notes "$NOTES" \
+            --latest

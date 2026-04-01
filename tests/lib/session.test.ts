@@ -3,6 +3,7 @@ import type { PipelineResult } from '../../src/lib/pipeline';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
+  formatTimestamp: jest.fn().mockReturnValue('20260101-000000'),
 }));
 
 jest.mock('../../src/lib/logger', () => ({

@@ -39,7 +39,7 @@ function checkPrerequisites(): void {
   ];
 
   for (const tool of tools) {
-    const result = exec(`which ${tool.name}`);
+    const result = exec(`command -v "${tool.name}"`);
     if (result.exitCode !== 0) {
       log.error(tool.message);
       process.exit(1);

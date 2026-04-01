@@ -4,7 +4,7 @@
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './logger.js';
-import { exec } from './shell.js';
+import { exec, formatTimestamp } from './shell.js';
 import { createPR } from './github.js';
 import type { Config } from './config.js';
 import type { PipelineResult } from './pipeline.js';
@@ -23,7 +23,7 @@ export type SessionContext = {
  */
 export function createSession(config: Config): SessionContext {
   const now = new Date();
-  const timestamp = formatSessionTimestamp(now);
+  const timestamp = formatTimestamp(now);
   const name = `session/${timestamp}`;
   const branch = config.mergeTo || name;
 
@@ -204,12 +204,3 @@ Automated by alpha-loop`;
   }
 }
 
-function formatSessionTimestamp(date: Date): string {
-  const y = date.getFullYear();
-  const mo = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  const h = String(date.getHours()).padStart(2, '0');
-  const mi = String(date.getMinutes()).padStart(2, '0');
-  const s = String(date.getSeconds()).padStart(2, '0');
-  return `${y}${mo}${d}-${h}${mi}${s}`;
-}

@@ -2,6 +2,8 @@ node_modules/
 dist/
 .worktrees/
 sessions/
+.alpha-loop/sessions/
+.alpha-loop/auth/
 logs/*
 !logs/.gitkeep
 .env

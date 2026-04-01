@@ -4,6 +4,9 @@
 import { execSync as nodeExecSync, exec as nodeExec, spawn } from 'node:child_process';
 import * as readline from 'node:readline';
 
+/** Max buffer for async exec output (10 MB). */
+const EXEC_MAX_BUFFER = 10 * 1024 * 1024;
+
 export type ExecResult = {
   stdout: string;
   stderr: string;
@@ -28,7 +31,7 @@ export function exec(
     });
     return { stdout: stdout.trim(), stderr: '', exitCode: 0 };
   } catch (err: unknown) {
-    const e = err as { stdout?: string; stderr?: string; status?: number };
+    const e = err as NodeJS.ErrnoException & { stdout?: Buffer | string; stderr?: Buffer | string; status?: number };
     return {
       stdout: (e.stdout ?? '').toString().trim(),
       stderr: (e.stderr ?? '').toString().trim(),
@@ -42,11 +45,16 @@ export function exec(
  */
 export async function execAsync(cmd: string, cwd?: string): Promise<ExecResult> {
   return new Promise((resolve) => {
-    nodeExec(cmd, { cwd, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+    nodeExec(cmd, { cwd, maxBuffer: EXEC_MAX_BUFFER }, (error, stdout, stderr) => {
+      let exitCode = 0;
+      if (error) {
+        const execErr = error as NodeJS.ErrnoException & { code?: number | string };
+        exitCode = typeof execErr.code === 'number' ? execErr.code : 1;
+      }
       resolve({
         stdout: stdout?.toString() ?? '',
         stderr: stderr?.toString() ?? '',
-        exitCode: error ? (error as any).code ?? 1 : 0,
+        exitCode,
       });
     });
   });
@@ -85,9 +93,23 @@ export function run(
 /**
  * Check whether a command exists on the system PATH.
  */
+/**
+ * Format a Date as YYYYMMDD-HHMMSS for filenames and session names.
+ */
+export function formatTimestamp(date: Date): string {
+  const y = date.getFullYear();
+  const mo = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const h = String(date.getHours()).padStart(2, '0');
+  const mi = String(date.getMinutes()).padStart(2, '0');
+  const s = String(date.getSeconds()).padStart(2, '0');
+  return `${y}${mo}${d}-${h}${mi}${s}`;
+}
+
 export function commandExists(cmd: string): boolean {
+  if (!/^[a-zA-Z0-9_-]+$/.test(cmd)) return false;
   try {
-    nodeExecSync(`command -v ${cmd}`, { stdio: 'ignore' });
+    nodeExecSync(`command -v "${cmd}"`, { stdio: 'ignore' });
     return true;
   } catch {
     return false;

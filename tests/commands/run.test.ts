@@ -22,6 +22,7 @@ jest.mock('../../src/lib/config', () => ({
 
 jest.mock('../../src/lib/github', () => ({
   pollIssues: jest.fn(),
+  listMilestones: jest.fn().mockReturnValue([]),
 }));
 
 jest.mock('../../src/lib/pipeline', () => ({
@@ -202,8 +203,8 @@ describe('runCommand', () => {
     await runCommand({});
 
     // Should check for gh, git, claude
-    expect(mockExec).toHaveBeenCalledWith('which gh');
-    expect(mockExec).toHaveBeenCalledWith('which git');
-    expect(mockExec).toHaveBeenCalledWith('which claude');
+    expect(mockExec).toHaveBeenCalledWith('command -v "gh"');
+    expect(mockExec).toHaveBeenCalledWith('command -v "git"');
+    expect(mockExec).toHaveBeenCalledWith('command -v "claude"');
   });
 });

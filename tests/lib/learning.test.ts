@@ -2,6 +2,7 @@ import { extractLearnings, getLearningContext, countLearnings } from '../../src/
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
+  formatTimestamp: jest.fn().mockReturnValue('20260101-000000'),
 }));
 
 jest.mock('../../src/lib/logger', () => ({

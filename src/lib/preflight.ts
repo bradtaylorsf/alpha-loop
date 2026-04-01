@@ -1,8 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execAsync, type ExecResult } from './shell.js';
-import { exec } from './shell.js';
+import { exec, execAsync, type ExecResult } from './shell.js';
 import { log } from './logger.js';
 
 export interface PreflightConfig {

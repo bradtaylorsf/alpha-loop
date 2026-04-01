@@ -3,7 +3,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createWriteStream, type WriteStream } from 'node:fs';
-import * as logger from './logger.js';
+import { log } from './logger.js';
 
 export type AgentResult = {
   exitCode: number;
@@ -64,7 +64,7 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
 export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
   const { command, args } = buildAgentArgs(options);
 
-  logger.info(`Agent: ${options.agent} | Model: ${options.model} | CWD: ${options.cwd}`);
+  log.info(`Agent: ${options.agent} | Model: ${options.model} | CWD: ${options.cwd}`);
 
   const startTime = Date.now();
   const chunks: string[] = [];

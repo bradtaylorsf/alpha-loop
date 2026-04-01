@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import YAML from 'yaml';
-import { logError } from '../lib/logger.js';
+import { log } from '../lib/logger.js';
 
 interface SessionIssue {
   number: number;
@@ -90,14 +90,14 @@ export function historyList(sessionsDir: string): void {
 export function historyDetail(sessionsDir: string, sessionName: string): void {
   const yamlPath = path.join(sessionsDir, sessionName, 'session.yaml');
   if (!fs.existsSync(yamlPath)) {
-    logError(`Session not found: ${sessionName}`);
+    log.error(`Session not found: ${sessionName}`);
     process.exitCode = 1;
     return;
   }
 
   const session = loadSession(yamlPath);
   if (!session) {
-    logError(`Could not parse session: ${sessionName}`);
+    log.error(`Could not parse session: ${sessionName}`);
     process.exitCode = 1;
     return;
   }
@@ -155,7 +155,7 @@ export function historyDetail(sessionsDir: string, sessionName: string): void {
 export function historyQa(sessionsDir: string, sessionName: string): void {
   const qaPath = path.join(sessionsDir, sessionName, 'qa-checklist.md');
   if (!fs.existsSync(qaPath)) {
-    logError(`QA checklist not found for session: ${sessionName}`);
+    log.error(`QA checklist not found for session: ${sessionName}`);
     process.exitCode = 1;
     return;
   }
@@ -168,7 +168,8 @@ export function historyClean(sessionsDir: string): void {
     return;
   }
 
-  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const RETENTION_DAYS = 30;
+  const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let removed = 0;
 
   const entries = fs.readdirSync(sessionsDir, { withFileTypes: true })

@@ -22,6 +22,9 @@ import { saveResult, getPreviousResult } from './session.js';
 import type { Config } from './config.js';
 import type { SessionContext } from './session.js';
 
+/** Max diff size to include in learning analysis. */
+const MAX_DIFF_CHARS = 10_000;
+
 export type PipelineResult = {
   issueNum: number;
   title: string;
@@ -326,7 +329,7 @@ export async function processIssue(
   let runDiff = '';
   if (!config.dryRun) {
     const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
-    runDiff = diffResult.stdout.slice(0, 10000); // Limit diff size
+    runDiff = diffResult.stdout.slice(0, MAX_DIFF_CHARS);
   }
 
   await extractLearnings({

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execAsync, type ExecResult } from './shell.js';
+import { log } from './logger.js';
 
 const CONTEXT_DIR = '.alpha-loop';
 const CONTEXT_FILE = join(CONTEXT_DIR, 'context.md');
@@ -51,7 +52,8 @@ export async function generateProjectContext(
   const result = await executor(cmd, projectDir);
 
   if (result.exitCode !== 0 || !result.stdout.trim()) {
-    return; // Generation failed silently, matching bash behavior
+    log.warn(`Project context generation failed (exit ${result.exitCode})`);
+    return;
   }
 
   writeFileSync(contextFile, result.stdout, 'utf-8');

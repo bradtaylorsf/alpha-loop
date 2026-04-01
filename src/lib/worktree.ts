@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync, symlinkSync, readlinkSync, unlinkSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { exec } from './shell.js';
-import * as logger from './logger.js';
+import { log } from './logger.js';
 
 export type WorktreeResult = {
   path: string;
@@ -42,16 +42,16 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
   mkdirSync(worktreesDir, { recursive: true });
   const worktreePath = resolve(worktreesDir, `issue-${issueNum}`);
 
-  logger.info(`Creating worktree at ${worktreePath} (branch: ${branch})`);
+  log.info(`Creating worktree at ${worktreePath} (branch: ${branch})`);
 
   if (dryRun) {
-    logger.dry(`Would create worktree: ${worktreePath}`);
+    log.dry(`Would create worktree: ${worktreePath}`);
     return { path: worktreePath, branch };
   }
 
   // Clean up existing worktree if present
   if (existsSync(worktreePath)) {
-    logger.warn(`Worktree already exists at ${worktreePath}, removing...`);
+    log.warn(`Worktree already exists at ${worktreePath}, removing...`);
     exec(`git worktree remove "${worktreePath}" --force`, { cwd: projectDir });
   }
 
@@ -75,7 +75,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
   exec('git fetch origin', { cwd: projectDir });
 
   // Create worktree from the appropriate branch (try origin/ first, fall back to local)
-  logger.info(`Branching worktree from: ${fromBranch}`);
+  log.info(`Branching worktree from: ${fromBranch}`);
   const remoteResult = exec(
     `git worktree add "${worktreePath}" -b "${branch}" "origin/${fromBranch}"`,
     { cwd: projectDir },
@@ -88,9 +88,9 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
     if (localResult.exitCode !== 0) {
       throw new Error(`Failed to create worktree from ${fromBranch}: ${localResult.stderr}`);
     }
-    logger.info(`Created worktree from local ${fromBranch}`);
+    log.info(`Created worktree from local ${fromBranch}`);
   } else {
-    logger.info(`Created worktree from origin/${fromBranch}`);
+    log.info(`Created worktree from origin/${fromBranch}`);
   }
 
   // Symlink env files from main repo to worktree (gitignored files don't exist in worktrees)
@@ -103,7 +103,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
         try { unlinkSync(dest); } catch { /* ignore */ }
       }
       symlinkSync(src, dest);
-      logger.info(`Symlinked ${envFile} to worktree`);
+      log.info(`Symlinked ${envFile} to worktree`);
     }
   }
 
@@ -112,18 +112,18 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
 
   // Install dependencies unless skipped
   if (!skipInstall) {
-    logger.info('Installing dependencies in worktree...');
+    log.info('Installing dependencies in worktree...');
     const installResult = exec('pnpm install --frozen-lockfile', { cwd: worktreePath });
     if (installResult.exitCode !== 0) {
       // Fall back to regular install
       const fallback = exec('pnpm install', { cwd: worktreePath });
       if (fallback.exitCode !== 0) {
-        logger.warn('pnpm install had issues, continuing anyway...');
+        log.warn('pnpm install had issues, continuing anyway...');
       }
     }
   }
 
-  logger.info(`Worktree ready at ${worktreePath}`);
+  log.info(`Worktree ready at ${worktreePath}`);
   return { path: worktreePath, branch };
 }
 
@@ -135,26 +135,26 @@ export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<
   const worktreePath = resolve(projectDir, '.worktrees', `issue-${issueNum}`);
 
   if (!autoCleanup) {
-    logger.info('Skipping worktree cleanup (autoCleanup=false)');
+    log.info('Skipping worktree cleanup (autoCleanup=false)');
     return;
   }
 
   if (dryRun) {
-    logger.dry(`Would clean up worktree: ${worktreePath}`);
+    log.dry(`Would clean up worktree: ${worktreePath}`);
     return;
   }
 
   if (existsSync(worktreePath)) {
-    logger.info(`Removing worktree: ${worktreePath}`);
+    log.info(`Removing worktree: ${worktreePath}`);
     const result = exec(`git worktree remove "${worktreePath}" --force`, { cwd: projectDir });
     if (result.exitCode !== 0) {
-      logger.warn('Could not remove worktree cleanly, forcing...');
+      log.warn('Could not remove worktree cleanly, forcing...');
       exec(`rm -rf "${worktreePath}"`, { cwd: projectDir });
       exec('git worktree prune', { cwd: projectDir });
     }
   }
 
-  logger.info('Worktree cleaned up');
+  log.info('Worktree cleaned up');
 }
 
 /**
@@ -177,19 +177,19 @@ function ensureComposeProjectName(worktreePath: string, projectDir: string): voi
       // Source doesn't have it — create a .env.compose override instead
       const composePath = join(worktreePath, '.env.compose');
       writeFileSync(composePath, `COMPOSE_PROJECT_NAME=${repoName}\n`);
-      logger.info(`Set COMPOSE_PROJECT_NAME=${repoName} in .env.compose`);
+      log.info(`Set COMPOSE_PROJECT_NAME=${repoName} in .env.compose`);
       return;
     } catch {
       // Not a symlink — safe to check/append
       const content = readFileSync(envPath, 'utf-8') ?? '';
       if (content.includes('COMPOSE_PROJECT_NAME')) return;
       appendFileSync(envPath, `\nCOMPOSE_PROJECT_NAME=${repoName}\n`);
-      logger.info(`Added COMPOSE_PROJECT_NAME=${repoName} to .env`);
+      log.info(`Added COMPOSE_PROJECT_NAME=${repoName} to .env`);
       return;
     }
   }
 
   // No .env at all — create one with just COMPOSE_PROJECT_NAME
   writeFileSync(envPath, `COMPOSE_PROJECT_NAME=${repoName}\n`);
-  logger.info(`Created .env with COMPOSE_PROJECT_NAME=${repoName}`);
+  log.info(`Created .env with COMPOSE_PROJECT_NAME=${repoName}`);
 }

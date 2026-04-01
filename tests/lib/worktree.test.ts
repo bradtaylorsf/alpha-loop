@@ -6,11 +6,15 @@ jest.mock('../../src/lib/shell', () => ({
 }));
 
 jest.mock('../../src/lib/logger', () => ({
-  info: jest.fn(),
-  warn: jest.fn(),
-  error: jest.fn(),
-  debug: jest.fn(),
-  dry: jest.fn(),
+  log: {
+    info: jest.fn(),
+    success: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    step: jest.fn(),
+    dry: jest.fn(),
+    debug: jest.fn(),
+  },
 }));
 
 jest.mock('node:fs', () => ({
@@ -25,7 +29,7 @@ jest.mock('node:fs', () => ({
 }));
 
 import { exec } from '../../src/lib/shell';
-import * as logger from '../../src/lib/logger';
+import { log } from '../../src/lib/logger';
 import { existsSync, symlinkSync, writeFileSync } from 'node:fs';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
@@ -181,7 +185,7 @@ describe('setupWorktree', () => {
   test('dry run logs without acting', async () => {
     await setupWorktree({ ...baseOptions, dryRun: true });
 
-    expect(logger.dry).toHaveBeenCalledWith(expect.stringContaining('Would create worktree'));
+    expect(log.dry).toHaveBeenCalledWith(expect.stringContaining('Would create worktree'));
 
     // Should not have run any destructive git commands
     const destructiveCalls = mockExec.mock.calls.filter(
@@ -264,13 +268,13 @@ describe('cleanupWorktree', () => {
   test('skips cleanup when autoCleanup is false', async () => {
     await cleanupWorktree({ ...baseOptions, autoCleanup: false });
 
-    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Skipping'));
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('Skipping'));
     expect(mockExec).not.toHaveBeenCalled();
   });
 
   test('dry run logs without acting', async () => {
     await cleanupWorktree({ ...baseOptions, dryRun: true });
 
-    expect(logger.dry).toHaveBeenCalledWith(expect.stringContaining('Would clean up'));
+    expect(log.dry).toHaveBeenCalledWith(expect.stringContaining('Would clean up'));
   });
 });

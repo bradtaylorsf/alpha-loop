@@ -19,8 +19,6 @@ function fmt(label: string, color: string, msg: string): void {
   console.error(`${color}[${label}]${NC}  ${timestamp()} ${msg}`);
 }
 
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
-
 export const log = {
   info: (msg: string): void => fmt('INFO', BLUE, msg),
   success: (msg: string): void => fmt('OK', GREEN, msg),
@@ -30,17 +28,3 @@ export const log = {
   dry: (msg: string): void => fmt('DRY', YELLOW, msg),
   debug: (msg: string): void => fmt('DEBUG', GRAY, msg),
 };
-
-// Named exports for modules that import { info, warn, error } style
-export const info = log.info;
-export const warn = log.warn;
-export const error = log.error;
-export const debug = log.debug;
-export const dry = log.dry;
-
-// Aliases used by issue-74 commands
-export const logInfo = log.info;
-export const logSuccess = log.success;
-export const logWarn = log.warn;
-export const logError = log.error;
-export const logStep = log.step;

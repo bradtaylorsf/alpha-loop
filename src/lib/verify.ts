@@ -15,6 +15,9 @@ import { log } from './logger.js';
 import { spawnAgent } from './agent.js';
 import type { Config } from './config.js';
 
+/** Max seconds to wait for app to become ready. */
+const APP_READY_TIMEOUT_S = 60;
+
 export type VerifyResult = {
   passed: boolean;
   output: string;
@@ -76,7 +79,7 @@ export async function runVerify(options: {
     return { passed: true, output: 'Verification skipped (no start command)' };
   }
 
-  const port = config.port || 3000;
+  const port = config.port ?? 3000;
 
   // Start the app in the background
   log.info(`Starting app with '${devCmd}' on port ${port}...`);
@@ -89,9 +92,9 @@ export async function runVerify(options: {
 
   const appPid = appProcess.pid;
 
-  // Wait for app to be ready (up to 60s)
+  // Wait for app to be ready
   let ready = false;
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < APP_READY_TIMEOUT_S; i++) {
     const check = exec(`curl -s -o /dev/null http://localhost:${port}`);
     if (check.exitCode === 0) {
       ready = true;
@@ -108,7 +111,7 @@ export async function runVerify(options: {
   }
 
   if (!ready) {
-    log.error(`App did not become ready on port ${port} within 60s`);
+    log.error(`App did not become ready on port ${port} within ${APP_READY_TIMEOUT_S}s`);
     killProcess(appPid!);
     return { passed: false, output: `App failed to start on port ${port}` };
   }
