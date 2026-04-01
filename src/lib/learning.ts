@@ -36,7 +36,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
 
   log.step('Extracting learnings from run...');
 
-  const learningsDir = join(process.cwd(), 'learnings');
+  const learningsDir = join(process.cwd(), '.alpha-loop', 'learnings');
   mkdirSync(learningsDir, { recursive: true });
 
   const timestamp = formatTimestamp(new Date());

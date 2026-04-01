@@ -8,7 +8,6 @@ export type Config = {
   project: number;
   model: string;
   reviewModel: string;
-  maxTurns: number;
   pollInterval: number;
   dryRun: boolean;
   baseBranch: string;
@@ -32,6 +31,7 @@ export type Config = {
   mergeTo: string;
   autoCleanup: boolean;
   runFull: boolean;
+  verbose: boolean;
 };
 
 const DEFAULTS: Config = {
@@ -40,7 +40,6 @@ const DEFAULTS: Config = {
   project: 2,
   model: 'opus',
   reviewModel: 'opus',
-  maxTurns: 30,
   pollInterval: 60,
   dryRun: false,
   baseBranch: 'master',
@@ -64,6 +63,7 @@ const DEFAULTS: Config = {
   mergeTo: '',
   autoCleanup: true,
   runFull: false,
+  verbose: false,
 };
 
 /** Map from YAML key (snake_case) to Config key (camelCase). */
@@ -72,7 +72,6 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   project: 'project',
   model: 'model',
   review_model: 'reviewModel',
-  max_turns: 'maxTurns',
   poll_interval: 'pollInterval',
   dry_run: 'dryRun',
   base_branch: 'baseBranch',
@@ -96,6 +95,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   merge_to: 'mergeTo',
   auto_cleanup: 'autoCleanup',
   run_full: 'runFull',
+  verbose: 'verbose',
 };
 
 /** Map from env var name to Config key. */
@@ -104,7 +104,6 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   PROJECT_NUM: 'project',
   MODEL: 'model',
   REVIEW_MODEL: 'reviewModel',
-  MAX_TURNS: 'maxTurns',
   POLL_INTERVAL: 'pollInterval',
   DRY_RUN: 'dryRun',
   BASE_BRANCH: 'baseBranch',
@@ -128,6 +127,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   MERGE_TO: 'mergeTo',
   AUTO_CLEANUP: 'autoCleanup',
   RUN_FULL: 'runFull',
+  VERBOSE: 'verbose',
 };
 
 function coerce(value: string, current: unknown): unknown {

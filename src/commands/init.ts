@@ -122,7 +122,6 @@ function configTemplate(repo: string): string {
 repo: ${repo}
 model: opus
 review_model: opus
-max_turns: 30
 label: ready
 base_branch: main
 test_command: pnpm test

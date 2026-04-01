@@ -28,7 +28,7 @@ export function createSession(config: Config): SessionContext {
   const branch = config.mergeTo || name;
 
   const projectDir = process.cwd();
-  const resultsDir = join(projectDir, 'sessions', name);
+  const resultsDir = join(projectDir, '.alpha-loop', 'sessions', name);
   const logsDir = join(resultsDir, 'logs');
 
   mkdirSync(resultsDir, { recursive: true });
@@ -135,10 +135,10 @@ export async function finalizeSession(
     return null;
   }
 
-  // Stage learnings (sessions/ is gitignored — kept locally for debugging)
-  const learningsDir = join(projectDir, 'learnings');
+  // Stage learnings
+  const learningsDir = join(projectDir, '.alpha-loop', 'learnings');
   if (existsSync(learningsDir)) {
-    exec('git add learnings/', { cwd: projectDir });
+    exec('git add .alpha-loop/learnings/', { cwd: projectDir });
   }
 
   // Commit if there are staged changes

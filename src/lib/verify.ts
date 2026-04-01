@@ -223,7 +223,6 @@ Navigate, click, type, submit forms. Verify the feature works as a real user wou
     model: config.model,
     prompt: verifyPrompt,
     cwd: worktree,
-    maxTurns: config.maxTurns,
     logFile,
   });
 

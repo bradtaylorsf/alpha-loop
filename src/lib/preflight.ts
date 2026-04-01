@@ -2,6 +2,8 @@ import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execAsync, type ExecResult } from './shell.js';
+import { exec } from './shell.js';
+import { log } from './logger.js';
 
 export interface PreflightConfig {
   testCommand: string;
@@ -93,6 +95,48 @@ export function parseFailingTests(output: string): string[] {
   }
 
   return failures;
+}
+
+/**
+ * Check if configured ports are already in use on the host.
+ * Warns about conflicts so the user can fix them before the agent wastes retries.
+ */
+export function checkPortConflicts(port: number): string[] {
+  const conflicts: string[] = [];
+
+  const result = exec(`lsof -i :${port} -P -n -sTCP:LISTEN`, { cwd: process.cwd() });
+  if (result.exitCode === 0 && result.stdout.trim()) {
+    const lines = result.stdout.trim().split('\n').slice(1); // skip header
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      const processName = parts[0] ?? 'unknown';
+      const pid = parts[1] ?? '?';
+      conflicts.push(`Port ${port} in use by ${processName} (PID ${pid})`);
+    }
+  }
+
+  return conflicts;
+}
+
+/**
+ * Run port conflict checks for the dev server port.
+ * Returns list of conflicts found. Empty = no conflicts.
+ */
+export function runPortCheck(port: number): string[] {
+  if (!port) return [];
+
+  const conflicts = checkPortConflicts(port);
+  if (conflicts.length > 0) {
+    log.warn('Port conflicts detected:');
+    for (const c of conflicts) {
+      log.warn(`  ${c}`);
+    }
+    log.warn('The verification step may fail if these ports are not freed.');
+  } else {
+    log.success(`Port ${port} is available`);
+  }
+
+  return conflicts;
 }
 
 function saveIgnoreFile(failures: string[], rawOutput: string): string {

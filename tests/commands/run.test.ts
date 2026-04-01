@@ -51,6 +51,7 @@ jest.mock('../../src/lib/context', () => ({
 
 jest.mock('../../src/lib/preflight', () => ({
   runPreflight: jest.fn().mockResolvedValue({ passed: true, preExistingFailures: [] }),
+  runPortCheck: jest.fn().mockReturnValue([]),
 }));
 
 jest.mock('../../src/commands/sync', () => ({
@@ -82,7 +83,6 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     project: 1,
     model: 'opus',
     reviewModel: 'opus',
-    maxTurns: 30,
     pollInterval: 60,
     dryRun: false,
     baseBranch: 'master',
@@ -103,6 +103,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     mergeTo: '',
     autoCleanup: true,
     runFull: false,
+    verbose: false,
     maxIssues: 0,
     maxSessionDuration: 0,
     milestone: '',

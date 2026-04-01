@@ -15,17 +15,23 @@ jest.mock('../../src/lib/logger', () => ({
 
 jest.mock('node:fs', () => ({
   existsSync: jest.fn(),
-  copyFileSync: jest.fn(),
   mkdirSync: jest.fn(),
+  symlinkSync: jest.fn(),
+  readlinkSync: jest.fn(),
+  unlinkSync: jest.fn(),
+  readFileSync: jest.fn().mockReturnValue(''),
+  writeFileSync: jest.fn(),
+  appendFileSync: jest.fn(),
 }));
 
 import { exec } from '../../src/lib/shell';
 import * as logger from '../../src/lib/logger';
-import { existsSync, copyFileSync } from 'node:fs';
+import { existsSync, symlinkSync, writeFileSync } from 'node:fs';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockExists = existsSync as jest.MockedFunction<typeof existsSync>;
-const mockCopy = copyFileSync as jest.MockedFunction<typeof copyFileSync>;
+const mockSymlink = symlinkSync as jest.MockedFunction<typeof symlinkSync>;
+const mockWriteFile = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -134,7 +140,7 @@ describe('setupWorktree', () => {
     );
   });
 
-  test('copies .env files to worktree', async () => {
+  test('symlinks .env files to worktree', async () => {
     mockExists.mockImplementation((p: any) => {
       if (typeof p === 'string' && (p.endsWith('.env') || p.endsWith('.env.local'))) return true;
       return false;
@@ -142,7 +148,16 @@ describe('setupWorktree', () => {
 
     await setupWorktree(baseOptions);
 
-    expect(mockCopy).toHaveBeenCalled();
+    expect(mockSymlink).toHaveBeenCalled();
+  });
+
+  test('sets COMPOSE_PROJECT_NAME in worktree', async () => {
+    await setupWorktree(baseOptions);
+
+    expect(mockWriteFile).toHaveBeenCalledWith(
+      expect.stringContaining('.env'),
+      expect.stringContaining('COMPOSE_PROJECT_NAME='),
+    );
   });
 
   test('runs pnpm install unless skipInstall is true', async () => {

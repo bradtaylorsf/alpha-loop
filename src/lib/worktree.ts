@@ -1,8 +1,8 @@
 /**
  * Worktree Manager — create and clean up isolated git worktrees.
  */
-import { existsSync, copyFileSync, mkdirSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, symlinkSync, readlinkSync, unlinkSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { join, resolve, basename } from 'node:path';
 import { exec } from './shell.js';
 import * as logger from './logger.js';
 
@@ -93,14 +93,22 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
     logger.info(`Created worktree from origin/${fromBranch}`);
   }
 
-  // Copy env files from main repo to worktree (gitignored files don't exist in worktrees)
+  // Symlink env files from main repo to worktree (gitignored files don't exist in worktrees)
   for (const envFile of ENV_FILES) {
     const src = join(projectDir, envFile);
+    const dest = join(worktreePath, envFile);
     if (existsSync(src)) {
-      copyFileSync(src, join(worktreePath, envFile));
-      logger.info(`Copied ${envFile} to worktree`);
+      // Remove existing file/symlink if present
+      if (existsSync(dest)) {
+        try { unlinkSync(dest); } catch { /* ignore */ }
+      }
+      symlinkSync(src, dest);
+      logger.info(`Symlinked ${envFile} to worktree`);
     }
   }
+
+  // Set COMPOSE_PROJECT_NAME so Docker doesn't use "issue-N" as project name
+  ensureComposeProjectName(worktreePath, projectDir);
 
   // Install dependencies unless skipped
   if (!skipInstall) {
@@ -147,4 +155,41 @@ export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<
   }
 
   logger.info('Worktree cleaned up');
+}
+
+/**
+ * Ensure COMPOSE_PROJECT_NAME is set in the worktree's .env file
+ * so Docker Compose doesn't use the worktree directory name (e.g., "issue-2")
+ * as the project name for containers.
+ */
+function ensureComposeProjectName(worktreePath: string, projectDir: string): void {
+  const repoName = basename(projectDir);
+  const envPath = join(worktreePath, '.env');
+
+  // Check if .env already has COMPOSE_PROJECT_NAME
+  if (existsSync(envPath)) {
+    // If it's a symlink, we can't modify it — check if the source has the var
+    try {
+      readlinkSync(envPath);
+      // It's a symlink — check if the source .env already has COMPOSE_PROJECT_NAME
+      const content = readFileSync(envPath, 'utf-8');
+      if (content.includes('COMPOSE_PROJECT_NAME')) return;
+      // Source doesn't have it — create a .env.compose override instead
+      const composePath = join(worktreePath, '.env.compose');
+      writeFileSync(composePath, `COMPOSE_PROJECT_NAME=${repoName}\n`);
+      logger.info(`Set COMPOSE_PROJECT_NAME=${repoName} in .env.compose`);
+      return;
+    } catch {
+      // Not a symlink — safe to check/append
+      const content = readFileSync(envPath, 'utf-8') ?? '';
+      if (content.includes('COMPOSE_PROJECT_NAME')) return;
+      appendFileSync(envPath, `\nCOMPOSE_PROJECT_NAME=${repoName}\n`);
+      logger.info(`Added COMPOSE_PROJECT_NAME=${repoName} to .env`);
+      return;
+    }
+  }
+
+  // No .env at all — create one with just COMPOSE_PROJECT_NAME
+  writeFileSync(envPath, `COMPOSE_PROJECT_NAME=${repoName}\n`);
+  logger.info(`Created .env with COMPOSE_PROJECT_NAME=${repoName}`);
 }

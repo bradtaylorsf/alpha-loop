@@ -22,7 +22,7 @@ beforeEach(() => {
   // Reset env vars that could interfere
   // Clear all env vars that map to config keys
   for (const key of [
-    'REPO', 'MODEL', 'MAX_TURNS', 'PROJECT_NUM', 'DRY_RUN',
+    'REPO', 'MODEL', 'PROJECT_NUM', 'DRY_RUN',
     'REVIEW_MODEL', 'POLL_INTERVAL', 'BASE_BRANCH', 'LOG_DIR',
     'LABEL_READY', 'MAX_TEST_RETRIES', 'TEST_COMMAND', 'DEV_COMMAND',
     'PORT', 'SKIP_TESTS', 'SKIP_REVIEW', 'SKIP_INSTALL', 'SKIP_PREFLIGHT',
@@ -74,7 +74,6 @@ describe('loadConfig', () => {
 project: 5
 model: sonnet
 review_model: haiku
-max_turns: 10
 label: todo
 base_branch: main
 test_command: npm test
@@ -87,7 +86,6 @@ test_command: npm test
     expect(config.project).toBe(5);
     expect(config.model).toBe('sonnet');
     expect(config.reviewModel).toBe('haiku');
-    expect(config.maxTurns).toBe(10);
     expect(config.labelReady).toBe('todo');
     expect(config.baseBranch).toBe('main');
     expect(config.testCommand).toBe('npm test');
@@ -98,23 +96,21 @@ test_command: npm test
       join(tempDir, '.alpha-loop.yaml'),
       `repo: fileowner/filerepo
 model: opus
-max_turns: 30
+max_test_retries: 5
 `,
     );
 
     process.env.MODEL = 'sonnet';
-    process.env.MAX_TURNS = '50';
 
     const config = loadConfig();
     expect(config.repo).toBe('fileowner/filerepo');
     expect(config.model).toBe('sonnet');
-    expect(config.maxTurns).toBe(50);
+    expect(config.maxTestRetries).toBe(5);
   });
 
   it('returns defaults when no config file exists', () => {
     const config = loadConfig();
     expect(config.model).toBe('opus');
-    expect(config.maxTurns).toBe(30);
     expect(config.pollInterval).toBe(60);
     expect(config.baseBranch).toBe('master');
     expect(config.labelReady).toBe('ready');

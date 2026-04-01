@@ -18,7 +18,7 @@ jest.mock('node:child_process', () => ({
 jest.mock('node:fs', () => ({
   createWriteStream: jest.fn(() => ({
     write: jest.fn(),
-    end: jest.fn(),
+    end: jest.fn((cb?: () => void) => { if (cb) cb(); }),
   })),
 }));
 
@@ -52,17 +52,15 @@ describe('buildAgentArgs', () => {
     ]);
   });
 
-  test('claude agent includes --max-turns when specified', () => {
+  test('claude agent does not include --max-turns (agents finish naturally)', () => {
     const result = buildAgentArgs({
       agent: 'claude',
       model: 'sonnet',
       prompt: 'test',
       cwd: '/tmp',
-      maxTurns: 50,
     });
 
-    expect(result.args).toContain('--max-turns');
-    expect(result.args).toContain('50');
+    expect(result.args).not.toContain('--max-turns');
   });
 
   test('constructs correct args for codex agent', () => {

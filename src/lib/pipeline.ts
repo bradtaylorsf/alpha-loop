@@ -100,6 +100,7 @@ export async function processIssue(
         prompt: `Analyze this GitHub issue and enrich it with implementation details.\n\nIssue #${issueNum}: ${title}\n\n${body}\n\nOutput the enriched issue body with acceptance criteria, implementation notes, and any edge cases to handle.`,
         cwd: worktreePath,
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
+        verbose: config.verbose,
       });
       if (planResult.exitCode === 0 && planResult.output.trim()) {
         implBody = body + '\n\n## Agent Planning Notes\n\n' + planResult.output.trim();
@@ -118,7 +119,7 @@ export async function processIssue(
     const visionContext = loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md'));
     const projectContext = loadFileIfExists(join(projectDir, '.alpha-loop', 'context.md'));
     const previousResult = getPreviousResult(session);
-    const learningContext = getLearningContext(join(projectDir, 'learnings'));
+    const learningContext = getLearningContext(join(projectDir, '.alpha-loop', 'learnings'));
 
     const implementPrompt = buildImplementPrompt({
       issueNum,
@@ -135,8 +136,9 @@ export async function processIssue(
       model: config.model,
       prompt: implementPrompt,
       cwd: worktreePath,
-      maxTurns: config.maxTurns,
+
       logFile: join(session.logsDir, `issue-${issueNum}-implement.log`),
+      verbose: config.verbose,
     });
 
     if (implResult.exitCode !== 0) {
@@ -177,22 +179,23 @@ export async function processIssue(
     if (attempt < config.maxTestRetries) {
       log.warn(`Tests failed on attempt ${attempt}, invoking agent to fix...`);
       if (!config.dryRun) {
-        const fixPrompt = `Tests are failing for issue #${issueNum}. Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully\n2. Fix the implementation code or the tests\n3. Run the tests again to verify\n4. Commit your fixes with message: fix: resolve test failures for issue #${issueNum}`;
+        const fixPrompt = `Tests are failing for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix the implementation code or the tests\n3. Run the tests again to verify\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why it was failing>\n   Example: fix(#${issueNum}): use port 5435 for postgres — default 5432 conflicts with host service\n   DO NOT use generic messages like "fix: resolve test failures"`;
 
         await spawnAgent({
           agent: 'claude',
           model: config.model,
           prompt: fixPrompt,
           cwd: worktreePath,
-          maxTurns: config.maxTurns,
+    
           logFile: join(session.logsDir, `issue-${issueNum}-fix-${attempt}.log`),
+          verbose: config.verbose,
         });
 
         // Auto-commit fixes
         const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
         if (fixStatus.stdout.trim()) {
           exec('git add -A', { cwd: worktreePath });
-          exec(`git commit -m "fix: resolve test failures for issue #${issueNum}"`, { cwd: worktreePath });
+          exec(`git commit -m "fix(#${issueNum}): resolve test failures (attempt ${attempt})"`, { cwd: worktreePath });
         }
       }
     } else {
@@ -228,22 +231,23 @@ export async function processIssue(
 
     if (attempt < config.maxTestRetries) {
       log.warn(`Verification failed on attempt ${attempt}, invoking agent to fix...`);
-      const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum}.\nThe app was started and tested with playwright-cli, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification output above to understand what failed\n2. Fix the implementation code so the feature works correctly\n3. Run the test command to make sure unit tests still pass\n4. Commit your fixes with message: fix: resolve verification failures for issue #${issueNum}`;
+      const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\nThe app was started and tested with playwright-cli, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification output above and identify the ROOT CAUSE of each failure\n2. Fix the implementation code so the feature works correctly\n3. Run the test command to make sure unit tests still pass\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why verification failed>\n   Example: fix(#${issueNum}): add ENCRYPTION_KEY to langfuse config — service requires 32+ char secret\n   DO NOT use generic messages like "fix: resolve verification failures"`;
 
       await spawnAgent({
         agent: 'claude',
         model: config.model,
         prompt: verifyFixPrompt,
         cwd: worktreePath,
-        maxTurns: config.maxTurns,
+  
         logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
+        verbose: config.verbose,
       });
 
       // Auto-commit fixes
       const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
       if (fixStatus.stdout.trim()) {
         exec('git add -A', { cwd: worktreePath });
-        exec(`git commit -m "fix: resolve verification failures for issue #${issueNum}"`, { cwd: worktreePath });
+        exec(`git commit -m "fix(#${issueNum}): resolve verification failures (attempt ${attempt})"`, { cwd: worktreePath });
       }
     } else {
       log.warn(`Verification still failing after ${config.maxTestRetries} attempts`);
@@ -273,8 +277,9 @@ export async function processIssue(
         model: config.reviewModel,
         prompt: reviewPrompt,
         cwd: worktreePath,
-        maxTurns: config.maxTurns,
+  
         logFile: join(session.logsDir, `issue-${issueNum}-review.log`),
+        verbose: config.verbose,
       });
 
       reviewOutput = reviewResult.output;
@@ -528,7 +533,7 @@ function buildPRBody(
   // Session log reference
   lines.push(
     '---',
-    `*Automated by [alpha-loop](https://github.com/bradtaylorsf/alpha-loop) · Full logs in \`sessions/\`*`,
+    `*Automated by [alpha-loop](https://github.com/bradtaylorsf/alpha-loop) · Full logs in \`.alpha-loop/sessions/\`*`,
   );
 
   return lines.join('\n');

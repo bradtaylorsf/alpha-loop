@@ -13,7 +13,7 @@ import { cleanupWorktree } from '../lib/worktree.js';
 import { generateSessionSummary } from '../lib/learning.js';
 import { hasVision } from '../lib/vision.js';
 import { contextNeedsRefresh } from '../lib/context.js';
-import { runPreflight } from '../lib/preflight.js';
+import { runPreflight, runPortCheck } from '../lib/preflight.js';
 import { syncAgentAssets } from './sync.js';
 
 export type RunOptions = {
@@ -25,6 +25,7 @@ export type RunOptions = {
   skipLearn?: boolean;
   autoMerge?: boolean;
   mergeTo?: string;
+  verbose?: boolean;
 };
 
 /**
@@ -63,13 +64,13 @@ function printBanner(config: Config, session: SessionContext): void {
   console.error(`  Project:        ${BOLD}#${config.project} (${config.repoOwner})${NC}`);
   console.error(`  Model:          ${BOLD}${config.model}${NC}`);
   console.error(`  Review Model:   ${BOLD}${config.reviewModel}${NC}`);
-  console.error(`  Max Turns:      ${BOLD}${config.maxTurns}${NC}`);
   console.error(`  Base Branch:    ${BOLD}${config.baseBranch}${NC}`);
   console.error(`  Label:          ${BOLD}${config.labelReady}${NC}`);
   console.error(`  Dry Run:        ${BOLD}${config.dryRun}${NC}`);
   console.error(`  Skip Tests:     ${BOLD}${config.skipTests}${NC}`);
   console.error(`  Skip Review:    ${BOLD}${config.skipReview}${NC}`);
   console.error(`  Skip Learn:     ${BOLD}${config.skipLearn}${NC}`);
+  console.error(`  Verbose:        ${BOLD}${config.verbose}${NC}`);
   console.error(`  Test Retries:   ${BOLD}${config.maxTestRetries}${NC}`);
   console.error(`  Max Issues:     ${BOLD}${config.maxIssues || 'unlimited'}${NC}`);
   console.error(`  Max Duration:   ${BOLD}${config.maxSessionDuration ? config.maxSessionDuration + 's' : 'unlimited'}${NC}`);
@@ -159,6 +160,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
   if (options.milestone) overrides.milestone = options.milestone;
   if (options.autoMerge) overrides.autoMerge = true;
   if (options.mergeTo) overrides.mergeTo = options.mergeTo;
+  if (options.verbose) overrides.verbose = true;
 
   const config = loadConfig(overrides);
 
@@ -227,6 +229,12 @@ export async function runCommand(options: RunOptions): Promise<void> {
   }
   if (activeMilestone) {
     log.info(`Filtering issues by milestone: ${activeMilestone}`);
+  }
+
+  // Pre-flight port check
+  if (config.port) {
+    log.step('Checking for port conflicts...');
+    runPortCheck(config.port);
   }
 
   // Pre-flight test validation
@@ -341,7 +349,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
   // Generate session summary (aggregates learnings across all issues)
   if (session.results.length > 0) {
-    const learningsDir = join(process.cwd(), 'learnings');
+    const learningsDir = join(process.cwd(), '.alpha-loop', 'learnings');
     await generateSessionSummary({
       sessionName: session.name,
       results: session.results,

@@ -28,6 +28,7 @@ program
   .option('--milestone <name>', 'Only process issues in this milestone')
   .option('--auto-merge', 'Auto-merge PRs to session branch')
   .option('--merge-to <branch>', 'Use existing branch instead of creating session branch')
+  .option('--verbose', 'Stream live agent output to terminal')
   .action(async (options) => {
     const { runCommand } = await import('./commands/run.js');
     await runCommand(options);

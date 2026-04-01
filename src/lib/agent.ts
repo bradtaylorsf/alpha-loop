@@ -16,8 +16,8 @@ export type AgentOptions = {
   model: string;
   prompt: string;
   cwd: string;
-  maxTurns?: number;
   logFile?: string;
+  verbose?: boolean;
 };
 
 /**
@@ -33,9 +33,8 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
         '--verbose',
         '--output-format', 'text',
       ];
-      if (options.maxTurns) {
-        args.push('--max-turns', String(options.maxTurns));
-      }
+      // Note: --max-turns intentionally omitted. Let the agent finish naturally.
+      // The harness controls retry limits via maxTestRetries, not agent turn limits.
       return { command: 'claude', args };
     }
     case 'codex': {
@@ -88,9 +87,11 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
     const handleData = (data: Buffer) => {
       const text = data.toString();
       chunks.push(text);
-      // Stream to terminal in real-time (tee behavior)
-      process.stdout.write(data);
-      // Also write to log file if provided
+      // Stream to terminal only when verbose is enabled
+      if (options.verbose) {
+        process.stderr.write(data);
+      }
+      // Always write to log file if provided
       if (logStream) {
         logStream.write(data);
       }
@@ -99,28 +100,23 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
     child.stdout.on('data', handleData);
     child.stderr.on('data', handleData);
 
-    child.on('close', (code) => {
+    const finish = (exitCode: number, output: string) => {
       const duration = Date.now() - startTime;
       if (logStream) {
-        logStream.end();
+        logStream.end(() => {
+          resolve({ exitCode, output, duration });
+        });
+      } else {
+        resolve({ exitCode, output, duration });
       }
-      resolve({
-        exitCode: code ?? 1,
-        output: chunks.join(''),
-        duration,
-      });
+    };
+
+    child.on('close', (code) => {
+      finish(code ?? 1, chunks.join(''));
     });
 
     child.on('error', (err) => {
-      const duration = Date.now() - startTime;
-      if (logStream) {
-        logStream.end();
-      }
-      resolve({
-        exitCode: 1,
-        output: `Failed to spawn ${command}: ${err.message}`,
-        duration,
-      });
+      finish(1, `Failed to spawn ${command}: ${err.message}`);
     });
   });
 }

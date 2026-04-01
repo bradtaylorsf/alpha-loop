@@ -148,8 +148,8 @@ export function historyDetail(sessionsDir: string, sessionName: string): void {
   }
 
   console.log('');
-  console.log(`QA Checklist: sessions/${sessionName}/qa-checklist.md`);
-  console.log(`Logs:         sessions/${sessionName}/logs/`);
+  console.log(`QA Checklist: .alpha-loop/sessions/${sessionName}/qa-checklist.md`);
+  console.log(`Logs:         .alpha-loop/sessions/${sessionName}/logs/`);
 }
 
 export function historyQa(sessionsDir: string, sessionName: string): void {
@@ -202,7 +202,7 @@ export function historyCommand(
   session: string | undefined,
   options: { qa?: boolean; clean?: boolean },
 ): void {
-  const sessionsDir = path.join(process.cwd(), 'sessions');
+  const sessionsDir = path.join(process.cwd(), '.alpha-loop', 'sessions');
 
   if (options.clean) {
     historyClean(sessionsDir);

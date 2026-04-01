@@ -45,7 +45,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     project: 1,
     model: 'opus',
     reviewModel: 'opus',
-    maxTurns: 30,
     pollInterval: 60,
     dryRun: false,
     baseBranch: 'master',
@@ -66,6 +65,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     mergeTo: '',
     autoCleanup: true,
     runFull: false,
+    verbose: false,
     maxIssues: 0,
     maxSessionDuration: 0,
     milestone: '',
@@ -91,7 +91,7 @@ describe('createSession', () => {
     createSession(makeConfig());
 
     expect(mockMkdirSync).toHaveBeenCalledWith(
-      expect.stringContaining('sessions/session/'),
+      expect.stringContaining('.alpha-loop/sessions/session/'),
       { recursive: true },
     );
     expect(mockMkdirSync).toHaveBeenCalledWith(
