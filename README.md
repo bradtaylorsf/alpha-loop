@@ -8,10 +8,10 @@ Agent-agnostic automated development loop. Fetches issues from your GitHub proje
 
 ```bash
 # Install globally
-npm install -g alpha-loop
+npm install -g @bradtaylorsf/alpha-loop
 
 # Or run directly
-npx alpha-loop
+npx @bradtaylorsf/alpha-loop
 ```
 
 ### Prerequisites

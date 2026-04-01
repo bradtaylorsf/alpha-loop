@@ -1,5 +1,5 @@
 {
-  "name": "alpha-loop",
+  "name": "@bradtaylorsf/alpha-loop",
   "version": "1.0.0",
   "description": "Agent-agnostic automated development loop: Plan → Build → Test → Review → Ship",
   "type": "module",
