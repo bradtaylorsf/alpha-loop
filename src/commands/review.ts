@@ -10,6 +10,7 @@ import { exec } from '../lib/shell.js';
 import { formatTimestamp } from '../lib/shell.js';
 import { spawnAgent } from '../lib/agent.js';
 import { createPR } from '../lib/github.js';
+import { syncAgentAssets } from './sync.js';
 
 export type ReviewOptions = {
   apply?: boolean;
@@ -25,9 +26,10 @@ type ProposedChange = {
 
 /** Directories that proposed changes are allowed to target. */
 const ALLOWED_PREFIXES = [
-  'agents/',
-  '.claude/skills/',
-  '.agents/skills/',
+  'skills/',
+  '.claude/agents/',
+  'AGENTS.md',
+  'CLAUDE.md',
   '.alpha-loop.yaml',
 ];
 
@@ -212,12 +214,12 @@ ${harnessConfig}
 
 Analyze the learnings and propose specific improvements. Focus on:
 
-1. **Agent prompts** (\`agents/implementer.md\`, \`agents/reviewer.md\`):
+1. **Agent prompts** (\`.claude/agents/implementer.md\`, \`.claude/agents/reviewer.md\`, \`AGENTS.md\`):
    - Are there recurring patterns or anti-patterns that should be baked into the prompts?
    - Are there common mistakes the agent makes that a prompt instruction would prevent?
    - Are there successful strategies that should be reinforced?
 
-2. **Skill definitions** (in \`.claude/skills/\`):
+2. **Skill definitions** (in \`skills/\`, synced to \`.claude/skills/\` and \`.agents/skills/\`):
    - Should any skills be added, updated, or removed based on the learnings?
    - Are there recurring test patterns (Playwright, Jest) that deserve a skill?
    - Are there common environment issues (ports, auth, seeding) that should be documented?
@@ -254,7 +256,7 @@ Respond with ONLY a JSON array of proposed changes. Each change must have this e
 \`\`\`
 
 Rules:
-- \`path\` must be one of: \`agents/*.md\`, \`.claude/skills/*\`, \`.agents/skills/*\`, or \`.alpha-loop.yaml\`
+- \`path\` must be one of: \`.claude/agents/*.md\`, \`skills/*\`, \`AGENTS.md\`, \`CLAUDE.md\`, or \`.alpha-loop.yaml\`
 - \`content\` is the COMPLETE new file content (not a diff)
 - \`category\` must be one of: \`agent\`, \`skill\`, \`config\`, \`testing\`
 - Only propose changes that are clearly supported by the learnings data
@@ -407,9 +409,15 @@ async function applyChanges(
     return;
   }
 
-  // Stage and commit changes
+  // Sync skills/ → .claude/skills/ and .agents/skills/ so editor copies stay current
+  const syncResult = syncAgentAssets({ projectDir });
+  if (syncResult.synced) {
+    log.success('Synced agent assets after applying changes');
+  }
+
+  // Stage and commit changes (including synced copies)
   const stageResult = exec(
-    `git add ${appliedPaths.map((p) => JSON.stringify(p)).join(' ')}`,
+    `git add ${appliedPaths.map((p) => JSON.stringify(p)).join(' ')} .claude/ .agents/ CLAUDE.md 2>/dev/null || true`,
     { cwd: projectDir },
   );
   if (stageResult.exitCode !== 0) {
@@ -521,16 +529,22 @@ export async function reviewCommand(options: ReviewOptions): Promise<void> {
   log.info(`Metrics: ${metrics.total} runs, ${metrics.successes} succeeded, ${metrics.failures} failed`);
 
   // --- Gather agent definitions ---
-  const agentsDir = join(projectDir, 'agents');
-  const agentDefs = readDirFiles(agentsDir, ['.md', '.yaml', '.yml']);
+  // --- Gather agent definitions ---
+  // .claude/agents/ contains the alpha-loop agent prompts (implementer, reviewer, etc.)
+  // AGENTS.md / CLAUDE.md contain the main agent instructions doc
+  const claudeAgentsDir = join(projectDir, '.claude', 'agents');
+  const agentDefs = readDirFiles(claudeAgentsDir, ['.md', '.yaml', '.yml']);
+  // Also include AGENTS.md if it exists (the main instructions doc)
+  const agentsMdPath = join(projectDir, 'AGENTS.md');
+  if (existsSync(agentsMdPath)) {
+    agentDefs.push({ path: agentsMdPath, content: readFileSync(agentsMdPath, 'utf-8') });
+  }
   log.info(`Found ${agentDefs.length} agent definition(s)`);
 
   // --- Gather skill definitions ---
-  const claudeSkillsDir = join(projectDir, '.claude', 'skills');
-  const agentsSkillsDir = join(projectDir, '.agents', 'skills');
-  const claudeSkills = readDirFiles(claudeSkillsDir, []);
-  const agentsSkills = readDirFiles(agentsSkillsDir, []);
-  const allSkills = [...claudeSkills, ...agentsSkills];
+  // skills/ is the source of truth (synced to .claude/skills/ and .agents/skills/)
+  const sourceSkillsDir = join(projectDir, 'skills');
+  const allSkills = readDirFiles(sourceSkillsDir, []);
   log.info(`Found ${allSkills.length} skill definition(s)`);
 
   // --- Gather harness config ---
