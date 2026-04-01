@@ -110,6 +110,7 @@ body:
 function configTemplate(repo: string): string {
   return `# Alpha Loop configuration
 repo: ${repo}
+project: 0  # GitHub Project number (find it in your project URL)
 model: opus
 review_model: opus
 label: ready

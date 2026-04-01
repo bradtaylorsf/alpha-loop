@@ -140,6 +140,7 @@ Running `alpha-loop init` creates a `.alpha-loop.yaml` file:
 ```yaml
 # Alpha Loop configuration
 repo: owner/repo-name
+project: 0  # GitHub Project number (find it in your project URL)
 model: opus
 review_model: opus
 label: ready
@@ -159,6 +160,7 @@ max_session_duration: 7200  # 2 hours in seconds
 | Key | Default | Description |
 |-----|---------|-------------|
 | `repo` | (auto-detected) | GitHub repo in `owner/name` format |
+| `project` | `0` | GitHub Project number (from URL: `users/<owner>/projects/<N>`) |
 | `model` | `opus` | AI model for implementation and verification |
 | `review_model` | `opus` | AI model for code review and learning extraction |
 | `label` | `ready` | GitHub label that marks issues as ready for the loop |
@@ -188,6 +190,7 @@ All config options can be set via environment variables (uppercase, same names):
 | Variable | Config Key |
 |----------|------------|
 | `REPO` | `repo` |
+| `PROJECT` | `project` |
 | `MODEL` | `model` |
 | `REVIEW_MODEL` | `review_model` |
 | `MAX_TEST_RETRIES` | `max_test_retries` |
