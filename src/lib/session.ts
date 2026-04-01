@@ -49,6 +49,8 @@ export function createSession(config: Config): SessionContext {
       if (fromRemote.exitCode !== 0) {
         exec(`git checkout -b "${branch}" "${config.baseBranch}"`, { cwd: projectDir });
       }
+      // Create an initial commit so the branch has a diff from base (required for PR creation)
+      exec(`git commit --allow-empty -m "chore: start session ${name}"`, { cwd: projectDir });
       // Push session branch to remote so PRs can target it
       exec(`git push origin "${branch}"`, { cwd: projectDir });
       // Switch back to the original branch

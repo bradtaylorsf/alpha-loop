@@ -28,6 +28,7 @@ jest.mock('../../src/lib/worktree', () => ({
 }));
 
 jest.mock('../../src/lib/github', () => ({
+  assignIssue: jest.fn(),
   labelIssue: jest.fn(),
   commentIssue: jest.fn(),
   createPR: jest.fn(),

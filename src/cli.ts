@@ -62,4 +62,24 @@ program
   .option('--check', 'Check for drift without syncing (exits non-zero if drift found)')
   .action(syncCommand);
 
+program
+  .command('resume')
+  .description('Resume stranded work — push branches, run review, open PRs')
+  .option('--issue <num>', 'Only resume a specific issue number')
+  .option('--session <name>', 'Resume from a specific session directory')
+  .action(async (options) => {
+    const { resumeCommand } = await import('./commands/resume.js');
+    await resumeCommand(options);
+  });
+
+program
+  .command('review')
+  .description('Analyze accumulated learnings and propose self-improvements to agents, skills, and config')
+  .option('--apply', 'Apply proposed changes and open a draft PR')
+  .option('--session <name>', 'Only analyze learnings from a specific session')
+  .action(async (options) => {
+    const { reviewCommand } = await import('./commands/review.js');
+    await reviewCommand(options);
+  });
+
 program.parse();

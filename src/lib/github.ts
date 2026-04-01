@@ -181,13 +181,32 @@ export function labelIssue(repo: string, issueNum: number, addLabel: string, rem
 
 /**
  * Comment on an issue.
+ * Uses --body-file to avoid shell escaping issues with newlines and special characters.
  */
 export function commentIssue(repo: string, issueNum: number, body: string): void {
+  const bodyFile = join(tmpdir(), `alpha-loop-comment-${Date.now()}`);
+  writeFileSync(bodyFile, body, 'utf-8');
+  try {
+    const result = exec(
+      `gh issue comment ${issueNum} --repo "${repo}" --body-file "${bodyFile}"`,
+    );
+    if (result.exitCode !== 0) {
+      log.warn(`Failed to comment on issue #${issueNum}: ${result.stderr}`);
+    }
+  } finally {
+    try { unlinkSync(bodyFile); } catch { /* cleanup best-effort */ }
+  }
+}
+
+/**
+ * Assign an issue to a user.
+ */
+export function assignIssue(repo: string, issueNum: number, assignee: string): void {
   const result = exec(
-    `gh issue comment ${issueNum} --repo "${repo}" --body ${JSON.stringify(body)}`,
+    `gh issue edit ${issueNum} --repo "${repo}" --add-assignee "${assignee}"`,
   );
   if (result.exitCode !== 0) {
-    log.warn(`Failed to comment on issue #${issueNum}: ${result.stderr}`);
+    log.warn(`Failed to assign issue #${issueNum} to ${assignee}: ${result.stderr}`);
   }
 }
 
