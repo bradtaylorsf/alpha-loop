@@ -25,6 +25,10 @@ alpha-loop run --dry-run # Dry run (preview, no changes)
 alpha-loop scan          # Generate/refresh project context
 alpha-loop vision        # Interactive project vision setup
 alpha-loop auth          # Save authenticated browser state
+alpha-loop resume        # Resume stranded work from crashed sessions
+alpha-loop resume --issue 34     # Resume a specific issue
+alpha-loop review        # Analyze learnings, propose agent/skill improvements
+alpha-loop review --apply        # Apply improvements and create draft PR
 alpha-loop history       # View session history
 alpha-loop history <name> --qa    # Show QA checklist for session
 alpha-loop history --clean        # Remove old session data
@@ -42,6 +46,8 @@ alpha-loop/
 │   │   ├── auth.ts             # Browser auth state management
 │   │   ├── history.ts          # Session history viewer
 │   │   ├── init.ts             # Config template creation
+│   │   ├── resume.ts           # Resume stranded work from crashed sessions
+│   │   ├── review.ts           # Self-improvement loop (learnings → proposals)
 │   │   ├── run.ts              # Main loop execution
 │   │   ├── scan.ts             # Project context generation
 │   │   └── vision.ts           # Vision document setup

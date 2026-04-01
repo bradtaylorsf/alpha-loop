@@ -1,6 +1,5 @@
-import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { detectRepo } from '../lib/config.js';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
@@ -9,29 +8,27 @@ import { syncAgentAssets } from './sync.js';
 /**
  * Find the templates directory shipped with alpha-loop.
  * Works whether running from src/ (tsx) or dist/ (compiled) or as an npm package.
+ *
+ * Uses the resolved path of the CLI entrypoint (process.argv[1]) to locate the
+ * package root, following symlinks so globally-installed npm packages resolve correctly.
  */
 function findTemplatesDir(): string | null {
-  // Walk up from this file's location to find the alpha-loop package root.
-  // src/commands/init.ts -> src/ -> package root (has templates/)
-  // dist/commands/init.js -> dist/ -> package root (has templates/)
-  //
-  // Use import.meta.url (ESM) which resolves through symlinks to the actual file,
-  // unlike __dirname (unavailable in ESM) or process.argv[1] (follows symlink path).
-  const thisDir = dirname(fileURLToPath(import.meta.url));
-
-  const candidates: string[] = [];
-
-  // Walk up from this file's actual location
-  let dir = thisDir;
-  for (let i = 0; i < 5; i++) {
-    candidates.push(join(dir, 'templates'));
-    const parent = join(dir, '..');
-    if (parent === dir) break;
-    dir = parent;
+  // Resolve symlinks (npm global installs are symlinked from bin/ to the actual package)
+  let startDir: string;
+  try {
+    startDir = dirname(realpathSync(process.argv[1]));
+  } catch {
+    startDir = process.cwd();
   }
 
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
+  // Walk up from the entrypoint to find templates/
+  let dir = startDir;
+  for (let i = 0; i < 5; i++) {
+    const candidate = join(dir, 'templates');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
   return null;
 }
