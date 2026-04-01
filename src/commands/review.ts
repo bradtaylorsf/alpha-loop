@@ -117,22 +117,26 @@ function computeMetrics(learnings: string[]): Metrics {
 function readDirFiles(dir: string, exts: string[]): Array<{ path: string; content: string }> {
   if (!existsSync(dir)) return [];
   const results: Array<{ path: string; content: string }> = [];
-  try {
-    const entries = readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      if (exts.length > 0 && !exts.some((ext) => entry.name.endsWith(ext))) continue;
-      const fullPath = join(dir, entry.name);
-      try {
-        const content = readFileSync(fullPath, 'utf-8');
-        results.push({ path: fullPath, content });
-      } catch {
-        // Skip unreadable files
+
+  function walk(current: string): void {
+    try {
+      const entries = readdirSync(current, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = join(current, entry.name);
+        if (entry.isDirectory()) {
+          walk(fullPath);
+        } else if (entry.isFile()) {
+          if (exts.length > 0 && !exts.some((ext) => entry.name.endsWith(ext))) continue;
+          try {
+            const content = readFileSync(fullPath, 'utf-8');
+            results.push({ path: fullPath, content });
+          } catch { /* skip unreadable */ }
+        }
       }
-    }
-  } catch {
-    // Skip unreadable dirs
+    } catch { /* skip unreadable dirs */ }
   }
+
+  walk(dir);
   return results;
 }
 
