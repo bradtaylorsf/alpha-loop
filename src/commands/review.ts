@@ -323,7 +323,7 @@ function displayProposals(changes: ProposedChange[]): void {
 }
 
 /**
- * Save proposals to a markdown file in learnings/proposed-updates/.
+ * Save proposals to a markdown file in .alpha-loop/learnings/proposed-updates/.
  */
 function saveProposals(
   proposals: ProposedChange[],
@@ -331,7 +331,7 @@ function saveProposals(
   timestamp: string,
   projectDir: string,
 ): string {
-  const dir = join(projectDir, 'learnings', 'proposed-updates');
+  const dir = join(projectDir, '.alpha-loop', 'learnings', 'proposed-updates');
   mkdirSync(dir, { recursive: true });
 
   const outFile = join(dir, `${timestamp}-proposals.md`);
