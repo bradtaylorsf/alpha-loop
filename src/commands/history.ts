@@ -1,24 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import YAML from 'yaml';
 import { log } from '../lib/logger.js';
-
-interface SessionIssue {
-  number: number;
-  status: string;
-  pr_url?: string;
-  error?: string;
-  duration?: number;
-}
-
-interface SessionData {
-  name: string;
-  repo?: string;
-  started: string;
-  duration?: number;
-  model?: string;
-  issues?: SessionIssue[];
-}
+import type { PipelineResult } from '../lib/pipeline.js';
 
 function formatDuration(seconds: number | undefined): string {
   if (!seconds || seconds <= 0) return '';
@@ -30,130 +13,184 @@ function formatDuration(seconds: number | undefined): string {
   return `${secs}s`;
 }
 
-function loadSession(yamlPath: string): SessionData | null {
+/**
+ * Load all result-*.json files from a session directory.
+ */
+function loadResults(sessionDir: string): PipelineResult[] {
+  const results: PipelineResult[] = [];
   try {
-    const raw = fs.readFileSync(yamlPath, 'utf-8');
-    return YAML.parse(raw) as SessionData;
-  } catch {
-    return null;
+    const files = fs.readdirSync(sessionDir)
+      .filter((f) => f.startsWith('result-') && f.endsWith('.json'))
+      .sort();
+    for (const file of files) {
+      try {
+        const content = fs.readFileSync(path.join(sessionDir, file), 'utf-8');
+        results.push(JSON.parse(content) as PipelineResult);
+      } catch { /* skip invalid */ }
+    }
+  } catch { /* directory not readable */ }
+  return results;
+}
+
+/**
+ * Find all session directories under .alpha-loop/sessions/.
+ * Handles nested structure: sessions/session/<timestamp>/
+ */
+function findSessionDirs(sessionsRoot: string): Array<{ dir: string; name: string; timestamp: string }> {
+  if (!fs.existsSync(sessionsRoot)) return [];
+
+  const sessions: Array<{ dir: string; name: string; timestamp: string }> = [];
+
+  for (const group of fs.readdirSync(sessionsRoot, { withFileTypes: true })) {
+    if (!group.isDirectory()) continue;
+    const groupDir = path.join(sessionsRoot, group.name);
+
+    for (const entry of fs.readdirSync(groupDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      sessions.push({
+        dir: path.join(groupDir, entry.name),
+        name: `${group.name}/${entry.name}`,
+        timestamp: entry.name,
+      });
+    }
   }
+
+  // Sort newest first
+  sessions.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  return sessions;
 }
 
 export function historyList(sessionsDir: string): void {
-  if (!fs.existsSync(sessionsDir)) {
+  const sessions = findSessionDirs(sessionsDir);
+
+  if (sessions.length === 0) {
     console.log('No sessions found.');
     return;
   }
-
-  const entries = fs.readdirSync(sessionsDir, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .map((d) => {
-      const yamlPath = path.join(sessionsDir, d.name, 'session.yaml');
-      if (!fs.existsSync(yamlPath)) return null;
-      return { dir: d.name, session: loadSession(yamlPath) };
-    })
-    .filter((e): e is { dir: string; session: SessionData } => e !== null && e.session !== null);
-
-  if (entries.length === 0) {
-    console.log('No sessions found.');
-    return;
-  }
-
-  // Sort by date descending
-  entries.sort((a, b) => {
-    const da = a.session.started ?? '';
-    const db = b.session.started ?? '';
-    return db.localeCompare(da);
-  });
 
   console.log('Sessions:');
-  for (const { session } of entries) {
-    const name = session.name ?? 'unknown';
-    const date = (session.started ?? '????-??-??').slice(0, 10);
-    const issues = session.issues ?? [];
-    const issueCount = issues.length;
-    const successCount = issues.filter((i) => i.status === 'success').length;
-    const failedCount = issues.filter((i) => i.status === 'failed').length;
-    const durStr = formatDuration(session.duration);
-    const issueWord = issueCount === 1 ? 'issue' : 'issues';
+  console.log('');
 
+  for (const session of sessions) {
+    const results = loadResults(session.dir);
+    const issueCount = results.length;
+    const successCount = results.filter((r) => r.status === 'success').length;
+    const failedCount = issueCount - successCount;
+    const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+    const durStr = formatDuration(totalDuration);
+
+    // Parse date from timestamp (YYYYMMDD-HHMMSS)
+    const ts = session.timestamp;
+    const date = ts.length >= 8
+      ? `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`
+      : ts;
+
+    const issueWord = issueCount === 1 ? 'issue' : 'issues';
     let statusParts = '';
     if (successCount > 0) statusParts += `${successCount} \u2713`;
     if (failedCount > 0) statusParts += ` ${failedCount} \u2717`;
+    if (issueCount === 0) statusParts = '(empty)';
 
     console.log(
-      `  ${name.padEnd(30)} ${date}  ${issueCount} ${issueWord.padEnd(7)} ${statusParts.padEnd(10)} ${durStr}`,
+      `  ${session.name.padEnd(30)} ${date}  ${String(issueCount).padStart(2)} ${issueWord.padEnd(7)} ${statusParts.padEnd(10)} ${durStr}`,
     );
   }
 }
 
 export function historyDetail(sessionsDir: string, sessionName: string): void {
-  const yamlPath = path.join(sessionsDir, sessionName, 'session.yaml');
-  if (!fs.existsSync(yamlPath)) {
-    log.error(`Session not found: ${sessionName}`);
+  // Try exact match first, then search by timestamp suffix
+  let sessionDir = path.join(sessionsDir, sessionName);
+  if (!fs.existsSync(sessionDir)) {
+    // Search for a matching timestamp across groups
+    const all = findSessionDirs(sessionsDir);
+    const match = all.find((s) => s.name === sessionName || s.timestamp === sessionName);
+    if (!match) {
+      log.error(`Session not found: ${sessionName}`);
+      process.exitCode = 1;
+      return;
+    }
+    sessionDir = match.dir;
+  }
+
+  const results = loadResults(sessionDir);
+  if (results.length === 0) {
+    log.error(`No results found in session: ${sessionName}`);
     process.exitCode = 1;
     return;
   }
 
-  const session = loadSession(yamlPath);
-  if (!session) {
-    log.error(`Could not parse session: ${sessionName}`);
-    process.exitCode = 1;
-    return;
-  }
+  const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+  const successCount = results.filter((r) => r.status === 'success').length;
 
-  const dateDisplay = session.started
-    ? `${session.started.slice(0, 10)} ${session.started.slice(11, 16)}`
-    : '????-??-??';
-  const durStr = formatDuration(session.duration);
-
-  console.log(`Session: ${session.name ?? sessionName}`);
-  console.log(`Date:    ${dateDisplay}`);
-  if (session.repo) console.log(`Repo:    ${session.repo}`);
-  if (session.model) console.log(`Model:   ${session.model}`);
-  console.log(`Duration: ${durStr}`);
+  console.log(`Session:  ${sessionName}`);
+  console.log(`Issues:   ${results.length} (${successCount} succeeded, ${results.length - successCount} failed)`);
+  console.log(`Duration: ${formatDuration(totalDuration)}`);
   console.log('');
 
   console.log('Issues:');
-  for (const issue of session.issues ?? []) {
-    let symbol: string;
+  for (const result of results) {
+    const symbol = result.status === 'success' ? '\u2713' : '\u2717';
     let statusText: string;
 
-    switch (issue.status) {
-      case 'success':
-        symbol = '\u2713';
-        if (issue.pr_url) {
-          const prNum = issue.pr_url.match(/(\d+)$/)?.[1] ?? '';
-          statusText = `PR #${prNum}`;
-        } else {
-          statusText = 'SUCCESS';
-        }
-        break;
-      case 'failed':
-        symbol = '\u2717';
-        statusText = 'FAILED';
-        break;
-      default:
-        symbol = '\u2298';
-        statusText = 'SKIPPED';
-        break;
+    if (result.status === 'success' && result.prUrl) {
+      const prNum = result.prUrl.match(/(\d+)$/)?.[1] ?? '';
+      statusText = `PR #${prNum}`;
+    } else if (result.status === 'success') {
+      statusText = 'SUCCESS';
+    } else {
+      statusText = 'FAILED';
     }
 
-    const issueDur = formatDuration(issue.duration);
-    let line = `  ${symbol} #${String(issue.number).padEnd(4)} ${statusText.padEnd(9)} (${issueDur})`;
-    if (issue.error) {
-      line += ` \u2014 ${issue.error}`;
-    }
-    console.log(line);
+    const durStr = formatDuration(result.duration);
+    const tests = result.testsPassing ? 'tests \u2713' : 'tests \u2717';
+    const verify = result.verifyPassing ? 'verify \u2713' : 'verify \u2717';
+
+    console.log(
+      `  ${symbol} #${String(result.issueNum).padEnd(4)} ${result.title}`
+    );
+    console.log(
+      `           ${statusText.padEnd(12)} ${durStr.padEnd(10)} ${tests}  ${verify}`
+    );
   }
 
   console.log('');
-  console.log(`QA Checklist: .alpha-loop/sessions/${sessionName}/qa-checklist.md`);
-  console.log(`Logs:         .alpha-loop/sessions/${sessionName}/logs/`);
+
+  // Show paths to useful files
+  const logsDir = path.join(sessionDir, 'logs');
+  if (fs.existsSync(logsDir)) {
+    console.log(`Logs:         ${path.relative(process.cwd(), logsDir)}/`);
+  }
+  const screenshotsDir = path.join(sessionDir, 'screenshots');
+  if (fs.existsSync(screenshotsDir)) {
+    console.log(`Screenshots:  ${path.relative(process.cwd(), screenshotsDir)}/`);
+  }
+
+  // Check for session summary in learnings
+  const learningsDir = path.join(process.cwd(), '.alpha-loop', 'learnings');
+  const summaryName = `session-summary-${sessionName.replace(/\//g, '-')}.md`;
+  const summaryPath = path.join(learningsDir, summaryName);
+  if (fs.existsSync(summaryPath)) {
+    console.log(`Summary:      ${path.relative(process.cwd(), summaryPath)}`);
+  }
+
+  // Show QA checklist if it exists
+  const qaPath = path.join(sessionDir, 'qa-checklist.md');
+  if (fs.existsSync(qaPath)) {
+    console.log(`QA Checklist: ${path.relative(process.cwd(), qaPath)}`);
+  }
 }
 
 export function historyQa(sessionsDir: string, sessionName: string): void {
-  const qaPath = path.join(sessionsDir, sessionName, 'qa-checklist.md');
+  // Try exact path, then search
+  let qaPath = path.join(sessionsDir, sessionName, 'qa-checklist.md');
+  if (!fs.existsSync(qaPath)) {
+    const all = findSessionDirs(sessionsDir);
+    const match = all.find((s) => s.name === sessionName || s.timestamp === sessionName);
+    if (match) {
+      qaPath = path.join(match.dir, 'qa-checklist.md');
+    }
+  }
+
   if (!fs.existsSync(qaPath)) {
     log.error(`QA checklist not found for session: ${sessionName}`);
     process.exitCode = 1;
@@ -163,7 +200,9 @@ export function historyQa(sessionsDir: string, sessionName: string): void {
 }
 
 export function historyClean(sessionsDir: string): void {
-  if (!fs.existsSync(sessionsDir)) {
+  const sessions = findSessionDirs(sessionsDir);
+
+  if (sessions.length === 0) {
     console.log('No sessions found.');
     return;
   }
@@ -172,22 +211,17 @@ export function historyClean(sessionsDir: string): void {
   const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let removed = 0;
 
-  const entries = fs.readdirSync(sessionsDir, { withFileTypes: true })
-    .filter((d) => d.isDirectory());
-
-  for (const entry of entries) {
-    const yamlPath = path.join(sessionsDir, entry.name, 'session.yaml');
-    if (!fs.existsSync(yamlPath)) continue;
-
-    const session = loadSession(yamlPath);
-    if (!session?.started) continue;
-
-    const sessionDate = new Date(session.started).getTime();
+  for (const session of sessions) {
+    // Parse date from timestamp YYYYMMDD-HHMMSS
+    const ts = session.timestamp;
+    if (ts.length < 8) continue;
+    const dateStr = `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`;
+    const sessionDate = new Date(dateStr).getTime();
     if (isNaN(sessionDate)) continue;
 
     if (sessionDate < cutoff) {
-      fs.rmSync(path.join(sessionsDir, entry.name), { recursive: true });
-      console.log(`Removed: ${session.name ?? entry.name}`);
+      fs.rmSync(session.dir, { recursive: true });
+      console.log(`Removed: ${session.name}`);
       removed++;
     }
   }

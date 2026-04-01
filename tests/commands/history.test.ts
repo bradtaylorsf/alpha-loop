@@ -7,14 +7,32 @@ function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'history-test-'));
 }
 
+/**
+ * Create a session with result-*.json files matching the real directory structure.
+ * Structure: sessionsDir/session/<timestamp>/result-<N>.json
+ */
 function createSession(
   sessionsDir: string,
-  name: string,
-  yaml: string,
+  timestamp: string,
+  results: Array<{ issueNum: number; title: string; status: string; prUrl?: string; duration: number }>,
 ): void {
-  const dir = path.join(sessionsDir, name);
+  const dir = path.join(sessionsDir, 'session', timestamp);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'session.yaml'), yaml);
+  for (const r of results) {
+    fs.writeFileSync(
+      path.join(dir, `result-${r.issueNum}.json`),
+      JSON.stringify({
+        issueNum: r.issueNum,
+        title: r.title,
+        status: r.status,
+        prUrl: r.prUrl,
+        testsPassing: r.status === 'success',
+        verifyPassing: r.status === 'success',
+        duration: r.duration,
+        filesChanged: 1,
+      }, null, 2),
+    );
+  }
 }
 
 describe('history', () => {
@@ -46,49 +64,31 @@ describe('history', () => {
 
     it('lists sessions sorted by date descending', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
-      createSession(sessionsDir, 'older', `
-name: older-session
-started: "2025-01-10T10:00:00Z"
-duration: 120
-issues:
-  - number: 1
-    status: success
-`);
-      createSession(sessionsDir, 'newer', `
-name: newer-session
-started: "2025-01-15T10:00:00Z"
-duration: 60
-issues:
-  - number: 2
-    status: failed
-`);
+      createSession(sessionsDir, '20250110-100000', [
+        { issueNum: 1, title: 'Older issue', status: 'success', duration: 120 },
+      ]);
+      createSession(sessionsDir, '20250115-100000', [
+        { issueNum: 2, title: 'Newer issue', status: 'failure', duration: 60 },
+      ]);
 
       historyList(sessionsDir);
 
       const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
       expect(output).toContain('Sessions:');
-      expect(output).toContain('newer-session');
-      expect(output).toContain('older-session');
+      expect(output).toContain('20250115');
+      expect(output).toContain('20250110');
       // newer should appear before older
-      const newerIdx = output.indexOf('newer-session');
-      const olderIdx = output.indexOf('older-session');
+      const newerIdx = output.indexOf('20250115');
+      const olderIdx = output.indexOf('20250110');
       expect(newerIdx).toBeLessThan(olderIdx);
     });
 
     it('formats issue counts and status symbols', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
-      createSession(sessionsDir, 'mixed', `
-name: mixed-session
-started: "2025-01-15T10:00:00Z"
-duration: 300
-issues:
-  - number: 1
-    status: success
-    pr_url: https://github.com/owner/repo/pull/5
-  - number: 2
-    status: failed
-    error: test failure
-`);
+      createSession(sessionsDir, '20250115-100000', [
+        { issueNum: 1, title: 'Good issue', status: 'success', prUrl: 'https://github.com/owner/repo/pull/5', duration: 180 },
+        { issueNum: 2, title: 'Bad issue', status: 'failure', duration: 120 },
+      ]);
 
       historyList(sessionsDir);
 
@@ -101,36 +101,22 @@ issues:
   });
 
   describe('historyDetail', () => {
-    it('shows session detail with header and issues', () => {
+    it('shows session detail with issues', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
-      createSession(sessionsDir, 'test-session', `
-name: test-session
-repo: owner/repo
-started: "2025-01-15T10:30:00Z"
-duration: 120
-model: opus
-issues:
-  - number: 1
-    status: success
-    pr_url: https://github.com/owner/repo/pull/5
-    duration: 60
-  - number: 2
-    status: failed
-    error: test timeout
-    duration: 60
-`);
+      createSession(sessionsDir, '20250115-103000', [
+        { issueNum: 1, title: 'Feature A', status: 'success', prUrl: 'https://github.com/owner/repo/pull/5', duration: 60 },
+        { issueNum: 2, title: 'Feature B', status: 'failure', duration: 60 },
+      ]);
 
-      historyDetail(sessionsDir, 'test-session');
+      historyDetail(sessionsDir, 'session/20250115-103000');
 
       const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
-      expect(output).toContain('Session: test-session');
-      expect(output).toContain('Date:    2025-01-15 10:30');
-      expect(output).toContain('Repo:    owner/repo');
-      expect(output).toContain('Model:   opus');
-      expect(output).toContain('Duration: 2m 00s');
+      expect(output).toContain('Session:');
+      expect(output).toContain('Issues:');
       expect(output).toContain('PR #5');
-      expect(output).toContain('FAILED');
-      expect(output).toContain('test timeout');
+      expect(output).toContain('Feature A');
+      expect(output).toContain('Feature B');
+      expect(output).toContain('2m 00s');
     });
 
     it('shows error for non-existent session', () => {
@@ -145,11 +131,11 @@ issues:
   describe('historyQa', () => {
     it('prints QA checklist contents', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
-      const sessionDir = path.join(sessionsDir, 'test-session');
+      const sessionDir = path.join(sessionsDir, 'session', '20250115-100000');
       fs.mkdirSync(sessionDir, { recursive: true });
       fs.writeFileSync(path.join(sessionDir, 'qa-checklist.md'), '# QA Checklist\n- [ ] Tests pass');
 
-      historyQa(sessionsDir, 'test-session');
+      historyQa(sessionsDir, 'session/20250115-100000');
 
       const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
       expect(output).toContain('# QA Checklist');
@@ -159,9 +145,9 @@ issues:
     it('shows error when QA file is missing', () => {
       const errorSpy = jest.spyOn(console, 'error').mockImplementation();
       const sessionsDir = path.join(tmpDir, 'sessions');
-      fs.mkdirSync(path.join(sessionsDir, 'test-session'), { recursive: true });
+      fs.mkdirSync(path.join(sessionsDir, 'session', '20250115-100000'), { recursive: true });
 
-      historyQa(sessionsDir, 'test-session');
+      historyQa(sessionsDir, 'session/20250115-100000');
 
       const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
       expect(errorOutput).toContain('QA checklist not found');
@@ -172,42 +158,39 @@ issues:
   describe('historyClean', () => {
     it('removes sessions older than 30 days', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
-      const oldDate = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
-      const newDate = new Date().toISOString();
 
-      createSession(sessionsDir, 'old-session', `
-name: old-session
-started: "${oldDate}"
-duration: 60
-issues: []
-`);
-      createSession(sessionsDir, 'new-session', `
-name: new-session
-started: "${newDate}"
-duration: 60
-issues: []
-`);
+      // Create old session (40 days ago)
+      const oldDate = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+      const oldTs = `${oldDate.getFullYear()}${String(oldDate.getMonth() + 1).padStart(2, '0')}${String(oldDate.getDate()).padStart(2, '0')}-100000`;
+
+      // Create new session (today)
+      const now = new Date();
+      const newTs = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-100000`;
+
+      createSession(sessionsDir, oldTs, [
+        { issueNum: 1, title: 'Old issue', status: 'success', duration: 60 },
+      ]);
+      createSession(sessionsDir, newTs, [
+        { issueNum: 2, title: 'New issue', status: 'success', duration: 60 },
+      ]);
 
       historyClean(sessionsDir);
 
-      expect(fs.existsSync(path.join(sessionsDir, 'old-session'))).toBe(false);
-      expect(fs.existsSync(path.join(sessionsDir, 'new-session'))).toBe(true);
+      expect(fs.existsSync(path.join(sessionsDir, 'session', oldTs))).toBe(false);
+      expect(fs.existsSync(path.join(sessionsDir, 'session', newTs))).toBe(true);
 
       const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
-      expect(output).toContain('Removed: old-session');
-      expect(output).toContain('Removed 1 session(s).');
+      expect(output).toContain('Removed');
+      expect(output).toContain('1 session(s)');
     });
 
     it('shows message when no old sessions exist', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
-      const newDate = new Date().toISOString();
-
-      createSession(sessionsDir, 'recent', `
-name: recent
-started: "${newDate}"
-duration: 60
-issues: []
-`);
+      const now = new Date();
+      const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-100000`;
+      createSession(sessionsDir, ts, [
+        { issueNum: 1, title: 'Recent', status: 'success', duration: 60 },
+      ]);
 
       historyClean(sessionsDir);
 
