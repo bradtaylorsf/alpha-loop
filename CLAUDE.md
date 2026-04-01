@@ -72,19 +72,33 @@ alpha-loop/
 │       ├── vision.ts           # Vision document helpers
 │       └── worktree.ts         # Git worktree management
 ├── tests/                      # Test suite (mirrors src/ structure)
+├── templates/                  # DISTRIBUTION: starter files shipped with npm package
+│   ├── skills/                 # Default skills installed by `alpha-loop init`
+│   └── agents/                 # Default agent prompts installed by `alpha-loop init`
 ├── .alpha-loop.yaml            # Loop configuration (includes harnesses list)
 ├── .alpha-loop/
-│   ├── templates/              # Source of truth for skills, agents, instructions
+│   ├── templates/              # THIS REPO'S OWN skills, agents, instructions
 │   │   ├── skills/             # Skill definitions (synced to harness-specific paths)
 │   │   ├── agents/             # Agent prompt files (implementer.md, reviewer.md)
 │   │   └── instructions.md     # Main instructions (synced to CLAUDE.md, AGENTS.md)
 │   ├── learnings/              # Tracked in git — team-shared knowledge
 │   │   └── proposed-updates/   # Proposed improvements from `alpha-loop review`
 │   └── sessions/               # Gitignored — local logs, screenshots
-├── .claude/                    # Auto-synced from templates (Claude Code)
-├── .agents/                    # Auto-synced from templates (Codex, Cursor, etc.)
-└── .codex/                     # Auto-synced from templates (Codex agents)
+├── .claude/                    # Auto-synced from .alpha-loop/templates/ (Claude Code)
+├── .agents/                    # Auto-synced from .alpha-loop/templates/ (Codex, Cursor, etc.)
+└── .codex/                     # Auto-synced from .alpha-loop/templates/ (Codex agents)
 ```
+
+## Two templates/ directories — don't confuse them
+
+This repo has TWO `templates/` directories with different purposes:
+
+- **`templates/`** (root) — **Distribution templates** shipped with the npm package. When a user runs `alpha-loop init` in their project, these files are copied to their `.alpha-loop/templates/`. This is product code — changes here affect all new alpha-loop users.
+- **`.alpha-loop/templates/`** — **This repo's own** dev config for running alpha-loop against itself. Same as any other project using alpha-loop. Changes here only affect this repo's development workflow.
+
+When editing skills or agent prompts, make sure you're editing the right one:
+- Improving the **default starter skills** for new users → edit `templates/`
+- Improving **this repo's own** loop behavior → edit `.alpha-loop/templates/`
 
 ## Architecture Principles
 
