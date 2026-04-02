@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './logger.js';
 import { exec } from './shell.js';
-import { spawnAgent, type AgentOptions } from './agent.js';
+import { spawnAgent } from './agent.js';
 import { setupWorktree, cleanupWorktree } from './worktree.js';
 import {
   assignIssue,
@@ -101,7 +101,7 @@ export async function processIssue(
   if (!config.dryRun) {
     try {
       const planResult = await spawnAgent({
-        agent: config.agent as AgentOptions['agent'],
+        agent: config.agent,
         model: config.model,
         prompt: `Analyze this GitHub issue and enrich it with implementation details.\n\nIssue #${issueNum}: ${title}\n\n${body}\n\nOutput the enriched issue body with acceptance criteria, implementation notes, and any edge cases to handle.`,
         cwd: worktreePath,
@@ -138,7 +138,7 @@ export async function processIssue(
     });
 
     const implResult = await spawnAgent({
-      agent: config.agent as AgentOptions['agent'],
+      agent: config.agent,
       model: config.model,
       prompt: implementPrompt,
       cwd: worktreePath,
@@ -188,7 +188,7 @@ export async function processIssue(
         const fixPrompt = `Tests are failing for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix the implementation code or the tests\n3. Run the tests again to verify\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why it was failing>\n   Example: fix(#${issueNum}): use port 5435 for postgres — default 5432 conflicts with host service\n   DO NOT use generic messages like "fix: resolve test failures"`;
 
         await spawnAgent({
-          agent: config.agent as AgentOptions['agent'],
+          agent: config.agent,
           model: config.model,
           prompt: fixPrompt,
           cwd: worktreePath,
@@ -252,7 +252,7 @@ export async function processIssue(
         const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\nThe app was started and tested with playwright-cli, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification output above and identify the ROOT CAUSE of each failure\n2. Fix the implementation code so the feature works correctly\n3. Run the test command to make sure unit tests still pass\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why verification failed>\n   Example: fix(#${issueNum}): add ENCRYPTION_KEY to langfuse config — service requires 32+ char secret\n   DO NOT use generic messages like "fix: resolve verification failures"`;
 
         await spawnAgent({
-          agent: config.agent as AgentOptions['agent'],
+          agent: config.agent,
           model: config.model,
           prompt: verifyFixPrompt,
           cwd: worktreePath,
@@ -291,7 +291,7 @@ export async function processIssue(
       });
 
       const reviewResult = await spawnAgent({
-        agent: config.agent as AgentOptions['agent'],
+        agent: config.agent,
         model: config.reviewModel,
         prompt: reviewPrompt,
         cwd: worktreePath,

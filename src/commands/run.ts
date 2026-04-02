@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
 import { exec } from '../lib/shell.js';
-import { loadConfig, type Config } from '../lib/config.js';
+import { loadConfig, assertSafeShellArg, type Config } from '../lib/config.js';
 import { pollIssues, listMilestones, type Milestone } from '../lib/github.js';
 import { processIssue } from '../lib/pipeline.js';
 import { createSession, finalizeSession, type SessionContext } from '../lib/session.js';
@@ -35,17 +35,19 @@ export type RunOptions = {
 function checkPrerequisites(config: Config): void {
   const AGENT_INSTALL_URLS: Record<string, string> = {
     claude: 'https://claude.ai/code',
-    codex: 'https://github.com/openai/codex',
+    codex: 'https://developers.openai.com/codex/cli/reference',
     opencode: 'https://github.com/sst/opencode',
   };
 
   const agentUrl = AGENT_INSTALL_URLS[config.agent] ?? '';
   const agentMsg = `${config.agent} CLI not found.${agentUrl ? ` Install: ${agentUrl}` : ''}`;
 
+  const safeAgent = assertSafeShellArg(config.agent, 'agent');
+
   const tools = [
     { name: 'gh', message: 'GitHub CLI not found. Install: https://cli.github.com/' },
     { name: 'git', message: 'git not found.' },
-    { name: config.agent, message: agentMsg },
+    { name: safeAgent, message: agentMsg },
   ];
 
   for (const tool of tools) {

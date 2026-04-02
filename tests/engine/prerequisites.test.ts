@@ -30,7 +30,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxTestRetries: 3,
     testCommand: 'pnpm test',
     devCommand: 'pnpm dev',
-
     skipTests: false,
     skipReview: false,
     skipInstall: false,

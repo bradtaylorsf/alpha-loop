@@ -21,7 +21,7 @@ npx @bradtaylorsf/alpha-loop
 - **[GitHub CLI](https://cli.github.com/)** (`gh`) — authenticated with `gh auth login`
 - **AI agent CLI** — set `agent` in your config to one of:
   - [Claude Code](https://claude.ai/code) (`claude`) — default
-  - [Codex](https://openai.com/index/introducing-codex/) (`codex`)
+  - [Codex](https://developers.openai.com/codex/cli/reference) (`codex`)
   - [OpenCode](https://github.com/sst/opencode) (`opencode`)
 - **[Playwright CLI](https://www.npmjs.com/package/@playwright/cli)** (optional) — for live verification with screenshots
 
@@ -208,6 +208,7 @@ max_session_duration: 7200  # 2 hours in seconds
 | `skip_install` | `false` | Skip `pnpm install` in worktrees |
 | `skip_preflight` | `false` | Skip pre-flight test validation |
 | `auto_cleanup` | `true` | Auto-remove worktrees after processing |
+| `run_full` | `false` | Run full pipeline without skipping any steps |
 | `verbose` | `false` | Enable verbose agent output |
 | `harnesses` | (auto from agent) | Coding harnesses to sync skills/agents to |
 

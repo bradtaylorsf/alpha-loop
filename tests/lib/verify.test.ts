@@ -1,4 +1,4 @@
-import { runVerify, type VerifyResult } from '../../src/lib/verify.js';
+import { runVerify, detectPort, type VerifyResult } from '../../src/lib/verify.js';
 import type { Config } from '../../src/lib/config.js';
 
 // Mock agent and shell to avoid real process spawning
@@ -30,7 +30,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxTestRetries: 1,
     testCommand: 'pnpm test',
     devCommand: 'pnpm dev',
-
     skipTests: false,
     skipReview: false,
     skipInstall: false,
@@ -50,6 +49,24 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     ...overrides,
   };
 }
+
+describe('detectPort', () => {
+  it('detects PORT=NNNN from dev command', () => {
+    expect(detectPort('PORT=8080 pnpm dev')).toBe(8080);
+  });
+
+  it('detects --port flag', () => {
+    expect(detectPort('pnpm dev --port 4000')).toBe(4000);
+  });
+
+  it('defaults to 3000 when no port specified', () => {
+    expect(detectPort('pnpm dev')).toBe(3000);
+  });
+
+  it('prefers PORT env var over --port flag', () => {
+    expect(detectPort('PORT=5000 pnpm dev --port 4000')).toBe(5000);
+  });
+});
 
 describe('runVerify', () => {
   beforeEach(() => {

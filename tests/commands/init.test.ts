@@ -48,7 +48,7 @@ const mockExit = jest.spyOn(process, 'exit').mockImplementation(((code?: number)
   throw new Error(`process.exit(${code})`);
 }) as () => never);
 
-import { initCommand } from '../../src/commands/init.js';
+import { initCommand, ensureLabels } from '../../src/commands/init.js';
 
 let originalCwd: string;
 let tempDir: string;
@@ -66,6 +66,68 @@ beforeEach(() => {
 afterEach(() => {
   process.chdir(originalCwd);
   rmSync(tempDir, { recursive: true, force: true });
+});
+
+const { exec: mockExec } = jest.requireMock('../../src/lib/shell') as { exec: jest.Mock };
+
+describe('ensureLabels', () => {
+  it('skips creation when all labels exist', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh label list')) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { name: 'ready' },
+            { name: 'in-progress' },
+            { name: 'in-review' },
+            { name: 'failed' },
+          ]),
+          stderr: '',
+        };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+
+    await ensureLabels('owner/repo', 'ready');
+    expect(mockExec).not.toHaveBeenCalledWith(expect.stringContaining('gh label create'));
+  });
+
+  it('creates missing labels', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh label list')) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([{ name: 'ready' }]),
+          stderr: '',
+        };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+
+    await ensureLabels('owner/repo', 'ready');
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('gh label create "in-progress"'));
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('gh label create "in-review"'));
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('gh label create "failed"'));
+  });
+
+  it('uses configured label name instead of default "ready"', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh label list')) {
+        return { exitCode: 0, stdout: JSON.stringify([]), stderr: '' };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+
+    await ensureLabels('owner/repo', 'todo');
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('gh label create "todo"'));
+    expect(mockExec).not.toHaveBeenCalledWith(expect.stringContaining('gh label create "ready"'));
+  });
+
+  it('handles gh CLI failure gracefully', async () => {
+    mockExec.mockReturnValue({ exitCode: 1, stdout: '', stderr: 'error' });
+    await ensureLabels('owner/repo', 'ready');
+    // Should not throw, just warn
+  });
 });
 
 describe('init command', () => {

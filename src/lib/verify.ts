@@ -20,7 +20,7 @@ const APP_READY_TIMEOUT_S = 60;
 
 /**
  * Detect port from a dev command string.
- * Checks for PORT=NNNN env var or --port/- p flag patterns.
+ * Checks for PORT=NNNN env var or --port flag.
  * Falls back to 3000.
  */
 export function detectPort(devCommand: string): number {
@@ -240,7 +240,7 @@ Navigate, click, type, submit forms. Verify the feature works as a real user wou
   let agentResult;
   try {
     agentResult = await spawnAgent({
-      agent: config.agent as 'claude' | 'codex' | 'opencode',
+      agent: config.agent,
       model: config.model,
       prompt: verifyPrompt,
       cwd: worktree,

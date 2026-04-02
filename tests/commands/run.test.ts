@@ -18,6 +18,7 @@ jest.mock('../../src/lib/logger', () => ({
 
 jest.mock('../../src/lib/config', () => ({
   loadConfig: jest.fn(),
+  assertSafeShellArg: jest.fn((value: string) => value),
 }));
 
 jest.mock('../../src/lib/github', () => ({
@@ -94,7 +95,6 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     maxTestRetries: 3,
     testCommand: 'pnpm test',
     devCommand: 'pnpm dev',
-
     skipTests: false,
     skipReview: false,
     skipInstall: false,
