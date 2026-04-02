@@ -28,6 +28,7 @@ jest.mock('../../src/commands/scan', () => ({
 jest.mock('../../src/commands/sync', () => ({
   syncAgentAssets: jest.fn().mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] }),
   migrateToTemplates: jest.fn(),
+  resolveHarnesses: jest.fn((harnesses: string[], _agent: string) => harnesses.length > 0 ? harnesses : ['claude']),
 }));
 
 // Mock vision helpers
@@ -40,6 +41,15 @@ jest.mock('../../src/lib/templates', () => ({
   findDistributionTemplatesDir: jest.fn().mockReturnValue(null),
 }));
 
+// Mock readline so interactive prompts (label creation, project statuses) don't block tests
+// Default: answer 'y' so label/status creation tests work. Override in specific tests if needed.
+jest.mock('node:readline', () => ({
+  createInterface: jest.fn().mockReturnValue({
+    question: jest.fn((_prompt: string, cb: (answer: string) => void) => cb('y')),
+    close: jest.fn(),
+  }),
+}));
+
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
 
 // Mock process.exit to prevent Jest from actually exiting
@@ -47,7 +57,7 @@ const mockExit = jest.spyOn(process, 'exit').mockImplementation(((code?: number)
   throw new Error(`process.exit(${code})`);
 }) as () => never);
 
-import { initCommand } from '../../src/commands/init.js';
+import { initCommand, ensureLabels } from '../../src/commands/init.js';
 
 let originalCwd: string;
 let tempDir: string;
@@ -67,6 +77,68 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
+const { exec: mockExec } = jest.requireMock('../../src/lib/shell') as { exec: jest.Mock };
+
+describe('ensureLabels', () => {
+  it('skips creation when all labels exist', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh label list')) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { name: 'ready' },
+            { name: 'in-progress' },
+            { name: 'in-review' },
+            { name: 'failed' },
+          ]),
+          stderr: '',
+        };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+
+    await ensureLabels('owner/repo', 'ready');
+    expect(mockExec).not.toHaveBeenCalledWith(expect.stringContaining('gh label create'));
+  });
+
+  it('creates missing labels', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh label list')) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([{ name: 'ready' }]),
+          stderr: '',
+        };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+
+    await ensureLabels('owner/repo', 'ready');
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('gh label create "in-progress"'));
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('gh label create "in-review"'));
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('gh label create "failed"'));
+  });
+
+  it('uses configured label name instead of default "ready"', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh label list')) {
+        return { exitCode: 0, stdout: JSON.stringify([]), stderr: '' };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+
+    await ensureLabels('owner/repo', 'todo');
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('gh label create "todo"'));
+    expect(mockExec).not.toHaveBeenCalledWith(expect.stringContaining('gh label create "ready"'));
+  });
+
+  it('handles gh CLI failure gracefully', async () => {
+    mockExec.mockReturnValue({ exitCode: 1, stdout: '', stderr: 'error' });
+    await ensureLabels('owner/repo', 'ready');
+    // Should not throw, just warn
+  });
+});
+
 describe('init command', () => {
   it('creates .alpha-loop.yaml with auto-detected repo', async () => {
     mockedExecSync.mockReturnValue('https://github.com/myorg/myrepo.git\n');
@@ -78,7 +150,7 @@ describe('init command', () => {
 
     const content = readFileSync(configPath, 'utf-8');
     expect(content).toContain('repo: myorg/myrepo');
-    expect(content).toContain('model: opus');
+    expect(content).toContain('agent: claude');
     expect(content).toContain('test_command: pnpm test');
     expect(content).toContain('harnesses:');
   });

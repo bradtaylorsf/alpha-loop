@@ -1,7 +1,7 @@
 /**
  * Process Issue Pipeline — the 12-step orchestration for a single issue.
  */
-import { mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './logger.js';
 import { exec } from './shell.js';
@@ -26,13 +26,170 @@ import type { SessionContext } from './session.js';
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
 
+/** Patterns that indicate a transient agent error (re-queue, don't mark as failed). */
+const TRANSIENT_ERROR_PATTERNS = [
+  /usage limit/i,
+  /rate limit/i,
+  /too many requests/i,
+  /quota exceeded/i,
+  /capacity/i,
+  /try again/i,
+];
+
+/**
+ * Check if agent output indicates a transient error (usage limits, rate limits).
+ * These issues should be re-queued, not marked as permanently failed.
+ */
+function isTransientError(output: string): boolean {
+  return TRANSIENT_ERROR_PATTERNS.some((p) => p.test(output));
+}
+
+/**
+ * Structured plan output from the planning agent.
+ * Controls which pipeline steps run and how.
+ */
+export type IssuePlan = {
+  summary: string;
+  files: string[];
+  implementation: string;
+  testing: {
+    needed: boolean;
+    reason: string;
+  };
+  verification: {
+    needed: boolean;
+    instructions?: string;
+    reason: string;
+  };
+};
+
+/**
+ * Structured gate result written by review/verify agents as JSON files.
+ * The orchestrator reads these to decide: continue or loop back to implementer.
+ */
+export type GateResult = {
+  passed: boolean;
+  summary: string;
+  findings: Array<{
+    severity: 'critical' | 'warning' | 'info';
+    description: string;
+    fixed: boolean;
+    file?: string;
+  }>;
+};
+
+/** Default gate result when agent doesn't write one (assume pass). */
+const DEFAULT_GATE: GateResult = {
+  passed: true,
+  summary: 'Gate agent did not write a result file — assuming pass',
+  findings: [],
+};
+
+/** Default plan when planning fails or is skipped. */
+const DEFAULT_PLAN: IssuePlan = {
+  summary: '',
+  files: [],
+  implementation: '',
+  testing: { needed: true, reason: 'Default: run project test command' },
+  verification: { needed: false, reason: 'Default: skip verification unless plan requests it' },
+};
+
+/**
+ * Read and validate a plan JSON file written by the planning agent.
+ * Falls back to DEFAULT_PLAN if the file doesn't exist or is invalid.
+ */
+function readPlan(planFile: string): IssuePlan {
+  try {
+    if (!existsSync(planFile)) return DEFAULT_PLAN;
+
+    const raw = readFileSync(planFile, 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+    return {
+      summary: String(parsed.summary ?? ''),
+      files: Array.isArray(parsed.files) ? parsed.files.map(String) : [],
+      implementation: String(parsed.implementation ?? ''),
+      testing: {
+        needed: (parsed.testing as any)?.needed !== false,
+        reason: String((parsed.testing as any)?.reason ?? 'No reason given'),
+      },
+      verification: {
+        needed: (parsed.verification as any)?.needed === true,
+        instructions: (parsed.verification as any)?.instructions || undefined,
+        reason: String((parsed.verification as any)?.reason ?? 'No reason given'),
+      },
+    };
+  } catch {
+    return DEFAULT_PLAN;
+  }
+}
+
+/**
+ * Read and validate a gate result JSON file written by review/verify agents.
+ * Falls back to DEFAULT_GATE if the file doesn't exist or is invalid.
+ */
+function readGateResult(gateFile: string): GateResult {
+  try {
+    if (!existsSync(gateFile)) return DEFAULT_GATE;
+
+    const raw = readFileSync(gateFile, 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+    return {
+      passed: parsed.passed === true,
+      summary: String(parsed.summary ?? ''),
+      findings: Array.isArray(parsed.findings)
+        ? (parsed.findings as Array<Record<string, unknown>>).map((f) => ({
+            severity: (['critical', 'warning', 'info'].includes(String(f.severity)) ? f.severity : 'info') as 'critical' | 'warning' | 'info',
+            description: String(f.description ?? ''),
+            fixed: f.fixed === true,
+            file: f.file ? String(f.file) : undefined,
+          }))
+        : [],
+    };
+  } catch {
+    return DEFAULT_GATE;
+  }
+}
+
+/**
+ * Move a JSON file from worktree to session logs dir (for inspection).
+ * Deletes the source file from the worktree. Non-fatal on failure.
+ */
+function moveToSessionLogs(src: string, dest: string): void {
+  try {
+    if (!existsSync(src)) return;
+    const content = readFileSync(src, 'utf-8');
+    writeFileSync(dest, content);
+    unlinkSync(src);
+  } catch { /* non-fatal */ }
+}
+
+/**
+ * Format gate findings into a prompt section for the implementer.
+ */
+function formatGateFindings(gate: GateResult, gateType: string): string {
+  const unfixed = gate.findings.filter((f) => !f.fixed);
+  if (unfixed.length === 0) return '';
+
+  const lines = [`## ${gateType} Findings (MUST FIX)`, '', gate.summary, ''];
+  for (const f of unfixed) {
+    const fileRef = f.file ? ` (${f.file})` : '';
+    lines.push(`- [${f.severity.toUpperCase()}]${fileRef} ${f.description}`);
+  }
+  return lines.join('\n');
+}
+
 export type PipelineResult = {
   issueNum: number;
   title: string;
   status: 'success' | 'failure';
+  /** Why the issue failed — 'transient' means re-queue (e.g. usage limit), 'permanent' means label failed. */
+  failureReason?: 'transient' | 'permanent';
   prUrl?: string;
   testsPassing: boolean;
   verifyPassing: boolean;
+  verifySkipped: boolean;
   duration: number;
   filesChanged: number;
 };
@@ -81,6 +238,7 @@ export async function processIssue(
       sessionBranch: session.branch,
       autoMerge: config.autoMerge,
       skipInstall: config.skipInstall,
+      setupCommand: config.setupCommand,
       dryRun: config.dryRun,
     });
     worktreePath = wt.path;
@@ -94,24 +252,73 @@ export async function processIssue(
     return failureResult(issueNum, title, startTime);
   }
 
-  // --- Step 3: Plan (optional, non-fatal) ---
+  // --- Step 3: Plan (structured JSON — controls test/verify steps) ---
   log.step('Step 3: Planning');
-  let implBody = body;
+  let plan: IssuePlan = DEFAULT_PLAN;
+  // Write plan inside the worktree (agents sandbox to their CWD), then move to sessions dir
+  const planFileInWorktree = join(worktreePath, `plan-issue-${issueNum}.json`);
+  const planFileInSession = join(session.logsDir, `plan-issue-${issueNum}.json`);
   if (!config.dryRun) {
     try {
+      const planPrompt = `Analyze this GitHub issue and produce a structured implementation plan.
+
+Issue #${issueNum}: ${title}
+
+${body}
+
+Write a JSON file to: plan-issue-${issueNum}.json
+
+The file must contain ONLY valid JSON with this exact schema:
+
+{
+  "summary": "One-line description of what needs to be done",
+  "files": ["src/path/to/file.ts", "..."],
+  "implementation": "Concise step-by-step plan. What to create, modify, wire up. No issue restatement.",
+  "testing": {
+    "needed": true,
+    "reason": "Why tests are or aren't needed for this change"
+  },
+  "verification": {
+    "needed": false,
+    "instructions": "If needed: specific playwright-cli steps to verify the feature. If not needed: omit this field.",
+    "reason": "Why verification is or isn't needed (e.g. no UI changes, API-only, config change)"
+  }
+}
+
+Rules:
+- testing.needed: true if ANY code changes could affect behavior. false only for docs, config, or comments.
+- verification.needed: true ONLY if the issue changes user-visible UI that can be tested in a browser.
+- verification.instructions: if needed, list the exact playwright-cli commands to verify (open URL, click elements, check content).
+- implementation: be concise and actionable. List files to modify and what to change in each.
+- Write ONLY the JSON file. Do not create any other files or make any code changes.`;
+
       const planResult = await spawnAgent({
-        agent: 'claude',
+        agent: config.agent,
         model: config.model,
-        prompt: `Analyze this GitHub issue and enrich it with implementation details.\n\nIssue #${issueNum}: ${title}\n\n${body}\n\nOutput the enriched issue body with acceptance criteria, implementation notes, and any edge cases to handle.`,
+        prompt: planPrompt,
         cwd: worktreePath,
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
         verbose: config.verbose,
       });
-      if (planResult.exitCode === 0 && planResult.output.trim()) {
-        implBody = body + '\n\n## Agent Planning Notes\n\n' + planResult.output.trim();
+
+      // Detect transient errors (usage limits) during planning
+      if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
+        log.warn(`Agent hit a transient error during planning for #${issueNum} — re-queuing`);
+        requeueIssue(config, issueNum);
+        await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+        return failureResult(issueNum, title, startTime, 'transient');
+      }
+
+      plan = readPlan(planFileInWorktree);
+      if (plan.summary) {
+        // Move plan from worktree to sessions dir for inspection, clean up worktree
+        moveToSessionLogs(planFileInWorktree, planFileInSession);
+        log.success(`Plan: ${plan.summary} | Tests: ${plan.testing.needed ? 'yes' : 'skip'} | Verify: ${plan.verification.needed ? 'yes' : 'skip'}`);
+      } else {
+        log.warn('Planning agent did not write plan file, using defaults (run all tests, skip verify)');
       }
     } catch {
-      log.warn('Planning stage failed, proceeding with original issue description');
+      log.warn('Planning stage failed, using defaults');
     }
   } else {
     log.dry('Would run planning agent');
@@ -129,7 +336,8 @@ export async function processIssue(
     const implementPrompt = buildImplementPrompt({
       issueNum,
       title,
-      body: implBody,
+      body,
+      planContent: plan.implementation || undefined,
       visionContext: visionContext ?? undefined,
       projectContext: projectContext ?? undefined,
       previousResult: previousResult ?? undefined,
@@ -137,7 +345,7 @@ export async function processIssue(
     });
 
     const implResult = await spawnAgent({
-      agent: 'claude',
+      agent: config.agent,
       model: config.model,
       prompt: implementPrompt,
       cwd: worktreePath,
@@ -147,11 +355,17 @@ export async function processIssue(
     });
 
     if (implResult.exitCode !== 0) {
+      if (isTransientError(implResult.output)) {
+        log.warn(`Agent hit a transient error during implementation for #${issueNum} — re-queuing`);
+        requeueIssue(config, issueNum);
+        await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+        return failureResult(issueNum, title, startTime, 'transient');
+      }
       log.error(`Implementation failed for issue #${issueNum}`);
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, 'Agent loop failed during implementation. See logs for details.');
       await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
-      return failureResult(issueNum, title, startTime);
+      return failureResult(issueNum, title, startTime, 'permanent');
     }
 
     // Auto-commit if agent didn't
@@ -168,8 +382,15 @@ export async function processIssue(
   log.step('Step 5: Running tests');
   let testOutput = '';
   let testsPassing = false;
+  let testRetries = 0;
 
-  for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+  if (!plan.testing.needed) {
+    log.info(`Tests skipped by plan: ${plan.testing.reason}`);
+    testsPassing = true;
+    testOutput = `Tests skipped by plan: ${plan.testing.reason}`;
+  }
+
+  for (let attempt = 1; testsPassing ? false : attempt <= config.maxTestRetries; attempt++) {
     log.info(`Test attempt ${attempt} of ${config.maxTestRetries}`);
 
     const testResult = runTests(worktreePath, config, logFile);
@@ -182,16 +403,17 @@ export async function processIssue(
     }
 
     if (attempt < config.maxTestRetries) {
+      testRetries++;
       log.warn(`Tests failed on attempt ${attempt}, invoking agent to fix...`);
       if (!config.dryRun) {
-        const fixPrompt = `Tests are failing for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix the implementation code or the tests\n3. Run the tests again to verify\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why it was failing>\n   Example: fix(#${issueNum}): use port 5435 for postgres — default 5432 conflicts with host service\n   DO NOT use generic messages like "fix: resolve test failures"`;
+        const fixPrompt = `Tests are failing for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix ONLY code related to issue #${issueNum} — do NOT modify test infrastructure, build scripts, or unrelated files\n3. If tests fail due to environment issues (missing venv, wrong port, missing deps), fix only YOUR code — do NOT rewrite the test runner or package.json scripts\n4. Run the tests again to verify\n5. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why it was failing>\n   Example: fix(#${issueNum}): use port 5435 for postgres — default 5432 conflicts with host service\n   DO NOT use generic messages like "fix: resolve test failures"`;
 
         await spawnAgent({
-          agent: 'claude',
+          agent: config.agent,
           model: config.model,
           prompt: fixPrompt,
           cwd: worktreePath,
-    
+          resume: true,
           logFile: join(session.logsDir, `issue-${issueNum}-fix-${attempt}.log`),
           verbose: config.verbose,
         });
@@ -209,94 +431,192 @@ export async function processIssue(
     }
   }
 
-  // --- Step 6: Live verification with playwright-cli ---
-  log.step('Step 6: Live verification');
-  let verifyOutput = '';
-  let verifyPassing = false;
-
-  for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
-    log.info(`Verification attempt ${attempt} of ${config.maxTestRetries}`);
-
-    const verifyResult = await runVerify({
-      worktree: worktreePath,
-      logFile,
-      issueNum,
-      title,
-      body,
-      config,
-      sessionDir: session.resultsDir,
-    });
-    verifyOutput = verifyResult.output;
-
-    if (verifyResult.passed) {
-      verifyPassing = true;
-      log.success(`Verification passed on attempt ${attempt}`);
-      break;
-    }
-
-    if (attempt < config.maxTestRetries) {
-      // If the agent timed out, retrying with a fix agent won't help — just retry verification
-      const timedOut = verifyOutput.includes('[TIMEOUT]');
-      if (timedOut) {
-        log.warn(`Verification timed out on attempt ${attempt}, retrying without fix agent...`);
-      } else {
-        log.warn(`Verification failed on attempt ${attempt}, invoking agent to fix...`);
-        const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\nThe app was started and tested with playwright-cli, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification output above and identify the ROOT CAUSE of each failure\n2. Fix the implementation code so the feature works correctly\n3. Run the test command to make sure unit tests still pass\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why verification failed>\n   Example: fix(#${issueNum}): add ENCRYPTION_KEY to langfuse config — service requires 32+ char secret\n   DO NOT use generic messages like "fix: resolve verification failures"`;
-
-        await spawnAgent({
-          agent: 'claude',
-          model: config.model,
-          prompt: verifyFixPrompt,
-          cwd: worktreePath,
-          logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
-          verbose: config.verbose,
-        });
-      }
-
-      // Auto-commit fixes
-      const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
-      if (fixStatus.stdout.trim()) {
-        exec('git add -A', { cwd: worktreePath });
-        exec(`git commit -m "fix(#${issueNum}): resolve verification failures (attempt ${attempt})"`, { cwd: worktreePath });
-      }
-    } else {
-      log.warn(`Verification still failing after ${config.maxTestRetries} attempts`);
-    }
-  }
-
-  // --- Step 7: Review ---
-  log.step('Step 7: Code review');
+  // --- Step 6: Review gate (JSON-based) ---
+  log.step('Step 6: Code review');
   let reviewOutput = '';
+  let reviewGate: GateResult = DEFAULT_GATE;
 
   if (config.skipReview) {
     log.info('Code review skipped');
   } else if (config.dryRun) {
     log.dry('Would run code review');
   } else {
-    try {
-      const reviewPrompt = buildReviewPrompt({
+    const reviewFileInWorktree = join(worktreePath, `review-issue-${issueNum}.json`);
+    const reviewFileInSession = join(session.logsDir, `review-issue-${issueNum}.json`);
+
+    for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+      log.info(`Review attempt ${attempt} of ${config.maxTestRetries}`);
+
+      try {
+        const reviewPrompt = buildReviewPrompt({
+          issueNum,
+          title,
+          body,
+          baseBranch: config.baseBranch,
+          visionContext: loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md')) ?? undefined,
+        });
+
+        const reviewResult = await spawnAgent({
+          agent: config.agent,
+          model: config.reviewModel,
+          prompt: reviewPrompt,
+          cwd: worktreePath,
+          logFile: join(session.logsDir, `issue-${issueNum}-review${attempt > 1 ? `-${attempt}` : ''}.log`),
+          verbose: config.verbose,
+        });
+
+        reviewOutput = reviewResult.output;
+      } catch {
+        log.warn('Code review failed, continuing without review');
+        reviewOutput = 'Code review could not be completed';
+        break;
+      }
+
+      // Read the gate JSON
+      reviewGate = readGateResult(reviewFileInWorktree);
+      moveToSessionLogs(reviewFileInWorktree, reviewFileInSession);
+
+      if (reviewGate.passed) {
+        log.success(`Review passed: ${reviewGate.summary || 'no issues found'}`);
+        break;
+      }
+
+      // Review found unfixed issues — loop back to implementer
+      const unfixedCount = reviewGate.findings.filter((f) => !f.fixed).length;
+      log.warn(`Review found ${unfixedCount} unfixed issue(s), sending back to implementer...`);
+
+      if (attempt < config.maxTestRetries) {
+        const findings = formatGateFindings(reviewGate, 'Code Review');
+        const fixPrompt = `The code review for issue #${issueNum} found problems that need to be fixed.\n\n${findings}\n\nInstructions:\n1. Address each finding listed above\n2. Run tests to make sure nothing is broken\n3. Commit your fixes with: git commit -m "fix(#${issueNum}): address review findings"`;
+
+        await spawnAgent({
+          agent: config.agent,
+          model: config.model,
+          prompt: fixPrompt,
+          cwd: worktreePath,
+          resume: true,
+          logFile: join(session.logsDir, `issue-${issueNum}-review-fix-${attempt}.log`),
+          verbose: config.verbose,
+        });
+
+        // Auto-commit if agent didn't
+        const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
+        if (fixStatus.stdout.trim()) {
+          exec('git add -A', { cwd: worktreePath });
+          exec(`git commit -m "fix(#${issueNum}): address review findings (attempt ${attempt})"`, { cwd: worktreePath });
+        }
+
+        // Re-run tests before next review attempt
+        const retest = runTests(worktreePath, config, logFile);
+        if (!retest.passed) {
+          log.warn('Tests failed after review fixes — will be caught in final status');
+          testOutput = retest.output;
+          testsPassing = false;
+        }
+      } else {
+        log.warn(`Review still failing after ${config.maxTestRetries} attempts`);
+      }
+    }
+  }
+
+  // --- Step 7: Verify gate (JSON-based) ---
+  log.step('Step 7: Live verification');
+  let verifyOutput = '';
+  let verifyPassing = false;
+  let verifySkipped = false;
+
+  if (!plan.verification.needed) {
+    log.info(`Verification skipped by plan: ${plan.verification.reason}`);
+    verifyPassing = true;
+    verifySkipped = true;
+    verifyOutput = `Verification skipped by plan: ${plan.verification.reason}`;
+  }
+
+  if (!verifySkipped && !config.dryRun) {
+    const verifyFileInWorktree = join(worktreePath, `verify-issue-${issueNum}.json`);
+    const verifyFileInSession = join(session.logsDir, `verify-issue-${issueNum}.json`);
+
+    for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+      log.info(`Verification attempt ${attempt} of ${config.maxTestRetries}`);
+
+      const verifyResult = await runVerify({
+        worktree: worktreePath,
+        logFile,
         issueNum,
         title,
         body,
-        baseBranch: config.baseBranch,
-        visionContext: loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md')) ?? undefined,
+        config,
+        sessionDir: session.resultsDir,
+        verifyInstructions: plan.verification.instructions,
       });
+      verifyOutput = verifyResult.output;
 
-      const reviewResult = await spawnAgent({
-        agent: 'claude',
-        model: config.reviewModel,
-        prompt: reviewPrompt,
-        cwd: worktreePath,
-  
-        logFile: join(session.logsDir, `issue-${issueNum}-review.log`),
-        verbose: config.verbose,
-      });
+      if (verifyResult.skipped) {
+        verifyPassing = true;
+        verifySkipped = true;
+        break;
+      }
 
-      reviewOutput = reviewResult.output;
-    } catch {
-      log.warn('Code review failed, continuing without review');
-      reviewOutput = 'Code review could not be completed';
+      // Read verify gate JSON (if the verify agent wrote one)
+      const verifyGate = readGateResult(verifyFileInWorktree);
+      moveToSessionLogs(verifyFileInWorktree, verifyFileInSession);
+
+      // Use gate JSON if available, otherwise fall back to runVerify's pass/fail
+      const passed = verifyGate !== DEFAULT_GATE ? verifyGate.passed : verifyResult.passed;
+
+      if (passed) {
+        verifyPassing = true;
+        log.success(`Verification passed on attempt ${attempt}`);
+        break;
+      }
+
+      if (attempt < config.maxTestRetries) {
+        const timedOut = verifyOutput.includes('[TIMEOUT]');
+        if (timedOut) {
+          log.warn(`Verification timed out on attempt ${attempt}, retrying...`);
+        } else {
+          log.warn(`Verification failed on attempt ${attempt}, sending back to implementer...`);
+
+          // Use gate findings if available, otherwise use raw verify output
+          const findings = verifyGate !== DEFAULT_GATE
+            ? formatGateFindings(verifyGate, 'Verification')
+            : `## Verification Findings (MUST FIX)\n\n${verifyOutput}`;
+
+          const fixPrompt = `Live verification failed for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\n\n${findings}\n\nInstructions:\n1. Read the verification findings and identify the ROOT CAUSE\n2. Fix ONLY code related to issue #${issueNum}\n3. Run tests to make sure nothing is broken\n4. Commit your fixes with: git commit -m "fix(#${issueNum}): address verification findings"`;
+
+          await spawnAgent({
+            agent: config.agent,
+            model: config.model,
+            prompt: fixPrompt,
+            cwd: worktreePath,
+            resume: true,
+            logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
+            verbose: config.verbose,
+          });
+
+          // Auto-commit if agent didn't
+          const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
+          if (fixStatus.stdout.trim()) {
+            exec('git add -A', { cwd: worktreePath });
+            exec(`git commit -m "fix(#${issueNum}): address verification findings (attempt ${attempt})"`, { cwd: worktreePath });
+          }
+
+          // Re-run tests before next verify attempt
+          const retest = runTests(worktreePath, config, logFile);
+          if (!retest.passed) {
+            log.warn('Tests failed after verify fixes');
+            testOutput = retest.output;
+            testsPassing = false;
+          }
+        }
+      } else {
+        log.warn(`Verification still failing after ${config.maxTestRetries} attempts`);
+      }
     }
+  } else if (config.dryRun && !verifySkipped) {
+    log.dry('Would run live verification');
+    verifyPassing = true;
+    verifySkipped = true;
   }
 
   // --- Step 8: Create PR ---
@@ -305,7 +625,7 @@ export async function processIssue(
 
   if (!config.dryRun) {
     const prBase = config.autoMerge ? session.branch : config.baseBranch;
-    const prBody = buildPRBody(issueNum, title, reviewOutput, testOutput, testsPassing, verifyPassing, body);
+    const prBody = buildPRBody(issueNum, title, reviewGate, testOutput, testsPassing, verifyPassing, verifySkipped, body);
 
     try {
       prUrl = createPR({
@@ -339,15 +659,20 @@ export async function processIssue(
     runDiff = diffResult.stdout.slice(0, MAX_DIFF_CHARS);
   }
 
+  // Format review gate for learnings
+  const reviewForLearnings = reviewGate.findings.length > 0
+    ? `Review: ${reviewGate.summary}\n${reviewGate.findings.map((f) => `- [${f.severity}] ${f.description} (${f.fixed ? 'fixed' : 'unfixed'})`).join('\n')}`
+    : `Review: ${reviewGate.summary || 'passed'}`;
+
   await extractLearnings({
     issueNum,
     title,
     status: testsPassing ? 'success' : 'failure',
-    retries: config.maxTestRetries,
+    retries: testRetries,
     duration,
     diff: runDiff,
     testOutput,
-    reviewOutput,
+    reviewOutput: reviewForLearnings,
     verifyOutput,
     body,
     config,
@@ -357,7 +682,7 @@ export async function processIssue(
   log.step('Step 10: Updating issue status');
   if (!config.dryRun) {
     const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
-    updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'Done');
+    updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In Review');
     labelIssue(config.repo, issueNum, 'in-review', 'in-progress');
     commentIssue(config.repo, issueNum,
       `Automated implementation complete.\n\n**PR**: ${prUrl ?? 'N/A'}\n**Tests**: ${testsStatus}\n**Review**: Attached to PR body.\n\n---\n*Processed by alpha-loop in ${duration}s*`,
@@ -408,6 +733,7 @@ export async function processIssue(
     prUrl,
     testsPassing,
     verifyPassing,
+    verifySkipped,
     duration,
     filesChanged,
   };
@@ -421,16 +747,29 @@ export async function processIssue(
   return result;
 }
 
-function failureResult(issueNum: number, title: string, startTime: number): PipelineResult {
+function failureResult(issueNum: number, title: string, startTime: number, reason?: 'transient' | 'permanent'): PipelineResult {
   return {
     issueNum,
     title,
     status: 'failure',
+    failureReason: reason,
     testsPassing: false,
     verifyPassing: false,
+    verifySkipped: false,
     duration: Math.round((Date.now() - startTime) / 1000),
     filesChanged: 0,
   };
+}
+
+/**
+ * Re-queue an issue back to ready state after a transient failure.
+ * Restores the label to ready and project status to Todo.
+ */
+function requeueIssue(config: Config, issueNum: number): void {
+  if (config.dryRun) return;
+  labelIssue(config.repo, issueNum, config.labelReady, 'in-progress');
+  updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'Todo');
+  log.info(`Issue #${issueNum} re-queued for next run`);
 }
 
 function loadFileIfExists(filePath: string): string | null {
@@ -442,68 +781,66 @@ function loadFileIfExists(filePath: string): string | null {
   }
 }
 
-/**
- * Extract just the review summary from the full agent output.
- * Looks for the structured report section the reviewer agent produces.
- */
-function extractReviewSummary(reviewOutput: string): string {
-  if (!reviewOutput) return 'No review available';
-
-  // Look for the structured review report (reviewer agent outputs this format)
-  const patterns = [
-    /### Review Summary[\s\S]*$/m,
-    /### Findings Fixed[\s\S]*$/m,
-    /## Review Report[\s\S]*$/m,
-    /\*\*Verdict:.*$/m,
-  ];
-
-  for (const pattern of patterns) {
-    const match = reviewOutput.match(pattern);
-    if (match) return match[0].trim();
-  }
-
-  // Fallback: take the last 500 chars which usually has the summary
-  const lines = reviewOutput.trim().split('\n');
-  const lastLines = lines.slice(-20).join('\n');
-  if (lastLines.length > 0) return lastLines;
-
-  return 'Review completed — see logs for details';
-}
 
 /**
  * Extract a one-line test summary from raw test output.
- * e.g., "30 passed, 0 failed" from Jest/Vitest output.
+ * Aggregates results across multiple test runners (pytest, Jest, Vitest).
+ * Handles concurrent output like: [pytest] 189 passed, [frontend] Tests 6 passed, etc.
  */
 function extractTestSummary(testOutput: string): string {
   if (!testOutput) return '';
 
-  // Jest: "Tests:  30 passed, 30 total"
-  const jestMatch = testOutput.match(/Tests:\s+(.+total)/);
-  if (jestMatch) return jestMatch[1].trim();
+  let totalPassed = 0;
+  let totalFailed = 0;
+  let totalSkipped = 0;
 
-  // Vitest: "Tests  30 passed (30)"
-  const vitestMatch = testOutput.match(/Tests\s+(.+\(\d+\))/);
-  if (vitestMatch) return vitestMatch[1].trim();
+  // Pytest summary line: "189 passed, 1 skipped in 7.05s" or "5 failed, 184 passed"
+  // Match the "=== ... ===" summary line format
+  for (const match of testOutput.matchAll(/=+\s*(.*?)\s*=+/g)) {
+    const line = match[1];
+    const passed = line.match(/(\d+) passed/);
+    const failed = line.match(/(\d+) failed/);
+    const skipped = line.match(/(\d+) skipped/);
+    if (passed) totalPassed += parseInt(passed[1], 10);
+    if (failed) totalFailed += parseInt(failed[1], 10);
+    if (skipped) totalSkipped += parseInt(skipped[1], 10);
+  }
 
-  // Fallback: count "passed" and "failed" lines
-  const passed = (testOutput.match(/passed/gi) || []).length;
-  const failed = (testOutput.match(/failed/gi) || []).length;
-  if (passed > 0 || failed > 0) return `${passed} passed, ${failed} failed`;
+  // Jest summary: "Tests:  30 passed, 30 total" or "Tests:  2 failed, 28 passed, 30 total"
+  for (const match of testOutput.matchAll(/Tests:\s+(?:(\d+) failed,\s+)?(\d+) passed/g)) {
+    if (match[1]) totalFailed += parseInt(match[1], 10);
+    totalPassed += parseInt(match[2], 10);
+  }
 
-  return '';
+  // Vitest summary: "Tests  6 passed (6)" — uses spaces not colon, has parens
+  for (const match of testOutput.matchAll(/Tests\s+(?:(\d+) failed\s+)?(\d+) passed\s+\(\d+\)/g)) {
+    if (match[1]) totalFailed += parseInt(match[1], 10);
+    totalPassed += parseInt(match[2], 10);
+  }
+
+  if (totalPassed === 0 && totalFailed === 0) return '';
+
+  const parts: string[] = [];
+  parts.push(`${totalPassed} passed`);
+  if (totalFailed > 0) parts.push(`${totalFailed} failed`);
+  if (totalSkipped > 0) parts.push(`${totalSkipped} skipped`);
+  return parts.join(', ');
 }
 
 function buildPRBody(
   issueNum: number,
   title: string,
-  reviewOutput: string,
+  reviewGate: GateResult,
   testOutput: string,
   testsPassing: boolean,
   verifyPassing: boolean,
+  verifySkipped: boolean,
   body: string,
 ): string {
   const testSummary = extractTestSummary(testOutput);
-  const reviewSummary = extractReviewSummary(reviewOutput);
+
+  const verifyStatus = verifySkipped ? 'SKIPPED' : verifyPassing ? 'PASS' : 'FAIL';
+  const reviewStatus = reviewGate.passed ? 'PASS' : 'FAIL';
 
   const lines: string[] = [
     `Closes #${issueNum}`,
@@ -517,7 +854,8 @@ function buildPRBody(
     `| Check | Status |`,
     `|-------|--------|`,
     `| Unit tests | ${testsPassing ? 'PASS' : 'FAIL'} |`,
-    `| Verification | ${verifyPassing ? 'PASS' : 'FAIL'} |`,
+    `| Code review | ${reviewStatus} |`,
+    `| Verification | ${verifyStatus} |`,
   ];
 
   if (testSummary) {
@@ -526,13 +864,20 @@ function buildPRBody(
 
   lines.push('');
 
-  // Code review — just the summary, not the full agent output
-  lines.push(
-    '## Code Review',
-    '',
-    reviewSummary,
-    '',
-  );
+  // Code review — structured from gate result
+  if (reviewGate.findings.length > 0) {
+    lines.push('## Code Review', '');
+    lines.push(reviewGate.summary || 'Review completed');
+    lines.push('');
+    for (const f of reviewGate.findings) {
+      const status = f.fixed ? 'FIXED' : 'OPEN';
+      const fileRef = f.file ? ` \`${f.file}\`` : '';
+      lines.push(`- **${f.severity.toUpperCase()}** [${status}]${fileRef}: ${f.description}`);
+    }
+    lines.push('');
+  } else {
+    lines.push('## Code Review', '', reviewGate.summary || 'No issues found', '');
+  }
 
   // What to test — from issue body or generic
   const whatToTestMatch = body.match(/## Test Requirements[\s\S]*?(?=\n## |$)/);

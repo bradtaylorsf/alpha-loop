@@ -42,7 +42,8 @@ export const HARNESS_REGISTRY: Record<string, HarnessConfig> = {
   antigravity:    { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   augment:        { skillsDir: '.augment/skills' },
   bob:            { skillsDir: '.bob/skills' },
-  'claude-code':  { skillsDir: '.claude/skills', agentsDir: '.claude/agents', instructionsFile: 'CLAUDE.md' },
+  claude:         { skillsDir: '.claude/skills', agentsDir: '.claude/agents', instructionsFile: 'CLAUDE.md' },
+  'claude-code':  { skillsDir: '.claude/skills', agentsDir: '.claude/agents', instructionsFile: 'CLAUDE.md' }, // legacy alias
   openclaw:       { skillsDir: 'skills' },
   cline:          { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   warp:           { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
@@ -218,6 +219,26 @@ function resolveTemplateSources(projectDir: string): TemplateSources | null {
 }
 
 // ---------------------------------------------------------------------------
+// Agent → Harness mapping
+// ---------------------------------------------------------------------------
+
+/** Maps agent CLI names to their default harness names for syncing. */
+const AGENT_HARNESS_MAP: Record<string, string[]> = {
+  claude: ['claude'],
+  codex: ['codex'],
+  opencode: ['opencode'],
+};
+
+/**
+ * Resolve harnesses to sync to. If explicit harnesses are provided, use those.
+ * Otherwise, derive from the configured agent.
+ */
+export function resolveHarnesses(harnesses: string[], agent: string): string[] {
+  if (harnesses.length > 0) return harnesses;
+  return AGENT_HARNESS_MAP[agent] ?? [];
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -375,17 +396,17 @@ export function migrateToTemplates(projectDir: string = process.cwd()): void {
 export function syncCommand(options: { check?: boolean; harnesses?: string[] } = {}): void {
   const projectDir = process.cwd();
 
-  // Load harnesses from options or fall back to config file
+  // Load harnesses from options or fall back to config file, auto-deriving from agent if needed
   let harnesses = options.harnesses ?? [];
   if (harnesses.length === 0) {
     try {
-      harnesses = loadConfig().harnesses;
+      const config = loadConfig();
+      harnesses = resolveHarnesses(config.harnesses, config.agent);
     } catch { /* config not available */ }
   }
 
   if (harnesses.length === 0) {
-    log.warn('No harnesses configured. Add a "harnesses" list to .alpha-loop.yaml.');
-    log.info('Example:  harnesses:\n  - claude-code\n  - codex');
+    log.warn('No harnesses configured. Set "agent" or add a "harnesses" list to .alpha-loop.yaml.');
     return;
   }
 

@@ -52,8 +52,7 @@ alpha-loop/
 │   │   ├── scan.ts             # Project context generation
 │   │   └── vision.ts           # Vision document setup
 │   ├── engine/                 # Multi-agent engine
-│   │   ├── agents.ts           # Agent registry and selection
-│   │   ├── config.ts           # Engine configuration with Zod
+│   │   ├── agents.ts           # Agent CLI map and arg builder (claude, codex, opencode)
 │   │   └── prerequisites.ts    # System requirement checks
 │   └── lib/                    # Shared libraries
 │       ├── agent.ts            # Agent runner abstraction
@@ -75,7 +74,7 @@ alpha-loop/
 ├── templates/                  # DISTRIBUTION: starter files shipped with npm package
 │   ├── skills/                 # Default skills installed by `alpha-loop init`
 │   └── agents/                 # Default agent prompts installed by `alpha-loop init`
-├── .alpha-loop.yaml            # Loop configuration (includes harnesses list)
+├── .alpha-loop.yaml            # Loop configuration (agent, model, harnesses, etc.)
 ├── .alpha-loop/
 │   ├── templates/              # THIS REPO'S OWN skills and sub-agent definitions
 │   │   ├── skills/             # Skill definitions (synced to harness-specific paths)

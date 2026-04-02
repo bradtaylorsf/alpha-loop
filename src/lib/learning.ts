@@ -62,7 +62,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
   }
 
   const result = await spawnAgent({
-    agent: 'claude',
+    agent: config.agent,
     model: config.reviewModel,
     prompt,
     cwd: process.cwd(),
@@ -234,7 +234,7 @@ Output ONLY this markdown structure:
 | Total duration | ${Math.round(totalDuration / 60)} min |`;
 
   const agentResult = await spawnAgent({
-    agent: 'claude',
+    agent: config.agent,
     model: config.reviewModel,
     prompt,
     cwd: process.cwd(),

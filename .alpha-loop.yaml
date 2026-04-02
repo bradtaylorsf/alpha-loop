@@ -2,42 +2,20 @@
 # This repo uses itself to build itself
 
 repo: bradtaylorsf/alpha-loop
+repo_owner: bradtaylorsf
 project: 2
-model: opus                      # global default model
-review_model: opus
-max_turns: 30
-label: ready
+agent: claude
 base_branch: master
+label: ready
 test_command: pnpm test
-poll_interval: 60
+dev_command: pnpm dev
+auto_merge: true
 
-# Coding harnesses to sync skills/agents to
+# Safety limits (0 = unlimited)
+max_issues: 0
+max_session_duration: 0
+max_test_retries: 3
+
+# Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
   - claude-code
-  - codex
-
-# Per-stage agent/model configuration (optional).
-# If a stage is not listed, it falls back to global model + agent: claude.
-# stages:
-#   implement:
-#     agent: claude              # which CLI to invoke (claude, codex, opencode)
-#     model: opus                # model to pass via --model flag
-#     maxTurns: 30
-#   fix:
-#     agent: claude
-#     model: opus
-#     maxTurns: 20
-#   review:
-#     agent: codex               # different agent for code review
-#     model: codex
-#   verify:
-#     agent: codex
-#     model: codex
-#   learn:
-#     agent: claude
-#     model: opus
-#     maxTurns: 5
-#   aggregate:
-#     agent: claude
-#     model: opus
-#     maxTurns: 10

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
 import { assertSafeShellArg, loadConfig } from '../lib/config.js';
+import { buildOneShotCommand } from '../lib/agent.js';
 
 const SCAN_PROMPT = `Analyze this codebase and produce a concise project context file. Read the key files (package.json, entry points, config files, README, CLAUDE.md) and output ONLY this markdown structure:
 
@@ -83,6 +84,9 @@ IMPORTANT: Do NOT add testing procedures, git workflow, code review checklists, 
 
 `;
 
+/** Timeout for one-shot agent calls (scan, instructions). */
+const AGENT_TIMEOUT = 5 * 60 * 1000;
+
 export function scanCommand(): void {
   const projectDir = process.cwd();
   const contextDir = path.join(projectDir, '.alpha-loop');
@@ -94,10 +98,11 @@ export function scanCommand(): void {
   // --- Generate project context ---
   log.step('Scanning codebase for project context...');
 
-  const model = assertSafeShellArg(config.model ?? 'opus', 'model');
+  const safeModel = assertSafeShellArg(config.model, 'model');
+  const agentCmd = buildOneShotCommand(config.agent, safeModel);
   const result = exec(
-    `echo ${JSON.stringify(SCAN_PROMPT)} | claude -p --model ${model} --dangerously-skip-permissions --output-format text 2>/dev/null`,
-    { cwd: projectDir },
+    `echo ${JSON.stringify(SCAN_PROMPT)} | ${agentCmd} 2>/dev/null`,
+    { cwd: projectDir, timeout: AGENT_TIMEOUT },
   );
 
   if (result.exitCode === 0 && result.stdout) {
@@ -105,21 +110,21 @@ export function scanCommand(): void {
     log.success(`Project context saved to ${contextFile}`);
   } else if (result.stdout) {
     fs.writeFileSync(contextFile, result.stdout + '\n');
-    log.warn('Claude exited with errors but produced output');
+    log.warn('Agent exited with errors but produced output');
     log.success(`Project context saved to ${contextFile}`);
   } else {
     log.error(`Project context generation failed: ${result.stderr || 'empty output'}`);
   }
 
   // --- Generate instructions file ---
-  generateInstructions(projectDir, model);
+  generateInstructions(projectDir, config.agent, safeModel);
 }
 
 /**
  * Generate or update the instructions file at .alpha-loop/templates/instructions.md.
  * If no existing file, generates from scratch. If existing, merges with fresh scan.
  */
-export function generateInstructions(projectDir: string, model: string): void {
+export function generateInstructions(projectDir: string, agent: 'claude' | 'codex' | 'opencode', model: string): void {
   const templatesDir = path.join(projectDir, '.alpha-loop', 'templates');
   fs.mkdirSync(templatesDir, { recursive: true });
 
@@ -127,6 +132,8 @@ export function generateInstructions(projectDir: string, model: string): void {
   const existing = fs.existsSync(instructionsFile)
     ? fs.readFileSync(instructionsFile, 'utf-8')
     : null;
+
+  const agentCmd = buildOneShotCommand(agent, model);
 
   if (existing) {
     // Merge mode: preserve user customizations, update stale content
@@ -139,12 +146,11 @@ export function generateInstructions(projectDir: string, model: string): void {
       '\n\n## OUTPUT:\nProduce the updated instructions file. Output ONLY the markdown content, nothing else.';
 
     // Write prompt to temp file to avoid shell injection from file content
-    const safeModel = assertSafeShellArg(model, 'model');
     const promptFile = path.join(tmpdir(), `alpha-loop-merge-${Date.now()}.txt`);
     fs.writeFileSync(promptFile, mergePrompt, 'utf-8');
     const mergeResult = exec(
-      `claude -p --model ${safeModel} --dangerously-skip-permissions --output-format text < "${promptFile}" 2>/dev/null`,
-      { cwd: projectDir },
+      `${agentCmd} < "${promptFile}" 2>/dev/null`,
+      { cwd: projectDir, timeout: AGENT_TIMEOUT },
     );
     try { fs.unlinkSync(promptFile); } catch { /* cleanup best-effort */ }
 
@@ -163,12 +169,11 @@ export function generateInstructions(projectDir: string, model: string): void {
     // Fresh generation
     log.step('Generating baseline instructions file...');
 
-    const safeModel = assertSafeShellArg(model, 'model');
     const genPromptFile = path.join(tmpdir(), `alpha-loop-gen-${Date.now()}.txt`);
     fs.writeFileSync(genPromptFile, INSTRUCTIONS_PROMPT, 'utf-8');
     const genResult = exec(
-      `claude -p --model ${safeModel} --dangerously-skip-permissions --output-format text < "${genPromptFile}" 2>/dev/null`,
-      { cwd: projectDir },
+      `${agentCmd} < "${genPromptFile}" 2>/dev/null`,
+      { cwd: projectDir, timeout: AGENT_TIMEOUT },
     );
     try { fs.unlinkSync(genPromptFile); } catch { /* cleanup best-effort */ }
 

@@ -18,6 +18,7 @@ jest.mock('../../src/lib/logger', () => ({
 
 jest.mock('../../src/lib/config', () => ({
   loadConfig: jest.fn(),
+  assertSafeShellArg: jest.fn((value: string) => value),
 }));
 
 jest.mock('../../src/lib/github', () => ({
@@ -57,6 +58,7 @@ jest.mock('../../src/lib/preflight', () => ({
 
 jest.mock('../../src/commands/sync', () => ({
   syncAgentAssets: jest.fn().mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] }),
+  resolveHarnesses: jest.fn((harnesses: string[], _agent: string) => harnesses),
 }));
 
 jest.mock('node:fs', () => ({
@@ -82,6 +84,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     repo: 'owner/repo',
     repoOwner: 'owner',
     project: 1,
+    agent: 'claude',
     model: 'opus',
     reviewModel: 'opus',
     pollInterval: 60,
@@ -92,7 +95,6 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     maxTestRetries: 3,
     testCommand: 'pnpm test',
     devCommand: 'pnpm dev',
-    port: 3000,
     skipTests: false,
     skipReview: false,
     skipInstall: false,
@@ -109,6 +111,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     maxSessionDuration: 0,
     milestone: '',
     harnesses: [],
+    setupCommand: '',
     ...overrides,
   };
 }
@@ -149,6 +152,7 @@ describe('runCommand', () => {
       status: 'success',
       testsPassing: true,
       verifyPassing: true,
+      verifySkipped: false,
       duration: 60,
       filesChanged: 5,
     });

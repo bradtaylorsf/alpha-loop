@@ -9,8 +9,12 @@ jest.mock('../../src/lib/shell', () => ({
 }));
 
 jest.mock('../../src/lib/config', () => ({
-  loadConfig: jest.fn().mockReturnValue({ model: 'opus' }),
+  loadConfig: jest.fn().mockReturnValue({ agent: 'claude', model: '' }),
   assertSafeShellArg: jest.fn((value: string) => value),
+}));
+
+jest.mock('../../src/lib/agent', () => ({
+  buildOneShotCommand: jest.fn(() => 'claude -p --dangerously-skip-permissions --output-format text'),
 }));
 
 import { scanCommand } from '../../src/commands/scan';

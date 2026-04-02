@@ -6,6 +6,7 @@ export type Config = {
   repo: string;
   repoOwner: string;
   project: number;
+  agent: 'claude' | 'codex' | 'opencode';
   model: string;
   reviewModel: string;
   pollInterval: number;
@@ -16,7 +17,6 @@ export type Config = {
   maxTestRetries: number;
   testCommand: string;
   devCommand: string;
-  port: number;
   skipTests: boolean;
   skipReview: boolean;
   skipInstall: boolean;
@@ -33,14 +33,16 @@ export type Config = {
   runFull: boolean;
   verbose: boolean;
   harnesses: string[];
+  setupCommand: string;
 };
 
 const DEFAULTS: Config = {
   repo: '',
   repoOwner: '',
   project: 2,
-  model: 'opus',
-  reviewModel: 'opus',
+  agent: 'claude',
+  model: '',
+  reviewModel: '',
   pollInterval: 60,
   dryRun: false,
   baseBranch: 'master',
@@ -49,7 +51,6 @@ const DEFAULTS: Config = {
   maxTestRetries: 3,
   testCommand: 'pnpm test',
   devCommand: 'pnpm dev',
-  port: 3000,
   skipTests: false,
   skipReview: false,
   skipInstall: false,
@@ -66,6 +67,7 @@ const DEFAULTS: Config = {
   runFull: false,
   verbose: false,
   harnesses: [],
+  setupCommand: '',
 };
 
 /** Map from YAML key (snake_case) to Config key (camelCase). */
@@ -73,6 +75,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   harnesses: 'harnesses',
   repo: 'repo',
   project: 'project',
+  agent: 'agent',
   model: 'model',
   review_model: 'reviewModel',
   poll_interval: 'pollInterval',
@@ -83,7 +86,6 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   max_test_retries: 'maxTestRetries',
   test_command: 'testCommand',
   dev_command: 'devCommand',
-  port: 'port',
   skip_tests: 'skipTests',
   skip_review: 'skipReview',
   skip_install: 'skipInstall',
@@ -99,12 +101,14 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   auto_cleanup: 'autoCleanup',
   run_full: 'runFull',
   verbose: 'verbose',
+  setup_command: 'setupCommand',
 };
 
 /** Map from env var name to Config key. */
 const ENV_KEY_MAP: Record<string, keyof Config> = {
   REPO: 'repo',
-  PROJECT_NUM: 'project',
+  PROJECT: 'project',
+  AGENT: 'agent',
   MODEL: 'model',
   REVIEW_MODEL: 'reviewModel',
   POLL_INTERVAL: 'pollInterval',
@@ -115,7 +119,6 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   MAX_TEST_RETRIES: 'maxTestRetries',
   TEST_COMMAND: 'testCommand',
   DEV_COMMAND: 'devCommand',
-  PORT: 'port',
   SKIP_TESTS: 'skipTests',
   SKIP_REVIEW: 'skipReview',
   SKIP_INSTALL: 'skipInstall',
@@ -131,6 +134,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   AUTO_CLEANUP: 'autoCleanup',
   RUN_FULL: 'runFull',
   VERBOSE: 'verbose',
+  SETUP_COMMAND: 'setupCommand',
 };
 
 function coerce(value: string, current: unknown): unknown {
@@ -139,8 +143,9 @@ function coerce(value: string, current: unknown): unknown {
   return value;
 }
 
-/** Validate a string contains only safe shell characters. */
+/** Validate a string contains only safe shell characters. Empty strings are allowed (model is optional). */
 export function assertSafeShellArg(value: string, name: string): string {
+  if (value === '') return value;
   if (!/^[a-zA-Z0-9._\-/]+$/.test(value)) {
     throw new Error(`Invalid ${name}: contains unsafe characters: ${value}`);
   }
@@ -213,6 +218,12 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...envConfig,
     ...overrides,
   };
+
+  // Validate agent is a known value
+  const VALID_AGENTS = ['claude', 'codex', 'opencode'] as const;
+  if (!VALID_AGENTS.includes(merged.agent as typeof VALID_AGENTS[number])) {
+    throw new Error(`Invalid agent: "${merged.agent}". Supported agents: ${VALID_AGENTS.join(', ')}`);
+  }
 
   // Derive repoOwner from repo
   if (merged.repo) {

@@ -132,7 +132,7 @@ describe('buildReviewPrompt', () => {
     expect(prompt).not.toContain('## Product Vision');
   });
 
-  test('includes structured review report format', () => {
+  test('includes gate result JSON schema', () => {
     const prompt = buildReviewPrompt({
       issueNum: 42,
       title: 'Add login page',
@@ -140,9 +140,10 @@ describe('buildReviewPrompt', () => {
       baseBranch: 'master',
     });
 
-    expect(prompt).toContain('### Findings Fixed');
-    expect(prompt).toContain('### Remaining Gaps');
-    expect(prompt).toContain('### Verification Notes');
+    expect(prompt).toContain('## Gate Result (REQUIRED)');
+    expect(prompt).toContain('review-issue-42.json');
+    expect(prompt).toContain('"passed"');
+    expect(prompt).toContain('"findings"');
   });
 });
 
@@ -166,7 +167,7 @@ describe('buildLearnPrompt', () => {
     expect(prompt).toContain('## Run Info');
     expect(prompt).toContain('#42 "Add login page"');
     expect(prompt).toContain('Status: success');
-    expect(prompt).toContain('Retries: 1');
+    expect(prompt).toContain('Test fix retries: 1');
     expect(prompt).toContain('Duration: 300s');
   });
 

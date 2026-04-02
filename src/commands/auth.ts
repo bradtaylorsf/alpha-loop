@@ -33,7 +33,7 @@ export async function authCommand(): Promise<void> {
   console.log('verification runs.');
   console.log('');
 
-  const defaultUrl = `http://localhost:${config.port ?? 3000}`;
+  const defaultUrl = `http://localhost:3000`;
 
   const rl = readline.createInterface({
     input: process.stdin,

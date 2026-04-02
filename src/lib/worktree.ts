@@ -18,6 +18,7 @@ export type SetupWorktreeOptions = {
   sessionBranch?: string;
   autoMerge?: boolean;
   skipInstall?: boolean;
+  setupCommand?: string;
   dryRun?: boolean;
 };
 
@@ -36,7 +37,7 @@ const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.l
  * branches from session branch so changes stack across issues.
  */
 export async function setupWorktree(options: SetupWorktreeOptions): Promise<WorktreeResult> {
-  const { issueNum, projectDir, baseBranch, sessionBranch, autoMerge, skipInstall, dryRun } = options;
+  const { issueNum, projectDir, baseBranch, sessionBranch, autoMerge, skipInstall, setupCommand, dryRun } = options;
   const branch = `agent/issue-${issueNum}`;
   const worktreesDir = resolve(projectDir, '.worktrees');
   mkdirSync(worktreesDir, { recursive: true });
@@ -120,6 +121,15 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
       if (fallback.exitCode !== 0) {
         log.warn('pnpm install had issues, continuing anyway...');
       }
+    }
+  }
+
+  // Run custom setup command (e.g., Python venv, Ruby bundler, Go modules)
+  if (setupCommand) {
+    log.info(`Running setup command: ${setupCommand}`);
+    const setupResult = exec(setupCommand, { cwd: worktreePath });
+    if (setupResult.exitCode !== 0) {
+      log.warn(`Setup command failed (exit ${setupResult.exitCode}), continuing anyway...`);
     }
   }
 

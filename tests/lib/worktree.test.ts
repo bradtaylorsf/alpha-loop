@@ -173,6 +173,39 @@ describe('setupWorktree', () => {
     );
   });
 
+  test('runs setup command after dependency install', async () => {
+    await setupWorktree({ ...baseOptions, setupCommand: 'python -m venv .venv' });
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'python -m venv .venv',
+      expect.objectContaining({ cwd: expect.stringContaining('issue-42') }),
+    );
+  });
+
+  test('skips setup command when not configured', async () => {
+    await setupWorktree(baseOptions);
+
+    const setupCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('python'),
+    );
+    expect(setupCalls).toHaveLength(0);
+  });
+
+  test('continues when setup command fails', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('python')) {
+        return { stdout: '', stderr: 'error', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await setupWorktree({ ...baseOptions, setupCommand: 'python -m venv .venv' });
+
+    // Should still return successfully
+    expect(result.branch).toBe('agent/issue-42');
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('Setup command failed'));
+  });
+
   test('skips pnpm install when skipInstall is true', async () => {
     await setupWorktree({ ...baseOptions, skipInstall: true });
 

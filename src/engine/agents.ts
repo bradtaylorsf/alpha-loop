@@ -9,7 +9,13 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import type { AgentConfig } from './config.js';
+
+/** Minimal config needed to build agent CLI args. */
+export type AgentConfig = {
+  agent: string;
+  model: string;
+  maxTurns?: number;
+};
 
 // ============================================================================
 // Agent CLI Mapping
@@ -37,9 +43,9 @@ export const AGENT_CLI_MAP: Record<string, {
   },
   codex: {
     command: 'codex',
-    promptFlag: '-q',
+    promptFlag: 'exec',
     modelFlag: '--model',
-    permissionFlag: '--auto-edit',
+    permissionFlag: '--full-auto',
     supportsMaxTurns: false,
   },
   opencode: {
@@ -73,13 +79,16 @@ export function buildAgentArgs(config: AgentConfig & { model: string }, prompt: 
 
   const args: string[] = [];
 
-  // For opencode, "run" is a subcommand, not a flag
-  if (config.agent === 'opencode') {
-    args.push(agentDef.promptFlag); // 'run'
+  // For agents that use subcommands (codex 'exec', opencode 'run'), add it first
+  const isSubcommand = config.agent === 'codex' || config.agent === 'opencode';
+  if (isSubcommand) {
+    args.push(agentDef.promptFlag);
   }
 
-  // Model flag
-  args.push(agentDef.modelFlag, config.model);
+  // Model flag (skip if empty — let agent CLI use its default)
+  if (config.model) {
+    args.push(agentDef.modelFlag, config.model);
+  }
 
   // Permission flag (if agent supports it)
   if (agentDef.permissionFlag) {
@@ -91,12 +100,11 @@ export function buildAgentArgs(config: AgentConfig & { model: string }, prompt: 
     args.push(agentDef.maxTurnsFlag, String(config.maxTurns));
   }
 
-  // Prompt flag — for claude/codex it's a flag before the prompt text
-  if (config.agent !== 'opencode') {
-    args.push(agentDef.promptFlag, prompt);
-  } else {
-    // opencode takes prompt as a positional arg after 'run'
+  // Prompt: subcommand agents take it as positional arg; flag agents use promptFlag
+  if (isSubcommand) {
     args.push(prompt);
+  } else {
+    args.push(agentDef.promptFlag, prompt);
   }
 
   return { command: agentDef.command, args };

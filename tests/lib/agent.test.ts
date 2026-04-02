@@ -1,4 +1,4 @@
-import { buildAgentArgs, spawnAgent, type AgentOptions } from '../../src/lib/agent';
+import { buildAgentArgs, buildOneShotCommand, spawnAgent, type AgentOptions } from '../../src/lib/agent';
 
 // Mock child_process.spawn
 const mockStdin = { write: jest.fn(), end: jest.fn() };
@@ -48,7 +48,7 @@ describe('buildAgentArgs', () => {
       '--model', 'opus',
       '--dangerously-skip-permissions',
       '--verbose',
-      '--output-format', 'text',
+      '--output-format', 'stream-json',
     ]);
   });
 
@@ -72,7 +72,7 @@ describe('buildAgentArgs', () => {
     });
 
     expect(result.command).toBe('codex');
-    expect(result.args).toEqual(['-q', '--model', 'gpt-4', '--auto-edit']);
+    expect(result.args).toEqual(['exec', '--model', 'gpt-4', '--full-auto']);
   });
 
   test('constructs correct args for opencode agent', () => {
@@ -87,10 +87,109 @@ describe('buildAgentArgs', () => {
     expect(result.args).toEqual(['run', '--model', 'deepseek']);
   });
 
+  test('omits --model when model is empty', () => {
+    const claude = buildAgentArgs({ agent: 'claude', model: '', prompt: 'test', cwd: '/tmp' });
+    expect(claude.args).not.toContain('--model');
+
+    const codex = buildAgentArgs({ agent: 'codex', model: '', prompt: 'test', cwd: '/tmp' });
+    expect(codex.args).not.toContain('--model');
+
+    const opencode = buildAgentArgs({ agent: 'opencode', model: '', prompt: 'test', cwd: '/tmp' });
+    expect(opencode.args).not.toContain('--model');
+  });
+
   test('throws for unknown agent type', () => {
     expect(() =>
       buildAgentArgs({ agent: 'unknown' as any, model: 'x', prompt: 'y', cwd: '/tmp' }),
     ).toThrow('Unknown agent type: unknown');
+  });
+
+  test('claude resume adds --continue flag before -p', () => {
+    const result = buildAgentArgs({
+      agent: 'claude',
+      model: 'opus',
+      prompt: 'fix tests',
+      cwd: '/tmp',
+      resume: true,
+    });
+
+    expect(result.command).toBe('claude');
+    expect(result.args[0]).toBe('--continue');
+    expect(result.args[1]).toBe('-p');
+    expect(result.args).toContain('--model');
+  });
+
+  test('codex resume uses exec resume --last', () => {
+    const result = buildAgentArgs({
+      agent: 'codex',
+      model: 'gpt-4',
+      prompt: 'fix tests',
+      cwd: '/tmp',
+      resume: true,
+    });
+
+    expect(result.command).toBe('codex');
+    expect(result.args[0]).toBe('exec');
+    expect(result.args[1]).toBe('resume');
+    expect(result.args[2]).toBe('--last');
+    expect(result.args).toContain('--full-auto');
+  });
+
+  test('opencode ignores resume flag (no resume support)', () => {
+    const result = buildAgentArgs({
+      agent: 'opencode',
+      model: 'deepseek',
+      prompt: 'fix tests',
+      cwd: '/tmp',
+      resume: true,
+    });
+
+    expect(result.command).toBe('opencode');
+    expect(result.args).toEqual(['run', '--model', 'deepseek']);
+  });
+
+  test('resume false does not add --continue for claude', () => {
+    const result = buildAgentArgs({
+      agent: 'claude',
+      model: 'opus',
+      prompt: 'test',
+      cwd: '/tmp',
+      resume: false,
+    });
+
+    expect(result.args).not.toContain('--continue');
+    expect(result.args[0]).toBe('-p');
+  });
+});
+
+describe('buildOneShotCommand', () => {
+  test('builds claude command with model', () => {
+    const cmd = buildOneShotCommand('claude', 'opus');
+    expect(cmd).toBe('claude -p --model opus --dangerously-skip-permissions --output-format text');
+  });
+
+  test('builds claude command without model', () => {
+    const cmd = buildOneShotCommand('claude', '');
+    expect(cmd).toBe('claude -p --dangerously-skip-permissions --output-format text');
+  });
+
+  test('builds codex command with model', () => {
+    const cmd = buildOneShotCommand('codex', 'gpt-5.4');
+    expect(cmd).toBe('codex exec --model gpt-5.4 --full-auto');
+  });
+
+  test('builds codex command without model', () => {
+    const cmd = buildOneShotCommand('codex', '');
+    expect(cmd).toBe('codex exec --full-auto');
+  });
+
+  test('builds opencode command', () => {
+    const cmd = buildOneShotCommand('opencode', 'deepseek');
+    expect(cmd).toBe('opencode run --model deepseek');
+  });
+
+  test('throws for unknown agent', () => {
+    expect(() => buildOneShotCommand('unknown' as any, '')).toThrow('Unknown agent type: unknown');
   });
 });
 

@@ -9,7 +9,7 @@ jest.mock('../../src/lib/shell', () => ({
 }));
 
 jest.mock('../../src/lib/config', () => ({
-  loadConfig: jest.fn().mockReturnValue({ port: 3000 }),
+  loadConfig: jest.fn().mockReturnValue({}),
 }));
 
 import { authCommand } from '../../src/commands/auth';

@@ -1,4 +1,4 @@
-import { runVerify, type VerifyResult } from '../../src/lib/verify.js';
+import { runVerify, isNonUiChange, type VerifyResult } from '../../src/lib/verify.js';
 import type { Config } from '../../src/lib/config.js';
 
 // Mock agent and shell to avoid real process spawning
@@ -19,6 +19,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     repo: 'test/repo',
     repoOwner: 'test',
     project: 1,
+    agent: 'claude',
     model: 'opus',
     reviewModel: 'opus',
     pollInterval: 60,
@@ -29,7 +30,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxTestRetries: 1,
     testCommand: 'pnpm test',
     devCommand: 'pnpm dev',
-    port: 3000,
     skipTests: false,
     skipReview: false,
     skipInstall: false,
@@ -41,6 +41,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxSessionDuration: 0,
     milestone: '',
     harnesses: [],
+    setupCommand: '',
     autoMerge: false,
     mergeTo: '',
     autoCleanup: true,
@@ -50,12 +51,53 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
   };
 }
 
+describe('isNonUiChange', () => {
+  it('returns true for config-only changes', () => {
+    const diff = ` agents/fork/config.yaml       | 20 ++++++++++++++++++++
+ agents/fork/behaviors.yaml    | 15 +++++++++++++++
+ agents/fork/system_prompt.md  | 30 ++++++++++++++++++++++++++++++
+ 3 files changed, 65 insertions(+)`;
+    expect(isNonUiChange(diff)).toBe(true);
+  });
+
+  it('returns true for test-only changes', () => {
+    const diff = ` src/utils.test.ts  | 10 ++++++++++
+ src/api.test.tsx   | 5 +++++
+ 2 files changed, 15 insertions(+)`;
+    expect(isNonUiChange(diff)).toBe(true);
+  });
+
+  it('returns false for source code changes', () => {
+    const diff = ` src/components/App.tsx | 10 ++++++++++
+ 1 file changed, 10 insertions(+)`;
+    expect(isNonUiChange(diff)).toBe(false);
+  });
+
+  it('returns false when mix of UI and non-UI files', () => {
+    const diff = ` config.yaml         | 5 +++++
+ src/pages/Home.tsx   | 20 ++++++++++++++++++++
+ 2 files changed, 25 insertions(+)`;
+    expect(isNonUiChange(diff)).toBe(false);
+  });
+
+  it('returns true for empty diff', () => {
+    expect(isNonUiChange('')).toBe(true);
+  });
+
+  it('returns true for json/lock files', () => {
+    const diff = ` package.json     | 2 +-
+ pnpm-lock.yaml   | 100 +++++++++++++++++++++++++++++++
+ 2 files changed, 101 insertions(+), 1 deletion(-)`;
+    expect(isNonUiChange(diff)).toBe(true);
+  });
+});
+
 describe('runVerify', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  it('returns passed when skipVerify is true', async () => {
+  it('returns passed and skipped when skipVerify is true', async () => {
     const result = await runVerify({
       worktree: '/tmp/test',
       logFile: '/tmp/test.log',
@@ -67,10 +109,11 @@ describe('runVerify', () => {
     });
 
     expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
     expect(result.output).toContain('skipped');
   });
 
-  it('returns passed when dryRun is true', async () => {
+  it('returns passed and skipped when dryRun is true', async () => {
     const result = await runVerify({
       worktree: '/tmp/test',
       logFile: '/tmp/test.log',
@@ -82,6 +125,7 @@ describe('runVerify', () => {
     });
 
     expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
     expect(result.output).toContain('dry run');
   });
 
@@ -99,14 +143,43 @@ describe('runVerify', () => {
     });
 
     expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
     expect(result.output).toContain('playwright-cli not installed');
   });
 
-  it('skips verification when no dev command found', async () => {
-    // playwright-cli exists
+  it('skips verification for non-UI changes', async () => {
     exec.mockImplementation((cmd: string) => {
       if (cmd === 'which playwright-cli') {
         return { exitCode: 0, stdout: '/usr/bin/playwright-cli', stderr: '' };
+      }
+      if (cmd.includes('git diff --stat')) {
+        return { exitCode: 0, stdout: ' config.yaml | 5 +++++\n 1 file changed, 5 insertions(+)', stderr: '' };
+      }
+      return { exitCode: 1, stdout: '', stderr: '' };
+    });
+
+    const result = await runVerify({
+      worktree: '/tmp/test',
+      logFile: '/tmp/test.log',
+      issueNum: 1,
+      title: 'test',
+      body: 'test body',
+      config: makeConfig(),
+      sessionDir: '/tmp/session',
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
+    expect(result.output).toContain('non-UI');
+  });
+
+  it('skips verification when no dev command found', async () => {
+    exec.mockImplementation((cmd: string) => {
+      if (cmd === 'which playwright-cli') {
+        return { exitCode: 0, stdout: '/usr/bin/playwright-cli', stderr: '' };
+      }
+      if (cmd.includes('git diff --stat')) {
+        return { exitCode: 0, stdout: ' src/app.tsx | 5 +++++\n 1 file changed, 5 insertions(+)', stderr: '' };
       }
       return { exitCode: 1, stdout: '', stderr: '' };
     });
@@ -122,6 +195,7 @@ describe('runVerify', () => {
     });
 
     expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
     expect(result.output).toContain('no start command');
   });
 });

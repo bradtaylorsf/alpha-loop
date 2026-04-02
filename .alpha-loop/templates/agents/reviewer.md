@@ -2,7 +2,7 @@
 name: reviewer
 description: Reviews code changes, fixes issues found, and produces a review summary. Runs after implementation.
 tools: Read, Write, Edit, Glob, Grep, Bash
-model: opus
+
 skills: code-review, security-analysis, testing-patterns, test-robustness, api-patterns, docs-sync
 ---
 

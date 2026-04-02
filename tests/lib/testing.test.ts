@@ -31,6 +31,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     repo: 'owner/repo',
     repoOwner: 'owner',
     project: 1,
+    agent: 'claude',
     model: 'opus',
     reviewModel: 'opus',
     pollInterval: 60,
@@ -41,7 +42,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxTestRetries: 3,
     testCommand: 'pnpm test',
     devCommand: 'pnpm dev',
-    port: 3000,
     skipTests: false,
     skipReview: false,
     skipInstall: false,
@@ -58,6 +58,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxSessionDuration: 0,
     milestone: '',
     harnesses: [],
+    setupCommand: '',
     ...overrides,
   };
 }

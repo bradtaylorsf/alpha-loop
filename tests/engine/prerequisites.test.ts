@@ -5,7 +5,7 @@ import {
   formatCheckResults,
   formatPipelineSummary,
 } from '../../src/engine/prerequisites.js';
-import { ConfigSchema } from '../../src/engine/config.js';
+import type { Config } from '../../src/lib/config.js';
 
 // Mock child_process.execSync for `which` calls
 jest.mock('node:child_process', () => ({
@@ -13,6 +13,43 @@ jest.mock('node:child_process', () => ({
 }));
 
 const mockExecSync = execSync as jest.MockedFunction<typeof execSync>;
+
+function makeConfig(overrides: Partial<Config> = {}): Config {
+  return {
+    repo: 'owner/repo',
+    repoOwner: 'owner',
+    project: 0,
+    agent: 'claude',
+    model: 'opus',
+    reviewModel: 'opus',
+    pollInterval: 60,
+    dryRun: false,
+    baseBranch: 'master',
+    logDir: 'logs',
+    labelReady: 'ready',
+    maxTestRetries: 3,
+    testCommand: 'pnpm test',
+    devCommand: 'pnpm dev',
+    skipTests: false,
+    skipReview: false,
+    skipInstall: false,
+    skipPreflight: false,
+    skipVerify: false,
+    skipLearn: false,
+    skipE2e: false,
+    maxIssues: 0,
+    maxSessionDuration: 0,
+    milestone: '',
+    autoMerge: true,
+    mergeTo: '',
+    autoCleanup: true,
+    runFull: false,
+    verbose: false,
+    harnesses: [],
+    setupCommand: '',
+    ...overrides,
+  };
+}
 
 describe('isCommandAvailable', () => {
   beforeEach(() => {
@@ -43,71 +80,31 @@ describe('checkAgents', () => {
     mockExecSync.mockReset();
   });
 
-  it('groups stages by agent and checks each', () => {
-    // claude is installed, codex is not
-    mockExecSync.mockImplementation((cmd) => {
-      const cmdStr = String(cmd);
-      if (cmdStr.includes('claude')) return Buffer.from('/usr/local/bin/claude');
-      throw new Error('not found');
-    });
-
-    const config = ConfigSchema.parse({
-      repo: 'owner/repo',
-      stages: {
-        implement: { agent: 'claude', model: 'opus' },
-        review: { agent: 'codex', model: 'codex' },
-        verify: { agent: 'codex', model: 'codex' },
-      },
-    });
-
-    const result = checkAgents(config);
-    expect(result.ok).toBe(false);
-
-    const claudeResult = result.results.find(r => r.agent === 'claude');
-    expect(claudeResult?.installed).toBe(true);
-    // claude should be used for implement, fix, learn, aggregate (defaults) plus explicit implement
-    expect(claudeResult?.stages).toContain('implement');
-
-    const codexResult = result.results.find(r => r.agent === 'codex');
-    expect(codexResult?.installed).toBe(false);
-    expect(codexResult?.stages).toContain('review');
-    expect(codexResult?.stages).toContain('verify');
-  });
-
-  it('returns ok=true when all agents are installed', () => {
-    mockExecSync.mockReturnValue(Buffer.from('/usr/local/bin/agent'));
-
-    const config = ConfigSchema.parse({ repo: 'owner/repo' });
-    const result = checkAgents(config);
-    expect(result.ok).toBe(true);
-  });
-
-  it('defaults all stages to claude when no stages config', () => {
+  it('checks the configured agent', () => {
     mockExecSync.mockReturnValue(Buffer.from('/usr/local/bin/claude'));
 
-    const config = ConfigSchema.parse({ repo: 'owner/repo' });
-    const result = checkAgents(config);
-
+    const result = checkAgents(makeConfig({ agent: 'claude' }));
+    expect(result.ok).toBe(true);
     expect(result.results).toHaveLength(1);
     expect(result.results[0].agent).toBe('claude');
-    expect(result.results[0].stages).toHaveLength(6); // all stages
+    expect(result.results[0].installed).toBe(true);
   });
 
-  it('reports affected stages when agent is missing', () => {
+  it('returns ok=false when agent is not installed', () => {
     mockExecSync.mockImplementation(() => { throw new Error('not found'); });
 
-    const config = ConfigSchema.parse({
-      repo: 'owner/repo',
-      stages: {
-        review: { agent: 'codex' },
-        verify: { agent: 'codex' },
-      },
-    });
+    const result = checkAgents(makeConfig({ agent: 'codex' }));
+    expect(result.ok).toBe(false);
+    expect(result.results[0].agent).toBe('codex');
+    expect(result.results[0].installed).toBe(false);
+  });
 
-    const result = checkAgents(config);
-    const codexResult = result.results.find(r => r.agent === 'codex');
-    expect(codexResult?.installed).toBe(false);
-    expect(codexResult?.stages).toEqual(['review', 'verify']);
+  it('checks codex when configured', () => {
+    mockExecSync.mockReturnValue(Buffer.from('/usr/local/bin/codex'));
+
+    const result = checkAgents(makeConfig({ agent: 'codex' }));
+    expect(result.ok).toBe(true);
+    expect(result.results[0].agent).toBe('codex');
   });
 });
 
@@ -115,57 +112,29 @@ describe('formatCheckResults', () => {
   it('formats installed agents with checkmark', () => {
     const output = formatCheckResults({
       ok: true,
-      results: [
-        { agent: 'claude', installed: true, stages: ['implement', 'fix', 'learn', 'aggregate'] },
-      ],
+      results: [{ agent: 'claude', installed: true }],
     });
     expect(output).toContain('✓ claude');
-    expect(output).toContain('implement, fix, learn, aggregate');
   });
 
   it('formats missing agents with X and error message', () => {
     const output = formatCheckResults({
       ok: false,
-      results: [
-        { agent: 'codex', installed: false, stages: ['review', 'verify'] },
-      ],
+      results: [{ agent: 'codex', installed: false }],
     });
     expect(output).toContain('✗ codex');
     expect(output).toContain('Error: "codex" is not installed');
-    expect(output).toContain('review, verify');
   });
 });
 
 describe('formatPipelineSummary', () => {
-  it('shows per-stage configuration', () => {
-    const config = ConfigSchema.parse({
-      repo: 'owner/repo',
-      model: 'opus',
-      max_turns: 30,
-      stages: {
-        review: { agent: 'codex', model: 'codex' },
-        verify: { agent: 'codex', model: 'codex' },
-        learn: { agent: 'claude', model: 'opus', maxTurns: 5 },
-      },
-    });
-
-    const output = formatPipelineSummary(config);
-    expect(output).toContain('Pipeline:');
-    expect(output).toContain('implement:');
+  it('shows agent and model configuration', () => {
+    const output = formatPipelineSummary(makeConfig({ agent: 'claude', model: 'opus' }));
     expect(output).toContain('claude/opus');
-    expect(output).toContain('review:');
-    expect(output).toContain('codex/codex');
-    expect(output).toContain('learn:');
-    expect(output).toContain('(5 turns)');
   });
 
-  it('shows turns from global max_turns for stages without overrides', () => {
-    const config = ConfigSchema.parse({
-      repo: 'owner/repo',
-      max_turns: 25,
-    });
-
-    const output = formatPipelineSummary(config);
-    expect(output).toContain('(25 turns)');
+  it('reflects codex agent config', () => {
+    const output = formatPipelineSummary(makeConfig({ agent: 'codex', model: 'gpt-5-codex' }));
+    expect(output).toContain('codex/gpt-5-codex');
   });
 });

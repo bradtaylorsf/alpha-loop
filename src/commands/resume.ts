@@ -452,6 +452,7 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
         prUrl: r.prUrl,
         testsPassing: true,
         verifyPassing: false, // verification was skipped/crashed
+        verifySkipped: true,
         duration: 0,
         filesChanged: 0,
       };

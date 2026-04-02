@@ -19,9 +19,9 @@ npx @bradtaylorsf/alpha-loop
 - **Node.js 20+**
 - **git** — for worktree isolation
 - **[GitHub CLI](https://cli.github.com/)** (`gh`) — authenticated with `gh auth login`
-- **AI agent CLI** — currently supports:
-  - [Claude Code](https://claude.ai/code) (`claude`)
-  - [Codex](https://github.com/openai/codex) (`codex`)
+- **AI agent CLI** — set `agent` in your config to one of:
+  - [Claude Code](https://claude.ai/code) (`claude`) — default
+  - [Codex](https://developers.openai.com/codex/cli/reference) (`codex`)
   - [OpenCode](https://github.com/sst/opencode) (`opencode`)
 - **[Playwright CLI](https://www.npmjs.com/package/@playwright/cli)** (optional) — for live verification with screenshots
 
@@ -32,7 +32,7 @@ npx @bradtaylorsf/alpha-loop
 cd your-project
 alpha-loop init
 
-# 2. Edit .alpha-loop.yaml if needed (repo, harnesses, model, etc.)
+# 2. Edit .alpha-loop.yaml if needed (agent, model, test_command, etc.)
 
 # 3. Run the loop — you'll be prompted to pick a milestone
 alpha-loop run
@@ -92,7 +92,7 @@ These learnings are automatically fed into future implementation prompts, so the
 
 ### Self-Improvement (`alpha-loop review`)
 
-Run `alpha-loop review` to trigger the self-improvement loop. It reads all accumulated learnings, computes metrics (success rate, avg retries, common failures), gathers current agent/skill definitions, and asks Claude to propose targeted improvements:
+Run `alpha-loop review` to trigger the self-improvement loop. It reads all accumulated learnings, computes metrics (success rate, avg retries, common failures), gathers current agent/skill definitions, and asks the configured agent to propose targeted improvements:
 
 - **Agent prompts** — bake in recurring patterns, eliminate anti-patterns
 - **Skill definitions** — add/update skills based on what consistently works or fails
@@ -142,8 +142,9 @@ During live verification, the agent takes screenshots at key states and saves th
 alpha-loop run [options]
 
 Options:
+  --once              Process one issue and exit
   --dry-run           Preview without making changes
-  --model <model>     AI model to use (e.g., opus, sonnet)
+  --model <model>     AI model override (e.g., opus, sonnet, gpt-5.4, gpt-5.3-codex)
   --milestone <name>  Only process issues in this milestone (skips interactive prompt)
   --skip-tests        Skip test execution
   --skip-review       Skip code review step
@@ -160,19 +161,17 @@ Running `alpha-loop init` creates a `.alpha-loop.yaml` file:
 # Alpha Loop configuration
 repo: owner/repo-name
 project: 0  # GitHub Project number (find it in your project URL)
-model: opus
-review_model: opus
+agent: claude  # AI agent CLI: claude, codex, opencode
+# model:       # omit to use agent's default (e.g., opus, gpt-5.4)
 label: ready
 base_branch: main
 test_command: pnpm test
 dev_command: pnpm dev
-port: 3000
 auto_merge: true
 
-# Coding harnesses to sync skills/agents to
+# Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
-  - claude-code
-  - codex
+  - claude
 
 # Safety limits (0 = unlimited)
 max_issues: 20
@@ -185,13 +184,15 @@ max_session_duration: 7200  # 2 hours in seconds
 |-----|---------|-------------|
 | `repo` | (auto-detected) | GitHub repo in `owner/name` format |
 | `project` | `0` | GitHub Project number (from URL: `users/<owner>/projects/<N>`) |
-| `model` | `opus` | AI model for implementation and verification |
-| `review_model` | `opus` | AI model for code review and learning extraction |
+| `agent` | `claude` | AI agent CLI to use: `claude`, `codex`, or `opencode` |
+| `model` | (agent default) | AI model (passed via `--model` flag; omit to use agent's default) |
+| `review_model` | (agent default) | AI model for code review and learning extraction |
 | `label` | `ready` | GitHub label that marks issues as ready for the loop |
 | `base_branch` | `master` | Branch to create PRs against |
 | `test_command` | `pnpm test` | Command to run tests |
 | `dev_command` | `pnpm dev` | Command to start the dev server for verification |
-| `port` | `3000` | Port the dev server runs on |
+| `max_turns` | (none) | Max conversation turns for the agent |
+| `poll_interval` | `60` | Seconds between issue polling |
 | `max_test_retries` | `3` | Times to retry failing tests/verification |
 | `milestone` | (none) | Only process issues in this milestone |
 | `max_issues` | `0` | Max issues to process per session (0 = unlimited) |
@@ -206,7 +207,9 @@ max_session_duration: 7200  # 2 hours in seconds
 | `skip_install` | `false` | Skip `pnpm install` in worktrees |
 | `skip_preflight` | `false` | Skip pre-flight test validation |
 | `auto_cleanup` | `true` | Auto-remove worktrees after processing |
-| `harnesses` | `['claude-code', 'codex']` | Coding harnesses to sync skills/agents to |
+| `run_full` | `false` | Run full pipeline without skipping any steps |
+| `verbose` | `false` | Enable verbose agent output |
+| `harnesses` | (auto from agent) | Coding harnesses to sync skills/agents to (e.g., `claude`, `codex`) |
 
 ### Environment Variables
 
@@ -216,8 +219,10 @@ All config options can be set via environment variables (uppercase, same names):
 |----------|------------|
 | `REPO` | `repo` |
 | `PROJECT` | `project` |
+| `AGENT` | `agent` |
 | `MODEL` | `model` |
 | `REVIEW_MODEL` | `review_model` |
+| `POLL_INTERVAL` | `poll_interval` |
 | `MAX_TEST_RETRIES` | `max_test_retries` |
 | `MILESTONE` | `milestone` |
 | `MAX_ISSUES` | `max_issues` |
@@ -225,29 +230,65 @@ All config options can be set via environment variables (uppercase, same names):
 | `BASE_BRANCH` | `base_branch` |
 | `TEST_COMMAND` | `test_command` |
 | `DEV_COMMAND` | `dev_command` |
-| `PORT` | `port` |
 | `DRY_RUN` | `dry_run` |
 | `SKIP_TESTS` | `skip_tests` |
 | `SKIP_REVIEW` | `skip_review` |
 | `SKIP_VERIFY` | `skip_verify` |
 | `SKIP_LEARN` | `skip_learn` |
+| `SKIP_E2E` | `skip_e2e` |
+| `SKIP_INSTALL` | `skip_install` |
+| `SKIP_PREFLIGHT` | `skip_preflight` |
 | `AUTO_MERGE` | `auto_merge` |
+| `AUTO_CLEANUP` | `auto_cleanup` |
 | `MERGE_TO` | `merge_to` |
+| `RUN_FULL` | `run_full` |
+| `VERBOSE` | `verbose` |
 
 **Precedence:** CLI flags > environment variables > `.alpha-loop.yaml` > auto-detection > defaults
+
+### Switching Agents
+
+Alpha Loop is agent-agnostic. Set the `agent` field in `.alpha-loop.yaml` to switch which CLI runs the pipeline:
+
+```yaml
+# Use Codex instead of Claude
+agent: codex
+```
+
+```yaml
+# Use Codex with a specific model
+agent: codex
+model: gpt-5.3-codex
+```
+
+If you omit `model`, the agent CLI uses its own default (e.g., Claude uses its configured model, Codex uses `gpt-5.4`). Set `model` only when you want to override.
+
+| Agent | Example models | CLI flags used |
+|-------|---------------|----------------|
+| `claude` | `opus`, `sonnet`, `haiku` | `-p --model MODEL --dangerously-skip-permissions` |
+| `codex` | `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex` | `exec --model MODEL --full-auto` |
+| `opencode` | `deepseek`, `gpt-4` | `run --model MODEL` |
+
+When you change `agent`, the harness sync automatically targets the correct directories (e.g., `.claude/` for Claude, `.codex/` for Codex). You can also explicitly list harnesses if you use multiple tools:
+
+```yaml
+agent: codex
+harnesses:
+  - codex
+  - claude  # also sync to Claude for teammates using it
+```
 
 ## GitHub Setup
 
 ### Labels
 
-Create these labels on your repo (or let the loop create them):
+The loop uses these labels. Run `alpha-loop init` to create any that are missing:
 
 | Label | Purpose |
 |-------|---------|
 | `ready` | Issue is ready for the loop to pick up |
 | `in-progress` | Loop is actively working on it |
 | `in-review` | PR created, awaiting review |
-| `done` | Merged and complete |
 | `failed` | Loop failed after retries |
 
 ### Milestones

@@ -7,6 +7,7 @@ export type ImplementPromptOptions = {
   issueNum: number;
   title: string;
   body: string;
+  planContent?: string;
   visionContext?: string;
   projectContext?: string;
   previousResult?: string;
@@ -38,13 +39,17 @@ export type LearnPromptOptions = {
  * Build the implementation prompt for an AI agent.
  */
 export function buildImplementPrompt(options: ImplementPromptOptions): string {
-  const { issueNum, title, body, visionContext, projectContext, previousResult, learningContext } = options;
+  const { issueNum, title, body, planContent, visionContext, projectContext, previousResult, learningContext } = options;
 
   const sections: string[] = [
     `Implement GitHub issue #${issueNum}: ${title}`,
     '',
     body,
   ];
+
+  if (planContent) {
+    sections.push('', '', `## Implementation Plan`, planContent);
+  }
 
   if (visionContext) {
     sections.push('', '', '## Product Vision', visionContext);
@@ -63,6 +68,13 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
   }
 
   sections.push(
+    '',
+    '## Scope Rules (CRITICAL)',
+    '- ONLY modify files directly related to this issue',
+    '- If tests fail due to environment issues (missing venv, wrong port, missing deps), report it — do NOT rewrite test infrastructure',
+    '- Do NOT fix unrelated code, even if you notice problems',
+    '- Do NOT modify dev server config, build config, fonts, or styling unless the issue specifically requires it',
+    '- If the issue lists "Affected Files/Areas", stay within that scope',
     '',
     '## Before You Start',
     '1. Read the product vision and technical context above',
@@ -134,16 +146,31 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     '- WARNING (quality, security): FIX THEM directly if possible',
     '- INFO (suggestions, minor improvements): Note them in your report but don\'t block',
     '',
-    'After fixing, output a structured review report:',
+    `## Gate Result (REQUIRED)`,
     '',
-    '### Findings Fixed',
-    '- (list what you found and fixed)',
+    `After your review, write a JSON file to: review-issue-${issueNum}.json`,
     '',
-    '### Remaining Gaps',
-    '- (anything you couldn\'t fix — these need human attention)',
+    'The file must contain ONLY valid JSON with this exact schema:',
     '',
-    '### Verification Notes',
-    '- (what a human should manually check)',
+    '{',
+    '  "passed": true,',
+    '  "summary": "One-line summary of review outcome",',
+    '  "findings": [',
+    '    {',
+    '      "severity": "critical",',
+    '      "description": "What the issue is",',
+    '      "fixed": true,',
+    '      "file": "path/to/affected/file.ts"',
+    '    }',
+    '  ]',
+    '}',
+    '',
+    'Rules:',
+    '- passed: true if all critical/warning issues were fixed. false if any remain unfixed.',
+    '- findings: list ALL issues found, with fixed=true for ones you fixed, fixed=false for ones you could not fix.',
+    '- severity: "critical" for blockers, "warning" for should-fix, "info" for notes.',
+    '- If you fixed everything and the code is clean, set passed=true with an empty findings array.',
+    '- If there are unfixed critical/warning issues, set passed=false — the implementer will be sent back to fix them.',
   );
 
   return sections.join('\n');
@@ -165,7 +192,7 @@ export function buildLearnPrompt(options: LearnPromptOptions): string {
 ## Run Info
 - Issue: #${issueNum} "${title}"
 - Status: ${status}
-- Retries: ${retries}
+- Test fix retries: ${retries} (number of times tests failed and the agent was sent back to fix)
 - Duration: ${duration}s
 
 ## Issue Requirements
@@ -188,7 +215,7 @@ Output ONLY this markdown structure, nothing else:
 ---
 issue: ${issueNum}
 status: ${status}
-retries: ${retries}
+test_fix_retries: ${retries}
 duration: ${duration}
 date: ${today}
 ---

@@ -2,12 +2,11 @@
  * Prerequisites Module
  * ====================
  *
- * Verifies that all configured AI CLI agents are installed before starting the pipeline.
- * Groups stages by agent for clear diagnostic output.
+ * Verifies that the configured AI CLI agent is installed before starting the pipeline.
  */
 
 import { execSync } from 'node:child_process';
-import { type Config, type StageName, STAGE_NAMES, resolveStageConfig } from './config.js';
+import type { Config } from '../lib/config.js';
 
 // ============================================================================
 // Types
@@ -16,7 +15,6 @@ import { type Config, type StageName, STAGE_NAMES, resolveStageConfig } from './
 export interface AgentCheckResult {
   agent: string;
   installed: boolean;
-  stages: StageName[];
 }
 
 export interface PrerequisiteResult {
@@ -45,33 +43,17 @@ export function isCommandAvailable(command: string): boolean {
 }
 
 /**
- * Checks all agents configured across pipeline stages.
- * Returns structured results showing which agents are installed and which stages they serve.
+ * Checks that the configured agent CLI is installed.
  */
 export function checkAgents(config: Config): PrerequisiteResult {
-  // Collect stages grouped by agent
-  const agentStages = new Map<string, StageName[]>();
-
-  for (const stage of STAGE_NAMES) {
-    const { agent } = resolveStageConfig(config, stage);
-    const stages = agentStages.get(agent) ?? [];
-    stages.push(stage);
-    agentStages.set(agent, stages);
-  }
-
-  // Check each unique agent
-  const results: AgentCheckResult[] = [];
-  for (const [agent, stages] of agentStages) {
-    results.push({
-      agent,
-      installed: isCommandAvailable(agent),
-      stages,
-    });
-  }
+  const result: AgentCheckResult = {
+    agent: config.agent,
+    installed: isCommandAvailable(config.agent),
+  };
 
   return {
-    ok: results.every(r => r.installed),
-    results,
+    ok: result.installed,
+    results: [result],
   };
 }
 
@@ -87,14 +69,13 @@ export function formatCheckResults(result: PrerequisiteResult): string {
 
   for (const r of result.results) {
     const icon = r.installed ? '\u2713' : '\u2717';
-    const stageList = r.stages.join(', ');
-    lines.push(`  ${icon} ${r.agent} (${stageList})`);
+    lines.push(`  ${icon} ${r.agent}`);
   }
 
   if (!result.ok) {
     const missing = result.results.filter(r => !r.installed);
     for (const m of missing) {
-      lines.push(`\nError: "${m.agent}" is not installed. Affected stages: ${m.stages.join(', ')}`);
+      lines.push(`\nError: "${m.agent}" is not installed.`);
     }
   }
 
@@ -102,17 +83,8 @@ export function formatCheckResults(result: PrerequisiteResult): string {
 }
 
 /**
- * Formats the pipeline startup summary showing per-stage configuration.
+ * Formats the pipeline startup summary.
  */
 export function formatPipelineSummary(config: Config): string {
-  const lines: string[] = ['Pipeline:'];
-
-  for (const stage of STAGE_NAMES) {
-    const sc = resolveStageConfig(config, stage);
-    const turns = sc.maxTurns ? ` (${sc.maxTurns} turns)` : '';
-    const padded = `${stage}:`.padEnd(14);
-    lines.push(`  ${padded}${sc.agent}/${sc.model}${turns}`);
-  }
-
-  return lines.join('\n');
+  return `Pipeline: ${config.agent}/${config.model}`;
 }

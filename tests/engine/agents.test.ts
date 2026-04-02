@@ -31,9 +31,10 @@ describe('buildAgentArgs', () => {
       const result = buildAgentArgs({ agent: 'codex', model: 'codex' }, prompt);
       expect(result.command).toBe('codex');
       expect(result.args).toEqual([
+        'exec',
         '--model', 'codex',
-        '--auto-edit',
-        '-q', prompt,
+        '--full-auto',
+        prompt,
       ]);
     });
 
@@ -63,6 +64,13 @@ describe('buildAgentArgs', () => {
     it('does not include --max-turns even when provided', () => {
       const result = buildAgentArgs({ agent: 'opencode', model: 'gpt-4', maxTurns: 10 }, prompt);
       expect(result.args).not.toContain('--max-turns');
+    });
+  });
+
+  describe('model omission', () => {
+    it('omits --model when model is empty', () => {
+      const result = buildAgentArgs({ agent: 'claude', model: '' }, prompt);
+      expect(result.args).not.toContain('--model');
     });
   });
 
