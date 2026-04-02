@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { exec } from '../lib/shell.js';
 import { assertSafeShellArg, loadConfig } from '../lib/config.js';
+import { buildOneShotCommand } from '../lib/agent.js';
 import { log } from '../lib/logger.js';
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
@@ -173,17 +174,18 @@ Output ONLY this markdown structure. Be specific and actionable. Under 500 words
 ## What Good Looks Like
 (3-4 bullet points describing the quality bar — what a successful implementation looks like for this project)`;
 
-    const model = assertSafeShellArg(config.model ?? 'opus', 'model');
+    const safeModel = assertSafeShellArg(config.model, 'model');
+    const agentCmd = buildOneShotCommand(config.agent, safeModel);
     const visionResult = exec(
-      `echo ${JSON.stringify(visionPrompt)} | claude -p --model ${model} --dangerously-skip-permissions --output-format text 2>/dev/null`,
-      { cwd: projectDir },
+      `echo ${JSON.stringify(visionPrompt)} | ${agentCmd} 2>/dev/null`,
+      { cwd: projectDir, timeout: 5 * 60 * 1000 },
     );
 
     if (visionResult.exitCode === 0 && visionResult.stdout) {
       fs.writeFileSync(visionFile, visionResult.stdout + '\n');
     } else {
       // Fallback: write raw inputs
-      log.warn('Claude synthesis failed, saving raw inputs');
+      log.warn('Agent synthesis failed, saving raw inputs');
       const raw = [
         '## What We\'re Building',
         projectDescription,

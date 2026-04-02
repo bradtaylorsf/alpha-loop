@@ -139,8 +139,9 @@ function coerce(value: string, current: unknown): unknown {
   return value;
 }
 
-/** Validate a string contains only safe shell characters. */
+/** Validate a string contains only safe shell characters. Empty strings are allowed (model is optional). */
 export function assertSafeShellArg(value: string, name: string): string {
+  if (value === '') return value;
   if (!/^[a-zA-Z0-9._\-/]+$/.test(value)) {
     throw new Error(`Invalid ${name}: contains unsafe characters: ${value}`);
   }

@@ -1,4 +1,4 @@
-import { buildAgentArgs, spawnAgent, type AgentOptions } from '../../src/lib/agent';
+import { buildAgentArgs, buildOneShotCommand, spawnAgent, type AgentOptions } from '../../src/lib/agent';
 
 // Mock child_process.spawn
 const mockStdin = { write: jest.fn(), end: jest.fn() };
@@ -102,6 +102,37 @@ describe('buildAgentArgs', () => {
     expect(() =>
       buildAgentArgs({ agent: 'unknown' as any, model: 'x', prompt: 'y', cwd: '/tmp' }),
     ).toThrow('Unknown agent type: unknown');
+  });
+});
+
+describe('buildOneShotCommand', () => {
+  test('builds claude command with model', () => {
+    const cmd = buildOneShotCommand('claude', 'opus');
+    expect(cmd).toBe('claude -p --model opus --dangerously-skip-permissions --output-format text');
+  });
+
+  test('builds claude command without model', () => {
+    const cmd = buildOneShotCommand('claude', '');
+    expect(cmd).toBe('claude -p --dangerously-skip-permissions --output-format text');
+  });
+
+  test('builds codex command with model', () => {
+    const cmd = buildOneShotCommand('codex', 'gpt-5.4');
+    expect(cmd).toBe('codex exec --model gpt-5.4 --full-auto');
+  });
+
+  test('builds codex command without model', () => {
+    const cmd = buildOneShotCommand('codex', '');
+    expect(cmd).toBe('codex exec --full-auto');
+  });
+
+  test('builds opencode command', () => {
+    const cmd = buildOneShotCommand('opencode', 'deepseek');
+    expect(cmd).toBe('opencode run --model deepseek');
+  });
+
+  test('throws for unknown agent', () => {
+    expect(() => buildOneShotCommand('unknown' as any, '')).toThrow('Unknown agent type: unknown');
   });
 });
 

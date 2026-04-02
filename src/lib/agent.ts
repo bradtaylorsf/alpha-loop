@@ -62,6 +62,34 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
 }
 
 /**
+ * Build a shell command string for one-shot agent prompts (scan, vision).
+ * Reads prompt from stdin. Returns the command to pipe into.
+ */
+export function buildOneShotCommand(agent: 'claude' | 'codex' | 'opencode', model: string): string {
+  switch (agent) {
+    case 'claude': {
+      const parts = ['claude', '-p'];
+      if (model) parts.push('--model', model);
+      parts.push('--dangerously-skip-permissions', '--output-format', 'text');
+      return parts.join(' ');
+    }
+    case 'codex': {
+      const parts = ['codex', 'exec'];
+      if (model) parts.push('--model', model);
+      parts.push('--full-auto');
+      return parts.join(' ');
+    }
+    case 'opencode': {
+      const parts = ['opencode', 'run'];
+      if (model) parts.push('--model', model);
+      return parts.join(' ');
+    }
+    default:
+      throw new Error(`Unknown agent type: ${agent}`);
+  }
+}
+
+/**
  * Spawn an AI agent with a prompt.
  * Streams output to terminal in real-time while capturing it.
  */

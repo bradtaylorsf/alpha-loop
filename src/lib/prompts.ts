@@ -64,6 +64,13 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
 
   sections.push(
     '',
+    '## Scope Rules (CRITICAL)',
+    '- ONLY modify files directly related to this issue',
+    '- If tests fail due to environment issues (missing venv, wrong port, missing deps), report it — do NOT rewrite test infrastructure',
+    '- Do NOT fix unrelated code, even if you notice problems',
+    '- Do NOT modify dev server config, build config, fonts, or styling unless the issue specifically requires it',
+    '- If the issue lists "Affected Files/Areas", stay within that scope',
+    '',
     '## Before You Start',
     '1. Read the product vision and technical context above',
     '2. Make decisions that align with the target users and current priority',

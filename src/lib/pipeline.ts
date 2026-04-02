@@ -103,7 +103,7 @@ export async function processIssue(
       const planResult = await spawnAgent({
         agent: config.agent,
         model: config.model,
-        prompt: `Analyze this GitHub issue and enrich it with implementation details.\n\nIssue #${issueNum}: ${title}\n\n${body}\n\nOutput the enriched issue body with acceptance criteria, implementation notes, and any edge cases to handle.`,
+        prompt: `Analyze this GitHub issue and produce a brief implementation plan (under 200 lines).\n\nIssue #${issueNum}: ${title}\n\n${body}\n\nOutput ONLY:\n1. Files to create/modify (with paths)\n2. Key implementation details not obvious from the issue\n3. Edge cases to handle\n\nDo NOT restate the issue. Do NOT explore the full codebase. Be concise.`,
         cwd: worktreePath,
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
         verbose: config.verbose,
@@ -185,7 +185,7 @@ export async function processIssue(
     if (attempt < config.maxTestRetries) {
       log.warn(`Tests failed on attempt ${attempt}, invoking agent to fix...`);
       if (!config.dryRun) {
-        const fixPrompt = `Tests are failing for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix the implementation code or the tests\n3. Run the tests again to verify\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why it was failing>\n   Example: fix(#${issueNum}): use port 5435 for postgres — default 5432 conflicts with host service\n   DO NOT use generic messages like "fix: resolve test failures"`;
+        const fixPrompt = `Tests are failing for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix ONLY code related to issue #${issueNum} — do NOT modify test infrastructure, build scripts, or unrelated files\n3. If tests fail due to environment issues (missing venv, wrong port, missing deps), fix only YOUR code — do NOT rewrite the test runner or package.json scripts\n4. Run the tests again to verify\n5. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why it was failing>\n   Example: fix(#${issueNum}): use port 5435 for postgres — default 5432 conflicts with host service\n   DO NOT use generic messages like "fix: resolve test failures"`;
 
         await spawnAgent({
           agent: config.agent,
@@ -249,7 +249,7 @@ export async function processIssue(
         log.warn(`Verification timed out on attempt ${attempt}, retrying without fix agent...`);
       } else {
         log.warn(`Verification failed on attempt ${attempt}, invoking agent to fix...`);
-        const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\nThe app was started and tested with playwright-cli, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification output above and identify the ROOT CAUSE of each failure\n2. Fix the implementation code so the feature works correctly\n3. Run the test command to make sure unit tests still pass\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why verification failed>\n   Example: fix(#${issueNum}): add ENCRYPTION_KEY to langfuse config — service requires 32+ char secret\n   DO NOT use generic messages like "fix: resolve verification failures"`;
+        const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\nThe app was started and tested with playwright-cli, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification output above and identify the ROOT CAUSE of each failure\n2. Fix ONLY code related to issue #${issueNum} — do NOT modify dev server config, build tools, fonts, styling, or unrelated files\n3. If the app fails to start, that is an environment issue — do NOT rewrite the dev server or its dependencies\n4. Run the test command to make sure unit tests still pass\n5. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why verification failed>\n   Example: fix(#${issueNum}): add ENCRYPTION_KEY to langfuse config — service requires 32+ char secret\n   DO NOT use generic messages like "fix: resolve verification failures"`;
 
         await spawnAgent({
           agent: config.agent,
