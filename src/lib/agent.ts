@@ -25,6 +25,8 @@ export type AgentOptions = {
   timeout?: number;
   /** Max conversation turns for the agent. Only supported by claude. */
   maxTurns?: number;
+  /** Resume the most recent agent session in the CWD instead of starting fresh. */
+  resume?: boolean;
 };
 
 /**
@@ -33,7 +35,9 @@ export type AgentOptions = {
 export function buildAgentArgs(options: AgentOptions): { command: string; args: string[] } {
   switch (options.agent) {
     case 'claude': {
-      const args = ['-p'];
+      const args: string[] = [];
+      if (options.resume) args.push('--continue');
+      args.push('-p');
       if (options.model) args.push('--model', options.model);
       args.push(
         '--dangerously-skip-permissions',
@@ -46,7 +50,12 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
       return { command: 'claude', args };
     }
     case 'codex': {
-      const args = ['exec'];
+      const args: string[] = [];
+      if (options.resume) {
+        args.push('exec', 'resume', '--last');
+      } else {
+        args.push('exec');
+      }
       if (options.model) args.push('--model', options.model);
       args.push('--full-auto');
       return { command: 'codex', args };

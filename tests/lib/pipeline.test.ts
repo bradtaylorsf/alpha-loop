@@ -118,6 +118,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxSessionDuration: 0,
     milestone: '',
     harnesses: [],
+    setupCommand: '',
     ...overrides,
   };
 }
@@ -209,6 +210,10 @@ describe('processIssue', () => {
       (call: any[]) => (call[0] as any).prompt?.includes('Tests are failing'),
     );
     expect(fixCalls).toHaveLength(2);
+    // Fix calls should use session resume
+    for (const call of fixCalls) {
+      expect((call[0] as any).resume).toBe(true);
+    }
   });
 
   test('dry run mode logs without executing side effects', async () => {

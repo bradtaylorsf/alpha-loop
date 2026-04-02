@@ -71,6 +71,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxSessionDuration: 0,
     milestone: '',
     harnesses: [],
+    setupCommand: '',
     ...overrides,
   };
 }

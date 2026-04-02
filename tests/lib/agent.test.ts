@@ -103,6 +103,63 @@ describe('buildAgentArgs', () => {
       buildAgentArgs({ agent: 'unknown' as any, model: 'x', prompt: 'y', cwd: '/tmp' }),
     ).toThrow('Unknown agent type: unknown');
   });
+
+  test('claude resume adds --continue flag before -p', () => {
+    const result = buildAgentArgs({
+      agent: 'claude',
+      model: 'opus',
+      prompt: 'fix tests',
+      cwd: '/tmp',
+      resume: true,
+    });
+
+    expect(result.command).toBe('claude');
+    expect(result.args[0]).toBe('--continue');
+    expect(result.args[1]).toBe('-p');
+    expect(result.args).toContain('--model');
+  });
+
+  test('codex resume uses exec resume --last', () => {
+    const result = buildAgentArgs({
+      agent: 'codex',
+      model: 'gpt-4',
+      prompt: 'fix tests',
+      cwd: '/tmp',
+      resume: true,
+    });
+
+    expect(result.command).toBe('codex');
+    expect(result.args[0]).toBe('exec');
+    expect(result.args[1]).toBe('resume');
+    expect(result.args[2]).toBe('--last');
+    expect(result.args).toContain('--full-auto');
+  });
+
+  test('opencode ignores resume flag (no resume support)', () => {
+    const result = buildAgentArgs({
+      agent: 'opencode',
+      model: 'deepseek',
+      prompt: 'fix tests',
+      cwd: '/tmp',
+      resume: true,
+    });
+
+    expect(result.command).toBe('opencode');
+    expect(result.args).toEqual(['run', '--model', 'deepseek']);
+  });
+
+  test('resume false does not add --continue for claude', () => {
+    const result = buildAgentArgs({
+      agent: 'claude',
+      model: 'opus',
+      prompt: 'test',
+      cwd: '/tmp',
+      resume: false,
+    });
+
+    expect(result.args).not.toContain('--continue');
+    expect(result.args[0]).toBe('-p');
+  });
 });
 
 describe('buildOneShotCommand', () => {

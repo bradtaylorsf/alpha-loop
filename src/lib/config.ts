@@ -33,6 +33,7 @@ export type Config = {
   runFull: boolean;
   verbose: boolean;
   harnesses: string[];
+  setupCommand: string;
 };
 
 const DEFAULTS: Config = {
@@ -66,6 +67,7 @@ const DEFAULTS: Config = {
   runFull: false,
   verbose: false,
   harnesses: [],
+  setupCommand: '',
 };
 
 /** Map from YAML key (snake_case) to Config key (camelCase). */
@@ -99,6 +101,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   auto_cleanup: 'autoCleanup',
   run_full: 'runFull',
   verbose: 'verbose',
+  setup_command: 'setupCommand',
 };
 
 /** Map from env var name to Config key. */
@@ -131,6 +134,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   AUTO_CLEANUP: 'autoCleanup',
   RUN_FULL: 'runFull',
   VERBOSE: 'verbose',
+  SETUP_COMMAND: 'setupCommand',
 };
 
 function coerce(value: string, current: unknown): unknown {

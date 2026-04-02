@@ -46,6 +46,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     runFull: false,
     verbose: false,
     harnesses: [],
+    setupCommand: '',
     ...overrides,
   };
 }

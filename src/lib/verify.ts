@@ -60,8 +60,9 @@ export async function runVerify(options: {
   body: string;
   config: Config;
   sessionDir: string;
+  verifyInstructions?: string;
 }): Promise<VerifyResult> {
-  const { worktree, logFile, issueNum, title, body, config, sessionDir } = options;
+  const { worktree, logFile, issueNum, title, body, config, sessionDir, verifyInstructions } = options;
 
   if (config.skipVerify) {
     log.info('Verification skipped (skipVerify=true)');
@@ -125,7 +126,16 @@ export async function runVerify(options: {
     exec(`playwright-cli state-load "${authStateDir}/state.json"`);
   }
 
-  // Build the verification prompt — agent handles server startup and URL detection
+  // Build the verification prompt — use plan instructions if available, otherwise generic
+  const verifySteps = verifyInstructions
+    ? `## Verification Steps (from plan)\n\n${verifyInstructions}`
+    : `## Your Task
+
+1. Start the dev server: \`${devCmd}\`
+2. Read the server output to find what URL/port it starts on
+3. Use playwright-cli to open the app and test the feature
+4. When done, kill the dev server process`;
+
   const verifyPrompt = `You are a QA tester verifying that issue #${issueNum} was implemented correctly.
 
 ## Issue: ${title}
@@ -136,12 +146,7 @@ ${body}
 ${diffStat.stdout || 'No diff available'}
 
 ${visionContext ? `## Product Vision\n${visionContext}\n` : ''}
-## Your Task
-
-1. Start the dev server: \`${devCmd}\`
-2. Read the server output to find what URL/port it starts on
-3. Use playwright-cli to open the app and test the feature
-4. When done, kill the dev server process
+${verifySteps}
 
 ### Playwright CLI Commands
 - \`playwright-cli open <url>\` — Open the app

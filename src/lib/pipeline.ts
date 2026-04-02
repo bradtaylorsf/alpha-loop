@@ -26,6 +26,63 @@ import type { SessionContext } from './session.js';
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
 
+/**
+ * Structured plan output from the planning agent.
+ * Controls which pipeline steps run and how.
+ */
+export type IssuePlan = {
+  summary: string;
+  files: string[];
+  implementation: string;
+  testing: {
+    needed: boolean;
+    reason: string;
+  };
+  verification: {
+    needed: boolean;
+    instructions?: string;
+    reason: string;
+  };
+};
+
+/** Default plan when planning fails or is skipped. */
+const DEFAULT_PLAN: IssuePlan = {
+  summary: '',
+  files: [],
+  implementation: '',
+  testing: { needed: true, reason: 'Default: run project test command' },
+  verification: { needed: false, reason: 'Default: skip verification unless plan requests it' },
+};
+
+/**
+ * Read and validate a plan JSON file written by the planning agent.
+ * Falls back to DEFAULT_PLAN if the file doesn't exist or is invalid.
+ */
+function readPlan(planFile: string): IssuePlan {
+  try {
+    if (!existsSync(planFile)) return DEFAULT_PLAN;
+
+    const raw = readFileSync(planFile, 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+    return {
+      summary: String(parsed.summary ?? ''),
+      files: Array.isArray(parsed.files) ? parsed.files.map(String) : [],
+      implementation: String(parsed.implementation ?? ''),
+      testing: {
+        needed: (parsed.testing as any)?.needed !== false,
+        reason: String((parsed.testing as any)?.reason ?? 'No reason given'),
+      },
+      verification: {
+        needed: (parsed.verification as any)?.needed === true,
+        instructions: (parsed.verification as any)?.instructions || undefined,
+        reason: String((parsed.verification as any)?.reason ?? 'No reason given'),
+      },
+    };
+  } catch {
+    return DEFAULT_PLAN;
+  }
+}
 
 export type PipelineResult = {
   issueNum: number;
@@ -83,6 +140,7 @@ export async function processIssue(
       sessionBranch: session.branch,
       autoMerge: config.autoMerge,
       skipInstall: config.skipInstall,
+      setupCommand: config.setupCommand,
       dryRun: config.dryRun,
     });
     worktreePath = wt.path;
@@ -96,26 +154,70 @@ export async function processIssue(
     return failureResult(issueNum, title, startTime);
   }
 
-  // --- Step 3: Plan (optional, non-fatal) ---
+  // --- Step 3: Plan (structured JSON — controls test/verify steps) ---
   log.step('Step 3: Planning');
-  const planFile = join(worktreePath, `plan-issue-${issueNum}.md`);
+  let plan: IssuePlan = DEFAULT_PLAN;
+  // Write plan inside the worktree (agents sandbox to their CWD), then move to sessions dir
+  const planFileInWorktree = join(worktreePath, `plan-issue-${issueNum}.json`);
+  const planFileInSession = join(session.logsDir, `plan-issue-${issueNum}.json`);
   if (!config.dryRun) {
     try {
-      const planResult = await spawnAgent({
+      const planPrompt = `Analyze this GitHub issue and produce a structured implementation plan.
+
+Issue #${issueNum}: ${title}
+
+${body}
+
+Write a JSON file to: plan-issue-${issueNum}.json
+
+The file must contain ONLY valid JSON with this exact schema:
+
+{
+  "summary": "One-line description of what needs to be done",
+  "files": ["src/path/to/file.ts", "..."],
+  "implementation": "Concise step-by-step plan. What to create, modify, wire up. No issue restatement.",
+  "testing": {
+    "needed": true,
+    "reason": "Why tests are or aren't needed for this change"
+  },
+  "verification": {
+    "needed": false,
+    "instructions": "If needed: specific playwright-cli steps to verify the feature. If not needed: omit this field.",
+    "reason": "Why verification is or isn't needed (e.g. no UI changes, API-only, config change)"
+  }
+}
+
+Rules:
+- testing.needed: true if ANY code changes could affect behavior. false only for docs, config, or comments.
+- verification.needed: true ONLY if the issue changes user-visible UI that can be tested in a browser.
+- verification.instructions: if needed, list the exact playwright-cli commands to verify (open URL, click elements, check content).
+- implementation: be concise and actionable. List files to modify and what to change in each.
+- Write ONLY the JSON file. Do not create any other files or make any code changes.`;
+
+      await spawnAgent({
         agent: config.agent,
         model: config.model,
-        prompt: `Analyze this GitHub issue and produce an implementation plan.\n\nIssue #${issueNum}: ${title}\n\n${body}\n\nWrite your plan to the file: ${planFile}\n\nThe plan should include:\n1. Files to create/modify (with paths)\n2. Key implementation details not obvious from the issue\n3. Edge cases to handle\n\nDo NOT restate the issue description. Be concise and actionable.`,
+        prompt: planPrompt,
         cwd: worktreePath,
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
         verbose: config.verbose,
       });
-      if (planResult.exitCode === 0 && existsSync(planFile)) {
-        log.success(`Plan saved to ${planFile}`);
+
+      plan = readPlan(planFileInWorktree);
+      if (plan.summary) {
+        // Move plan from worktree to sessions dir for inspection, clean up worktree
+        try {
+          const planContent = readFileSync(planFileInWorktree, 'utf-8');
+          const { writeFileSync, unlinkSync } = await import('node:fs');
+          writeFileSync(planFileInSession, planContent);
+          unlinkSync(planFileInWorktree);
+        } catch { /* non-fatal */ }
+        log.success(`Plan: ${plan.summary} | Tests: ${plan.testing.needed ? 'yes' : 'skip'} | Verify: ${plan.verification.needed ? 'yes' : 'skip'}`);
       } else {
-        log.warn('Planning agent did not produce a plan file, proceeding without plan');
+        log.warn('Planning agent did not write plan file, using defaults (run all tests, skip verify)');
       }
     } catch {
-      log.warn('Planning stage failed, proceeding with original issue description');
+      log.warn('Planning stage failed, using defaults');
     }
   } else {
     log.dry('Would run planning agent');
@@ -134,7 +236,7 @@ export async function processIssue(
       issueNum,
       title,
       body,
-      planFile: existsSync(planFile) ? planFile : undefined,
+      planContent: plan.implementation || undefined,
       visionContext: visionContext ?? undefined,
       projectContext: projectContext ?? undefined,
       previousResult: previousResult ?? undefined,
@@ -174,7 +276,13 @@ export async function processIssue(
   let testOutput = '';
   let testsPassing = false;
 
-  for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+  if (!plan.testing.needed) {
+    log.info(`Tests skipped by plan: ${plan.testing.reason}`);
+    testsPassing = true;
+    testOutput = `Tests skipped by plan: ${plan.testing.reason}`;
+  }
+
+  for (let attempt = 1; testsPassing ? false : attempt <= config.maxTestRetries; attempt++) {
     log.info(`Test attempt ${attempt} of ${config.maxTestRetries}`);
 
     const testResult = runTests(worktreePath, config, logFile);
@@ -196,7 +304,7 @@ export async function processIssue(
           model: config.model,
           prompt: fixPrompt,
           cwd: worktreePath,
-    
+          resume: true,
           logFile: join(session.logsDir, `issue-${issueNum}-fix-${attempt}.log`),
           verbose: config.verbose,
         });
@@ -220,7 +328,14 @@ export async function processIssue(
   let verifyPassing = false;
   let verifySkipped = false;
 
-  for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+  if (!plan.verification.needed) {
+    log.info(`Verification skipped by plan: ${plan.verification.reason}`);
+    verifyPassing = true;
+    verifySkipped = true;
+    verifyOutput = `Verification skipped by plan: ${plan.verification.reason}`;
+  }
+
+  for (let attempt = 1; verifySkipped ? false : attempt <= config.maxTestRetries; attempt++) {
     log.info(`Verification attempt ${attempt} of ${config.maxTestRetries}`);
 
     const verifyResult = await runVerify({
@@ -231,6 +346,7 @@ export async function processIssue(
       body,
       config,
       sessionDir: session.resultsDir,
+      verifyInstructions: plan.verification.instructions,
     });
     verifyOutput = verifyResult.output;
 
@@ -260,6 +376,7 @@ export async function processIssue(
           model: config.model,
           prompt: verifyFixPrompt,
           cwd: worktreePath,
+          resume: true,
           logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
           verbose: config.verbose,
         });
@@ -476,11 +593,7 @@ function extractReviewSummary(reviewOutput: string): string {
     if (match) return match[0].trim();
   }
 
-  // Fallback: take the last 500 chars which usually has the summary
-  const lines = reviewOutput.trim().split('\n');
-  const lastLines = lines.slice(-20).join('\n');
-  if (lastLines.length > 0) return lastLines;
-
+  // No structured review section found — don't dump raw agent output
   return 'Review completed — see logs for details';
 }
 

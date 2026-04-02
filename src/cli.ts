@@ -30,9 +30,11 @@ program
   .option('--milestone <name>', 'Only process issues in this milestone')
   .option('--auto-merge', 'Auto-merge PRs to session branch')
   .option('--merge-to <branch>', 'Use existing branch instead of creating session branch')
+  .option('--once', 'Process one issue and exit')
   .option('--verbose', 'Stream live agent output to terminal')
   .action(async (options) => {
     const { runCommand } = await import('./commands/run.js');
+    if (options.once) options.maxIssues = 1;
     await runCommand(options);
   });
 
