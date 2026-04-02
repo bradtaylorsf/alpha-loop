@@ -120,6 +120,15 @@ When editing skills or agent prompts, make sure you're editing the right one:
 - Use `node:` prefix for built-in modules (e.g., `node:path`, `node:child_process`)
 - Jest for tests, `.test.ts` suffix, co-located in `tests/` directory
 
+## Release Process -- DO NOT manually publish or bump versions
+
+Releases are fully automated via `.github/workflows/release.yml`:
+- **Trigger**: Any push to `master` (excluding docs-only changes)
+- **Versioning**: Automatic from commit messages — `feat:` → minor, `fix:` → patch, `BREAKING CHANGE` → major
+- **Publishing**: CI publishes to npm, creates git tag, and GitHub Release
+- **To release**: Just merge the PR to master. That's it.
+- **DO NOT** run `pnpm publish`, `npm publish`, or manually edit `package.json` version
+
 ## Testing Rules
 
 - Jest with `forceExit: true` and `testTimeout: 30000` (see jest.config.cjs)
