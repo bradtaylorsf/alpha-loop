@@ -32,7 +32,7 @@ npx @bradtaylorsf/alpha-loop
 cd your-project
 alpha-loop init
 
-# 2. Edit .alpha-loop.yaml if needed (repo, harnesses, model, etc.)
+# 2. Edit .alpha-loop.yaml if needed (agent, model, test_command, etc.)
 
 # 3. Run the loop — you'll be prompted to pick a milestone
 alpha-loop run
@@ -92,7 +92,7 @@ These learnings are automatically fed into future implementation prompts, so the
 
 ### Self-Improvement (`alpha-loop review`)
 
-Run `alpha-loop review` to trigger the self-improvement loop. It reads all accumulated learnings, computes metrics (success rate, avg retries, common failures), gathers current agent/skill definitions, and asks Claude to propose targeted improvements:
+Run `alpha-loop review` to trigger the self-improvement loop. It reads all accumulated learnings, computes metrics (success rate, avg retries, common failures), gathers current agent/skill definitions, and asks the configured agent to propose targeted improvements:
 
 - **Agent prompts** — bake in recurring patterns, eliminate anti-patterns
 - **Skill definitions** — add/update skills based on what consistently works or fails
@@ -144,7 +144,7 @@ alpha-loop run [options]
 Options:
   --once              Process one issue and exit
   --dry-run           Preview without making changes
-  --model <model>     AI model to use (passed to agent CLI, e.g., opus, sonnet, gpt-5-codex)
+  --model <model>     AI model override (e.g., opus, sonnet, gpt-5.4, gpt-5.3-codex)
   --milestone <name>  Only process issues in this milestone (skips interactive prompt)
   --skip-tests        Skip test execution
   --skip-review       Skip code review step
@@ -222,6 +222,7 @@ All config options can be set via environment variables (uppercase, same names):
 | `AGENT` | `agent` |
 | `MODEL` | `model` |
 | `REVIEW_MODEL` | `review_model` |
+| `POLL_INTERVAL` | `poll_interval` |
 | `MAX_TEST_RETRIES` | `max_test_retries` |
 | `MILESTONE` | `milestone` |
 | `MAX_ISSUES` | `max_issues` |
@@ -234,8 +235,14 @@ All config options can be set via environment variables (uppercase, same names):
 | `SKIP_REVIEW` | `skip_review` |
 | `SKIP_VERIFY` | `skip_verify` |
 | `SKIP_LEARN` | `skip_learn` |
+| `SKIP_E2E` | `skip_e2e` |
+| `SKIP_INSTALL` | `skip_install` |
+| `SKIP_PREFLIGHT` | `skip_preflight` |
 | `AUTO_MERGE` | `auto_merge` |
+| `AUTO_CLEANUP` | `auto_cleanup` |
 | `MERGE_TO` | `merge_to` |
+| `RUN_FULL` | `run_full` |
+| `VERBOSE` | `verbose` |
 
 **Precedence:** CLI flags > environment variables > `.alpha-loop.yaml` > auto-detection > defaults
 
@@ -282,7 +289,6 @@ The loop uses these labels. Run `alpha-loop init` to create any that are missing
 | `ready` | Issue is ready for the loop to pick up |
 | `in-progress` | Loop is actively working on it |
 | `in-review` | PR created, awaiting review |
-| `done` | Merged and complete |
 | `failed` | Loop failed after retries |
 
 ### Milestones
