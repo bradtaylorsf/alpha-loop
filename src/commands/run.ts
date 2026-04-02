@@ -357,6 +357,12 @@ export async function runCommand(options: RunOptions): Promise<void> {
           session,
         );
         session.results.push(result);
+
+        // Stop processing if agent hit a transient error (usage/rate limit)
+        if (result.failureReason === 'transient') {
+          log.warn('Agent hit a rate/usage limit — stopping session to avoid wasting cycles');
+          break;
+        }
       } catch (err) {
         log.error(`Failed to process issue #${issue.number}: ${err}`);
       }

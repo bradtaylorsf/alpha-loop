@@ -175,27 +175,61 @@ export async function finalizeSession(
   }
 
   // Create or update session PR
-  const issueCount = session.results.length;
-  const successCount = session.results.filter((r) => r.status === 'success').length;
-  const failureCount = issueCount - successCount;
+  const successes = session.results.filter((r) => r.status === 'success');
+  const permanentFailures = session.results.filter((r) => r.status === 'failure' && r.failureReason !== 'transient');
+  const transientFailures = session.results.filter((r) => r.status === 'failure' && r.failureReason === 'transient');
   const totalDuration = session.results.reduce((sum, r) => sum + r.duration, 0);
-  const prTitle = `Session: ${session.name} — ${successCount}/${issueCount} succeeded`;
-  const prBody = `## Session Summary
 
-**Branch:** ${session.branch}
-**Issues processed:** ${issueCount} (${successCount} succeeded, ${failureCount} failed)
-**Total duration:** ${Math.round(totalDuration / 60)} minutes
-**Completed:** ${new Date().toISOString()}
+  // Only count completed issues (not transient failures that were re-queued)
+  const completedCount = successes.length + permanentFailures.length;
+  const prTitle = `Session: ${session.name} — ${successes.length}/${completedCount} succeeded`;
 
-### Issues
-${session.results.map((r) => `- #${r.issueNum}: ${r.title} — ${r.status === 'success' ? 'SUCCESS' : 'FAILURE'}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
+  const prLines: string[] = [
+    '## Session Summary',
+    '',
+    `**Branch:** ${session.branch}`,
+    `**Issues completed:** ${completedCount} (${successes.length} succeeded, ${permanentFailures.length} failed)`,
+    `**Total duration:** ${Math.round(totalDuration / 60)} minutes`,
+    `**Completed:** ${new Date().toISOString()}`,
+    '',
+  ];
 
-${session.results.filter((r) => r.status === 'success').map((r) => `Closes #${r.issueNum}`).join('\n')}
+  // Successes — the main content
+  if (successes.length > 0) {
+    prLines.push('### Issues');
+    for (const r of successes) {
+      prLines.push(`- #${r.issueNum}: ${r.title} — SUCCESS${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`);
+    }
+    prLines.push('');
+    prLines.push(...successes.map((r) => `Closes #${r.issueNum}`));
+    prLines.push('');
+  }
 
----
-This PR collects all changes from this session for final review before merging to ${config.baseBranch}.
+  // Permanent failures — collapsed
+  if (permanentFailures.length > 0) {
+    prLines.push('<details>');
+    prLines.push(`<summary>Failed Issues (${permanentFailures.length})</summary>`);
+    prLines.push('');
+    for (const r of permanentFailures) {
+      prLines.push(`- #${r.issueNum}: ${r.title} — FAILURE`);
+    }
+    prLines.push('');
+    prLines.push('</details>');
+    prLines.push('');
+  }
 
-Automated by alpha-loop`;
+  // Transient failures — brief note, these were re-queued
+  if (transientFailures.length > 0) {
+    prLines.push(`*${transientFailures.length} issue(s) were re-queued due to agent rate limits.*`);
+    prLines.push('');
+  }
+
+  prLines.push('---');
+  prLines.push(`This PR collects all changes from this session for final review before merging to ${config.baseBranch}.`);
+  prLines.push('');
+  prLines.push('Automated by alpha-loop');
+
+  const prBody = prLines.join('\n');
 
   try {
     const prUrl = createPR({

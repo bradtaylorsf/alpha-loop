@@ -183,9 +183,44 @@ describe('processIssue', () => {
     const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
 
     expect(result.status).toBe('failure');
+    expect(result.failureReason).toBe('permanent');
     expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'failed', 'in-progress');
     expect(commentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('failed during implementation'));
     expect(mockCleanupWorktree).toHaveBeenCalled();
+  });
+
+  test('re-queues issue on transient error (usage limit) during implementation', async () => {
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'implement prompt') {
+        return { exitCode: 1, output: "ERROR: You've hit your usage limit. Try again at 5:39 PM.", duration: 1000 };
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('failure');
+    expect(result.failureReason).toBe('transient');
+    // Should re-queue with ready label, not failed
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
+    expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'Todo');
+    // Should NOT comment about failure
+    expect(commentIssue).not.toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('failed during implementation'));
+  });
+
+  test('re-queues issue on transient error during planning', async () => {
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt?.includes('structured implementation plan')) {
+        return { exitCode: 1, output: "ERROR: You've hit your usage limit.", duration: 500 };
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('failure');
+    expect(result.failureReason).toBe('transient');
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
   });
 
   test('retries tests up to maxTestRetries with fix agent', async () => {

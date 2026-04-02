@@ -48,7 +48,7 @@ describe('buildAgentArgs', () => {
       '--model', 'opus',
       '--dangerously-skip-permissions',
       '--verbose',
-      '--output-format', 'text',
+      '--output-format', 'stream-json',
     ]);
   });
 

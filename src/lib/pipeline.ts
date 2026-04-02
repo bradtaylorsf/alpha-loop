@@ -26,6 +26,24 @@ import type { SessionContext } from './session.js';
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
 
+/** Patterns that indicate a transient agent error (re-queue, don't mark as failed). */
+const TRANSIENT_ERROR_PATTERNS = [
+  /usage limit/i,
+  /rate limit/i,
+  /too many requests/i,
+  /quota exceeded/i,
+  /capacity/i,
+  /try again/i,
+];
+
+/**
+ * Check if agent output indicates a transient error (usage limits, rate limits).
+ * These issues should be re-queued, not marked as permanently failed.
+ */
+function isTransientError(output: string): boolean {
+  return TRANSIENT_ERROR_PATTERNS.some((p) => p.test(output));
+}
+
 /**
  * Structured plan output from the planning agent.
  * Controls which pipeline steps run and how.
@@ -88,6 +106,8 @@ export type PipelineResult = {
   issueNum: number;
   title: string;
   status: 'success' | 'failure';
+  /** Why the issue failed — 'transient' means re-queue (e.g. usage limit), 'permanent' means label failed. */
+  failureReason?: 'transient' | 'permanent';
   prUrl?: string;
   testsPassing: boolean;
   verifyPassing: boolean;
@@ -194,7 +214,7 @@ Rules:
 - implementation: be concise and actionable. List files to modify and what to change in each.
 - Write ONLY the JSON file. Do not create any other files or make any code changes.`;
 
-      await spawnAgent({
+      const planResult = await spawnAgent({
         agent: config.agent,
         model: config.model,
         prompt: planPrompt,
@@ -202,6 +222,14 @@ Rules:
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
         verbose: config.verbose,
       });
+
+      // Detect transient errors (usage limits) during planning
+      if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
+        log.warn(`Agent hit a transient error during planning for #${issueNum} — re-queuing`);
+        requeueIssue(config, issueNum);
+        await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+        return failureResult(issueNum, title, startTime, 'transient');
+      }
 
       plan = readPlan(planFileInWorktree);
       if (plan.summary) {
@@ -254,11 +282,17 @@ Rules:
     });
 
     if (implResult.exitCode !== 0) {
+      if (isTransientError(implResult.output)) {
+        log.warn(`Agent hit a transient error during implementation for #${issueNum} — re-queuing`);
+        requeueIssue(config, issueNum);
+        await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+        return failureResult(issueNum, title, startTime, 'transient');
+      }
       log.error(`Implementation failed for issue #${issueNum}`);
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, 'Agent loop failed during implementation. See logs for details.');
       await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
-      return failureResult(issueNum, title, startTime);
+      return failureResult(issueNum, title, startTime, 'permanent');
     }
 
     // Auto-commit if agent didn't
@@ -551,17 +585,29 @@ Rules:
   return result;
 }
 
-function failureResult(issueNum: number, title: string, startTime: number): PipelineResult {
+function failureResult(issueNum: number, title: string, startTime: number, reason?: 'transient' | 'permanent'): PipelineResult {
   return {
     issueNum,
     title,
     status: 'failure',
+    failureReason: reason,
     testsPassing: false,
     verifyPassing: false,
     verifySkipped: false,
     duration: Math.round((Date.now() - startTime) / 1000),
     filesChanged: 0,
   };
+}
+
+/**
+ * Re-queue an issue back to ready state after a transient failure.
+ * Restores the label to ready and project status to Todo.
+ */
+function requeueIssue(config: Config, issueNum: number): void {
+  if (config.dryRun) return;
+  labelIssue(config.repo, issueNum, config.labelReady, 'in-progress');
+  updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'Todo');
+  log.info(`Issue #${issueNum} re-queued for next run`);
 }
 
 function loadFileIfExists(filePath: string): string | null {

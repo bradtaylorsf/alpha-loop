@@ -242,4 +242,59 @@ describe('finalizeSession', () => {
       body: expect.stringContaining('#1: First issue'),
     }));
   });
+
+  test('puts failed issues in collapsed details section', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('diff --cached --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config);
+    session.results.push(
+      { issueNum: 1, title: 'Success issue', status: 'success', prUrl: 'https://github.com/owner/repo/pull/1', testsPassing: true, verifyPassing: true, verifySkipped: false, duration: 60, filesChanged: 3 },
+      { issueNum: 2, title: 'Failed issue', status: 'failure', failureReason: 'permanent', testsPassing: false, verifyPassing: false, verifySkipped: false, duration: 30, filesChanged: 0 },
+    );
+
+    await finalizeSession(session, config);
+
+    const body = mockCreatePR.mock.calls[0][0].body;
+    expect(body).toContain('Closes #1');
+    expect(body).not.toContain('Closes #2');
+    expect(body).toContain('<details>');
+    expect(body).toContain('Failed Issues (1)');
+    expect(body).toContain('#2: Failed issue');
+  });
+
+  test('omits transient failures from PR body and notes re-queue', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('diff --cached --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config);
+    session.results.push(
+      { issueNum: 1, title: 'Success issue', status: 'success', prUrl: 'https://github.com/owner/repo/pull/1', testsPassing: true, verifyPassing: true, verifySkipped: false, duration: 60, filesChanged: 3 },
+      { issueNum: 2, title: 'Rate limited issue', status: 'failure', failureReason: 'transient', testsPassing: false, verifyPassing: false, verifySkipped: false, duration: 5, filesChanged: 0 },
+    );
+
+    await finalizeSession(session, config);
+
+    const body = mockCreatePR.mock.calls[0][0].body;
+    expect(body).toContain('Closes #1');
+    expect(body).not.toContain('#2: Rate limited');
+    expect(body).toContain('re-queued due to agent rate limits');
+    // Title should only count completed issues (not transient)
+    const title = mockCreatePR.mock.calls[0][0].title;
+    expect(title).toContain('1/1 succeeded');
+  });
 });
