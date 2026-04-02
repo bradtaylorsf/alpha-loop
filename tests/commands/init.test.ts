@@ -41,6 +41,14 @@ jest.mock('../../src/lib/templates', () => ({
   findDistributionTemplatesDir: jest.fn().mockReturnValue(null),
 }));
 
+// Mock readline so interactive prompts (label creation, project statuses) don't block tests
+jest.mock('node:readline', () => ({
+  createInterface: jest.fn().mockReturnValue({
+    question: jest.fn((_prompt: string, cb: (answer: string) => void) => cb('n')),
+    close: jest.fn(),
+  }),
+}));
+
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
 
 // Mock process.exit to prevent Jest from actually exiting
