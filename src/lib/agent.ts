@@ -47,9 +47,9 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
     }
     case 'codex': {
       const args = [
-        '-q',
+        'exec',
         '--model', options.model,
-        '--auto-edit',
+        '--full-auto',
       ];
       return { command: 'codex', args };
     }

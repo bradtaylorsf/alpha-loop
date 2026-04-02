@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './logger.js';
 import { exec } from './shell.js';
-import { spawnAgent } from './agent.js';
+import { spawnAgent, type AgentOptions } from './agent.js';
 import { setupWorktree, cleanupWorktree } from './worktree.js';
 import {
   assignIssue,
@@ -33,6 +33,7 @@ export type PipelineResult = {
   prUrl?: string;
   testsPassing: boolean;
   verifyPassing: boolean;
+  verifySkipped: boolean;
   duration: number;
   filesChanged: number;
 };
@@ -100,7 +101,7 @@ export async function processIssue(
   if (!config.dryRun) {
     try {
       const planResult = await spawnAgent({
-        agent: 'claude',
+        agent: config.agent as AgentOptions['agent'],
         model: config.model,
         prompt: `Analyze this GitHub issue and enrich it with implementation details.\n\nIssue #${issueNum}: ${title}\n\n${body}\n\nOutput the enriched issue body with acceptance criteria, implementation notes, and any edge cases to handle.`,
         cwd: worktreePath,
@@ -137,7 +138,7 @@ export async function processIssue(
     });
 
     const implResult = await spawnAgent({
-      agent: 'claude',
+      agent: config.agent as AgentOptions['agent'],
       model: config.model,
       prompt: implementPrompt,
       cwd: worktreePath,
@@ -187,7 +188,7 @@ export async function processIssue(
         const fixPrompt = `Tests are failing for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix the implementation code or the tests\n3. Run the tests again to verify\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why it was failing>\n   Example: fix(#${issueNum}): use port 5435 for postgres — default 5432 conflicts with host service\n   DO NOT use generic messages like "fix: resolve test failures"`;
 
         await spawnAgent({
-          agent: 'claude',
+          agent: config.agent as AgentOptions['agent'],
           model: config.model,
           prompt: fixPrompt,
           cwd: worktreePath,
@@ -213,6 +214,7 @@ export async function processIssue(
   log.step('Step 6: Live verification');
   let verifyOutput = '';
   let verifyPassing = false;
+  let verifySkipped = false;
 
   for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
     log.info(`Verification attempt ${attempt} of ${config.maxTestRetries}`);
@@ -227,6 +229,12 @@ export async function processIssue(
       sessionDir: session.resultsDir,
     });
     verifyOutput = verifyResult.output;
+
+    if (verifyResult.skipped) {
+      verifyPassing = true;
+      verifySkipped = true;
+      break;
+    }
 
     if (verifyResult.passed) {
       verifyPassing = true;
@@ -244,7 +252,7 @@ export async function processIssue(
         const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\nThe app was started and tested with playwright-cli, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification output above and identify the ROOT CAUSE of each failure\n2. Fix the implementation code so the feature works correctly\n3. Run the test command to make sure unit tests still pass\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why verification failed>\n   Example: fix(#${issueNum}): add ENCRYPTION_KEY to langfuse config — service requires 32+ char secret\n   DO NOT use generic messages like "fix: resolve verification failures"`;
 
         await spawnAgent({
-          agent: 'claude',
+          agent: config.agent as AgentOptions['agent'],
           model: config.model,
           prompt: verifyFixPrompt,
           cwd: worktreePath,
@@ -283,7 +291,7 @@ export async function processIssue(
       });
 
       const reviewResult = await spawnAgent({
-        agent: 'claude',
+        agent: config.agent as AgentOptions['agent'],
         model: config.reviewModel,
         prompt: reviewPrompt,
         cwd: worktreePath,
@@ -305,7 +313,7 @@ export async function processIssue(
 
   if (!config.dryRun) {
     const prBase = config.autoMerge ? session.branch : config.baseBranch;
-    const prBody = buildPRBody(issueNum, title, reviewOutput, testOutput, testsPassing, verifyPassing, body);
+    const prBody = buildPRBody(issueNum, title, reviewOutput, testOutput, testsPassing, verifyPassing, verifySkipped, body);
 
     try {
       prUrl = createPR({
@@ -408,6 +416,7 @@ export async function processIssue(
     prUrl,
     testsPassing,
     verifyPassing,
+    verifySkipped,
     duration,
     filesChanged,
   };
@@ -428,6 +437,7 @@ function failureResult(issueNum: number, title: string, startTime: number): Pipe
     status: 'failure',
     testsPassing: false,
     verifyPassing: false,
+    verifySkipped: false,
     duration: Math.round((Date.now() - startTime) / 1000),
     filesChanged: 0,
   };
@@ -500,10 +510,13 @@ function buildPRBody(
   testOutput: string,
   testsPassing: boolean,
   verifyPassing: boolean,
+  verifySkipped: boolean,
   body: string,
 ): string {
   const testSummary = extractTestSummary(testOutput);
   const reviewSummary = extractReviewSummary(reviewOutput);
+
+  const verifyStatus = verifySkipped ? 'SKIPPED' : verifyPassing ? 'PASS' : 'FAIL';
 
   const lines: string[] = [
     `Closes #${issueNum}`,
@@ -517,7 +530,7 @@ function buildPRBody(
     `| Check | Status |`,
     `|-------|--------|`,
     `| Unit tests | ${testsPassing ? 'PASS' : 'FAIL'} |`,
-    `| Verification | ${verifyPassing ? 'PASS' : 'FAIL'} |`,
+    `| Verification | ${verifyStatus} |`,
   ];
 
   if (testSummary) {

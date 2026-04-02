@@ -31,9 +31,10 @@ describe('buildAgentArgs', () => {
       const result = buildAgentArgs({ agent: 'codex', model: 'codex' }, prompt);
       expect(result.command).toBe('codex');
       expect(result.args).toEqual([
+        'exec',
         '--model', 'codex',
-        '--auto-edit',
-        '-q', prompt,
+        '--full-auto',
+        prompt,
       ]);
     });
 

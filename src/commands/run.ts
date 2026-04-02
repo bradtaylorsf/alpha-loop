@@ -13,8 +13,8 @@ import { cleanupWorktree } from '../lib/worktree.js';
 import { generateSessionSummary } from '../lib/learning.js';
 import { hasVision } from '../lib/vision.js';
 import { contextNeedsRefresh } from '../lib/context.js';
-import { runPreflight, runPortCheck } from '../lib/preflight.js';
-import { syncAgentAssets } from './sync.js';
+import { runPreflight } from '../lib/preflight.js';
+import { syncAgentAssets, resolveHarnesses } from './sync.js';
 
 export type RunOptions = {
   dryRun?: boolean;
@@ -30,12 +30,22 @@ export type RunOptions = {
 
 /**
  * Check that required CLI tools are installed.
+ * Also warns about optional tools (playwright-cli) that improve the pipeline.
  */
-function checkPrerequisites(): void {
+function checkPrerequisites(config: Config): void {
+  const AGENT_INSTALL_URLS: Record<string, string> = {
+    claude: 'https://claude.ai/code',
+    codex: 'https://github.com/openai/codex',
+    opencode: 'https://github.com/sst/opencode',
+  };
+
+  const agentUrl = AGENT_INSTALL_URLS[config.agent] ?? '';
+  const agentMsg = `${config.agent} CLI not found.${agentUrl ? ` Install: ${agentUrl}` : ''}`;
+
   const tools = [
     { name: 'gh', message: 'GitHub CLI not found. Install: https://cli.github.com/' },
     { name: 'git', message: 'git not found.' },
-    { name: 'claude', message: 'Claude CLI not found. Install: npm install -g @anthropic-ai/claude-code' },
+    { name: config.agent, message: agentMsg },
   ];
 
   for (const tool of tools) {
@@ -43,6 +53,16 @@ function checkPrerequisites(): void {
     if (result.exitCode !== 0) {
       log.error(tool.message);
       process.exit(1);
+    }
+  }
+
+  // Warn about optional playwright-cli for live verification
+  if (!config.skipVerify) {
+    const pwResult = exec('command -v "playwright-cli"');
+    if (pwResult.exitCode !== 0) {
+      log.warn('playwright-cli not installed — live verification will be skipped');
+      log.warn('  Install: npm install -g @anthropic-ai/claude-code');
+      log.warn('  Then run: playwright-cli install --skills');
     }
   }
 }
@@ -70,6 +90,7 @@ function printBanner(config: Config, session: SessionContext): void {
   console.error(`  Skip Tests:     ${BOLD}${config.skipTests}${NC}`);
   console.error(`  Skip Review:    ${BOLD}${config.skipReview}${NC}`);
   console.error(`  Skip Learn:     ${BOLD}${config.skipLearn}${NC}`);
+  console.error(`  Skip Verify:    ${BOLD}${config.skipVerify}${NC}`);
   console.error(`  Verbose:        ${BOLD}${config.verbose}${NC}`);
   console.error(`  Test Retries:   ${BOLD}${config.maxTestRetries}${NC}`);
   console.error(`  Max Issues:     ${BOLD}${config.maxIssues || 'unlimited'}${NC}`);
@@ -176,7 +197,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
   printBanner(config, session);
 
   // Check prerequisites
-  checkPrerequisites();
+  checkPrerequisites(config);
 
   // Track active worktree for cleanup on signal
   let activeIssueNum: number | null = null;
@@ -217,7 +238,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
   process.on('SIGTERM', () => { void cleanup(); });
 
   // Sync agent assets to all configured harnesses before starting the loop
-  const syncResult = syncAgentAssets(config.harnesses);
+  const syncResult = syncAgentAssets(resolveHarnesses(config.harnesses, config.agent));
   if (syncResult.synced) {
     log.success('Agent assets synced before run');
   }
@@ -231,11 +252,6 @@ export async function runCommand(options: RunOptions): Promise<void> {
     log.info(`Filtering issues by milestone: ${activeMilestone}`);
   }
 
-  // Pre-flight port check
-  if (config.port) {
-    log.step('Checking for port conflicts...');
-    runPortCheck(config.port);
-  }
 
   // Pre-flight test validation
   log.step('Running pre-flight test validation...');

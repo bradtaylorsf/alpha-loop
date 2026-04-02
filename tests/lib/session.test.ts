@@ -44,6 +44,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     repo: 'owner/repo',
     repoOwner: 'owner',
     project: 1,
+    agent: 'claude',
     model: 'opus',
     reviewModel: 'opus',
     pollInterval: 60,
@@ -54,7 +55,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxTestRetries: 3,
     testCommand: 'pnpm test',
     devCommand: 'pnpm dev',
-    port: 3000,
+
     skipTests: false,
     skipReview: false,
     skipInstall: false,
@@ -139,6 +140,7 @@ describe('saveResult', () => {
       status: 'success',
       testsPassing: true,
       verifyPassing: true,
+      verifySkipped: false,
       duration: 120,
       filesChanged: 5,
     };
@@ -167,6 +169,7 @@ describe('getPreviousResult', () => {
       prUrl: 'https://github.com/owner/repo/pull/1',
       testsPassing: true,
       verifyPassing: true,
+      verifySkipped: false,
       duration: 120,
       filesChanged: 5,
     });
@@ -182,7 +185,7 @@ describe('getPreviousResult', () => {
 describe('finalizeSession', () => {
   test('returns null when autoMerge is false', async () => {
     const session = createSession(makeConfig());
-    session.results.push({ issueNum: 1, title: 'T', status: 'success', testsPassing: true, verifyPassing: true, duration: 10, filesChanged: 1 });
+    session.results.push({ issueNum: 1, title: 'T', status: 'success', testsPassing: true, verifyPassing: true, verifySkipped: false, duration: 10, filesChanged: 1 });
 
     const result = await finalizeSession(session, makeConfig({ autoMerge: false }));
     expect(result).toBeNull();
@@ -197,7 +200,7 @@ describe('finalizeSession', () => {
 
   test('logs dry run message in dry run mode', async () => {
     const session = createSession(makeConfig());
-    session.results.push({ issueNum: 1, title: 'T', status: 'success', testsPassing: true, verifyPassing: true, duration: 10, filesChanged: 1 });
+    session.results.push({ issueNum: 1, title: 'T', status: 'success', testsPassing: true, verifyPassing: true, verifySkipped: false, duration: 10, filesChanged: 1 });
 
     const result = await finalizeSession(session, makeConfig({ autoMerge: true, dryRun: true }));
     expect(result).toBeNull();
@@ -223,6 +226,7 @@ describe('finalizeSession', () => {
       prUrl: 'https://github.com/owner/repo/pull/1',
       testsPassing: true,
       verifyPassing: true,
+      verifySkipped: false,
       duration: 60,
       filesChanged: 3,
     });

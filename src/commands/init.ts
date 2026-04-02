@@ -15,10 +15,11 @@
  */
 import { existsSync, writeFileSync, readFileSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import * as readline from 'node:readline';
 import { detectRepo, loadConfig } from '../lib/config.js';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
-import { syncAgentAssets, migrateToTemplates } from './sync.js';
+import { syncAgentAssets, migrateToTemplates, resolveHarnesses } from './sync.js';
 import { findDistributionTemplatesDir } from '../lib/templates.js';
 
 const CONFIG_FILE = '.alpha-loop.yaml';
@@ -96,19 +97,18 @@ function configTemplate(repo: string): string {
   return `# Alpha Loop configuration
 repo: ${repo}
 project: 0  # GitHub Project number (find it in your project URL)
+agent: claude  # AI agent CLI: claude, codex, opencode
 model: opus
 review_model: opus
 label: ready
 base_branch: main
 test_command: pnpm test
 dev_command: pnpm dev
-port: 3000
 auto_merge: true
 
-# Coding harnesses to sync skills/agents to
+# Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
   - claude-code
-  - codex
 
 # Safety limits (0 = unlimited)
 max_issues: 20
@@ -154,6 +154,70 @@ function ensureGitignore(): void {
   if (changed) {
     writeFileSync(gitignorePath, content);
     log.success('Updated .gitignore for alpha-loop');
+  }
+}
+
+const REQUIRED_LABELS = [
+  { name: 'ready', color: '0E8A16', description: 'Ready for agent processing' },
+  { name: 'in-progress', color: '1D76DB', description: 'Agent is working on this' },
+  { name: 'in-review', color: 'FBCA04', description: 'PR created, awaiting review' },
+  { name: 'failed', color: 'D93F0B', description: 'Agent processing failed' },
+];
+
+/**
+ * Check for required GitHub labels and interactively create missing ones.
+ */
+export async function ensureLabels(repo: string, labelReady: string): Promise<void> {
+  // Build the label list with the configured "ready" label name
+  const labels = REQUIRED_LABELS.map(l =>
+    l.name === 'ready' ? { ...l, name: labelReady } : l,
+  );
+
+  const result = exec(`gh label list --repo "${repo}" --json name --limit 200`);
+  if (result.exitCode !== 0) {
+    log.warn('Could not check labels (gh CLI issue or repo not found)');
+    return;
+  }
+
+  let existing: Set<string>;
+  try {
+    const parsed = JSON.parse(result.stdout) as Array<{ name: string }>;
+    existing = new Set(parsed.map(l => l.name));
+  } catch {
+    log.warn('Could not parse label list');
+    return;
+  }
+
+  const missing = labels.filter(l => !existing.has(l.name));
+  if (missing.length === 0) {
+    log.success('All required labels exist');
+    return;
+  }
+
+  log.info(`Missing labels: ${missing.map(l => l.name).join(', ')}`);
+
+  // Interactive confirmation if running in a TTY
+  if (process.stdin.isTTY) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>(resolve => {
+      rl.question('Create missing labels? [Y/n]: ', resolve);
+    });
+    rl.close();
+    if (answer.trim().toLowerCase() === 'n') {
+      log.info('Skipping label creation');
+      return;
+    }
+  }
+
+  for (const label of missing) {
+    const createResult = exec(
+      `gh label create "${label.name}" --repo "${repo}" --color "${label.color}" --description "${label.description}"`,
+    );
+    if (createResult.exitCode === 0) {
+      log.success(`Created label: ${label.name}`);
+    } else {
+      log.warn(`Failed to create label: ${label.name}`);
+    }
   }
 }
 
@@ -233,24 +297,7 @@ export async function initCommand(): Promise<void> {
 
   // --- Step 5: Install playwright-cli skills ---
   log.step('Step 5: Playwright CLI');
-  const which = exec('which playwright-cli');
-  if (which.exitCode === 0) {
-    const result = exec('playwright-cli install --skills');
-    if (result.exitCode === 0) {
-      log.success('Playwright CLI skills installed');
-      // Copy to templates source of truth
-      const installed = join('.claude', 'skills', 'playwright-cli');
-      const dest = join(projectTemplatesDir, 'skills', 'playwright-cli');
-      if (existsSync(installed) && !existsSync(dest)) {
-        copyDir(installed, dest);
-        log.info('Copied playwright-cli skill to .alpha-loop/templates/skills/');
-      }
-    } else {
-      log.warn('Could not install playwright-cli skills');
-    }
-  } else {
-    log.info('playwright-cli not found — skipping. Install with: npm install -g @playwright/cli@latest');
-  }
+  installPlaywrightSkills(projectDir, projectTemplatesDir);
 
   // --- Step 6: Vision (interactive) ---
   if (process.stdin.isTTY) {
@@ -274,7 +321,7 @@ export async function initCommand(): Promise<void> {
   // --- Step 8: Sync to harnesses ---
   log.step('Step 8: Sync to harnesses');
   const config = loadConfig();
-  const harnesses = config.harnesses.length > 0 ? config.harnesses : ['claude-code', 'codex'];
+  const harnesses = resolveHarnesses(config.harnesses, config.agent);
   const syncResult = syncAgentAssets(harnesses);
   if (syncResult.synced) {
     log.success(`Synced templates to ${harnesses.join(', ')}`);
@@ -292,8 +339,12 @@ export async function initCommand(): Promise<void> {
     log.info('Issue template already exists');
   }
 
-  // --- Step 10: Commit ---
-  log.step('Step 10: Commit generated files');
+  // --- Step 10: GitHub labels ---
+  log.step('Step 10: GitHub labels');
+  await ensureLabels(config.repo, config.labelReady);
+
+  // --- Step 11: Commit ---
+  log.step('Step 11: Commit generated files');
   const statusResult = exec('git status --porcelain .alpha-loop/ .claude/ .agents/ .codex/ CLAUDE.md AGENTS.md .gitignore .github/');
   if (statusResult.stdout.trim()) {
     exec('git add .alpha-loop/ .claude/ .agents/ .codex/ CLAUDE.md AGENTS.md .gitignore .github/ 2>/dev/null || true');
@@ -307,4 +358,54 @@ export async function initCommand(): Promise<void> {
   }
 
   log.success('Alpha-loop initialization complete!');
+}
+
+/**
+ * Install playwright-cli skills into .alpha-loop/templates/skills/ (source of truth).
+ * playwright-cli install --skills writes to .claude/ by default, so we move the
+ * installed skills into templates and let the normal sync handle distribution.
+ */
+export function installPlaywrightSkills(projectDir: string, templatesDir?: string): boolean {
+  const projectTemplatesDir = templatesDir ?? join(projectDir, '.alpha-loop', 'templates');
+
+  const which = exec('which playwright-cli');
+  if (which.exitCode !== 0) {
+    log.warn('playwright-cli not installed — live verification will not be available');
+    log.info('  Install: npm install -g @anthropic-ai/claude-code');
+    log.info('  Then run: alpha-loop init (or playwright-cli install --skills)');
+    return false;
+  }
+
+  // Run playwright-cli install --skills (writes to .claude/skills/)
+  const result = exec('playwright-cli install --skills', { cwd: projectDir });
+  if (result.exitCode !== 0) {
+    log.warn('Could not install playwright-cli skills');
+    return false;
+  }
+
+  log.success('Playwright CLI skills installed');
+
+  // Move installed skills from .claude/skills/ to templates source of truth
+  // playwright-cli may install multiple skill directories — move any new ones
+  const claudeSkillsDir = join(projectDir, '.claude', 'skills');
+  const templateSkillsDir = join(projectTemplatesDir, 'skills');
+
+  if (existsSync(claudeSkillsDir)) {
+    const installed = readdirSync(claudeSkillsDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && d.name.startsWith('playwright'));
+
+    for (const dir of installed) {
+      const dest = join(templateSkillsDir, dir.name);
+      const src = join(claudeSkillsDir, dir.name);
+      if (!existsSync(dest)) {
+        mkdirSync(dest, { recursive: true });
+        copyDir(src, dest);
+        log.info(`Moved ${dir.name} skill to .alpha-loop/templates/skills/`);
+      }
+      // Remove from .claude/ so sync doesn't conflict
+      exec(`rm -rf "${src}"`);
+    }
+  }
+
+  return true;
 }

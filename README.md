@@ -19,9 +19,9 @@ npx @bradtaylorsf/alpha-loop
 - **Node.js 20+**
 - **git** — for worktree isolation
 - **[GitHub CLI](https://cli.github.com/)** (`gh`) — authenticated with `gh auth login`
-- **AI agent CLI** — currently supports:
-  - [Claude Code](https://claude.ai/code) (`claude`)
-  - [Codex](https://github.com/openai/codex) (`codex`)
+- **AI agent CLI** — set `agent` in your config to one of:
+  - [Claude Code](https://claude.ai/code) (`claude`) — default
+  - [Codex](https://openai.com/index/introducing-codex/) (`codex`)
   - [OpenCode](https://github.com/sst/opencode) (`opencode`)
 - **[Playwright CLI](https://www.npmjs.com/package/@playwright/cli)** (optional) — for live verification with screenshots
 
@@ -142,8 +142,9 @@ During live verification, the agent takes screenshots at key states and saves th
 alpha-loop run [options]
 
 Options:
+  --once              Process one issue and exit
   --dry-run           Preview without making changes
-  --model <model>     AI model to use (e.g., opus, sonnet)
+  --model <model>     AI model to use (passed to agent CLI, e.g., opus, sonnet, gpt-5-codex)
   --milestone <name>  Only process issues in this milestone (skips interactive prompt)
   --skip-tests        Skip test execution
   --skip-review       Skip code review step
@@ -160,19 +161,18 @@ Running `alpha-loop init` creates a `.alpha-loop.yaml` file:
 # Alpha Loop configuration
 repo: owner/repo-name
 project: 0  # GitHub Project number (find it in your project URL)
+agent: claude  # AI agent CLI: claude, codex, opencode
 model: opus
 review_model: opus
 label: ready
 base_branch: main
 test_command: pnpm test
 dev_command: pnpm dev
-port: 3000
 auto_merge: true
 
-# Coding harnesses to sync skills/agents to
+# Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
   - claude-code
-  - codex
 
 # Safety limits (0 = unlimited)
 max_issues: 20
@@ -185,13 +185,15 @@ max_session_duration: 7200  # 2 hours in seconds
 |-----|---------|-------------|
 | `repo` | (auto-detected) | GitHub repo in `owner/name` format |
 | `project` | `0` | GitHub Project number (from URL: `users/<owner>/projects/<N>`) |
-| `model` | `opus` | AI model for implementation and verification |
+| `agent` | `claude` | AI agent CLI to use: `claude`, `codex`, or `opencode` |
+| `model` | `opus` | AI model (passed to agent CLI via `--model` flag) |
 | `review_model` | `opus` | AI model for code review and learning extraction |
 | `label` | `ready` | GitHub label that marks issues as ready for the loop |
 | `base_branch` | `master` | Branch to create PRs against |
 | `test_command` | `pnpm test` | Command to run tests |
 | `dev_command` | `pnpm dev` | Command to start the dev server for verification |
-| `port` | `3000` | Port the dev server runs on |
+| `max_turns` | (none) | Max conversation turns for the agent |
+| `poll_interval` | `60` | Seconds between issue polling |
 | `max_test_retries` | `3` | Times to retry failing tests/verification |
 | `milestone` | (none) | Only process issues in this milestone |
 | `max_issues` | `0` | Max issues to process per session (0 = unlimited) |
@@ -206,7 +208,8 @@ max_session_duration: 7200  # 2 hours in seconds
 | `skip_install` | `false` | Skip `pnpm install` in worktrees |
 | `skip_preflight` | `false` | Skip pre-flight test validation |
 | `auto_cleanup` | `true` | Auto-remove worktrees after processing |
-| `harnesses` | `['claude-code', 'codex']` | Coding harnesses to sync skills/agents to |
+| `verbose` | `false` | Enable verbose agent output |
+| `harnesses` | (auto from agent) | Coding harnesses to sync skills/agents to |
 
 ### Environment Variables
 
@@ -216,6 +219,7 @@ All config options can be set via environment variables (uppercase, same names):
 |----------|------------|
 | `REPO` | `repo` |
 | `PROJECT` | `project` |
+| `AGENT` | `agent` |
 | `MODEL` | `model` |
 | `REVIEW_MODEL` | `review_model` |
 | `MAX_TEST_RETRIES` | `max_test_retries` |
@@ -225,7 +229,6 @@ All config options can be set via environment variables (uppercase, same names):
 | `BASE_BRANCH` | `base_branch` |
 | `TEST_COMMAND` | `test_command` |
 | `DEV_COMMAND` | `dev_command` |
-| `PORT` | `port` |
 | `DRY_RUN` | `dry_run` |
 | `SKIP_TESTS` | `skip_tests` |
 | `SKIP_REVIEW` | `skip_review` |
@@ -236,11 +239,44 @@ All config options can be set via environment variables (uppercase, same names):
 
 **Precedence:** CLI flags > environment variables > `.alpha-loop.yaml` > auto-detection > defaults
 
+### Switching Agents
+
+Alpha Loop is agent-agnostic. Set the `agent` field in `.alpha-loop.yaml` to switch which CLI runs the pipeline:
+
+```yaml
+# Use Codex instead of Claude
+agent: codex
+model: gpt-5-codex
+```
+
+```yaml
+# Use OpenCode
+agent: opencode
+model: deepseek
+```
+
+The `model` value is passed directly to the agent CLI's `--model` flag. Valid values depend on the agent:
+
+| Agent | Example models | CLI flags used |
+|-------|---------------|----------------|
+| `claude` | `opus`, `sonnet`, `haiku` | `-p --model MODEL --dangerously-skip-permissions` |
+| `codex` | `gpt-5-codex`, `o3` | `exec --model MODEL --full-auto` |
+| `opencode` | `deepseek`, `gpt-4` | `run --model MODEL` |
+
+When you change `agent`, the harness sync automatically targets the correct directories (e.g., `.claude/` for Claude, `.codex/` for Codex). You can also explicitly list harnesses if you use multiple tools:
+
+```yaml
+agent: codex
+harnesses:
+  - codex
+  - claude-code  # also sync to Claude Code for teammates using it
+```
+
 ## GitHub Setup
 
 ### Labels
 
-Create these labels on your repo (or let the loop create them):
+The loop uses these labels. Run `alpha-loop init` to create any that are missing:
 
 | Label | Purpose |
 |-------|---------|

@@ -19,6 +19,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     repo: 'test/repo',
     repoOwner: 'test',
     project: 1,
+    agent: 'claude',
     model: 'opus',
     reviewModel: 'opus',
     pollInterval: 60,
@@ -29,7 +30,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxTestRetries: 1,
     testCommand: 'pnpm test',
     devCommand: 'pnpm dev',
-    port: 3000,
+
     skipTests: false,
     skipReview: false,
     skipInstall: false,
@@ -55,7 +56,7 @@ describe('runVerify', () => {
     jest.clearAllMocks();
   });
 
-  it('returns passed when skipVerify is true', async () => {
+  it('returns passed and skipped when skipVerify is true', async () => {
     const result = await runVerify({
       worktree: '/tmp/test',
       logFile: '/tmp/test.log',
@@ -67,10 +68,11 @@ describe('runVerify', () => {
     });
 
     expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
     expect(result.output).toContain('skipped');
   });
 
-  it('returns passed when dryRun is true', async () => {
+  it('returns passed and skipped when dryRun is true', async () => {
     const result = await runVerify({
       worktree: '/tmp/test',
       logFile: '/tmp/test.log',
@@ -82,6 +84,7 @@ describe('runVerify', () => {
     });
 
     expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
     expect(result.output).toContain('dry run');
   });
 
@@ -99,6 +102,7 @@ describe('runVerify', () => {
     });
 
     expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
     expect(result.output).toContain('playwright-cli not installed');
   });
 
@@ -122,6 +126,7 @@ describe('runVerify', () => {
     });
 
     expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
     expect(result.output).toContain('no start command');
   });
 });

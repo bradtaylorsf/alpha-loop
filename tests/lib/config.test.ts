@@ -22,10 +22,10 @@ beforeEach(() => {
   // Reset env vars that could interfere
   // Clear all env vars that map to config keys
   for (const key of [
-    'REPO', 'MODEL', 'PROJECT_NUM', 'DRY_RUN',
+    'REPO', 'MODEL', 'PROJECT', 'AGENT', 'DRY_RUN',
     'REVIEW_MODEL', 'POLL_INTERVAL', 'BASE_BRANCH', 'LOG_DIR',
     'LABEL_READY', 'MAX_TEST_RETRIES', 'TEST_COMMAND', 'DEV_COMMAND',
-    'PORT', 'SKIP_TESTS', 'SKIP_REVIEW', 'SKIP_INSTALL', 'SKIP_PREFLIGHT',
+    'SKIP_TESTS', 'SKIP_REVIEW', 'SKIP_INSTALL', 'SKIP_PREFLIGHT',
     'SKIP_VERIFY', 'SKIP_LEARN', 'SKIP_E2E', 'AUTO_MERGE', 'MERGE_TO',
     'AUTO_CLEANUP', 'RUN_FULL',
   ]) {
@@ -110,6 +110,7 @@ max_test_retries: 5
 
   it('returns defaults when no config file exists', () => {
     const config = loadConfig();
+    expect(config.agent).toBe('claude');
     expect(config.model).toBe('opus');
     expect(config.pollInterval).toBe(60);
     expect(config.baseBranch).toBe('master');
@@ -119,6 +120,32 @@ max_test_retries: 5
     expect(config.skipTests).toBe(false);
     expect(config.autoMerge).toBe(true);
     expect(config.autoCleanup).toBe(true);
+  });
+
+  it('loads agent from config file', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+agent: codex
+model: gpt-5-codex
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.agent).toBe('codex');
+    expect(config.model).toBe('gpt-5-codex');
+  });
+
+  it('loads agent from AGENT env var', () => {
+    process.env.AGENT = 'codex';
+    const config = loadConfig();
+    expect(config.agent).toBe('codex');
+  });
+
+  it('loads project from PROJECT env var', () => {
+    process.env.PROJECT = '5';
+    const config = loadConfig();
+    expect(config.project).toBe(5);
   });
 
   it('applies CLI overrides with highest priority', () => {

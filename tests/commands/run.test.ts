@@ -57,6 +57,7 @@ jest.mock('../../src/lib/preflight', () => ({
 
 jest.mock('../../src/commands/sync', () => ({
   syncAgentAssets: jest.fn().mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] }),
+  resolveHarnesses: jest.fn((harnesses: string[], _agent: string) => harnesses),
 }));
 
 jest.mock('node:fs', () => ({
@@ -82,6 +83,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     repo: 'owner/repo',
     repoOwner: 'owner',
     project: 1,
+    agent: 'claude',
     model: 'opus',
     reviewModel: 'opus',
     pollInterval: 60,
@@ -92,7 +94,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     maxTestRetries: 3,
     testCommand: 'pnpm test',
     devCommand: 'pnpm dev',
-    port: 3000,
+
     skipTests: false,
     skipReview: false,
     skipInstall: false,
@@ -149,6 +151,7 @@ describe('runCommand', () => {
       status: 'success',
       testsPassing: true,
       verifyPassing: true,
+      verifySkipped: false,
       duration: 60,
       filesChanged: 5,
     });

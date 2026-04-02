@@ -72,7 +72,7 @@ describe('buildAgentArgs', () => {
     });
 
     expect(result.command).toBe('codex');
-    expect(result.args).toEqual(['-q', '--model', 'gpt-4', '--auto-edit']);
+    expect(result.args).toEqual(['exec', '--model', 'gpt-4', '--full-auto']);
   });
 
   test('constructs correct args for opencode agent', () => {

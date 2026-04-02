@@ -3,7 +3,8 @@
 
 repo: bradtaylorsf/alpha-loop
 project: 2
-model: opus                      # global default model
+agent: claude                    # AI agent CLI: claude, codex, opencode
+model: opus                      # model passed to agent CLI via --model flag
 review_model: opus
 max_turns: 30
 label: ready
@@ -11,33 +12,6 @@ base_branch: master
 test_command: pnpm test
 poll_interval: 60
 
-# Coding harnesses to sync skills/agents to
+# Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
   - claude-code
-  - codex
-
-# Per-stage agent/model configuration (optional).
-# If a stage is not listed, it falls back to global model + agent: claude.
-# stages:
-#   implement:
-#     agent: claude              # which CLI to invoke (claude, codex, opencode)
-#     model: opus                # model to pass via --model flag
-#     maxTurns: 30
-#   fix:
-#     agent: claude
-#     model: opus
-#     maxTurns: 20
-#   review:
-#     agent: codex               # different agent for code review
-#     model: codex
-#   verify:
-#     agent: codex
-#     model: codex
-#   learn:
-#     agent: claude
-#     model: opus
-#     maxTurns: 5
-#   aggregate:
-#     agent: claude
-#     model: opus
-#     maxTurns: 10

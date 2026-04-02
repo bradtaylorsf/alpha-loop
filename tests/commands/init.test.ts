@@ -28,6 +28,7 @@ jest.mock('../../src/commands/scan', () => ({
 jest.mock('../../src/commands/sync', () => ({
   syncAgentAssets: jest.fn().mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] }),
   migrateToTemplates: jest.fn(),
+  resolveHarnesses: jest.fn((harnesses: string[], _agent: string) => harnesses.length > 0 ? harnesses : ['claude-code']),
 }));
 
 // Mock vision helpers

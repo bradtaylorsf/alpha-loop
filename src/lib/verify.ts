@@ -18,9 +18,23 @@ import type { Config } from './config.js';
 /** Max seconds to wait for app to become ready. */
 const APP_READY_TIMEOUT_S = 60;
 
+/**
+ * Detect port from a dev command string.
+ * Checks for PORT=NNNN env var or --port/- p flag patterns.
+ * Falls back to 3000.
+ */
+export function detectPort(devCommand: string): number {
+  const portEnv = devCommand.match(/PORT=(\d+)/);
+  if (portEnv) return parseInt(portEnv[1], 10);
+  const portFlag = devCommand.match(/(?:--port)\s+(\d+)/);
+  if (portFlag) return parseInt(portFlag[1], 10);
+  return 3000;
+}
+
 
 export type VerifyResult = {
   passed: boolean;
+  skipped: boolean;
   output: string;
 };
 
@@ -41,12 +55,12 @@ export async function runVerify(options: {
 
   if (config.skipVerify) {
     log.info('Verification skipped (skipVerify=true)');
-    return { passed: true, output: 'Verification skipped' };
+    return { passed: true, skipped: true, output: 'Verification skipped' };
   }
 
   if (config.dryRun) {
     log.dry('Would run live verification');
-    return { passed: true, output: 'Verification skipped (dry run)' };
+    return { passed: true, skipped: true, output: 'Verification skipped (dry run)' };
   }
 
   log.step(`Running live verification for issue #${issueNum}`);
@@ -55,8 +69,9 @@ export async function runVerify(options: {
   const whichResult = exec('which playwright-cli');
   if (whichResult.exitCode !== 0) {
     log.warn('playwright-cli not installed. Install with: npm install -g @anthropic-ai/claude-code');
+    log.warn('Run "playwright-cli install --skills" after installing to set up verification skills');
     log.info('Skipping live verification (no playwright-cli)');
-    return { passed: true, output: 'Verification skipped (playwright-cli not installed)' };
+    return { passed: true, skipped: true, output: 'Verification skipped (playwright-cli not installed)' };
   }
 
   // Detect how to start the app
@@ -77,10 +92,10 @@ export async function runVerify(options: {
 
   if (!devCmd) {
     log.info('No dev/start/preview command found, skipping verification');
-    return { passed: true, output: 'Verification skipped (no start command)' };
+    return { passed: true, skipped: true, output: 'Verification skipped (no start command)' };
   }
 
-  const port = config.port ?? 3000;
+  const port = detectPort(devCmd);
 
   // Start the app in the background
   log.info(`Starting app with '${devCmd}' on port ${port}...`);
@@ -106,7 +121,7 @@ export async function runVerify(options: {
       process.kill(appPid!, 0);
     } catch {
       log.error('App process exited before becoming ready');
-      return { passed: false, output: 'App failed to start' };
+      return { passed: false, skipped: false, output: 'App failed to start' };
     }
     await new Promise((r) => setTimeout(r, 1000));
   }
@@ -114,7 +129,7 @@ export async function runVerify(options: {
   if (!ready) {
     log.error(`App did not become ready on port ${port} within ${APP_READY_TIMEOUT_S}s`);
     killProcess(appPid!);
-    return { passed: false, output: `App failed to start on port ${port}` };
+    return { passed: false, skipped: false, output: `App failed to start on port ${port}` };
   }
 
   log.success(`App is ready on port ${port}`);
@@ -219,13 +234,13 @@ Use descriptive filenames:
 IMPORTANT: Use playwright-cli commands to actually interact with the app.
 Navigate, click, type, submit forms. Verify the feature works as a real user would use it.`;
 
-  log.info(`Verification agent: claude + playwright-cli | Testing live at http://localhost:${port}`);
+  log.info(`Verification agent: ${config.agent} + playwright-cli | Testing live at http://localhost:${port}`);
 
   // Run the verification agent with timeout and turn limit to prevent hangs
   let agentResult;
   try {
     agentResult = await spawnAgent({
-      agent: 'claude',
+      agent: config.agent as 'claude' | 'codex' | 'opencode',
       model: config.model,
       prompt: verifyPrompt,
       cwd: worktree,
@@ -245,16 +260,16 @@ Navigate, click, type, submit forms. Verify the feature works as a real user wou
   // Check if verification passed based on agent output
   if (/Status:.*FAIL/i.test(verifyOutput)) {
     log.error('Live verification FAILED');
-    return { passed: false, output: verifyOutput };
+    return { passed: false, skipped: false, output: verifyOutput };
   } else if (/Status:.*PASS/i.test(verifyOutput)) {
     log.success('Live verification PASSED');
-    return { passed: true, output: verifyOutput };
+    return { passed: true, skipped: false, output: verifyOutput };
   } else if (agentResult.exitCode === 0) {
     log.success('Verification completed (agent exit 0)');
-    return { passed: true, output: verifyOutput };
+    return { passed: true, skipped: false, output: verifyOutput };
   } else {
     log.warn(`Verification unclear (agent exit ${agentResult.exitCode})`);
-    return { passed: false, output: verifyOutput };
+    return { passed: false, skipped: false, output: verifyOutput };
   }
 }
 

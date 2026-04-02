@@ -6,6 +6,7 @@ export type Config = {
   repo: string;
   repoOwner: string;
   project: number;
+  agent: string;
   model: string;
   reviewModel: string;
   pollInterval: number;
@@ -16,7 +17,6 @@ export type Config = {
   maxTestRetries: number;
   testCommand: string;
   devCommand: string;
-  port: number;
   skipTests: boolean;
   skipReview: boolean;
   skipInstall: boolean;
@@ -39,6 +39,7 @@ const DEFAULTS: Config = {
   repo: '',
   repoOwner: '',
   project: 2,
+  agent: 'claude',
   model: 'opus',
   reviewModel: 'opus',
   pollInterval: 60,
@@ -49,7 +50,6 @@ const DEFAULTS: Config = {
   maxTestRetries: 3,
   testCommand: 'pnpm test',
   devCommand: 'pnpm dev',
-  port: 3000,
   skipTests: false,
   skipReview: false,
   skipInstall: false,
@@ -73,6 +73,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   harnesses: 'harnesses',
   repo: 'repo',
   project: 'project',
+  agent: 'agent',
   model: 'model',
   review_model: 'reviewModel',
   poll_interval: 'pollInterval',
@@ -83,7 +84,6 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   max_test_retries: 'maxTestRetries',
   test_command: 'testCommand',
   dev_command: 'devCommand',
-  port: 'port',
   skip_tests: 'skipTests',
   skip_review: 'skipReview',
   skip_install: 'skipInstall',
@@ -104,7 +104,8 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
 /** Map from env var name to Config key. */
 const ENV_KEY_MAP: Record<string, keyof Config> = {
   REPO: 'repo',
-  PROJECT_NUM: 'project',
+  PROJECT: 'project',
+  AGENT: 'agent',
   MODEL: 'model',
   REVIEW_MODEL: 'reviewModel',
   POLL_INTERVAL: 'pollInterval',
@@ -115,7 +116,6 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   MAX_TEST_RETRIES: 'maxTestRetries',
   TEST_COMMAND: 'testCommand',
   DEV_COMMAND: 'devCommand',
-  PORT: 'port',
   SKIP_TESTS: 'skipTests',
   SKIP_REVIEW: 'skipReview',
   SKIP_INSTALL: 'skipInstall',
