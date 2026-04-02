@@ -64,6 +64,7 @@ jest.mock('node:fs', () => ({
   existsSync: jest.fn().mockReturnValue(false),
   readFileSync: jest.fn(),
   writeFileSync: jest.fn(),
+  unlinkSync: jest.fn(),
 }));
 
 import { exec } from '../../src/lib/shell';
@@ -282,5 +283,43 @@ describe('processIssue', () => {
       title: expect.stringContaining('closes #42'),
       body: expect.stringContaining('Test Results'),
     }));
+  });
+
+  test('review gate loops back to implementer when review fails', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+
+    // First review call: review gate says failed. Second: passed.
+    let reviewCallCount = 0;
+    mockExistsSync.mockImplementation((path: any) => {
+      if (String(path).includes('review-issue-42.json')) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).includes('review-issue-42.json')) {
+        reviewCallCount++;
+        if (reviewCallCount === 1) {
+          return JSON.stringify({
+            passed: false,
+            summary: 'Scope drift detected',
+            findings: [{ severity: 'critical', description: 'Unrelated files changed', fixed: false, file: 'globals.css' }],
+          });
+        }
+        return JSON.stringify({ passed: true, summary: 'All issues fixed', findings: [] });
+      }
+      return '';
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('success');
+    // Should have called spawnAgent for: plan, implement, review1, fix, review2 = 5+ calls
+    // The fix call should use resume
+    const fixCalls = (mockSpawnAgent as jest.Mock).mock.calls.filter(
+      (call: any[]) => (call[0] as any).prompt?.includes('code review for issue #42 found problems'),
+    );
+    expect(fixCalls.length).toBeGreaterThanOrEqual(1);
+    expect(fixCalls[0][0].resume).toBe(true);
   });
 });

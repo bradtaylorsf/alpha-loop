@@ -161,9 +161,32 @@ ${verifySteps}
 ### Screenshots
 Save to: ${screenshotDir}
 
-## Report
+## Gate Result (REQUIRED)
 
-Output a verification report:
+After testing, write a JSON file to: verify-issue-${issueNum}.json
+
+The file must contain ONLY valid JSON with this exact schema:
+
+{
+  "passed": true,
+  "summary": "One-line summary of verification outcome",
+  "findings": [
+    {
+      "severity": "critical",
+      "description": "What failed or didn't work",
+      "fixed": false,
+      "file": "path/to/affected/file.ts"
+    }
+  ]
+}
+
+Rules:
+- passed: true if the feature works as expected. false if there are failures.
+- findings: list ALL checks performed, with severity and pass/fail status.
+- If everything works, set passed=true with an empty findings array.
+- If there are failures, set passed=false — the implementer will be sent back to fix them.
+
+Also output a human-readable summary:
 
 ### Status: PASS or FAIL
 ### What Was Tested
