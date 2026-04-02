@@ -12,7 +12,7 @@ import { log } from './lib/logger.js';
 program
   .name('alpha-loop')
   .description('Agent-agnostic automated development loop')
-  .version('1.0.0');
+  .version('1.0.1');
 
 program
   .command('init')
