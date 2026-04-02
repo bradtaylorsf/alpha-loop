@@ -52,7 +52,7 @@ alpha-loop run --milestone "v1.0"
 
 Alpha Loop implements a 12-step pipeline for each issue:
 
-1. **Status Update** — Labels issue `in-progress`, updates project board
+1. **Status Update** — Labels issue `in-progress`, assigns to you, updates project board
 2. **Worktree** — Creates an isolated git worktree so work doesn't conflict with other issues
 3. **Plan** — Agent analyzes the issue and enriches it with implementation details
 4. **Implement** — Agent writes the code, guided by project vision, context, and learnings from previous issues
@@ -97,6 +97,28 @@ Each completed issue produces a learning file in `.alpha-loop/learnings/` with:
 
 These learnings are automatically fed into future implementation prompts, so the agent gets smarter over time.
 
+### Self-Improvement (`alpha-loop review`)
+
+Run `alpha-loop review` to trigger the self-improvement loop. It reads all accumulated learnings, computes metrics (success rate, avg retries, common failures), gathers current agent/skill definitions, and asks Claude to propose targeted improvements:
+
+- **Agent prompts** — bake in recurring patterns, eliminate anti-patterns
+- **Skill definitions** — add/update skills based on what consistently works or fails
+- **Testing environment** — fix Playwright config, port conflicts, auth state, data seeding issues
+- **Harness configuration** — tune timeouts, retries, and defaults
+
+Without `--apply`, proposals are saved to `learnings/proposed-updates/` for review. With `--apply`, changes are written and a draft PR is created.
+
+### Crash Recovery (`alpha-loop resume`)
+
+If the loop hangs or crashes mid-session, work can be stranded on local branches with no PR. Run `alpha-loop resume` to recover:
+
+1. Scans for local `agent/issue-*` branches with commits but no open PR
+2. Pushes each branch to origin
+3. Runs code review
+4. Creates PRs and updates issue status
+
+Use `--issue <N>` to resume a specific issue.
+
 ### Screenshots
 
 During live verification, the agent takes screenshots at key states and saves them to `.alpha-loop/sessions/<name>/screenshots/issue-<N>/`. These are kept locally (not committed to git) for debugging.
@@ -115,7 +137,11 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop history <name>` | View a specific session |
 | `alpha-loop history <name> --qa` | Show QA checklist for session |
 | `alpha-loop history --clean` | Remove old session data |
-| `alpha-loop sync` | Sync agent assets (AGENTS.md, skills) across agent directories |
+| `alpha-loop sync` | Sync templates to configured harnesses (Claude, Codex, Cursor, etc.) |
+| `alpha-loop resume` | Resume stranded work — push branches, review, open PRs |
+| `alpha-loop resume --issue <N>` | Resume a specific issue |
+| `alpha-loop review` | Analyze learnings and propose self-improvements |
+| `alpha-loop review --apply` | Apply proposed improvements and create a draft PR |
 
 ### Run Options
 
@@ -182,6 +208,7 @@ max_session_duration: 7200  # 2 hours in seconds
 | `skip_install` | `false` | Skip `pnpm install` in worktrees |
 | `skip_preflight` | `false` | Skip pre-flight test validation |
 | `auto_cleanup` | `true` | Auto-remove worktrees after processing |
+| `harnesses` | `['claude-code', 'codex']` | Coding harnesses to sync skills/agents to |
 
 ### Environment Variables
 
@@ -264,8 +291,8 @@ What needs to be done.
 |-----------|-------------|---------|
 | `.alpha-loop/vision.md` | Yes | Project vision document |
 | `.alpha-loop/context.md` | Yes | Auto-generated project context |
-| `.alpha-loop/learnings/` | Yes | Learning files from each issue + session summaries |
-| `.alpha-loop/sessions/` | No (gitignored) | Session logs, results JSON, screenshots |
+| `.alpha-loop/learnings/` | Yes | Learning files, session manifests, and session summaries (shared with team) |
+| `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |
 

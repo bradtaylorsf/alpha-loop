@@ -108,6 +108,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     maxIssues: 0,
     maxSessionDuration: 0,
     milestone: '',
+    harnesses: [],
     ...overrides,
   };
 }

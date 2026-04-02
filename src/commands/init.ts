@@ -1,7 +1,6 @@
-import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { detectRepo } from '../lib/config.js';
+import { detectRepo, loadConfig } from '../lib/config.js';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
 import { syncAgentAssets } from './sync.js';
@@ -9,29 +8,27 @@ import { syncAgentAssets } from './sync.js';
 /**
  * Find the templates directory shipped with alpha-loop.
  * Works whether running from src/ (tsx) or dist/ (compiled) or as an npm package.
+ *
+ * Uses the resolved path of the CLI entrypoint (process.argv[1]) to locate the
+ * package root, following symlinks so globally-installed npm packages resolve correctly.
  */
 function findTemplatesDir(): string | null {
-  // Walk up from this file's location to find the alpha-loop package root.
-  // src/commands/init.ts -> src/ -> package root (has templates/)
-  // dist/commands/init.js -> dist/ -> package root (has templates/)
-  //
-  // Use import.meta.url (ESM) which resolves through symlinks to the actual file,
-  // unlike __dirname (unavailable in ESM) or process.argv[1] (follows symlink path).
-  const thisDir = dirname(fileURLToPath(import.meta.url));
-
-  const candidates: string[] = [];
-
-  // Walk up from this file's actual location
-  let dir = thisDir;
-  for (let i = 0; i < 5; i++) {
-    candidates.push(join(dir, 'templates'));
-    const parent = join(dir, '..');
-    if (parent === dir) break;
-    dir = parent;
+  // Resolve symlinks (npm global installs are symlinked from bin/ to the actual package)
+  let startDir: string;
+  try {
+    startDir = dirname(realpathSync(process.argv[1]));
+  } catch {
+    startDir = process.cwd();
   }
 
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
+  // Walk up from the entrypoint to find templates/
+  let dir = startDir;
+  for (let i = 0; i < 5; i++) {
+    const candidate = join(dir, 'templates');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
   }
   return null;
 }
@@ -120,6 +117,12 @@ dev_command: pnpm dev
 port: 3000
 auto_merge: true
 
+# Coding harnesses to sync skills/agents to (run 'alpha-loop sync' after changes)
+# See full list: https://github.com/nicepkg/playwright-cli
+harnesses:
+  - claude-code
+  - codex
+
 # Safety limits (0 = unlimited)
 max_issues: 20
 max_session_duration: 7200  # 2 hours in seconds
@@ -132,6 +135,46 @@ max_session_duration: 7200  # 2 hours in seconds
 function copyDir(src: string, dest: string): void {
   mkdirSync(dest, { recursive: true });
   exec(`cp -R "${src}/"* "${dest}/" 2>/dev/null || true`);
+}
+
+const GITIGNORE_ENTRIES = [
+  '# Alpha-loop ephemeral data (not shared)',
+  '.alpha-loop/sessions/',
+  '.alpha-loop/auth/',
+  '.worktrees/',
+];
+
+/**
+ * Ensure .gitignore tracks learnings but ignores sessions, auth, and worktrees.
+ * Also removes stale entries that previously ignored learnings.
+ */
+function ensureGitignore(): void {
+  const gitignorePath = '.gitignore';
+  let content = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : '';
+  let changed = false;
+
+  // Remove old entry that ignored learnings (they should be tracked now)
+  if (content.includes('.alpha-loop/learnings/')) {
+    content = content
+      .split('\n')
+      .filter((line) => line.trim() !== '.alpha-loop/learnings/')
+      .join('\n');
+    changed = true;
+    log.info('Removed .alpha-loop/learnings/ from .gitignore (learnings are now tracked)');
+  }
+
+  // Add required ignore entries
+  const missing = GITIGNORE_ENTRIES.filter((entry) => !content.includes(entry));
+  if (missing.length > 0) {
+    const suffix = (content.endsWith('\n') || content === '') ? '' : '\n';
+    content += suffix + missing.join('\n') + '\n';
+    changed = true;
+  }
+
+  if (changed) {
+    writeFileSync(gitignorePath, content);
+    log.success('Updated .gitignore for alpha-loop');
+  }
 }
 
 export function initCommand(): void {
@@ -152,6 +195,12 @@ export function initCommand(): void {
   }
 
   // Everything below is idempotent — safe to re-run
+
+  // Ensure .gitignore has the right alpha-loop entries:
+  // - Track learnings (team-shared knowledge)
+  // - Ignore sessions (local logs, screenshots, ephemeral data)
+  // - Ignore auth (browser state with credentials)
+  ensureGitignore();
 
   // Install playwright-cli skills if playwright-cli is available
   const which = exec('which playwright-cli');
@@ -233,8 +282,12 @@ export function initCommand(): void {
     log.success('Created GitHub issue template: .github/ISSUE_TEMPLATE/agent-ready.yml');
   }
 
-  // Sync agent assets so skills land in both .claude/skills/ and .agents/skills/
-  const syncResult = syncAgentAssets();
+  // Sync agent assets to all configured harnesses (default to claude-code + codex on first init)
+  const initConfig = loadConfig();
+  const initHarnesses = initConfig.harnesses.length > 0
+    ? initConfig.harnesses
+    : ['claude-code', 'codex'];
+  const syncResult = syncAgentAssets(initHarnesses);
   if (syncResult.synced) {
     log.success('Agent assets synced across .claude/ and .agents/');
   }

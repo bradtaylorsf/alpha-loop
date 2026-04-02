@@ -18,6 +18,7 @@ import type { Config } from './config.js';
 /** Max seconds to wait for app to become ready. */
 const APP_READY_TIMEOUT_S = 60;
 
+
 export type VerifyResult = {
   passed: boolean;
   output: string;
@@ -220,23 +221,26 @@ Navigate, click, type, submit forms. Verify the feature works as a real user wou
 
   log.info(`Verification agent: claude + playwright-cli | Testing live at http://localhost:${port}`);
 
-  // Run the verification agent
-  const agentResult = await spawnAgent({
-    agent: 'claude',
-    model: config.model,
-    prompt: verifyPrompt,
-    cwd: worktree,
-    logFile,
-  });
+  // Run the verification agent with timeout and turn limit to prevent hangs
+  let agentResult;
+  try {
+    agentResult = await spawnAgent({
+      agent: 'claude',
+      model: config.model,
+      prompt: verifyPrompt,
+      cwd: worktree,
+      logFile,
+    });
+  } finally {
+    // Always clean up the app process, even if the agent times out or errors
+    log.info('Shutting down app...');
+    killProcess(appPid!);
+
+    // Close playwright-cli browser sessions
+    exec('playwright-cli close-all');
+  }
 
   const verifyOutput = agentResult.output;
-
-  // Kill the app process
-  log.info('Shutting down app...');
-  killProcess(appPid!);
-
-  // Close playwright-cli browser sessions
-  exec('playwright-cli close-all');
 
   // Check if verification passed based on agent output
   if (/Status:.*FAIL/i.test(verifyOutput)) {

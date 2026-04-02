@@ -8,6 +8,7 @@ import { exec } from './shell.js';
 import { spawnAgent } from './agent.js';
 import { setupWorktree, cleanupWorktree } from './worktree.js';
 import {
+  assignIssue,
   labelIssue,
   commentIssue,
   createPR,
@@ -62,6 +63,7 @@ export async function processIssue(
   if (!config.dryRun) {
     updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In progress');
     labelIssue(config.repo, issueNum, 'in-progress', config.labelReady);
+    assignIssue(config.repo, issueNum, '@me');
   } else {
     log.dry('Would update issue status to in-progress');
   }
@@ -233,18 +235,23 @@ export async function processIssue(
     }
 
     if (attempt < config.maxTestRetries) {
-      log.warn(`Verification failed on attempt ${attempt}, invoking agent to fix...`);
-      const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\nThe app was started and tested with playwright-cli, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification output above and identify the ROOT CAUSE of each failure\n2. Fix the implementation code so the feature works correctly\n3. Run the test command to make sure unit tests still pass\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why verification failed>\n   Example: fix(#${issueNum}): add ENCRYPTION_KEY to langfuse config — service requires 32+ char secret\n   DO NOT use generic messages like "fix: resolve verification failures"`;
+      // If the agent timed out, retrying with a fix agent won't help — just retry verification
+      const timedOut = verifyOutput.includes('[TIMEOUT]');
+      if (timedOut) {
+        log.warn(`Verification timed out on attempt ${attempt}, retrying without fix agent...`);
+      } else {
+        log.warn(`Verification failed on attempt ${attempt}, invoking agent to fix...`);
+        const verifyFixPrompt = `Build verification failed after implementing issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\nThe app was started and tested with playwright-cli, but verification failed.\n\nVerification output:\n${verifyOutput}\n\nInstructions:\n1. Read the verification output above and identify the ROOT CAUSE of each failure\n2. Fix the implementation code so the feature works correctly\n3. Run the test command to make sure unit tests still pass\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why verification failed>\n   Example: fix(#${issueNum}): add ENCRYPTION_KEY to langfuse config — service requires 32+ char secret\n   DO NOT use generic messages like "fix: resolve verification failures"`;
 
-      await spawnAgent({
-        agent: 'claude',
-        model: config.model,
-        prompt: verifyFixPrompt,
-        cwd: worktreePath,
-  
-        logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
-        verbose: config.verbose,
-      });
+        await spawnAgent({
+          agent: 'claude',
+          model: config.model,
+          prompt: verifyFixPrompt,
+          cwd: worktreePath,
+          logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
+          verbose: config.verbose,
+        });
+      }
 
       // Auto-commit fixes
       const fixStatus = exec('git status --porcelain', { cwd: worktreePath });

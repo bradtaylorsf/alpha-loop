@@ -28,6 +28,7 @@ jest.mock('../../src/lib/worktree', () => ({
 }));
 
 jest.mock('../../src/lib/github', () => ({
+  assignIssue: jest.fn(),
   labelIssue: jest.fn(),
   commentIssue: jest.fn(),
   createPR: jest.fn(),
@@ -116,6 +117,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     maxIssues: 0,
     maxSessionDuration: 0,
     milestone: '',
+    harnesses: [],
     ...overrides,
   };
 }

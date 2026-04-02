@@ -25,6 +25,10 @@ alpha-loop run --dry-run # Dry run (preview, no changes)
 alpha-loop scan          # Generate/refresh project context
 alpha-loop vision        # Interactive project vision setup
 alpha-loop auth          # Save authenticated browser state
+alpha-loop resume        # Resume stranded work from crashed sessions
+alpha-loop resume --issue 34     # Resume a specific issue
+alpha-loop review        # Analyze learnings, propose agent/skill improvements
+alpha-loop review --apply        # Apply improvements and create draft PR
 alpha-loop history       # View session history
 alpha-loop history <name> --qa    # Show QA checklist for session
 alpha-loop history --clean        # Remove old session data
@@ -42,6 +46,8 @@ alpha-loop/
 │   │   ├── auth.ts             # Browser auth state management
 │   │   ├── history.ts          # Session history viewer
 │   │   ├── init.ts             # Config template creation
+│   │   ├── resume.ts           # Resume stranded work from crashed sessions
+│   │   ├── review.ts           # Self-improvement loop (learnings → proposals)
 │   │   ├── run.ts              # Main loop execution
 │   │   ├── scan.ts             # Project context generation
 │   │   └── vision.ts           # Vision document setup
@@ -66,19 +72,37 @@ alpha-loop/
 │       ├── vision.ts           # Vision document helpers
 │       └── worktree.ts         # Git worktree management
 ├── tests/                      # Test suite (mirrors src/ structure)
-├── agents/                     # Agent definitions (YAML+Markdown)
-├── learnings/                  # Self-improvement data
-│   └── proposed-updates/       # Proposed agent prompt updates
-├── .claude/
-│   ├── agents/                 # Agent definitions for Claude
-│   └── skills/                 # Reusable skill definitions
-└── .alpha-loop.yaml            # Loop configuration
+├── templates/                  # DISTRIBUTION: starter files shipped with npm package
+│   ├── skills/                 # Default skills installed by `alpha-loop init`
+│   └── agents/                 # Default agent prompts installed by `alpha-loop init`
+├── .alpha-loop.yaml            # Loop configuration (includes harnesses list)
+├── .alpha-loop/
+│   ├── templates/              # THIS REPO'S OWN skills and sub-agent definitions
+│   │   ├── skills/             # Skill definitions (synced to harness-specific paths)
+│   │   └── agents/             # Sub-agent prompts (implementer.md, reviewer.md)
+│   ├── learnings/              # Tracked in git — team-shared knowledge
+│   │   └── proposed-updates/   # Proposed improvements from `alpha-loop review`
+│   └── sessions/               # Gitignored — local logs, screenshots
+├── .claude/                    # Auto-synced from .alpha-loop/templates/ (Claude Code)
+├── .agents/                    # Auto-synced from .alpha-loop/templates/ (Codex, Cursor, etc.)
+└── .codex/                     # Auto-synced from .alpha-loop/templates/ (Codex agents)
 ```
+
+## Two templates/ directories — don't confuse them
+
+This repo has TWO `templates/` directories with different purposes:
+
+- **`templates/`** (root) — **Distribution templates** shipped with the npm package. When a user runs `alpha-loop init` in their project, these files are copied to their `.alpha-loop/templates/`. This is product code — changes here affect all new alpha-loop users.
+- **`.alpha-loop/templates/`** — **This repo's own** dev config for running alpha-loop against itself. Same as any other project using alpha-loop. Changes here only affect this repo's development workflow.
+
+When editing skills or agent prompts, make sure you're editing the right one:
+- Improving the **default starter skills** for new users → edit `templates/`
+- Improving **this repo's own** loop behavior → edit `.alpha-loop/templates/`
 
 ## Architecture Principles
 
 1. **GitHub is the database** -- Issues are the kanban, labels are the state machine, PRs are reviews
-2. **Agent-agnostic** -- Support any CLI agent (Claude, Codex, OpenCode)
+2. **Agent-agnostic** -- Support 40+ coding harnesses via configurable sync
 3. **The Loop is the product** -- Plan -> Build -> Test -> Review -> Ship
 4. **Self-improving** -- Extract learnings, update agent prompts automatically
 5. **Simple enough to understand** -- A course graduate should be able to read this codebase
@@ -86,8 +110,8 @@ alpha-loop/
 ## Protected Files -- DO NOT MODIFY OR DELETE
 
 - `CLAUDE.md` -- This file. Do not modify unless explicitly asked.
-- `.claude/agents/` -- Agent definitions. Do not modify unless explicitly asked.
-- `.claude/skills/` -- Skill definitions. Do not modify unless explicitly asked.
+- `.alpha-loop/templates/` -- Source of truth for skills, agents, and instructions. Modify via `alpha-loop review --apply`, not directly.
+- `.claude/`, `.agents/`, `.codex/` -- Auto-synced from templates. Do not edit directly.
 
 ## Code Style
 

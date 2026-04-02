@@ -216,8 +216,8 @@ export async function runCommand(options: RunOptions): Promise<void> {
   process.on('SIGINT', () => { void cleanup(); });
   process.on('SIGTERM', () => { void cleanup(); });
 
-  // Sync agent assets (AGENTS.md → CLAUDE.md, skills/ → .agents/skills/ + .claude/skills/)
-  const syncResult = syncAgentAssets();
+  // Sync agent assets to all configured harnesses before starting the loop
+  const syncResult = syncAgentAssets(config.harnesses);
   if (syncResult.synced) {
     log.success('Agent assets synced before run');
   }
