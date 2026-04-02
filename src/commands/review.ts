@@ -28,7 +28,6 @@ type ProposedChange = {
 const ALLOWED_PREFIXES = [
   '.alpha-loop/templates/skills/',
   '.alpha-loop/templates/agents/',
-  '.alpha-loop/templates/instructions.md',
   '.alpha-loop.yaml',
 ];
 
@@ -213,7 +212,7 @@ ${harnessConfig}
 
 Analyze the learnings and propose specific improvements. Focus on:
 
-1. **Agent prompts** (\`.alpha-loop/templates/agents/implementer.md\`, \`.alpha-loop/templates/agents/reviewer.md\`, \`.alpha-loop/templates/instructions.md\`):
+1. **Agent prompts** (\`.alpha-loop/templates/agents/implementer.md\`, \`.alpha-loop/templates/agents/reviewer.md\`):
    - Are there recurring patterns or anti-patterns that should be baked into the prompts?
    - Are there common mistakes the agent makes that a prompt instruction would prevent?
    - Are there successful strategies that should be reinforced?
@@ -255,7 +254,7 @@ Respond with ONLY a JSON array of proposed changes. Each change must have this e
 \`\`\`
 
 Rules:
-- \`path\` must be one of: \`.alpha-loop/templates/agents/*.md\`, \`.alpha-loop/templates/skills/*\`, \`.alpha-loop/templates/instructions.md\`, or \`.alpha-loop.yaml\`
+- \`path\` must be one of: \`.alpha-loop/templates/agents/*.md\`, \`.alpha-loop/templates/skills/*\`, or \`.alpha-loop.yaml\`
 - \`content\` is the COMPLETE new file content (not a diff)
 - \`category\` must be one of: \`agent\`, \`skill\`, \`config\`, \`testing\`
 - Only propose changes that are clearly supported by the learnings data
@@ -416,7 +415,7 @@ async function applyChanges(
 
   // Stage and commit changes (including synced copies)
   const stageResult = exec(
-    `git add ${appliedPaths.map((p) => JSON.stringify(p)).join(' ')} .alpha-loop/templates/ .claude/ .agents/ CLAUDE.md AGENTS.md 2>/dev/null || true`,
+    `git add ${appliedPaths.map((p) => JSON.stringify(p)).join(' ')} .alpha-loop/templates/ .claude/ .agents/ .codex/ 2>/dev/null || true`,
     { cwd: projectDir },
   );
   if (stageResult.exitCode !== 0) {
@@ -530,10 +529,6 @@ export async function reviewCommand(options: ReviewOptions): Promise<void> {
   // --- Gather agent definitions from .alpha-loop/templates/ (source of truth) ---
   const templateAgentsDir = join(projectDir, '.alpha-loop', 'templates', 'agents');
   const agentDefs = readDirFiles(templateAgentsDir, ['.md', '.yaml', '.yml']);
-  const instructionsPath = join(projectDir, '.alpha-loop', 'templates', 'instructions.md');
-  if (existsSync(instructionsPath)) {
-    agentDefs.push({ path: instructionsPath, content: readFileSync(instructionsPath, 'utf-8') });
-  }
   log.info(`Found ${agentDefs.length} agent definition(s)`);
 
   // --- Gather skill definitions from .alpha-loop/templates/ (source of truth) ---

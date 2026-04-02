@@ -77,10 +77,9 @@ alpha-loop/
 │   └── agents/                 # Default agent prompts installed by `alpha-loop init`
 ├── .alpha-loop.yaml            # Loop configuration (includes harnesses list)
 ├── .alpha-loop/
-│   ├── templates/              # THIS REPO'S OWN skills, agents, instructions
+│   ├── templates/              # THIS REPO'S OWN skills and sub-agent definitions
 │   │   ├── skills/             # Skill definitions (synced to harness-specific paths)
-│   │   ├── agents/             # Agent prompt files (implementer.md, reviewer.md)
-│   │   └── instructions.md     # Main instructions (synced to CLAUDE.md, AGENTS.md)
+│   │   └── agents/             # Sub-agent prompts (implementer.md, reviewer.md)
 │   ├── learnings/              # Tracked in git — team-shared knowledge
 │   │   └── proposed-updates/   # Proposed improvements from `alpha-loop review`
 │   └── sessions/               # Gitignored — local logs, screenshots
