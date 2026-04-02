@@ -7,6 +7,11 @@ jest.mock('node:child_process', () => ({
   execSync: jest.fn(),
 }));
 
+// Silence all logger output during tests
+jest.mock('../../src/lib/logger', () => ({
+  log: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), success: jest.fn(), step: jest.fn(), dry: jest.fn() },
+}));
+
 // Mock shell exec so init steps that shell out (scan, sync, git) don't run real commands
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn().mockReturnValue({ exitCode: 1, stdout: '', stderr: '' }),
