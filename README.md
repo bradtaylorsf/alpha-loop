@@ -162,8 +162,7 @@ Running `alpha-loop init` creates a `.alpha-loop.yaml` file:
 repo: owner/repo-name
 project: 0  # GitHub Project number (find it in your project URL)
 agent: claude  # AI agent CLI: claude, codex, opencode
-model: opus
-review_model: opus
+# model:       # omit to use agent's default (e.g., opus, gpt-5.4)
 label: ready
 base_branch: main
 test_command: pnpm test
@@ -172,7 +171,7 @@ auto_merge: true
 
 # Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
-  - claude-code
+  - claude
 
 # Safety limits (0 = unlimited)
 max_issues: 20
@@ -186,8 +185,8 @@ max_session_duration: 7200  # 2 hours in seconds
 | `repo` | (auto-detected) | GitHub repo in `owner/name` format |
 | `project` | `0` | GitHub Project number (from URL: `users/<owner>/projects/<N>`) |
 | `agent` | `claude` | AI agent CLI to use: `claude`, `codex`, or `opencode` |
-| `model` | `opus` | AI model (passed to agent CLI via `--model` flag) |
-| `review_model` | `opus` | AI model for code review and learning extraction |
+| `model` | (agent default) | AI model (passed via `--model` flag; omit to use agent's default) |
+| `review_model` | (agent default) | AI model for code review and learning extraction |
 | `label` | `ready` | GitHub label that marks issues as ready for the loop |
 | `base_branch` | `master` | Branch to create PRs against |
 | `test_command` | `pnpm test` | Command to run tests |
@@ -210,7 +209,7 @@ max_session_duration: 7200  # 2 hours in seconds
 | `auto_cleanup` | `true` | Auto-remove worktrees after processing |
 | `run_full` | `false` | Run full pipeline without skipping any steps |
 | `verbose` | `false` | Enable verbose agent output |
-| `harnesses` | (auto from agent) | Coding harnesses to sync skills/agents to |
+| `harnesses` | (auto from agent) | Coding harnesses to sync skills/agents to (e.g., `claude`, `codex`) |
 
 ### Environment Variables
 
@@ -247,21 +246,20 @@ Alpha Loop is agent-agnostic. Set the `agent` field in `.alpha-loop.yaml` to swi
 ```yaml
 # Use Codex instead of Claude
 agent: codex
-model: gpt-5-codex
 ```
 
 ```yaml
-# Use OpenCode
-agent: opencode
-model: deepseek
+# Use Codex with a specific model
+agent: codex
+model: gpt-5.3-codex
 ```
 
-The `model` value is passed directly to the agent CLI's `--model` flag. Valid values depend on the agent:
+If you omit `model`, the agent CLI uses its own default (e.g., Claude uses its configured model, Codex uses `gpt-5.4`). Set `model` only when you want to override.
 
 | Agent | Example models | CLI flags used |
 |-------|---------------|----------------|
 | `claude` | `opus`, `sonnet`, `haiku` | `-p --model MODEL --dangerously-skip-permissions` |
-| `codex` | `gpt-5-codex`, `o3` | `exec --model MODEL --full-auto` |
+| `codex` | `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex` | `exec --model MODEL --full-auto` |
 | `opencode` | `deepseek`, `gpt-4` | `run --model MODEL` |
 
 When you change `agent`, the harness sync automatically targets the correct directories (e.g., `.claude/` for Claude, `.codex/` for Codex). You can also explicitly list harnesses if you use multiple tools:
@@ -270,7 +268,7 @@ When you change `agent`, the harness sync automatically targets the correct dire
 agent: codex
 harnesses:
   - codex
-  - claude-code  # also sync to Claude Code for teammates using it
+  - claude  # also sync to Claude for teammates using it
 ```
 
 ## GitHub Setup

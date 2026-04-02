@@ -4,8 +4,6 @@
 repo: bradtaylorsf/alpha-loop
 project: 2
 agent: claude                    # AI agent CLI: claude, codex, opencode
-model: opus                      # model passed to agent CLI via --model flag
-review_model: opus
 max_turns: 30
 label: ready
 base_branch: master
@@ -14,4 +12,4 @@ poll_interval: 60
 
 # Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
-  - claude-code
+  - claude

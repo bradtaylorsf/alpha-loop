@@ -42,7 +42,8 @@ export const HARNESS_REGISTRY: Record<string, HarnessConfig> = {
   antigravity:    { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   augment:        { skillsDir: '.augment/skills' },
   bob:            { skillsDir: '.bob/skills' },
-  'claude-code':  { skillsDir: '.claude/skills', agentsDir: '.claude/agents', instructionsFile: 'CLAUDE.md' },
+  claude:         { skillsDir: '.claude/skills', agentsDir: '.claude/agents', instructionsFile: 'CLAUDE.md' },
+  'claude-code':  { skillsDir: '.claude/skills', agentsDir: '.claude/agents', instructionsFile: 'CLAUDE.md' }, // legacy alias
   openclaw:       { skillsDir: 'skills' },
   cline:          { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   warp:           { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
@@ -223,7 +224,7 @@ function resolveTemplateSources(projectDir: string): TemplateSources | null {
 
 /** Maps agent CLI names to their default harness names for syncing. */
 const AGENT_HARNESS_MAP: Record<string, string[]> = {
-  claude: ['claude-code'],
+  claude: ['claude'],
   codex: ['codex'],
   opencode: ['opencode'],
 };

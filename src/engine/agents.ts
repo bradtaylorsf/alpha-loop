@@ -85,8 +85,10 @@ export function buildAgentArgs(config: AgentConfig & { model: string }, prompt: 
     args.push(agentDef.promptFlag);
   }
 
-  // Model flag
-  args.push(agentDef.modelFlag, config.model);
+  // Model flag (skip if empty — let agent CLI use its default)
+  if (config.model) {
+    args.push(agentDef.modelFlag, config.model);
+  }
 
   // Permission flag (if agent supports it)
   if (agentDef.permissionFlag) {

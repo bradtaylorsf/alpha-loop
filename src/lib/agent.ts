@@ -33,31 +33,27 @@ export type AgentOptions = {
 export function buildAgentArgs(options: AgentOptions): { command: string; args: string[] } {
   switch (options.agent) {
     case 'claude': {
-      const args = [
-        '-p',
-        '--model', options.model,
+      const args = ['-p'];
+      if (options.model) args.push('--model', options.model);
+      args.push(
         '--dangerously-skip-permissions',
         '--verbose',
         '--output-format', 'text',
-      ];
+      );
       if (options.maxTurns) {
         args.push('--max-turns', String(options.maxTurns));
       }
       return { command: 'claude', args };
     }
     case 'codex': {
-      const args = [
-        'exec',
-        '--model', options.model,
-        '--full-auto',
-      ];
+      const args = ['exec'];
+      if (options.model) args.push('--model', options.model);
+      args.push('--full-auto');
       return { command: 'codex', args };
     }
     case 'opencode': {
-      const args = [
-        'run',
-        '--model', options.model,
-      ];
+      const args = ['run'];
+      if (options.model) args.push('--model', options.model);
       return { command: 'opencode', args };
     }
     default:

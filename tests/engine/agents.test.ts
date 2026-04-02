@@ -67,6 +67,13 @@ describe('buildAgentArgs', () => {
     });
   });
 
+  describe('model omission', () => {
+    it('omits --model when model is empty', () => {
+      const result = buildAgentArgs({ agent: 'claude', model: '' }, prompt);
+      expect(result.args).not.toContain('--model');
+    });
+  });
+
   describe('unknown agent', () => {
     it('throws a descriptive error for unknown agent types', () => {
       expect(() => buildAgentArgs({ agent: 'unknown-agent', model: 'foo' }, prompt))

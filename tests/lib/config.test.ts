@@ -111,7 +111,7 @@ max_test_retries: 5
   it('returns defaults when no config file exists', () => {
     const config = loadConfig();
     expect(config.agent).toBe('claude');
-    expect(config.model).toBe('opus');
+    expect(config.model).toBe('');
     expect(config.pollInterval).toBe(60);
     expect(config.baseBranch).toBe('master');
     expect(config.labelReady).toBe('ready');
@@ -127,13 +127,13 @@ max_test_retries: 5
       join(tempDir, '.alpha-loop.yaml'),
       `repo: owner/repo
 agent: codex
-model: gpt-5-codex
+model: gpt-5.4
 `,
     );
 
     const config = loadConfig();
     expect(config.agent).toBe('codex');
-    expect(config.model).toBe('gpt-5-codex');
+    expect(config.model).toBe('gpt-5.4');
   });
 
   it('loads agent from AGENT env var', () => {

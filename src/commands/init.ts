@@ -98,8 +98,7 @@ function configTemplate(repo: string): string {
 repo: ${repo}
 project: 0  # GitHub Project number (find it in your project URL)
 agent: claude  # AI agent CLI: claude, codex, opencode
-model: opus
-review_model: opus
+# model:       # AI model (omit to use agent's default, e.g., opus, gpt-5.4)
 label: ready
 base_branch: main
 test_command: pnpm test
@@ -108,7 +107,7 @@ auto_merge: true
 
 # Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
-  - claude-code
+  - claude
 
 # Safety limits (0 = unlimited)
 max_issues: 20

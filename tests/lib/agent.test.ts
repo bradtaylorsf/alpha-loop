@@ -87,6 +87,17 @@ describe('buildAgentArgs', () => {
     expect(result.args).toEqual(['run', '--model', 'deepseek']);
   });
 
+  test('omits --model when model is empty', () => {
+    const claude = buildAgentArgs({ agent: 'claude', model: '', prompt: 'test', cwd: '/tmp' });
+    expect(claude.args).not.toContain('--model');
+
+    const codex = buildAgentArgs({ agent: 'codex', model: '', prompt: 'test', cwd: '/tmp' });
+    expect(codex.args).not.toContain('--model');
+
+    const opencode = buildAgentArgs({ agent: 'opencode', model: '', prompt: 'test', cwd: '/tmp' });
+    expect(opencode.args).not.toContain('--model');
+  });
+
   test('throws for unknown agent type', () => {
     expect(() =>
       buildAgentArgs({ agent: 'unknown' as any, model: 'x', prompt: 'y', cwd: '/tmp' }),
