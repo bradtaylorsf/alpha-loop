@@ -35,10 +35,10 @@ afterEach(() => {
 });
 
 describe('init command', () => {
-  it('creates .alpha-loop.yaml with auto-detected repo', () => {
+  it('creates .alpha-loop.yaml with auto-detected repo', async () => {
     mockedExecSync.mockReturnValue('https://github.com/myorg/myrepo.git\n');
 
-    initCommand();
+    await initCommand();
 
     const configPath = join(tempDir, '.alpha-loop.yaml');
     expect(existsSync(configPath)).toBe(true);
@@ -49,17 +49,17 @@ describe('init command', () => {
     expect(content).toContain('test_command: pnpm test');
   });
 
-  it('creates config with placeholder when no git remote', () => {
-    initCommand();
+  it('creates config with placeholder when no git remote', async () => {
+    await initCommand();
 
     const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
     expect(content).toContain('repo: owner/repo');
   });
 
-  it('skips config creation when config already exists', () => {
+  it('skips config creation when config already exists', async () => {
     writeFileSync(join(tempDir, '.alpha-loop.yaml'), 'repo: existing/repo\n');
 
-    initCommand();
+    await initCommand();
 
     // Config should not be overwritten
     const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');

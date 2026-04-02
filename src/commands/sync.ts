@@ -1,13 +1,13 @@
 /**
- * Sync Command — keep skills and sub-agents in sync across coding harnesses.
+ * Sync Command — keep skills, sub-agents, and instructions in sync across coding harnesses.
  *
  * Source of truth: .alpha-loop/templates/
  *   skills/          → each harness's skillsDir
  *   agents/          → each harness's agentsDir (if defined)
+ *   instructions.md  → each harness's instructionsFile (e.g., CLAUDE.md, AGENTS.md)
  *
- * CLAUDE.md and AGENTS.md are project-owned files and are NOT synced.
- * Alpha-loop's operational instructions live in the sub-agent prompts
- * (.claude/agents/implementer.md, etc.), not in the project instructions file.
+ * Instructions files are only overwritten if they contain the "<!-- managed by alpha-loop -->"
+ * marker. Existing hand-written CLAUDE.md/AGENTS.md files are never touched.
  *
  * Harnesses to sync are read from the `harnesses` array supplied by the caller
  * (typically loaded from .alpha-loop.yaml). Only harnesses that exist in the
@@ -321,7 +321,6 @@ export function syncAgentAssets(
  *
  * Moves:
  *   skills/          → .alpha-loop/templates/skills/
- *   AGENTS.md        → .alpha-loop/templates/instructions.md
  *   .claude/agents/  → .alpha-loop/templates/agents/
  *
  * Does NOT delete the originals — the next sync run will recreate them

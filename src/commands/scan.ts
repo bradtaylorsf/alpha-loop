@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { tmpdir } from 'node:os';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
 import { assertSafeShellArg, loadConfig } from '../lib/config.js';
@@ -137,11 +138,15 @@ export function generateInstructions(projectDir: string, model: string): void {
     const mergePrompt = INSTRUCTIONS_MERGE_PROMPT + existing +
       '\n\n## OUTPUT:\nProduce the updated instructions file. Output ONLY the markdown content, nothing else.';
 
+    // Write prompt to temp file to avoid shell injection from file content
     const safeModel = assertSafeShellArg(model, 'model');
+    const promptFile = path.join(tmpdir(), `alpha-loop-merge-${Date.now()}.txt`);
+    fs.writeFileSync(promptFile, mergePrompt, 'utf-8');
     const mergeResult = exec(
-      `echo ${JSON.stringify(mergePrompt)} | claude -p --model ${safeModel} --dangerously-skip-permissions --output-format text 2>/dev/null`,
+      `claude -p --model ${safeModel} --dangerously-skip-permissions --output-format text < "${promptFile}" 2>/dev/null`,
       { cwd: projectDir },
     );
+    try { fs.unlinkSync(promptFile); } catch { /* cleanup best-effort */ }
 
     if (mergeResult.exitCode === 0 && mergeResult.stdout.trim()) {
       let output = mergeResult.stdout.trim();
@@ -159,10 +164,13 @@ export function generateInstructions(projectDir: string, model: string): void {
     log.step('Generating baseline instructions file...');
 
     const safeModel = assertSafeShellArg(model, 'model');
+    const genPromptFile = path.join(tmpdir(), `alpha-loop-gen-${Date.now()}.txt`);
+    fs.writeFileSync(genPromptFile, INSTRUCTIONS_PROMPT, 'utf-8');
     const genResult = exec(
-      `echo ${JSON.stringify(INSTRUCTIONS_PROMPT)} | claude -p --model ${safeModel} --dangerously-skip-permissions --output-format text 2>/dev/null`,
+      `claude -p --model ${safeModel} --dangerously-skip-permissions --output-format text < "${genPromptFile}" 2>/dev/null`,
       { cwd: projectDir },
     );
+    try { fs.unlinkSync(genPromptFile); } catch { /* cleanup best-effort */ }
 
     if (genResult.exitCode === 0 && genResult.stdout.trim()) {
       let output = genResult.stdout.trim();

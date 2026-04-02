@@ -4,8 +4,8 @@
  * Steps:
  * 1. Create config (.alpha-loop.yaml)
  * 2. Set up .gitignore
- * 3. Seed .alpha-loop/templates/ from distribution templates
- * 4. Detect and migrate legacy layout (skills/ at root, .claude/agents/)
+ * 3. Detect and migrate legacy layout (skills/ at root, .claude/agents/)
+ * 4. Seed .alpha-loop/templates/ from distribution (fills gaps only)
  * 5. Install playwright-cli skills (if available)
  * 6. Run vision (interactive, if TTY)
  * 7. Run scan (generates context + instructions)
@@ -13,7 +13,7 @@
  * 9. Install GitHub issue template
  * 10. Commit generated files
  */
-import { existsSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { detectRepo, loadConfig } from '../lib/config.js';
 import { exec } from '../lib/shell.js';
@@ -125,6 +125,7 @@ const GITIGNORE_ENTRIES = [
   '# Alpha-loop ephemeral data (not shared)',
   '.alpha-loop/sessions/',
   '.alpha-loop/auth/',
+  '.alpha-loop/templates/*.bak',
   '.worktrees/',
 ];
 
@@ -179,8 +180,12 @@ export async function initCommand(): Promise<void> {
   log.step('Step 2: Git ignore');
   ensureGitignore();
 
-  // --- Step 3: Seed .alpha-loop/templates/ from distribution ---
-  log.step('Step 3: Seed templates');
+  // --- Step 3: Detect and migrate legacy layout (before seeding, to preserve user skills) ---
+  log.step('Step 3: Legacy migration');
+  migrateToTemplates(projectDir);
+
+  // --- Step 4: Seed .alpha-loop/templates/ from distribution (only fills gaps) ---
+  log.step('Step 4: Seed templates');
   const distTemplatesDir = findDistributionTemplatesDir();
   const projectTemplatesDir = join(projectDir, '.alpha-loop', 'templates');
 
@@ -189,7 +194,8 @@ export async function initCommand(): Promise<void> {
     const distSkills = join(distTemplatesDir, 'skills');
     const projectSkills = join(projectTemplatesDir, 'skills');
     if (existsSync(distSkills)) {
-      const skillNames = exec(`ls "${distSkills}"`).stdout.trim().split('\n').filter(Boolean);
+      const skillNames = readdirSync(distSkills, { withFileTypes: true })
+        .filter((d) => d.isDirectory()).map((d) => d.name);
       let installed = 0;
       for (const name of skillNames) {
         const dest = join(projectSkills, name);
@@ -208,12 +214,12 @@ export async function initCommand(): Promise<void> {
     const projectAgents = join(projectTemplatesDir, 'agents');
     if (existsSync(distAgents)) {
       mkdirSync(projectAgents, { recursive: true });
-      const agentFiles = exec(`ls "${distAgents}"`).stdout.trim().split('\n').filter(Boolean);
+      const agentFiles = readdirSync(distAgents).filter((f) => f.endsWith('.md'));
       let installed = 0;
       for (const file of agentFiles) {
         const dest = join(projectAgents, file);
         if (!existsSync(dest)) {
-          exec(`cp "${join(distAgents, file)}" "${dest}"`);
+          copyFileSync(join(distAgents, file), dest);
           installed++;
         }
       }
@@ -224,10 +230,6 @@ export async function initCommand(): Promise<void> {
   } else {
     log.warn('Distribution templates not found — skipping seed');
   }
-
-  // --- Step 4: Detect and migrate legacy layout ---
-  log.step('Step 4: Legacy migration');
-  migrateToTemplates(projectDir);
 
   // --- Step 5: Install playwright-cli skills ---
   log.step('Step 5: Playwright CLI');
