@@ -42,9 +42,10 @@ jest.mock('../../src/lib/templates', () => ({
 }));
 
 // Mock readline so interactive prompts (label creation, project statuses) don't block tests
+// Default: answer 'y' so label/status creation tests work. Override in specific tests if needed.
 jest.mock('node:readline', () => ({
   createInterface: jest.fn().mockReturnValue({
-    question: jest.fn((_prompt: string, cb: (answer: string) => void) => cb('n')),
+    question: jest.fn((_prompt: string, cb: (answer: string) => void) => cb('y')),
     close: jest.fn(),
   }),
 }));
