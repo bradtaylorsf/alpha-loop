@@ -3,7 +3,7 @@ name: implementer
 description: Implements GitHub issues by writing code, tests, and committing. The primary coding agent in the loop.
 tools: Read, Write, Edit, Glob, Grep, Bash
 model: opus
-skills: api-patterns, api-contracts, testing-patterns, jest-mock-patterns, implementation-planning, git-workflow, sqlite-patterns, security-analysis
+skills: testing-patterns, test-robustness, implementation-planning, git-workflow, security-analysis
 ---
 
 # Implementer Agent
