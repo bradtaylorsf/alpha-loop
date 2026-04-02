@@ -11,6 +11,7 @@ import { formatTimestamp } from '../lib/shell.js';
 import { spawnAgent } from '../lib/agent.js';
 import { createPR } from '../lib/github.js';
 import { syncAgentAssets } from './sync.js';
+import { findDistributionTemplatesDir, diffSkills } from '../lib/templates.js';
 
 export type ReviewOptions = {
   apply?: boolean;
@@ -589,6 +590,35 @@ export async function reviewCommand(options: ReviewOptions): Promise<void> {
 
   log.success(`${safeProposals.length} improvement(s) proposed`);
   displayProposals(safeProposals);
+
+  // --- Check for skill upgrades from distribution templates ---
+  const distTemplatesDir = findDistributionTemplatesDir();
+  if (distTemplatesDir) {
+    const distSkillsDir = join(distTemplatesDir, 'skills');
+    const projectSkillsDir = join(projectDir, '.alpha-loop', 'templates', 'skills');
+    const upgrades = diffSkills(distSkillsDir, projectSkillsDir);
+
+    if (upgrades.length > 0) {
+      log.info('');
+      log.step(`Skill upgrades available (${upgrades.length}):`);
+      for (const u of upgrades) {
+        log.info(`  ${u.status === 'new' ? '[NEW]' : '[UPDATE]'} ${u.name}`);
+      }
+
+      if (options.apply) {
+        // Apply skill upgrades
+        mkdirSync(projectSkillsDir, { recursive: true });
+        for (const u of upgrades) {
+          const destDir = join(projectSkillsDir, u.name);
+          mkdirSync(destDir, { recursive: true });
+          writeFileSync(join(destDir, 'SKILL.md'), u.distContent);
+          log.success(`Upgraded skill: ${u.name}`);
+        }
+      } else {
+        log.info('  Run with --apply to install these upgrades.');
+      }
+    }
+  }
 
   // --- Apply or save ---
   if (options.apply) {
