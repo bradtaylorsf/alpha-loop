@@ -190,6 +190,8 @@ export async function finalizeSession(
 ### Issues
 ${session.results.map((r) => `- #${r.issueNum}: ${r.title} — ${r.status === 'success' ? 'SUCCESS' : 'FAILURE'}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
 
+${session.results.filter((r) => r.status === 'success').map((r) => `Closes #${r.issueNum}`).join('\n')}
+
 ---
 This PR collects all changes from this session for final review before merging to ${config.baseBranch}.
 

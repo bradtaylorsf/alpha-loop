@@ -580,17 +580,21 @@ function loadFileIfExists(filePath: string): string | null {
 function extractReviewSummary(reviewOutput: string): string {
   if (!reviewOutput) return 'No review available';
 
-  // Look for the structured review report (reviewer agent outputs this format)
+  // Look for structured review sections — capture only markdown content,
+  // stop at agent tool call output (lines starting with "exec", "codex", "tokens used", etc.)
   const patterns = [
-    /### Review Summary[\s\S]*$/m,
-    /### Findings Fixed[\s\S]*$/m,
-    /## Review Report[\s\S]*$/m,
-    /\*\*Verdict:.*$/m,
+    /### Review Summary\n([\s\S]*?)(?=\n(?:exec|codex|claude|tokens used|\d{4}-\d{2}-\d{2}T)|$)/,
+    /### Findings Fixed\n([\s\S]*?)(?=\n(?:exec|codex|claude|tokens used|\d{4}-\d{2}-\d{2}T)|$)/,
+    /## Review Report\n([\s\S]*?)(?=\n(?:exec|codex|claude|tokens used|\d{4}-\d{2}-\d{2}T)|$)/,
   ];
 
   for (const pattern of patterns) {
     const match = reviewOutput.match(pattern);
-    if (match) return match[0].trim();
+    if (match) {
+      const content = match[0].trim();
+      // Sanity check: don't return if it's mostly tool calls
+      if (content.length > 20 && !content.startsWith('exec')) return content;
+    }
   }
 
   // No structured review section found — don't dump raw agent output
