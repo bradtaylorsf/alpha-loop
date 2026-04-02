@@ -1,13 +1,10 @@
 #!/usr/bin/env node
 import { program } from 'commander';
-import { initCommand } from './commands/init.js';
 import { historyCommand } from './commands/history.js';
 import { scanCommand } from './commands/scan.js';
 import { visionCommand } from './commands/vision.js';
 import { authCommand } from './commands/auth.js';
-import { syncCommand, migrateToTemplates, syncAgentAssets } from './commands/sync.js';
-import { loadConfig } from './lib/config.js';
-import { log } from './lib/logger.js';
+import { syncCommand } from './commands/sync.js';
 
 program
   .name('alpha-loop')
@@ -16,8 +13,11 @@ program
 
 program
   .command('init')
-  .description('Create .alpha-loop.yaml config template')
-  .action(initCommand);
+  .description('Full project onboarding: config, templates, vision, scan, sync')
+  .action(async () => {
+    const { initCommand } = await import('./commands/init.js');
+    await initCommand();
+  });
 
 program
   .command('run')
@@ -63,20 +63,6 @@ program
   .description('Sync .alpha-loop/templates/ to all configured harnesses')
   .option('--check', 'Check for drift without syncing (exits non-zero if drift found)')
   .action(syncCommand);
-
-program
-  .command('migrate')
-  .description('Migrate legacy skills/, AGENTS.md, .claude/agents/ into .alpha-loop/templates/')
-  .action(() => {
-    migrateToTemplates();
-    const config = loadConfig();
-    if (config.harnesses.length > 0) {
-      const result = syncAgentAssets(config.harnesses);
-      if (result.synced) {
-        log.success('Synced templates to configured harnesses');
-      }
-    }
-  });
 
 program
   .command('resume')

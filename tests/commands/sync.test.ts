@@ -45,19 +45,64 @@ describe('syncAgentAssets', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test('does NOT sync instructions to CLAUDE.md or AGENTS.md', () => {
+  test('does not overwrite unmanaged CLAUDE.md (no marker)', () => {
     const dir = makeTmpDir();
     const templatesBase = join(dir, '.alpha-loop', 'templates');
     mkdirSync(join(templatesBase, 'skills', 'test-skill'), { recursive: true });
     writeFileSync(join(templatesBase, 'skills', 'test-skill', 'SKILL.md'), '# Test');
+    writeFileSync(join(templatesBase, 'instructions.md'), '<!-- managed by alpha-loop -->\n# New');
 
-    // Pre-existing project CLAUDE.md should not be touched
+    // Pre-existing CLAUDE.md WITHOUT marker must not be touched
     writeFileSync(join(dir, 'CLAUDE.md'), '# My Project Instructions');
 
     syncAgentAssets(['claude-code'], { projectDir: dir });
 
-    // CLAUDE.md must remain the project's own file
     expect(readFileSync(join(dir, 'CLAUDE.md'), 'utf-8')).toBe('# My Project Instructions');
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('syncs instructions.md to CLAUDE.md when marker is present', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    mkdirSync(templatesBase, { recursive: true });
+    writeFileSync(join(templatesBase, 'instructions.md'), '<!-- managed by alpha-loop -->\n# Updated');
+
+    // CLAUDE.md with marker — safe to overwrite
+    writeFileSync(join(dir, 'CLAUDE.md'), '<!-- managed by alpha-loop -->\n# Old');
+
+    const result = syncAgentAssets(['claude-code'], { projectDir: dir });
+
+    expect(result.docSynced).toBe(true);
+    expect(readFileSync(join(dir, 'CLAUDE.md'), 'utf-8')).toBe('<!-- managed by alpha-loop -->\n# Updated');
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('syncs instructions.md to AGENTS.md for codex harness', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    mkdirSync(templatesBase, { recursive: true });
+    writeFileSync(join(templatesBase, 'instructions.md'), '<!-- managed by alpha-loop -->\n# Project');
+
+    const result = syncAgentAssets(['codex'], { projectDir: dir });
+
+    expect(result.docSynced).toBe(true);
+    expect(readFileSync(join(dir, 'AGENTS.md'), 'utf-8')).toBe('<!-- managed by alpha-loop -->\n# Project');
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('creates CLAUDE.md when it does not exist', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    mkdirSync(templatesBase, { recursive: true });
+    writeFileSync(join(templatesBase, 'instructions.md'), '<!-- managed by alpha-loop -->\n# Fresh');
+
+    const result = syncAgentAssets(['claude-code'], { projectDir: dir });
+
+    expect(result.docSynced).toBe(true);
+    expect(readFileSync(join(dir, 'CLAUDE.md'), 'utf-8')).toBe('<!-- managed by alpha-loop -->\n# Fresh');
 
     rmSync(dir, { recursive: true, force: true });
   });

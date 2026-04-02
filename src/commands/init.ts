@@ -1,37 +1,25 @@
-import { existsSync, writeFileSync, readFileSync, appendFileSync, mkdirSync, realpathSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+/**
+ * Init Command — full project onboarding for alpha-loop.
+ *
+ * Steps:
+ * 1. Create config (.alpha-loop.yaml)
+ * 2. Set up .gitignore
+ * 3. Detect and migrate legacy layout (skills/ at root, .claude/agents/)
+ * 4. Seed .alpha-loop/templates/ from distribution (fills gaps only)
+ * 5. Install playwright-cli skills (if available)
+ * 6. Run vision (interactive, if TTY)
+ * 7. Run scan (generates context + instructions)
+ * 8. Sync templates to configured harnesses
+ * 9. Install GitHub issue template
+ * 10. Commit generated files
+ */
+import { existsSync, writeFileSync, readFileSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { detectRepo, loadConfig } from '../lib/config.js';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
-import { syncAgentAssets } from './sync.js';
-
-/**
- * Find the templates directory shipped with alpha-loop.
- * Works whether running from src/ (tsx) or dist/ (compiled) or as an npm package.
- *
- * Uses the resolved path of the CLI entrypoint (process.argv[1]) to locate the
- * package root, following symlinks so globally-installed npm packages resolve correctly.
- */
-function findTemplatesDir(): string | null {
-  // Resolve symlinks (npm global installs are symlinked from bin/ to the actual package)
-  let startDir: string;
-  try {
-    startDir = dirname(realpathSync(process.argv[1]));
-  } catch {
-    startDir = process.cwd();
-  }
-
-  // Walk up from the entrypoint to find templates/
-  let dir = startDir;
-  for (let i = 0; i < 5; i++) {
-    const candidate = join(dir, 'templates');
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
-}
+import { syncAgentAssets, migrateToTemplates } from './sync.js';
+import { findDistributionTemplatesDir } from '../lib/templates.js';
 
 const CONFIG_FILE = '.alpha-loop.yaml';
 
@@ -117,8 +105,7 @@ dev_command: pnpm dev
 port: 3000
 auto_merge: true
 
-# Coding harnesses to sync skills/agents to (run 'alpha-loop sync' after changes)
-# See full list: https://github.com/nicepkg/playwright-cli
+# Coding harnesses to sync skills/agents to
 harnesses:
   - claude-code
   - codex
@@ -129,9 +116,6 @@ max_session_duration: 7200  # 2 hours in seconds
 `;
 }
 
-/**
- * Copy a directory recursively using the shell (simple and reliable).
- */
 function copyDir(src: string, dest: string): void {
   mkdirSync(dest, { recursive: true });
   exec(`cp -R "${src}/"* "${dest}/" 2>/dev/null || true`);
@@ -141,13 +125,10 @@ const GITIGNORE_ENTRIES = [
   '# Alpha-loop ephemeral data (not shared)',
   '.alpha-loop/sessions/',
   '.alpha-loop/auth/',
+  '.alpha-loop/templates/*.bak',
   '.worktrees/',
 ];
 
-/**
- * Ensure .gitignore tracks learnings but ignores sessions, auth, and worktrees.
- * Also removes stale entries that previously ignored learnings.
- */
 function ensureGitignore(): void {
   const gitignorePath = '.gitignore';
   let content = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf-8') : '';
@@ -163,7 +144,6 @@ function ensureGitignore(): void {
     log.info('Removed .alpha-loop/learnings/ from .gitignore (learnings are now tracked)');
   }
 
-  // Add required ignore entries
   const missing = GITIGNORE_ENTRIES.filter((entry) => !content.includes(entry));
   if (missing.length > 0) {
     const suffix = (content.endsWith('\n') || content === '') ? '' : '\n';
@@ -177,10 +157,13 @@ function ensureGitignore(): void {
   }
 }
 
-export function initCommand(): void {
-  // Create config if it doesn't exist
+export async function initCommand(): Promise<void> {
+  const projectDir = process.cwd();
+
+  // --- Step 1: Create config ---
+  log.step('Step 1: Configuration');
   if (existsSync(CONFIG_FILE)) {
-    log.info(`${CONFIG_FILE} already exists — skipping config creation`);
+    log.info(`${CONFIG_FILE} already exists — skipping`);
   } else {
     let repo = detectRepo();
     if (repo) {
@@ -189,106 +172,139 @@ export function initCommand(): void {
       repo = 'owner/repo';
       log.warn('Could not auto-detect repo from git remote. Using placeholder.');
     }
-
     writeFileSync(CONFIG_FILE, configTemplate(repo));
     log.success(`Created ${CONFIG_FILE}`);
   }
 
-  // Everything below is idempotent — safe to re-run
-
-  // Ensure .gitignore has the right alpha-loop entries:
-  // - Track learnings (team-shared knowledge)
-  // - Ignore sessions (local logs, screenshots, ephemeral data)
-  // - Ignore auth (browser state with credentials)
+  // --- Step 2: Set up .gitignore ---
+  log.step('Step 2: Git ignore');
   ensureGitignore();
 
-  // Install playwright-cli skills if playwright-cli is available
+  // --- Step 3: Detect and migrate legacy layout (before seeding, to preserve user skills) ---
+  log.step('Step 3: Legacy migration');
+  migrateToTemplates(projectDir);
+
+  // --- Step 4: Seed .alpha-loop/templates/ from distribution (only fills gaps) ---
+  log.step('Step 4: Seed templates');
+  const distTemplatesDir = findDistributionTemplatesDir();
+  const projectTemplatesDir = join(projectDir, '.alpha-loop', 'templates');
+
+  if (distTemplatesDir) {
+    // Seed skills
+    const distSkills = join(distTemplatesDir, 'skills');
+    const projectSkills = join(projectTemplatesDir, 'skills');
+    if (existsSync(distSkills)) {
+      const skillNames = readdirSync(distSkills, { withFileTypes: true })
+        .filter((d) => d.isDirectory()).map((d) => d.name);
+      let installed = 0;
+      for (const name of skillNames) {
+        const dest = join(projectSkills, name);
+        if (!existsSync(dest)) {
+          copyDir(join(distSkills, name), dest);
+          installed++;
+        }
+      }
+      if (installed > 0) {
+        log.success(`Seeded ${installed} skill(s) to .alpha-loop/templates/skills/`);
+      }
+    }
+
+    // Seed agents
+    const distAgents = join(distTemplatesDir, 'agents');
+    const projectAgents = join(projectTemplatesDir, 'agents');
+    if (existsSync(distAgents)) {
+      mkdirSync(projectAgents, { recursive: true });
+      const agentFiles = readdirSync(distAgents).filter((f) => f.endsWith('.md'));
+      let installed = 0;
+      for (const file of agentFiles) {
+        const dest = join(projectAgents, file);
+        if (!existsSync(dest)) {
+          copyFileSync(join(distAgents, file), dest);
+          installed++;
+        }
+      }
+      if (installed > 0) {
+        log.success(`Seeded ${installed} agent(s) to .alpha-loop/templates/agents/`);
+      }
+    }
+  } else {
+    log.warn('Distribution templates not found — skipping seed');
+  }
+
+  // --- Step 5: Install playwright-cli skills ---
+  log.step('Step 5: Playwright CLI');
   const which = exec('which playwright-cli');
   if (which.exitCode === 0) {
-    log.info('Installing playwright-cli skills...');
     const result = exec('playwright-cli install --skills');
     if (result.exitCode === 0) {
       log.success('Playwright CLI skills installed');
-
-      // playwright-cli installs to .claude/skills/ only.
-      // Copy to skills/ (source of truth) so our sync propagates to .agents/skills/ too.
+      // Copy to templates source of truth
       const installed = join('.claude', 'skills', 'playwright-cli');
-      const sourceOfTruth = join('skills', 'playwright-cli');
-      if (existsSync(installed) && !existsSync(sourceOfTruth)) {
-        mkdirSync('skills', { recursive: true });
-        copyDir(installed, sourceOfTruth);
-        log.info('Copied playwright-cli skill to skills/ (source of truth)');
+      const dest = join(projectTemplatesDir, 'skills', 'playwright-cli');
+      if (existsSync(installed) && !existsSync(dest)) {
+        copyDir(installed, dest);
+        log.info('Copied playwright-cli skill to .alpha-loop/templates/skills/');
       }
     } else {
       log.warn('Could not install playwright-cli skills');
     }
   } else {
-    log.info('playwright-cli not found — skipping skill install. Install with: npm install -g @playwright/cli@latest');
+    log.info('playwright-cli not found — skipping. Install with: npm install -g @playwright/cli@latest');
   }
 
-  // Install base skills and agents from alpha-loop's templates
-  // These are the universal skills every project needs for the loop to work well
-  const templatesDir = findTemplatesDir();
-  if (templatesDir) {
-    // Install skills to skills/ (source of truth)
-    const templateSkills = join(templatesDir, 'skills');
-    if (existsSync(templateSkills)) {
-      const skillNames = exec(`ls "${templateSkills}"`).stdout.trim().split('\n').filter(Boolean);
-      let installed = 0;
-      for (const name of skillNames) {
-        const dest = join('skills', name);
-        if (!existsSync(dest)) {
-          mkdirSync('skills', { recursive: true });
-          copyDir(join(templateSkills, name), dest);
-          installed++;
-        }
-      }
-      if (installed > 0) {
-        log.success(`Installed ${installed} base skill(s): ${skillNames.filter(n => !existsSync(join('skills', n)) || installed > 0).join(', ')}`);
-      }
-    }
-
-    // Install agents to agents/ (will be synced by AGENTS.md convention)
-    // Also install directly to .claude/agents/ and .codex/agents/ for immediate use
-    const templateAgents = join(templatesDir, 'agents');
-    if (existsSync(templateAgents)) {
-      const agentFiles = exec(`ls "${templateAgents}"`).stdout.trim().split('\n').filter(Boolean);
-      for (const file of agentFiles) {
-        // .claude/agents/ for Claude
-        const claudeDest = join('.claude', 'agents', file);
-        if (!existsSync(claudeDest)) {
-          mkdirSync(join('.claude', 'agents'), { recursive: true });
-          exec(`cp "${join(templateAgents, file)}" "${claudeDest}"`);
-        }
-        // .codex/agents/ for Codex (TOML format would be different, but .md works as fallback)
-        const codexDest = join('.codex', 'agents', file);
-        if (!existsSync(codexDest)) {
-          mkdirSync(join('.codex', 'agents'), { recursive: true });
-          exec(`cp "${join(templateAgents, file)}" "${codexDest}"`);
-        }
-      }
-      log.success(`Installed agent definitions: ${agentFiles.join(', ')}`);
+  // --- Step 6: Vision (interactive) ---
+  if (process.stdin.isTTY) {
+    const { hasVision } = await import('../lib/vision.js');
+    if (!hasVision()) {
+      log.step('Step 6: Project vision');
+      const { visionCommand } = await import('./vision.js');
+      await visionCommand();
+    } else {
+      log.step('Step 6: Project vision (already exists)');
     }
   } else {
-    log.warn('Templates directory not found — skipping base skills/agents install');
+    log.step('Step 6: Project vision (skipped — non-interactive)');
   }
 
-  // Install GitHub issue template for structured agent-ready issues
+  // --- Step 7: Scan (context + instructions) ---
+  log.step('Step 7: Scan codebase');
+  const { scanCommand } = await import('./scan.js');
+  scanCommand();
+
+  // --- Step 8: Sync to harnesses ---
+  log.step('Step 8: Sync to harnesses');
+  const config = loadConfig();
+  const harnesses = config.harnesses.length > 0 ? config.harnesses : ['claude-code', 'codex'];
+  const syncResult = syncAgentAssets(harnesses);
+  if (syncResult.synced) {
+    log.success(`Synced templates to ${harnesses.join(', ')}`);
+  }
+
+  // --- Step 9: GitHub issue template ---
+  log.step('Step 9: Issue template');
   const templateDir = join('.github', 'ISSUE_TEMPLATE');
   const templateFile = join(templateDir, 'agent-ready.yml');
   if (!existsSync(templateFile)) {
     mkdirSync(templateDir, { recursive: true });
     writeFileSync(templateFile, ISSUE_TEMPLATE);
-    log.success('Created GitHub issue template: .github/ISSUE_TEMPLATE/agent-ready.yml');
+    log.success('Created GitHub issue template');
+  } else {
+    log.info('Issue template already exists');
   }
 
-  // Sync agent assets to all configured harnesses (default to claude-code + codex on first init)
-  const initConfig = loadConfig();
-  const initHarnesses = initConfig.harnesses.length > 0
-    ? initConfig.harnesses
-    : ['claude-code', 'codex'];
-  const syncResult = syncAgentAssets(initHarnesses);
-  if (syncResult.synced) {
-    log.success('Agent assets synced across .claude/ and .agents/');
+  // --- Step 10: Commit ---
+  log.step('Step 10: Commit generated files');
+  const statusResult = exec('git status --porcelain .alpha-loop/ .claude/ .agents/ .codex/ CLAUDE.md AGENTS.md .gitignore .github/');
+  if (statusResult.stdout.trim()) {
+    exec('git add .alpha-loop/ .claude/ .agents/ .codex/ CLAUDE.md AGENTS.md .gitignore .github/ 2>/dev/null || true');
+    const diffCheck = exec('git diff --cached --quiet');
+    if (diffCheck.exitCode !== 0) {
+      exec('git commit -m "chore: initialize alpha-loop (skills, agents, context, instructions)"');
+      log.success('Committed generated files');
+    }
+  } else {
+    log.info('No new files to commit');
   }
+
+  log.success('Alpha-loop initialization complete!');
 }

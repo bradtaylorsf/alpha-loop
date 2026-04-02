@@ -7,6 +7,39 @@ jest.mock('node:child_process', () => ({
   execSync: jest.fn(),
 }));
 
+// Silence all logger output during tests
+jest.mock('../../src/lib/logger', () => ({
+  log: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), success: jest.fn(), step: jest.fn(), dry: jest.fn() },
+}));
+
+// Mock shell exec so init steps that shell out (scan, sync, git) don't run real commands
+jest.mock('../../src/lib/shell', () => ({
+  exec: jest.fn().mockReturnValue({ exitCode: 1, stdout: '', stderr: '' }),
+  formatTimestamp: jest.fn().mockReturnValue('20260401-100000'),
+}));
+
+// Mock scan so Step 7 doesn't spawn Claude
+jest.mock('../../src/commands/scan', () => ({
+  scanCommand: jest.fn(),
+  generateInstructions: jest.fn(),
+}));
+
+// Mock sync so Step 8 doesn't do real file operations
+jest.mock('../../src/commands/sync', () => ({
+  syncAgentAssets: jest.fn().mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] }),
+  migrateToTemplates: jest.fn(),
+}));
+
+// Mock vision helpers
+jest.mock('../../src/lib/vision', () => ({
+  hasVision: jest.fn().mockReturnValue(true),
+}));
+
+// Mock templates finder (no distribution templates in test)
+jest.mock('../../src/lib/templates', () => ({
+  findDistributionTemplatesDir: jest.fn().mockReturnValue(null),
+}));
+
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
 
 // Mock process.exit to prevent Jest from actually exiting
@@ -35,10 +68,10 @@ afterEach(() => {
 });
 
 describe('init command', () => {
-  it('creates .alpha-loop.yaml with auto-detected repo', () => {
+  it('creates .alpha-loop.yaml with auto-detected repo', async () => {
     mockedExecSync.mockReturnValue('https://github.com/myorg/myrepo.git\n');
 
-    initCommand();
+    await initCommand();
 
     const configPath = join(tempDir, '.alpha-loop.yaml');
     expect(existsSync(configPath)).toBe(true);
@@ -47,22 +80,41 @@ describe('init command', () => {
     expect(content).toContain('repo: myorg/myrepo');
     expect(content).toContain('model: opus');
     expect(content).toContain('test_command: pnpm test');
+    expect(content).toContain('harnesses:');
   });
 
-  it('creates config with placeholder when no git remote', () => {
-    initCommand();
+  it('creates config with placeholder when no git remote', async () => {
+    await initCommand();
 
     const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
     expect(content).toContain('repo: owner/repo');
   });
 
-  it('skips config creation when config already exists', () => {
+  it('skips config creation when config already exists', async () => {
     writeFileSync(join(tempDir, '.alpha-loop.yaml'), 'repo: existing/repo\n');
 
-    initCommand();
+    await initCommand();
 
-    // Config should not be overwritten
     const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
     expect(content).toContain('repo: existing/repo');
+  });
+
+  it('creates .gitignore with correct entries', async () => {
+    await initCommand();
+
+    const gitignore = readFileSync(join(tempDir, '.gitignore'), 'utf-8');
+    expect(gitignore).toContain('.alpha-loop/sessions/');
+    expect(gitignore).toContain('.alpha-loop/auth/');
+    expect(gitignore).toContain('.worktrees/');
+    expect(gitignore).toContain('.alpha-loop/templates/*.bak');
+  });
+
+  it('removes stale learnings gitignore entry', async () => {
+    writeFileSync(join(tempDir, '.gitignore'), '.alpha-loop/learnings/\n');
+
+    await initCommand();
+
+    const gitignore = readFileSync(join(tempDir, '.gitignore'), 'utf-8');
+    expect(gitignore).not.toContain('.alpha-loop/learnings/');
   });
 });

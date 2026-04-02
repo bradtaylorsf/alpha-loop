@@ -14,6 +14,8 @@ module.exports = {
       useESM: false,
     }],
   },
+  // Silence console.error output during tests (logger writes to stderr)
+  silent: true,
   // Prevent hung tests from blocking the loop
   testTimeout: 30000,
   forceExit: true,

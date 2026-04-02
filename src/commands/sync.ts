@@ -1,13 +1,13 @@
 /**
- * Sync Command — keep skills and sub-agents in sync across coding harnesses.
+ * Sync Command — keep skills, sub-agents, and instructions in sync across coding harnesses.
  *
  * Source of truth: .alpha-loop/templates/
  *   skills/          → each harness's skillsDir
  *   agents/          → each harness's agentsDir (if defined)
+ *   instructions.md  → each harness's instructionsFile (e.g., CLAUDE.md, AGENTS.md)
  *
- * CLAUDE.md and AGENTS.md are project-owned files and are NOT synced.
- * Alpha-loop's operational instructions live in the sub-agent prompts
- * (.claude/agents/implementer.md, etc.), not in the project instructions file.
+ * Instructions files are only overwritten if they contain the "<!-- managed by alpha-loop -->"
+ * marker. Existing hand-written CLAUDE.md/AGENTS.md files are never touched.
  *
  * Harnesses to sync are read from the `harnesses` array supplied by the caller
  * (typically loaded from .alpha-loop.yaml). Only harnesses that exist in the
@@ -33,49 +33,50 @@ import { log } from '../lib/logger.js';
 export type HarnessConfig = {
   skillsDir: string;
   agentsDir?: string;
+  instructionsFile?: string;
 };
 
 export const HARNESS_REGISTRY: Record<string, HarnessConfig> = {
-  amp:            { skillsDir: '.agents/skills' },
-  antigravity:    { skillsDir: '.agents/skills' },
+  amp:            { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
+  antigravity:    { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   augment:        { skillsDir: '.augment/skills' },
   bob:            { skillsDir: '.bob/skills' },
-  'claude-code':  { skillsDir: '.claude/skills', agentsDir: '.claude/agents' },
+  'claude-code':  { skillsDir: '.claude/skills', agentsDir: '.claude/agents', instructionsFile: 'CLAUDE.md' },
   openclaw:       { skillsDir: 'skills' },
-  cline:          { skillsDir: '.agents/skills' },
-  warp:           { skillsDir: '.agents/skills' },
+  cline:          { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
+  warp:           { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   codebuddy:      { skillsDir: '.codebuddy/skills' },
-  codex:          { skillsDir: '.agents/skills', agentsDir: '.codex/agents' },
+  codex:          { skillsDir: '.agents/skills', agentsDir: '.codex/agents', instructionsFile: 'AGENTS.md' },
   'command-code': { skillsDir: '.commandcode/skills' },
   continue:       { skillsDir: '.continue/skills' },
   cortex:         { skillsDir: '.cortex/skills' },
   crush:          { skillsDir: '.crush/skills' },
-  cursor:         { skillsDir: '.agents/skills' },
-  deepagents:     { skillsDir: '.agents/skills' },
+  cursor:         { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
+  deepagents:     { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   droid:          { skillsDir: '.factory/skills' },
-  firebender:     { skillsDir: '.agents/skills' },
-  'gemini-cli':   { skillsDir: '.agents/skills' },
-  'github-copilot': { skillsDir: '.agents/skills' },
+  firebender:     { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
+  'gemini-cli':   { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
+  'github-copilot': { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   goose:          { skillsDir: '.goose/skills' },
   junie:          { skillsDir: '.junie/skills' },
   'iflow-cli':    { skillsDir: '.iflow/skills' },
   kilo:           { skillsDir: '.kilocode/skills' },
-  'kimi-cli':     { skillsDir: '.agents/skills' },
+  'kimi-cli':     { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   'kiro-cli':     { skillsDir: '.kiro/skills' },
   kode:           { skillsDir: '.kode/skills' },
   mcpjam:         { skillsDir: '.mcpjam/skills' },
   'mistral-vibe': { skillsDir: '.vibe/skills' },
   mux:            { skillsDir: '.mux/skills' },
-  opencode:       { skillsDir: '.agents/skills' },
+  opencode:       { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   openhands:      { skillsDir: '.openhands/skills' },
   pi:             { skillsDir: '.pi/skills' },
   qoder:          { skillsDir: '.qoder/skills' },
   'qwen-code':    { skillsDir: '.qwen/skills' },
-  replit:         { skillsDir: '.agents/skills' },
+  replit:         { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   roo:            { skillsDir: '.roo/skills' },
   trae:           { skillsDir: '.trae/skills' },
   'trae-cn':      { skillsDir: '.trae/skills' },
-  universal:      { skillsDir: '.agents/skills' },
+  universal:      { skillsDir: '.agents/skills', instructionsFile: 'AGENTS.md' },
   windsurf:       { skillsDir: '.windsurf/skills' },
   zencoder:       { skillsDir: '.zencoder/skills' },
   neovate:        { skillsDir: '.neovate/skills' },
@@ -90,6 +91,10 @@ export const HARNESS_REGISTRY: Record<string, HarnessConfig> = {
 const TEMPLATES_DIR = '.alpha-loop/templates';
 const TEMPLATE_SKILLS_SUBDIR = 'skills';
 const TEMPLATE_AGENTS_SUBDIR = 'agents';
+const TEMPLATE_INSTRUCTIONS_FILE = 'instructions.md';
+
+/** Marker that identifies files managed by alpha-loop (safe to overwrite). */
+export const MANAGED_MARKER = '<!-- managed by alpha-loop -->';
 
 // Legacy root-level fallbacks
 const LEGACY_SKILLS_DIR = 'skills';
@@ -173,6 +178,7 @@ function dirsMatch(src: string, dest: string): boolean {
 type TemplateSources = {
   skillsDir: string;
   agentsDir: string;
+  instructionsFile: string;
   isLegacy: boolean;
 };
 
@@ -180,11 +186,13 @@ function resolveTemplateSources(projectDir: string): TemplateSources | null {
   const templatesBase = join(projectDir, TEMPLATES_DIR);
   const templateSkills = join(templatesBase, TEMPLATE_SKILLS_SUBDIR);
   const templateAgents = join(templatesBase, TEMPLATE_AGENTS_SUBDIR);
+  const templateInstructions = join(templatesBase, TEMPLATE_INSTRUCTIONS_FILE);
 
   if (existsSync(templatesBase)) {
     return {
       skillsDir: templateSkills,
       agentsDir: templateAgents,
+      instructionsFile: templateInstructions,
       isLegacy: false,
     };
   }
@@ -195,11 +203,12 @@ function resolveTemplateSources(projectDir: string): TemplateSources | null {
   if (existsSync(legacySkills)) {
     log.warn(
       `Legacy layout detected (${LEGACY_SKILLS_DIR}/ at project root). ` +
-      `Run "alpha-loop migrate" to move them to ${TEMPLATES_DIR}/.`
+      `Run "alpha-loop init" to migrate to ${TEMPLATES_DIR}/.`
     );
     return {
       skillsDir: legacySkills,
       agentsDir: join(projectDir, LEGACY_CLAUDE_AGENTS_DIR),
+      instructionsFile: '', // No instructions in legacy layout
       isLegacy: true,
     };
   }
@@ -274,6 +283,34 @@ export function syncAgentAssets(
       }
     }
 
+    // -- Instructions file --
+    if (config.instructionsFile && sources.instructionsFile && existsSync(sources.instructionsFile)) {
+      const targetFile = join(projectDir, config.instructionsFile);
+      if (!filesMatch(sources.instructionsFile, targetFile)) {
+        // Safety: only overwrite if the target doesn't exist or contains the managed marker
+        const targetExists = existsSync(targetFile);
+        const targetManaged = targetExists &&
+          readFileSync(targetFile, 'utf-8').startsWith(MANAGED_MARKER);
+
+        if (!targetExists || targetManaged) {
+          if (check) {
+            log.warn(`Drift [${harness}]: ${config.instructionsFile} differs from template instructions.md`);
+          } else {
+            mkdirSync(join(targetFile, '..'), { recursive: true });
+            copyFileSync(sources.instructionsFile, targetFile);
+            log.info(`Synced [${harness}] instructions.md → ${config.instructionsFile}`);
+          }
+          result.docSynced = true;
+          result.synced = true;
+        } else {
+          log.warn(
+            `Skipping ${config.instructionsFile} — file exists without alpha-loop marker. ` +
+            `Run "alpha-loop scan" to generate a managed instructions file.`
+          );
+        }
+      }
+    }
+
   }
 
   return result;
@@ -284,7 +321,6 @@ export function syncAgentAssets(
  *
  * Moves:
  *   skills/          → .alpha-loop/templates/skills/
- *   AGENTS.md        → .alpha-loop/templates/instructions.md
  *   .claude/agents/  → .alpha-loop/templates/agents/
  *
  * Does NOT delete the originals — the next sync run will recreate them
