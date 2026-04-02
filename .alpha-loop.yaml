@@ -11,6 +11,11 @@ base_branch: master
 test_command: pnpm test
 poll_interval: 60
 
+# Coding harnesses to sync skills/agents to
+harnesses:
+  - claude-code
+  - codex
+
 # Per-stage agent/model configuration (optional).
 # If a stage is not listed, it falls back to global model + agent: claude.
 # stages:

@@ -25,6 +25,7 @@ import {
 } from 'node:fs';
 import { join, relative } from 'node:path';
 import { log } from '../lib/logger.js';
+import { loadConfig } from '../lib/config.js';
 
 // ---------------------------------------------------------------------------
 // Harness registry
@@ -373,7 +374,14 @@ export function migrateToTemplates(projectDir: string = process.cwd()): void {
  */
 export function syncCommand(options: { check?: boolean; harnesses?: string[] } = {}): void {
   const projectDir = process.cwd();
-  const harnesses = options.harnesses ?? [];
+
+  // Load harnesses from options or fall back to config file
+  let harnesses = options.harnesses ?? [];
+  if (harnesses.length === 0) {
+    try {
+      harnesses = loadConfig().harnesses;
+    } catch { /* config not available */ }
+  }
 
   if (harnesses.length === 0) {
     log.warn('No harnesses configured. Add a "harnesses" list to .alpha-loop.yaml.');
