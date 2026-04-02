@@ -7,6 +7,7 @@ export type ImplementPromptOptions = {
   issueNum: number;
   title: string;
   body: string;
+  planFile?: string;
   visionContext?: string;
   projectContext?: string;
   previousResult?: string;
@@ -38,13 +39,17 @@ export type LearnPromptOptions = {
  * Build the implementation prompt for an AI agent.
  */
 export function buildImplementPrompt(options: ImplementPromptOptions): string {
-  const { issueNum, title, body, visionContext, projectContext, previousResult, learningContext } = options;
+  const { issueNum, title, body, planFile, visionContext, projectContext, previousResult, learningContext } = options;
 
   const sections: string[] = [
     `Implement GitHub issue #${issueNum}: ${title}`,
     '',
     body,
   ];
+
+  if (planFile) {
+    sections.push('', '', `## Implementation Plan`, `Read the plan file before starting: ${planFile}`);
+  }
 
   if (visionContext) {
     sections.push('', '', '## Product Vision', visionContext);

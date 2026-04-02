@@ -26,6 +26,7 @@ import type { SessionContext } from './session.js';
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
 
+
 export type PipelineResult = {
   issueNum: number;
   title: string;
@@ -97,19 +98,21 @@ export async function processIssue(
 
   // --- Step 3: Plan (optional, non-fatal) ---
   log.step('Step 3: Planning');
-  let implBody = body;
+  const planFile = join(worktreePath, `plan-issue-${issueNum}.md`);
   if (!config.dryRun) {
     try {
       const planResult = await spawnAgent({
         agent: config.agent,
         model: config.model,
-        prompt: `Analyze this GitHub issue and produce a brief implementation plan (under 200 lines).\n\nIssue #${issueNum}: ${title}\n\n${body}\n\nOutput ONLY:\n1. Files to create/modify (with paths)\n2. Key implementation details not obvious from the issue\n3. Edge cases to handle\n\nDo NOT restate the issue. Do NOT explore the full codebase. Be concise.`,
+        prompt: `Analyze this GitHub issue and produce an implementation plan.\n\nIssue #${issueNum}: ${title}\n\n${body}\n\nWrite your plan to the file: ${planFile}\n\nThe plan should include:\n1. Files to create/modify (with paths)\n2. Key implementation details not obvious from the issue\n3. Edge cases to handle\n\nDo NOT restate the issue description. Be concise and actionable.`,
         cwd: worktreePath,
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
         verbose: config.verbose,
       });
-      if (planResult.exitCode === 0 && planResult.output.trim()) {
-        implBody = body + '\n\n## Agent Planning Notes\n\n' + planResult.output.trim();
+      if (planResult.exitCode === 0 && existsSync(planFile)) {
+        log.success(`Plan saved to ${planFile}`);
+      } else {
+        log.warn('Planning agent did not produce a plan file, proceeding without plan');
       }
     } catch {
       log.warn('Planning stage failed, proceeding with original issue description');
@@ -130,7 +133,8 @@ export async function processIssue(
     const implementPrompt = buildImplementPrompt({
       issueNum,
       title,
-      body: implBody,
+      body,
+      planFile: existsSync(planFile) ? planFile : undefined,
       visionContext: visionContext ?? undefined,
       projectContext: projectContext ?? undefined,
       previousResult: previousResult ?? undefined,
