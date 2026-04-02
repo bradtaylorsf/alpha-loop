@@ -18,7 +18,7 @@ Agent-agnostic automated development loop that implements The Loop methodology:
 ## Commands
 
 ```bash
-alpha-loop init          # Create .alpha-loop.yaml config template
+alpha-loop init          # Full onboarding: config, templates, vision, scan, sync
 alpha-loop run           # Run the loop continuously
 alpha-loop run --once    # Process one issue and exit
 alpha-loop run --dry-run # Dry run (preview, no changes)

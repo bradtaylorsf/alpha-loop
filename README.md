@@ -28,24 +28,17 @@ npx @bradtaylorsf/alpha-loop
 ## Quick Start
 
 ```bash
-# 1. Initialize config in your project
+# 1. Initialize — runs full onboarding (config, vision, scan, sync)
 cd your-project
 alpha-loop init
 
-# 2. Edit .alpha-loop.yaml with your repo settings
+# 2. Edit .alpha-loop.yaml if needed (repo, harnesses, model, etc.)
 
-# 3. Set up project vision (optional but recommended)
-alpha-loop vision
-
-# 4. Generate project context
-alpha-loop scan
-
-# 5. Run the loop — you'll be prompted to pick a milestone
+# 3. Run the loop — you'll be prompted to pick a milestone
 alpha-loop run
 
 # Or target a specific milestone directly
 alpha-loop run --milestone "v1.0"
-
 ```
 
 ## How It Works
@@ -127,10 +120,10 @@ During live verification, the agent takes screenshots at key states and saves th
 
 | Command | Description |
 |---------|-------------|
-| `alpha-loop init` | Create `.alpha-loop.yaml` config and install agent skills/templates |
+| `alpha-loop init` | Full onboarding: config, templates, vision, scan, sync, commit |
 | `alpha-loop run` | Fetch matching issues, process them all, then exit |
 | `alpha-loop run --dry-run` | Preview without making changes |
-| `alpha-loop scan` | Generate/refresh project context (`.alpha-loop/context.md`) |
+| `alpha-loop scan` | Generate/refresh project context and instructions file |
 | `alpha-loop vision` | Interactive project vision setup (`.alpha-loop/vision.md`) |
 | `alpha-loop auth` | Save authenticated browser state for verification |
 | `alpha-loop history` | View session history |
@@ -175,6 +168,11 @@ test_command: pnpm test
 dev_command: pnpm dev
 port: 3000
 auto_merge: true
+
+# Coding harnesses to sync skills/agents to
+harnesses:
+  - claude-code
+  - codex
 
 # Safety limits (0 = unlimited)
 max_issues: 20
