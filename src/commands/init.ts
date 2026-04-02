@@ -156,6 +156,8 @@ function ensureGitignore(): void {
   }
 }
 
+const REQUIRED_PROJECT_STATUSES = ['Todo', 'In progress', 'In Review', 'Done'];
+
 const REQUIRED_LABELS = [
   { name: 'ready', color: '0E8A16', description: 'Ready for agent processing' },
   { name: 'in-progress', color: '1D76DB', description: 'Agent is working on this' },
@@ -217,6 +219,105 @@ export async function ensureLabels(repo: string, labelReady: string): Promise<vo
     } else {
       log.warn(`Failed to create label: ${label.name}`);
     }
+  }
+}
+
+/**
+ * Check for required project board statuses and create missing ones.
+ */
+export async function ensureProjectStatuses(repoOwner: string, project: number): Promise<void> {
+  if (!project || project <= 0) {
+    log.info('No project board configured — skipping status check');
+    return;
+  }
+
+  // Get project ID and status field
+  const projectResult = exec(`gh project view ${project} --owner "${repoOwner}" --format json`);
+  if (projectResult.exitCode !== 0) {
+    log.warn(`Could not access project board ${project}`);
+    return;
+  }
+
+  let projectId: string;
+  try {
+    projectId = (JSON.parse(projectResult.stdout) as { id: string }).id;
+  } catch {
+    log.warn('Could not parse project data');
+    return;
+  }
+
+  const fieldResult = exec(`gh project field-list ${project} --owner "${repoOwner}" --format json`);
+  if (fieldResult.exitCode !== 0) {
+    log.warn('Could not list project fields');
+    return;
+  }
+
+  let fieldId: string | undefined;
+  let existingOptions: Array<{ id: string; name: string }> = [];
+  try {
+    const data = JSON.parse(fieldResult.stdout) as {
+      fields: Array<{ id: string; name: string; options?: Array<{ id: string; name: string }> }>;
+    };
+    const statusField = data.fields.find((f) => f.name === 'Status');
+    if (statusField) {
+      fieldId = statusField.id;
+      existingOptions = statusField.options ?? [];
+    }
+  } catch {
+    log.warn('Could not parse project fields');
+    return;
+  }
+
+  if (!fieldId) {
+    log.warn('No Status field found on project board');
+    return;
+  }
+
+  const existingNames = new Set(existingOptions.map((o) => o.name));
+  const missing = REQUIRED_PROJECT_STATUSES.filter((s) => !existingNames.has(s));
+
+  if (missing.length === 0) {
+    log.success('All required project statuses exist');
+    return;
+  }
+
+  log.info(`Missing project statuses: ${missing.join(', ')}`);
+
+  // Interactive confirmation if running in a TTY
+  if (process.stdin.isTTY) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>((resolve) => {
+      rl.question('Create missing project statuses? [Y/n]: ', resolve);
+    });
+    rl.close();
+    if (answer.trim().toLowerCase() === 'n') {
+      log.info('Skipping status creation');
+      return;
+    }
+  }
+
+  // Build the full options list (existing + new) for the update mutation
+  const allOptionObjs: Array<{ name: string; id?: string }> = [
+    ...existingOptions.map((o) => ({ name: o.name, id: o.id })),
+    ...missing.map((name) => ({ name })),
+  ];
+
+  const optionsJson = JSON.stringify(allOptionObjs);
+
+  const mutation = `mutation {
+    updateProjectV2Field(input: {
+      projectId: "${projectId}"
+      fieldId: "${fieldId}"
+      singleSelectOptions: ${optionsJson.replace(/"/g, '\\"')}
+    }) { projectV2Field { ... on ProjectV2SingleSelectField { id } } }
+  }`;
+
+  const createResult = exec(`gh api graphql -f query="${mutation}"`);
+  if (createResult.exitCode === 0) {
+    log.success(`Created project statuses: ${missing.join(', ')}`);
+  } else {
+    log.warn(`Could not create project statuses: ${createResult.stderr}`);
+    log.info(`Please add these statuses manually in your project settings: ${missing.join(', ')}`);
   }
 }
 
@@ -342,7 +443,11 @@ export async function initCommand(): Promise<void> {
   log.step('Step 10: GitHub labels');
   await ensureLabels(config.repo, config.labelReady);
 
-  // --- Step 11: Commit ---
+  // --- Step 11: Project board statuses ---
+  log.step('Step 11: Project board statuses');
+  await ensureProjectStatuses(config.repoOwner, config.project);
+
+  // --- Step 12: Commit ---
   log.step('Step 11: Commit generated files');
   const statusResult = exec('git status --porcelain .alpha-loop/ .claude/ .agents/ .codex/ CLAUDE.md AGENTS.md .gitignore .github/');
   if (statusResult.stdout.trim()) {

@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './logger.js';
 import { exec, formatTimestamp } from './shell.js';
-import { createPR } from './github.js';
+import { createPR, updateProjectStatus } from './github.js';
 import type { Config } from './config.js';
 import type { PipelineResult } from './pipeline.js';
 
@@ -207,6 +207,14 @@ Automated by alpha-loop`;
       cwd: projectDir,
     });
     log.success(`Session PR: ${prUrl}`);
+
+    // Mark all successful issues as Done on the project board
+    for (const r of session.results) {
+      if (r.status === 'success' && config.project > 0) {
+        updateProjectStatus(config.repo, config.project, config.repoOwner, r.issueNum, 'Done');
+      }
+    }
+
     return prUrl;
   } catch (err) {
     // If createPR failed (e.g. nothing to compare), try creating via gh directly

@@ -486,7 +486,7 @@ Rules:
   log.step('Step 10: Updating issue status');
   if (!config.dryRun) {
     const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
-    updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'Done');
+    updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In Review');
     labelIssue(config.repo, issueNum, 'in-review', 'in-progress');
     commentIssue(config.repo, issueNum,
       `Automated implementation complete.\n\n**PR**: ${prUrl ?? 'N/A'}\n**Tests**: ${testsStatus}\n**Review**: Attached to PR body.\n\n---\n*Processed by alpha-loop in ${duration}s*`,
