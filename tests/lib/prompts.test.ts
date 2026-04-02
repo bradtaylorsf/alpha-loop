@@ -167,7 +167,7 @@ describe('buildLearnPrompt', () => {
     expect(prompt).toContain('## Run Info');
     expect(prompt).toContain('#42 "Add login page"');
     expect(prompt).toContain('Status: success');
-    expect(prompt).toContain('Retries: 1');
+    expect(prompt).toContain('Test fix retries: 1');
     expect(prompt).toContain('Duration: 300s');
   });
 

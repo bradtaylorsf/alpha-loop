@@ -382,6 +382,7 @@ Rules:
   log.step('Step 5: Running tests');
   let testOutput = '';
   let testsPassing = false;
+  let testRetries = 0;
 
   if (!plan.testing.needed) {
     log.info(`Tests skipped by plan: ${plan.testing.reason}`);
@@ -402,6 +403,7 @@ Rules:
     }
 
     if (attempt < config.maxTestRetries) {
+      testRetries++;
       log.warn(`Tests failed on attempt ${attempt}, invoking agent to fix...`);
       if (!config.dryRun) {
         const fixPrompt = `Tests are failing for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix ONLY code related to issue #${issueNum} — do NOT modify test infrastructure, build scripts, or unrelated files\n3. If tests fail due to environment issues (missing venv, wrong port, missing deps), fix only YOUR code — do NOT rewrite the test runner or package.json scripts\n4. Run the tests again to verify\n5. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why it was failing>\n   Example: fix(#${issueNum}): use port 5435 for postgres — default 5432 conflicts with host service\n   DO NOT use generic messages like "fix: resolve test failures"`;
@@ -666,7 +668,7 @@ Rules:
     issueNum,
     title,
     status: testsPassing ? 'success' : 'failure',
-    retries: config.maxTestRetries,
+    retries: testRetries,
     duration,
     diff: runDiff,
     testOutput,
@@ -782,25 +784,47 @@ function loadFileIfExists(filePath: string): string | null {
 
 /**
  * Extract a one-line test summary from raw test output.
- * e.g., "30 passed, 0 failed" from Jest/Vitest output.
+ * Aggregates results across multiple test runners (pytest, Jest, Vitest).
+ * Handles concurrent output like: [pytest] 189 passed, [frontend] Tests 6 passed, etc.
  */
 function extractTestSummary(testOutput: string): string {
   if (!testOutput) return '';
 
-  // Jest: "Tests:  30 passed, 30 total"
-  const jestMatch = testOutput.match(/Tests:\s+(.+total)/);
-  if (jestMatch) return jestMatch[1].trim();
+  let totalPassed = 0;
+  let totalFailed = 0;
+  let totalSkipped = 0;
 
-  // Vitest: "Tests  30 passed (30)"
-  const vitestMatch = testOutput.match(/Tests\s+(.+\(\d+\))/);
-  if (vitestMatch) return vitestMatch[1].trim();
+  // Pytest summary line: "189 passed, 1 skipped in 7.05s" or "5 failed, 184 passed"
+  // Match the "=== ... ===" summary line format
+  for (const match of testOutput.matchAll(/=+\s*(.*?)\s*=+/g)) {
+    const line = match[1];
+    const passed = line.match(/(\d+) passed/);
+    const failed = line.match(/(\d+) failed/);
+    const skipped = line.match(/(\d+) skipped/);
+    if (passed) totalPassed += parseInt(passed[1], 10);
+    if (failed) totalFailed += parseInt(failed[1], 10);
+    if (skipped) totalSkipped += parseInt(skipped[1], 10);
+  }
 
-  // Fallback: count "passed" and "failed" lines
-  const passed = (testOutput.match(/passed/gi) || []).length;
-  const failed = (testOutput.match(/failed/gi) || []).length;
-  if (passed > 0 || failed > 0) return `${passed} passed, ${failed} failed`;
+  // Jest summary: "Tests:  30 passed, 30 total" or "Tests:  2 failed, 28 passed, 30 total"
+  for (const match of testOutput.matchAll(/Tests:\s+(?:(\d+) failed,\s+)?(\d+) passed/g)) {
+    if (match[1]) totalFailed += parseInt(match[1], 10);
+    totalPassed += parseInt(match[2], 10);
+  }
 
-  return '';
+  // Vitest summary: "Tests  6 passed (6)" — uses spaces not colon, has parens
+  for (const match of testOutput.matchAll(/Tests\s+(?:(\d+) failed\s+)?(\d+) passed\s+\(\d+\)/g)) {
+    if (match[1]) totalFailed += parseInt(match[1], 10);
+    totalPassed += parseInt(match[2], 10);
+  }
+
+  if (totalPassed === 0 && totalFailed === 0) return '';
+
+  const parts: string[] = [];
+  parts.push(`${totalPassed} passed`);
+  if (totalFailed > 0) parts.push(`${totalFailed} failed`);
+  if (totalSkipped > 0) parts.push(`${totalSkipped} skipped`);
+  return parts.join(', ');
 }
 
 function buildPRBody(

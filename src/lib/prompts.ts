@@ -192,7 +192,7 @@ export function buildLearnPrompt(options: LearnPromptOptions): string {
 ## Run Info
 - Issue: #${issueNum} "${title}"
 - Status: ${status}
-- Retries: ${retries}
+- Test fix retries: ${retries} (number of times tests failed and the agent was sent back to fix)
 - Duration: ${duration}s
 
 ## Issue Requirements
@@ -215,7 +215,7 @@ Output ONLY this markdown structure, nothing else:
 ---
 issue: ${issueNum}
 status: ${status}
-retries: ${retries}
+test_fix_retries: ${retries}
 duration: ${duration}
 date: ${today}
 ---
