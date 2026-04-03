@@ -91,6 +91,7 @@ export type EvalResult = {
     filesMatch: boolean;
     testsMatch: boolean;
     diffMatch: boolean;
+    outputMatch: boolean;
   };
 };
 
@@ -364,6 +365,7 @@ export function evaluateResult(
     filesMatch: true,
     testsMatch: true,
     diffMatch: true,
+    outputMatch: true,
   };
 
   // Check files changed
@@ -389,8 +391,7 @@ export function evaluateResult(
 
   // Check output contains (for step evals)
   if (evalCase.expected.outputContains) {
-    checks.diffMatch = checks.diffMatch &&
-      evalCase.expected.outputContains.every((s) => actual.output.includes(s));
+    checks.outputMatch = evalCase.expected.outputContains.every((s) => actual.output.includes(s));
   }
 
   // Compute partial credit (0-1)
@@ -413,7 +414,8 @@ export function evaluateResult(
  * Not a full glob implementation — just enough for eval file matching.
  */
 function minimatch(str: string, pattern: string): boolean {
-  const regex = new RegExp('^' + pattern.replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp('^' + escaped.replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
   return regex.test(str);
 }
 

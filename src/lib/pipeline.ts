@@ -276,7 +276,6 @@ export type PipelineResult = {
   verifySkipped: boolean;
   duration: number;
   filesChanged: number;
-  evalScore?: number;
 };
 
 /**

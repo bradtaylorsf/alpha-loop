@@ -4,7 +4,7 @@
  * For e2e cases: clones fixture repo, runs processIssue(), runs acceptance checks.
  * For step cases: loads input, runs a single pipeline step, checks output.
  */
-import { existsSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { log } from './logger.js';
@@ -91,7 +91,7 @@ export async function runEvalSuite(
         retries: 0,
         duration,
         error: err instanceof Error ? err.message : String(err),
-        details: { successMatch: false, filesMatch: false, testsMatch: false, diffMatch: false },
+        details: { successMatch: false, filesMatch: false, testsMatch: false, diffMatch: false, outputMatch: false },
       });
       log.warn(`  ERROR: ${evalCase.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -136,7 +136,7 @@ export async function runEvalSuite(
   // Write trace scores
   try {
     const traceResults = results.map((r) => ({
-      issueNum: parseInt(r.caseId.replace(/\D/g, '')) || 0,
+      issueNum: parseInt(r.caseId.match(/\d+/)?.[0] ?? '0') || 0,
       status: r.passed ? 'success' as const : 'failure' as const,
       testsPassing: r.details.testsMatch,
       verifyPassing: false,
@@ -245,6 +245,7 @@ async function runE2eEval(
           filesMatch: checkResults.results.some((r) => r.passed),
           testsMatch: pipelineResult.testsPassing === (evalCase.expected.testsPassing ?? true),
           diffMatch: checkResults.allPassed,
+          outputMatch: true,
         },
       };
     }
@@ -371,6 +372,7 @@ async function runStepEval(
         filesMatch: true,
         testsMatch: true,
         diffMatch: checkResults.allPassed,
+        outputMatch: true,
       },
     };
   }
@@ -390,7 +392,8 @@ async function runStepEval(
       successMatch: true,
       filesMatch: true,
       testsMatch: true,
-      diffMatch: outputMatch,
+      diffMatch: true,
+      outputMatch,
     },
   };
 }
@@ -444,6 +447,16 @@ export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
   return fixtureDir;
 }
 
+/** Read all files in a directory recursively, sorted, and concatenate contents. */
+function readDirContentsSorted(dirPath: string): string {
+  const entries = readdirSync(dirPath, { recursive: true, withFileTypes: true });
+  const files = entries
+    .filter((d) => d.isFile())
+    .map((d) => join(d.parentPath ?? d.path, d.name))
+    .sort();
+  return files.map((f) => readFileSync(f, 'utf-8')).join('\n');
+}
+
 /**
  * Snapshot the current harness state (prompts + skills + config) as a hash.
  */
@@ -463,8 +476,7 @@ export function snapshotHarness(config: Config): string {
   const skillsDir = join(process.cwd(), '.alpha-loop', 'templates', 'skills');
   if (existsSync(skillsDir)) {
     try {
-      const result = exec(`find ${skillsDir} -type f | sort | xargs cat`, { timeout: 5000 });
-      parts.push(result.stdout);
+      parts.push(readDirContentsSorted(skillsDir));
     } catch { /* non-fatal */ }
   }
 
@@ -472,8 +484,7 @@ export function snapshotHarness(config: Config): string {
   const agentsDir = join(process.cwd(), '.alpha-loop', 'templates', 'agents');
   if (existsSync(agentsDir)) {
     try {
-      const result = exec(`find ${agentsDir} -type f | sort | xargs cat`, { timeout: 5000 });
-      parts.push(result.stdout);
+      parts.push(readDirContentsSorted(agentsDir));
     } catch { /* non-fatal */ }
   }
 

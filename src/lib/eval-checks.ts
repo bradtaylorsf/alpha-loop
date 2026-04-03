@@ -46,6 +46,7 @@ export type HttpCheck = BaseCheck & {
   type: 'http';
   method: string;
   path: string;
+  port?: number;
   expect_status: number;
   expect_body_contains?: string;
 };
@@ -200,7 +201,7 @@ async function runGrepCheck(check: GrepCheck, ctx: CheckContext): Promise<CheckR
 
 async function runHttpCheck(check: HttpCheck, ctx: CheckContext): Promise<CheckResult> {
   try {
-    const url = `http://localhost:3000${check.path}`;
+    const url = `http://localhost:${check.port ?? 3000}${check.path}`;
     const response = await fetch(url, { method: check.method, signal: AbortSignal.timeout(10_000) });
     const body = await response.text();
     const statusMatch = response.status === check.expect_status;

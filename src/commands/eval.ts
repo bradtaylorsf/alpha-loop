@@ -233,11 +233,9 @@ export async function evalCaptureCommand(options: EvalCaptureOptions): Promise<v
       log.step('Recent sessions with failures:');
       console.log('');
 
-      let globalIdx = 0;
       for (const [session, failures] of grouped) {
         console.log(`  ${session} — ${failures.length} failure(s)`);
         for (const f of failures) {
-          globalIdx++;
           const step = detectFailureStepFromResult(f.result);
           const tests = f.result.testsPassing ? 'PASS' : 'FAIL';
           const verify = f.result.verifySkipped ? 'SKIP' : (f.result.verifyPassing ? 'PASS' : 'FAIL');

@@ -12,7 +12,7 @@
  * Key insight from Meta-Harness: full trace access (not summaries) is critical.
  * Key insight from autoresearch: fixed eval metric + autonomous iteration.
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from '../lib/logger.js';
 import { loadConfig } from '../lib/config.js';
@@ -284,9 +284,11 @@ type ProposedChange = {
  * Parse proposed changes from agent output.
  * Expects a JSON array in the output.
  */
-function parseProposedChanges(output: string): ProposedChange[] {
+export function parseProposedChanges(output: string): ProposedChange[] {
   // Find JSON array in output
-  const jsonMatch = output.match(/\[[\s\S]*?\]/);
+  // Try fenced code block first, fall back to greedy bracket matching
+  const fencedMatch = output.match(/```json\s*\n(\[[\s\S]*?\])\s*\n```/);
+  const jsonMatch = fencedMatch ? [fencedMatch[1]] : output.match(/\[[\s\S]*\]/);
   if (!jsonMatch) return [];
 
   try {
@@ -308,10 +310,12 @@ function parseProposedChanges(output: string): ProposedChange[] {
 /**
  * Check if a proposed path is safe to modify.
  */
-function isSafePath(filePath: string): boolean {
+export function isSafePath(filePath: string): boolean {
   // Reject absolute paths and path traversal
   if (filePath.startsWith('/') || filePath.includes('..')) return false;
 
-  // Must be in allowed prefixes
-  return ALLOWED_TARGETS.some((prefix) => filePath.startsWith(prefix));
+  // Must be in allowed targets: directory prefixes use startsWith, files use exact match
+  return ALLOWED_TARGETS.some((prefix) =>
+    prefix.endsWith('/') ? filePath.startsWith(prefix) : filePath === prefix
+  );
 }
