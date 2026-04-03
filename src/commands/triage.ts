@@ -14,6 +14,7 @@ import {
   formatTriageFindings,
   buildPlanningContext,
   type TriageFinding,
+  type TriageAction,
 } from '../lib/planning.js';
 import {
   listOpenIssues,
@@ -103,7 +104,7 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
   }
 
   // ── Interactive review ─────────────────────────────────────────────────────
-  const actionLabels: Record<string, string> = {
+  const actionLabels: Record<TriageAction, string> = {
     close: 'Close as stale',
     rewrite: 'Rewrite body',
     split: 'Split into sub-issues',
@@ -111,7 +112,7 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
   };
 
   const choices = findings.map((f) => ({
-    name: `[${f.action}] #${f.issueNum} ${f.title} — ${f.reason.slice(0, 60)}`,
+    name: `[${actionLabels[f.action]}] #${f.issueNum} ${f.title} — ${f.reason.slice(0, 60)}`,
     value: f.issueNum,
     checked: f.selected,
   }));
