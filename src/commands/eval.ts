@@ -658,40 +658,41 @@ export async function evalSearchCommand(options: EvalSearchOptions): Promise<voi
 }
 
 export type EvalImportSwebenchOptions = {
+  dataset?: string;
+  datasetId?: string;
+  count?: string;
+  repo?: string;
+  ids?: string;
   step?: string;
 };
 
 /**
- * Import SWE-bench cases (placeholder — requires HuggingFace download).
+ * Import SWE-bench cases from HuggingFace or a local JSONL file.
+ *
+ * Downloads entries from HuggingFace (requires Python + datasets library),
+ * converts each to a directory-based eval case under .alpha-loop/evals/cases/e2e/,
+ * and updates config.yaml with repo base commit mappings.
  */
 export async function evalImportSwebenchCommand(options?: EvalImportSwebenchOptions): Promise<void> {
-  const step = options?.step ?? 'implement';
+  const { importSwebench, listImportedSwebenchCases } = await import('../lib/eval-swebench.js');
 
   log.step('SWE-bench Import');
-  log.info('');
-  log.info('SWE-bench integration imports real GitHub issues with validated patches.');
-  log.info(`Import as: ${step === 'implement' ? 'step-level (implement)' : `step-level (${step})`} eval cases`);
-  log.info('');
-  log.info('Setup:');
-  log.info('  1. Clone the alpha-loop-evals fixture monorepo');
-  log.info('  2. Download SWE-bench dataset from HuggingFace:');
-  log.info('     princeton-nlp/SWE-bench_Lite (300 cases)');
-  log.info('     princeton-nlp/SWE-bench_Verified (500 cases)');
-  log.info('  3. Run: alpha-loop eval import-swebench --dataset <path> [--step implement]');
-  log.info('');
-  log.info('Each SWE-bench instance becomes an eval case with:');
-  log.info('  - fixture_repo: the target repo at the specific commit');
-  log.info('  - issue_body: the original GitHub issue description');
-  log.info('  - expected: validated patch as ground truth');
-  log.info('  - type: step (step-level eval targeting the specified pipeline step)');
-  log.info('');
-  log.info('Available datasets:');
-  log.info('  princeton-nlp/SWE-bench_Lite     — 300 curated cases');
-  log.info('  princeton-nlp/SWE-bench_Verified — 500 human-verified cases');
-  log.info('  openai/openai_humaneval          — 164 simple implement cases');
-  log.info('  google-research-datasets/mbpp    — 974 simple implement cases');
-  log.info('');
-  log.info('This is planned for M2 (Eval Content). See issue #95.');
+
+  const count = importSwebench({
+    dataset: options?.dataset,
+    datasetId: options?.datasetId,
+    count: options?.count ? parseInt(options.count, 10) : undefined,
+    repo: options?.repo,
+    ids: options?.ids,
+    step: options?.step ?? 'implement',
+  });
+
+  if (count > 0) {
+    log.success(`Imported ${count} SWE-bench eval case(s).`);
+
+    const existing = listImportedSwebenchCases();
+    log.info(`Total SWE-bench cases: ${existing.length}`);
+  }
 }
 
 export type EvalConvertOptions = {

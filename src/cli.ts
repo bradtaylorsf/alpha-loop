@@ -159,7 +159,12 @@ evalCmd
 evalCmd
   .command('import-swebench')
   .description('Import eval cases from SWE-bench dataset')
-  .option('--step <step>', 'Import as step-level cases for this pipeline step (default: implement)')
+  .option('--dataset <path>', 'Path to a downloaded JSONL file (skips auto-download)')
+  .option('--dataset-id <id>', 'HuggingFace dataset ID (default: princeton-nlp/SWE-bench_Lite)')
+  .option('--count <n>', 'Maximum number of cases to import')
+  .option('--repo <owner/repo>', 'Filter by repository (e.g. django/django)')
+  .option('--ids <csv>', 'Import specific instance IDs (comma-separated)')
+  .option('--step <step>', 'Pipeline step to target (default: implement)')
   .action(async (options) => {
     const { evalImportSwebenchCommand } = await import('./commands/eval.js');
     await evalImportSwebenchCommand(options);

@@ -1,0 +1,24 @@
+# Eval Fixture Configuration
+# Defines fixture repos and SWE-bench repo mappings for e2e evals.
+
+fixture_repo:
+  url: bradtaylorsf/alpha-loop-evals
+  commit: main  # Pin to a specific commit for reproducibility
+  fixtures:
+    ts-api:
+      path: fixtures/ts-api
+      setup: "pnpm install"
+      test: "pnpm test"
+      start: "pnpm dev"
+    python-cli:
+      path: fixtures/python-cli
+      setup: "uv sync"
+      test: "uv run pytest"
+    react-app:
+      path: fixtures/react-app
+      setup: "pnpm install"
+      test: "pnpm test"
+      start: "pnpm dev"
+
+# SWE-bench repo base commits (populated by `alpha-loop eval import-swebench`)
+swebench_repos: {}
