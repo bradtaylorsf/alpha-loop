@@ -20,6 +20,10 @@ import type { Config } from '../lib/config.js';
 import {
   loadEvalCases,
   saveEvalCase,
+  saveCapturedCase,
+  loadUnannotatedCases,
+  annotateCapturedCase,
+  detectFailureStep,
   formatEvalCase,
   evalsDir,
 } from '../lib/eval.js';
@@ -171,6 +175,11 @@ export function evalCompareCommand(run1: string, run2: string): void {
 
 /**
  * Capture a failure as an eval case — interactive walkthrough.
+ *
+ * Flow:
+ *   1. Show unannotated (auto-captured) skeleton cases first, prompt to annotate
+ *   2. Show recent session failures grouped by session
+ *   3. For each failure: show step, test/verify status, prompt for diagnosis
  */
 export async function evalCaptureCommand(options: EvalCaptureOptions): Promise<void> {
   const config = loadConfig();
@@ -181,27 +190,139 @@ export async function evalCaptureCommand(options: EvalCaptureOptions): Promise<v
     return;
   }
 
-  // Walk through recent failures from sessions
-  const sessionsDir = join(process.cwd(), '.alpha-loop', 'sessions');
-  if (!existsSync(sessionsDir)) {
-    log.warn('No sessions found. Run `alpha-loop run` first to generate session data.');
-    return;
-  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let capturedCount = 0;
 
-  // Find session directories with results
+  try {
+    // Phase 1: Show unannotated skeleton cases first
+    const unannotated = loadUnannotatedCases();
+    if (unannotated.length > 0) {
+      log.step(`Unannotated eval cases (auto-captured):`);
+      console.log('');
+      for (let i = 0; i < unannotated.length; i++) {
+        const u = unannotated[i];
+        const meta = u.evalCase;
+        console.log(`  ${i + 1}. ${meta.id} (issue #${extractIssueNum(meta.id)}, ${meta.source})`);
+      }
+      console.log('');
+
+      for (const entry of unannotated) {
+        const answer = await ask(rl, `Annotate ${entry.evalCase.id}? (y/n): `);
+        if (answer.toLowerCase() !== 'y') continue;
+
+        const annotation = await promptAnnotation(rl);
+        annotateCapturedCase(entry.path, annotation);
+        capturedCount++;
+        log.success(`Annotated: ${entry.evalCase.id}`);
+      }
+
+      if (capturedCount > 0) console.log('');
+    }
+
+    // Phase 2: Show recent session failures
+    const sessionFailures = collectSessionFailures();
+    if (sessionFailures.length === 0 && unannotated.length === 0) {
+      log.info('No failures found in recent sessions. Nothing to capture.');
+      return;
+    }
+
+    if (sessionFailures.length > 0) {
+      // Group by session
+      const grouped = groupBySession(sessionFailures);
+
+      log.step('Recent sessions with failures:');
+      console.log('');
+
+      let globalIdx = 0;
+      for (const [session, failures] of grouped) {
+        console.log(`  ${session} — ${failures.length} failure(s)`);
+        for (const f of failures) {
+          globalIdx++;
+          const step = detectFailureStepFromResult(f.result);
+          const tests = f.result.testsPassing ? 'PASS' : 'FAIL';
+          const verify = f.result.verifySkipped ? 'SKIP' : (f.result.verifyPassing ? 'PASS' : 'FAIL');
+          console.log(`    #${f.issueNum} — ${f.title}`);
+          console.log(`      Failed at: ${step} | Tests: ${tests} | Verify: ${verify}`);
+        }
+        console.log('');
+      }
+
+      // Prompt to capture each failure
+      for (const [_session, failures] of grouped) {
+        for (const failure of failures) {
+          const answer = await ask(rl, `Capture #${failure.issueNum}? (y/n/skip all): `);
+          if (answer === 'skip all') break;
+          if (answer.toLowerCase() !== 'y') continue;
+
+          const annotation = await promptAnnotation(rl);
+          const step = detectFailureStepFromResult(failure.result);
+
+          const casePath = saveCapturedCase({
+            issueNum: failure.issueNum,
+            title: failure.title,
+            issueBody: typeof failure.result.issueBody === 'string' ? failure.result.issueBody : undefined,
+            step,
+            session: failure.session,
+            tags: annotation.tags,
+          });
+
+          // Immediately annotate since we have the diagnosis
+          annotateCapturedCase(casePath, annotation);
+          capturedCount++;
+          log.success(`Created: ${casePath}`);
+        }
+      }
+    }
+
+    if (capturedCount > 0) {
+      console.log('');
+      log.info(`Done. ${capturedCount} eval case(s) created/annotated. Run 'alpha-loop eval --suite step' to test.`);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+/** Prompt user for failure annotation. */
+async function promptAnnotation(rl: readline.Interface): Promise<import('../lib/eval.js').CaseAnnotation> {
+  console.log('');
+  const whatWentWrong = await ask(rl, '  What went wrong? (one line): ');
+  const whatShouldHaveHappened = await ask(rl, '  What should have happened? (one line): ');
+  const tagsInput = await ask(rl, '  Tags (comma-separated, optional): ');
+
+  return {
+    whatWentWrong,
+    whatShouldHaveHappened,
+    tags: tagsInput.split(',').map((t) => t.trim()).filter(Boolean),
+  };
+}
+
+/** Extract issue number from a captured case ID like "captured-047-module-format". */
+function extractIssueNum(caseId: string): string {
+  const match = caseId.match(/captured-(\d+)/);
+  return match ? String(parseInt(match[1], 10)) : '?';
+}
+
+type SessionFailure = {
+  session: string;
+  issueNum: number;
+  title: string;
+  file: string;
+  result: Record<string, unknown>;
+};
+
+/** Collect failures from recent sessions. */
+function collectSessionFailures(): SessionFailure[] {
+  const sessionsDir = join(process.cwd(), '.alpha-loop', 'sessions');
+  if (!existsSync(sessionsDir)) return [];
+
   const sessionDirs = readdirSync(sessionsDir, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .map((d) => d.name)
     .sort()
     .reverse();
 
-  if (sessionDirs.length === 0) {
-    log.warn('No session data found.');
-    return;
-  }
-
-  // Collect failures from recent sessions
-  const failures: Array<{ session: string; issueNum: number; title: string; file: string }> = [];
+  const failures: SessionFailure[] = [];
 
   for (const sessionDir of sessionDirs.slice(0, 5)) {
     const sessionPath = join(sessionsDir, sessionDir);
@@ -217,6 +338,7 @@ export async function evalCaptureCommand(options: EvalCaptureOptions): Promise<v
             issueNum: result.issueNum,
             title: result.title ?? `Issue #${result.issueNum}`,
             file: join(sessionPath, file),
+            result,
           });
         }
       } catch {
@@ -225,46 +347,27 @@ export async function evalCaptureCommand(options: EvalCaptureOptions): Promise<v
     }
   }
 
-  if (failures.length === 0) {
-    log.info('No failures found in recent sessions. Nothing to capture.');
-    return;
+  return failures;
+}
+
+/** Group failures by session name. */
+function groupBySession(failures: SessionFailure[]): Map<string, SessionFailure[]> {
+  const grouped = new Map<string, SessionFailure[]>();
+  for (const f of failures) {
+    const existing = grouped.get(f.session) ?? [];
+    existing.push(f);
+    grouped.set(f.session, existing);
   }
+  return grouped;
+}
 
-  log.step(`Found ${failures.length} failure(s) in recent sessions:`);
-  console.log('');
-
-  for (let i = 0; i < failures.length; i++) {
-    const f = failures[i];
-    console.log(`  ${i + 1}. #${f.issueNum}: ${f.title} (${f.session})`);
+/** Detect failure step from a raw session result object. */
+function detectFailureStepFromResult(result: Record<string, unknown>): string {
+  if (!result.testsPassing) {
+    return (typeof result.filesChanged === 'number' && result.filesChanged > 1) ? 'test-fix' : 'implement';
   }
-
-  console.log('');
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
-  try {
-    const choice = await ask(rl, 'Capture which failure? (number, or "all", or "q" to quit): ');
-
-    if (choice === 'q' || choice === '') {
-      log.info('Cancelled.');
-      return;
-    }
-
-    if (choice === 'all') {
-      for (const failure of failures) {
-        await captureFailure(rl, failure, config);
-      }
-    } else {
-      const idx = parseInt(choice, 10) - 1;
-      if (idx >= 0 && idx < failures.length) {
-        await captureFailure(rl, failures[idx], config);
-      } else {
-        log.warn('Invalid choice.');
-      }
-    }
-  } finally {
-    rl.close();
-  }
+  if (!result.verifyPassing && !result.verifySkipped) return 'verify';
+  return 'review';
 }
 
 /** Capture a specific issue number as an eval case. */
@@ -341,36 +444,31 @@ async function captureFromTrace(
   const plan = readTrace(session, issueNum, 'plan.json');
   const diff = readTrace(session, issueNum, 'diff.patch');
 
+  const step = metadata.testsPassing
+    ? (metadata.verifyPassing ? 'review' : 'verify')
+    : 'implement';
+
   console.log(`\n  Issue: #${issueNum} — ${metadata.title}`);
   console.log(`  Status: ${metadata.status}`);
+  console.log(`  Failed at: ${step}`);
+  console.log(`  Tests: ${metadata.testsPassing ? 'PASS' : 'FAIL'} | Verify: ${metadata.verifySkipped ? 'SKIP' : (metadata.verifyPassing ? 'PASS' : 'FAIL')}`);
   console.log(`  Duration: ${metadata.duration}s, Retries: ${metadata.retries}`);
   if (plan) console.log(`  Plan: available`);
   if (diff) console.log(`  Diff: ${diff.length} chars`);
   console.log('');
 
-  const description = await ask(rl, 'Description (what this eval tests): ');
-  const shouldSucceed = await ask(rl, 'Should the agent succeed? (y/n): ');
-  const tagsInput = await ask(rl, 'Tags (comma-separated, e.g. typescript,refactor): ');
+  const annotation = await promptAnnotation(rl);
 
-  const evalCase: EvalCase = {
-    id: `issue-${issueNum}`,
-    description: description || `Eval case captured from issue #${issueNum}`,
-    type: 'full',
-    fixtureRepo: config.repo,
-    fixtureRef: 'main',
-    issueTitle: metadata.title,
-    issueBody: `Captured from issue #${issueNum} (session: ${session})`,
-    expected: {
-      success: shouldSucceed.toLowerCase() === 'y',
-      testsPassing: shouldSucceed.toLowerCase() === 'y',
-    },
-    tags: tagsInput.split(',').map((t) => t.trim()).filter(Boolean),
-    timeout: 0,
-    source: 'auto-capture',
-  };
+  const casePath = saveCapturedCase({
+    issueNum,
+    title: metadata.title,
+    step,
+    session,
+    tags: annotation.tags,
+  });
 
-  const filePath = saveEvalCase(evalCase);
-  log.success(`Eval case saved: ${filePath}`);
+  annotateCapturedCase(casePath, annotation);
+  log.success(`Eval case saved: ${casePath}`);
 }
 
 /** Capture a failure from session result as an eval case. */
@@ -382,36 +480,26 @@ async function captureFailure(
   log.step(`\nCapturing: #${failure.issueNum} — ${failure.title}`);
 
   const result = JSON.parse(readFileSync(failure.file, 'utf-8'));
+  const step = detectFailureStepFromResult(result);
 
-  console.log(`  Status: ${result.status}`);
-  console.log(`  Tests: ${result.testsPassing ? 'passing' : 'failing'}`);
+  console.log(`  Failed at: ${step}`);
+  console.log(`  Tests: ${result.testsPassing ? 'PASS' : 'FAIL'} | Verify: ${result.verifySkipped ? 'SKIP' : (result.verifyPassing ? 'PASS' : 'FAIL')}`);
   console.log(`  Duration: ${result.duration}s`);
   console.log(`  Files changed: ${result.filesChanged}`);
   console.log('');
 
-  const description = await ask(rl, '  Description (what this eval tests): ');
-  const shouldSucceed = await ask(rl, '  Expected: should succeed? (y/n): ');
-  const tagsInput = await ask(rl, '  Tags (comma-separated): ');
+  const annotation = await promptAnnotation(rl);
 
-  const evalCase: EvalCase = {
-    id: `issue-${failure.issueNum}`,
-    description: description || `Captured from failed issue #${failure.issueNum}`,
-    type: 'full',
-    fixtureRepo: config.repo,
-    fixtureRef: 'main',
-    issueTitle: failure.title,
-    issueBody: `Captured from session ${failure.session}, issue #${failure.issueNum}`,
-    expected: {
-      success: shouldSucceed.toLowerCase() === 'y',
-      testsPassing: shouldSucceed.toLowerCase() === 'y',
-    },
-    tags: tagsInput.split(',').map((t) => t.trim()).filter(Boolean),
-    timeout: 0,
-    source: 'auto-capture',
-  };
+  const casePath = saveCapturedCase({
+    issueNum: failure.issueNum,
+    title: failure.title,
+    step,
+    session: failure.session,
+    tags: annotation.tags,
+  });
 
-  const filePath = saveEvalCase(evalCase);
-  log.success(`Eval case saved: ${filePath}`);
+  annotateCapturedCase(casePath, annotation);
+  log.success(`Eval case saved: ${casePath}`);
 }
 
 /**

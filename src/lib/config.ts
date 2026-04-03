@@ -59,6 +59,8 @@ export type Config = {
   evalModel: string;
   skipEval: boolean;
   evalTimeout: number;
+  /** Auto-capture failures as eval cases at end of session (default: true). */
+  autoCapture: boolean;
   /** Per-model pricing table (cost per million tokens). */
   pricing: Record<string, ModelPricing>;
 };
@@ -99,6 +101,7 @@ const DEFAULTS: Config = {
   evalModel: '',
   skipEval: false,
   evalTimeout: 300,
+  autoCapture: true,
   pricing: {
     'claude-opus-4-6': { input: 15.0, output: 75.0 },
     'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
@@ -143,6 +146,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   eval_model: 'evalModel',
   skip_eval: 'skipEval',
   eval_timeout: 'evalTimeout',
+  auto_capture: 'autoCapture',
 };
 
 /** Map from env var name to Config key. */
@@ -180,6 +184,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   EVAL_MODEL: 'evalModel',
   SKIP_EVAL: 'skipEval',
   EVAL_TIMEOUT: 'evalTimeout',
+  AUTO_CAPTURE: 'autoCapture',
 };
 
 function coerce(value: string, current: unknown): unknown {

@@ -51,6 +51,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalModel: '',
     skipEval: false,
     evalTimeout: 300,
+    autoCapture: true,
     pricing: {},
     ...overrides,
   };

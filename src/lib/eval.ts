@@ -12,14 +12,18 @@
  *   - 'step' — tests a single pipeline stage (fast, cheap, targeted)
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, relative } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { log } from './logger.js';
 import type { Config } from './config.js';
+import type { PipelineResult } from './pipeline.js';
 import { computeCompositeScore, appendScore, hashConfig } from './score.js';
 import type { CaseResult, ScoreEntry } from './score.js';
 import { parseChecks } from './eval-checks.js';
 import type { CheckDefinition } from './eval-checks.js';
+
+/** Status of a captured eval case. */
+export type CapturedCaseStatus = 'needs-annotation' | 'ready';
 
 /** The pipeline step that a step-level eval targets. */
 export type PipelineStep = 'plan' | 'implement' | 'test' | 'review' | 'verify';
@@ -70,6 +74,8 @@ export type EvalCase = {
   checks?: CheckDefinition[];
   /** For step cases: raw input text (from input.md). */
   inputText?: string;
+  /** Status of captured cases ('needs-annotation' or 'ready'). */
+  captureStatus?: CapturedCaseStatus;
 };
 
 /** Result of running a single eval case. */
@@ -181,8 +187,10 @@ export function loadEvalCaseDir(dirPath: string): EvalCase | null {
     const evalType = type === 'step' ? 'step' : 'full';
 
     const checks = parseChecks(checksRaw);
-    const pipelineSteps = Array.isArray(metadata.pipeline_steps)
-      ? metadata.pipeline_steps.map(String)
+
+    // Read capture status from checks.yaml (auto-captured cases use 'needs-annotation')
+    const captureStatus = checksRaw.status === 'needs-annotation' ? 'needs-annotation' as CapturedCaseStatus
+      : checksRaw.status === 'ready' ? 'ready' as CapturedCaseStatus
       : undefined;
 
     return {
@@ -203,6 +211,7 @@ export function loadEvalCaseDir(dirPath: string): EvalCase | null {
       source: String(metadata.source ?? 'manual'),
       checks,
       inputText,
+      captureStatus,
     };
   } catch (err) {
     log.warn(`Failed to load eval case dir ${dirPath}: ${err instanceof Error ? err.message : err}`);
@@ -221,6 +230,7 @@ export function loadEvalCases(options?: {
   type?: 'full' | 'step';
   step?: PipelineStep;
   caseId?: string;
+  includeUnannotated?: boolean;
 }): EvalCase[] {
   const dir = evalsDir(options?.projectDir);
   if (!existsSync(dir)) return [];
@@ -274,6 +284,9 @@ export function loadEvalCases(options?: {
 
   // Apply filters
   const filtered = cases.filter((evalCase) => {
+    // Skip unannotated cases unless explicitly including them
+    if (evalCase.captureStatus === 'needs-annotation' && !options?.includeUnannotated) return false;
+
     // Filter by case ID prefix
     if (options?.caseId && !evalCase.id.startsWith(options.caseId)) return false;
 
@@ -457,4 +470,212 @@ export function formatEvalCase(evalCase: EvalCase): string {
   const tags = evalCase.tags.length > 0 ? ` [${evalCase.tags.join(', ')}]` : '';
   const step = evalCase.step ? ` (${evalCase.step})` : '';
   return `${evalCase.id}: ${evalCase.description} — ${evalCase.type}${step}${tags}`;
+}
+
+// ============================================================================
+// Capture Workflow — save, load, and annotate captured eval cases
+// ============================================================================
+
+/** Options for saving a captured eval case. */
+export type SaveCapturedCaseOptions = {
+  issueNum: number;
+  title: string;
+  issueBody?: string;
+  step: string;
+  session: string;
+  tags?: string[];
+  projectDir?: string;
+};
+
+/**
+ * Detect which pipeline step failed from a PipelineResult.
+ */
+export function detectFailureStep(result: PipelineResult): string {
+  if (!result.testsPassing) {
+    // If the issue's filesChanged > 0, the agent at least tried to implement;
+    // multiple retries suggest a test-fix loop failure
+    return result.filesChanged > 1 ? 'test-fix' : 'implement';
+  }
+  if (!result.verifyPassing && !result.verifySkipped) return 'verify';
+  return 'review';
+}
+
+/**
+ * Generate a slug from an issue title for directory naming.
+ */
+function slugify(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+}
+
+/**
+ * Save a captured eval case as a directory-based skeleton.
+ * Creates .alpha-loop/evals/cases/step/{stepName}/captured-{issueNum}-{slug}/
+ * with metadata.yaml, checks.yaml, and issue.md.
+ *
+ * Returns the path to the created case directory.
+ */
+export function saveCapturedCase(opts: SaveCapturedCaseOptions): string {
+  const dir = evalsDir(opts.projectDir);
+  const slug = slugify(opts.title);
+  const caseDirName = `captured-${String(opts.issueNum).padStart(3, '0')}-${slug}`;
+  const casePath = join(dir, 'cases', 'step', opts.step, caseDirName);
+
+  mkdirSync(casePath, { recursive: true });
+
+  // metadata.yaml
+  const metadata = stringifyYaml({
+    id: caseDirName,
+    description: opts.title,
+    tags: opts.tags ?? [],
+    source: 'auto-captured',
+    captured_from: {
+      issue: opts.issueNum,
+      session: opts.session,
+      date: new Date().toISOString().split('T')[0],
+    },
+  });
+  writeFileSync(join(casePath, 'metadata.yaml'), metadata);
+
+  // checks.yaml — skeleton with needs-annotation status
+  const checks = stringifyYaml({
+    type: 'step',
+    step: opts.step,
+    eval_method: 'pending',
+    status: 'needs-annotation',
+    source: 'auto-captured',
+    captured_from: {
+      issue: opts.issueNum,
+      session: opts.session,
+      date: new Date().toISOString().split('T')[0],
+    },
+    checks: [],
+  });
+  writeFileSync(join(casePath, 'checks.yaml'), checks);
+
+  // issue.md
+  const issueContent = `# ${opts.title}\n\n${opts.issueBody ?? `Captured from issue #${opts.issueNum}`}\n`;
+  writeFileSync(join(casePath, 'issue.md'), issueContent);
+
+  return casePath;
+}
+
+/**
+ * Load all unannotated (needs-annotation) captured cases.
+ */
+export function loadUnannotatedCases(projectDir?: string): Array<{ path: string; evalCase: EvalCase }> {
+  const cases = loadEvalCases({ projectDir, includeUnannotated: true });
+  return cases
+    .filter((c) => c.captureStatus === 'needs-annotation')
+    .map((c) => {
+      // Reconstruct the directory path from the case ID
+      const dir = evalsDir(projectDir);
+      // Search for the case directory
+      const casePath = findCaseDir(dir, c.id);
+      return { path: casePath, evalCase: c };
+    })
+    .filter((entry) => entry.path !== '');
+}
+
+/**
+ * Find a case directory by its ID within the evals directory tree.
+ */
+function findCaseDir(baseDir: string, caseId: string): string {
+  const casesDir = join(baseDir, 'cases');
+  if (!existsSync(casesDir)) return '';
+
+  for (const suiteType of ['e2e', 'step']) {
+    const suiteDir = join(casesDir, suiteType);
+    if (!existsSync(suiteDir)) continue;
+
+    if (suiteType === 'step') {
+      const stepDirs = readdirSync(suiteDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory());
+      for (const stepDir of stepDirs) {
+        const candidate = join(suiteDir, stepDir.name, caseId);
+        if (existsSync(candidate) && existsSync(join(candidate, 'checks.yaml'))) {
+          return candidate;
+        }
+        // Also check nested
+        const nested = join(suiteDir, stepDir.name);
+        if (existsSync(nested)) {
+          const subdirs = readdirSync(nested, { withFileTypes: true })
+            .filter((d) => d.isDirectory() && d.name === caseId);
+          if (subdirs.length > 0) return join(nested, subdirs[0].name);
+        }
+      }
+    } else {
+      const candidate = join(suiteDir, caseId);
+      if (existsSync(candidate) && existsSync(join(candidate, 'checks.yaml'))) {
+        return candidate;
+      }
+    }
+  }
+
+  return '';
+}
+
+/** Annotation data for a captured case. */
+export type CaseAnnotation = {
+  whatWentWrong: string;
+  whatShouldHaveHappened: string;
+  tags?: string[];
+};
+
+/**
+ * Annotate a captured case — updates checks.yaml with failure description,
+ * expected behavior, and sets status to 'ready'.
+ */
+export function annotateCapturedCase(casePath: string, annotation: CaseAnnotation): void {
+  const checksPath = join(casePath, 'checks.yaml');
+  if (!existsSync(checksPath)) {
+    throw new Error(`No checks.yaml found at ${casePath}`);
+  }
+
+  const checksRaw = parseYaml(readFileSync(checksPath, 'utf-8')) as Record<string, unknown>;
+
+  checksRaw.status = 'ready';
+  checksRaw.eval_method = 'annotated';
+  checksRaw.failure_description = annotation.whatWentWrong;
+  checksRaw.expected_behavior = annotation.whatShouldHaveHappened;
+
+  // Add keyword checks based on the annotation
+  const checks: Array<Record<string, unknown>> = [];
+  if (annotation.whatShouldHaveHappened) {
+    checks.push({
+      type: 'keyword_present',
+      keywords: extractKeywords(annotation.whatShouldHaveHappened),
+    });
+  }
+  if (checks.length > 0) {
+    checksRaw.checks = checks;
+  }
+
+  writeFileSync(checksPath, stringifyYaml(checksRaw));
+
+  // Update metadata tags if provided
+  if (annotation.tags && annotation.tags.length > 0) {
+    const metadataPath = join(casePath, 'metadata.yaml');
+    if (existsSync(metadataPath)) {
+      const metadata = parseYaml(readFileSync(metadataPath, 'utf-8')) as Record<string, unknown>;
+      const existingTags = Array.isArray(metadata.tags) ? metadata.tags.map(String) : [];
+      metadata.tags = [...new Set([...existingTags, ...annotation.tags])];
+      writeFileSync(metadataPath, stringifyYaml(metadata));
+    }
+  }
+}
+
+/**
+ * Extract meaningful keywords from annotation text for keyword_present checks.
+ */
+function extractKeywords(text: string): string[] {
+  // Split on common delimiters and take meaningful words (>3 chars)
+  return text
+    .split(/[\s,;.!?]+/)
+    .filter((w) => w.length > 3)
+    .map((w) => w.toLowerCase())
+    .slice(0, 5);
 }
