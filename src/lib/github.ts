@@ -486,7 +486,7 @@ export function closeIssue(repo: string, issueNum: number, reason?: 'completed' 
  * Create a milestone. Returns the milestone number.
  */
 export function createMilestone(repo: string, title: string, description: string, dueOn?: string): number {
-  const dueOnFlag = dueOn ? ` -f due_on="${dueOn}"` : '';
+  const dueOnFlag = dueOn ? ` -f due_on=${JSON.stringify(dueOn)}` : '';
   const result = exec(
     `gh api "repos/${repo}/milestones" -X POST -f title=${JSON.stringify(title)} -f description=${JSON.stringify(description)}${dueOnFlag}`,
   );
