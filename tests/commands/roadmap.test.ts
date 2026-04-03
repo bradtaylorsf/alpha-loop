@@ -216,6 +216,39 @@ describe('roadmap command', () => {
     expect(mockCreateMilestone).not.toHaveBeenCalled();
   });
 
+  it('skips prompts and applies all selected assignments with --yes', async () => {
+    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListMilestones.mockReturnValue([]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(SAMPLE_AGENT_RESPONSE);
+    mockCreateMilestone.mockReturnValueOnce(1).mockReturnValueOnce(2);
+
+    await roadmapCommand({ yes: true });
+
+    // Should not prompt
+    expect(mockCheckbox).not.toHaveBeenCalled();
+    expect(mockConfirm).not.toHaveBeenCalled();
+
+    // Should create milestones and assign all selected issues
+    expect(mockCreateMilestone).toHaveBeenCalledTimes(2);
+    expect(mockSetIssueMilestone).toHaveBeenCalledTimes(3);
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('--yes: applying all'));
+  });
+
+  it('combines --yes with --dry-run safely', async () => {
+    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListMilestones.mockReturnValue([]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(SAMPLE_AGENT_RESPONSE);
+
+    await roadmapCommand({ yes: true, dryRun: true });
+
+    expect(log.dry).toHaveBeenCalledWith(expect.stringContaining('Dry run'));
+    expect(mockCheckbox).not.toHaveBeenCalled();
+    expect(mockCreateMilestone).not.toHaveBeenCalled();
+    expect(mockSetIssueMilestone).not.toHaveBeenCalled();
+  });
+
   it('adds issues to project board when configured', async () => {
     // Reconfigure with project > 0
     const { loadConfig } = require('../../src/lib/config');

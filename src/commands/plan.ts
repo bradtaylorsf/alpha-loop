@@ -31,12 +31,13 @@ export type PlanOptions = {
   seed?: string;
   vision?: boolean;
   dryRun?: boolean;
+  yes?: boolean;
 };
 
 export async function planCommand(options: PlanOptions): Promise<void> {
   // ── TTY check ──────────────────────────────────────────────────────────────
-  if (!process.stdin.isTTY) {
-    log.info('The plan command requires an interactive terminal. Pipe a seed file with --seed instead.');
+  if (!process.stdin.isTTY && !options.yes) {
+    log.info('The plan command requires an interactive terminal. Use --seed with --yes for non-interactive mode.');
     return;
   }
 
@@ -54,6 +55,9 @@ export async function planCommand(options: PlanOptions): Promise<void> {
       log.error(`Could not read seed file: ${options.seed}`);
       return;
     }
+  } else if (options.yes) {
+    log.error('--yes requires --seed <file> to provide a project description.');
+    return;
   } else {
     seedDescription = await input({
       message: 'Describe what you want to build:',
@@ -65,23 +69,30 @@ export async function planCommand(options: PlanOptions): Promise<void> {
   }
 
   // ── Seed source selection ──────────────────────────────────────────────────
-  const seedSources = await checkbox({
-    message: 'Select seed sources to include:',
-    choices: [
-      { name: 'Codebase scan (project context)', value: 'codebase' },
-      { name: 'Spec files (glob pattern)', value: 'specs' },
-      { name: 'Existing issues (avoid duplicates)', value: 'issues' },
-    ],
-  });
+  const seedSources = options.yes
+    ? (() => {
+        log.info('--yes: selecting all seed sources (codebase, specs, issues)');
+        return ['codebase', 'specs', 'issues'];
+      })()
+    : await checkbox({
+        message: 'Select seed sources to include:',
+        choices: [
+          { name: 'Codebase scan (project context)', value: 'codebase' },
+          { name: 'Spec files (glob pattern)', value: 'specs' },
+          { name: 'Existing issues (avoid duplicates)', value: 'issues' },
+        ],
+      });
 
   // ── Gather seed data ──────────────────────────────────────────────────────
   let seedFiles: Array<{ path: string; content: string }> = [];
   let existingIssues: Array<{ number: number; title: string }> = [];
 
   if (seedSources.includes('specs')) {
-    const globPattern = await input({
-      message: 'Glob pattern for spec files (e.g. docs/**/*.md):',
-    });
+    const globPattern = options.yes
+      ? 'docs/**/*.md'
+      : await input({
+          message: 'Glob pattern for spec files (e.g. docs/**/*.md):',
+        });
     if (globPattern.trim()) {
       seedFiles = readSeedFiles([globPattern.trim()], projectDir);
       log.info(`Found ${seedFiles.length} spec file(s)`);
@@ -110,7 +121,8 @@ export async function planCommand(options: PlanOptions): Promise<void> {
     }
   }
 
-  if (!fs.existsSync(visionFile) && options.vision !== false) {
+  if (!fs.existsSync(visionFile) && (options.vision !== false || options.yes)) {
+    if (options.yes) log.info('--yes: auto-generating vision document');
     log.step('Generating project vision...');
     const visionPrompt = `Based on this project description, generate a concise project vision document (under 500 words) in markdown.\n\nDescription: ${seedDescription}\n${projectContext ? `\nTechnical context:\n${projectContext}` : ''}`;
     const safeModel = assertSafeShellArg(config.model, 'model');
@@ -176,47 +188,56 @@ export async function planCommand(options: PlanOptions): Promise<void> {
   }
 
   // ── Review UX ──────────────────────────────────────────────────────────────
-  const issueChoices = draft.issues.map((issue) => ({
-    name: `[${issue.priority}/${issue.complexity}] ${issue.title}`,
-    value: issue.id,
-    checked: issue.selected,
-  }));
+  let selectedIssues: PlannedIssue[];
 
-  const selectedIds = await checkbox({
-    message: 'Select issues to create:',
-    choices: issueChoices,
-  });
+  if (options.yes) {
+    selectedIssues = draft.issues;
+    log.info(`--yes: selecting all ${selectedIssues.length} issue(s)`);
+    log.info('--yes: skipping body editing');
+    log.info(`--yes: creating ${draft.milestones.length} milestone(s) and ${selectedIssues.length} issue(s)`);
+  } else {
+    const issueChoices = draft.issues.map((issue) => ({
+      name: `[${issue.priority}/${issue.complexity}] ${issue.title}`,
+      value: issue.id,
+      checked: issue.selected,
+    }));
 
-  // Update selected flags
-  for (const issue of draft.issues) {
-    issue.selected = selectedIds.includes(issue.id);
-  }
+    const selectedIds = await checkbox({
+      message: 'Select issues to create:',
+      choices: issueChoices,
+    });
 
-  const selectedIssues = draft.issues.filter((i) => i.selected);
-
-  // Offer to edit individual issue bodies
-  const wantsEdit = await confirm({
-    message: 'Edit any issue bodies before creating?',
-    default: false,
-  });
-
-  if (wantsEdit) {
-    for (const issue of selectedIssues) {
-      const edited = await editor({
-        message: `Edit body for: ${issue.title}`,
-        default: issue.body,
-      });
-      issue.body = edited;
+    // Update selected flags
+    for (const issue of draft.issues) {
+      issue.selected = selectedIds.includes(issue.id);
     }
-  }
 
-  const proceedConfirm = await confirm({
-    message: `Create ${draft.milestones.length} milestone(s) and ${selectedIssues.length} issue(s) on GitHub?`,
-  });
+    selectedIssues = draft.issues.filter((i) => i.selected);
 
-  if (!proceedConfirm) {
-    log.info('Cancelled.');
-    return;
+    // Offer to edit individual issue bodies
+    const wantsEdit = await confirm({
+      message: 'Edit any issue bodies before creating?',
+      default: false,
+    });
+
+    if (wantsEdit) {
+      for (const issue of selectedIssues) {
+        const edited = await editor({
+          message: `Edit body for: ${issue.title}`,
+          default: issue.body,
+        });
+        issue.body = edited;
+      }
+    }
+
+    const proceedConfirm = await confirm({
+      message: `Create ${draft.milestones.length} milestone(s) and ${selectedIssues.length} issue(s) on GitHub?`,
+    });
+
+    if (!proceedConfirm) {
+      log.info('Cancelled.');
+      return;
+    }
   }
 
   // ── Save draft for recovery ────────────────────────────────────────────────

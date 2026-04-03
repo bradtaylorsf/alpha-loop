@@ -26,6 +26,7 @@ import {
 
 export type TriageOptions = {
   dryRun?: boolean;
+  yes?: boolean;
 };
 
 /** Truncate issue bodies to stay within agent context limits. */
@@ -104,36 +105,43 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
   }
 
   // ── Interactive review ─────────────────────────────────────────────────────
-  const actionLabels: Record<TriageAction, string> = {
-    close: 'Close as stale',
-    rewrite: 'Rewrite body',
-    split: 'Split into sub-issues',
-    merge: 'Close as duplicate',
-  };
+  let selectedNums: number[];
 
-  const choices = findings.map((f) => ({
-    name: `[${actionLabels[f.action]}] #${f.issueNum} ${f.title} — ${f.reason.slice(0, 60)}`,
-    value: f.issueNum,
-    checked: f.selected,
-  }));
+  if (options.yes) {
+    selectedNums = findings.filter((f) => f.selected).map((f) => f.issueNum);
+    log.info(`--yes: applying all ${selectedNums.length} triage action(s)`);
+  } else {
+    const actionLabels: Record<TriageAction, string> = {
+      close: 'Close as stale',
+      rewrite: 'Rewrite body',
+      split: 'Split into sub-issues',
+      merge: 'Close as duplicate',
+    };
 
-  const selectedNums = await checkbox({
-    message: 'Select actions to apply:',
-    choices,
-  });
+    const choices = findings.map((f) => ({
+      name: `[${actionLabels[f.action]}] #${f.issueNum} ${f.title} — ${f.reason.slice(0, 60)}`,
+      value: f.issueNum,
+      checked: f.selected,
+    }));
 
-  if (selectedNums.length === 0) {
-    log.info('No actions selected.');
-    return;
-  }
+    selectedNums = await checkbox({
+      message: 'Select actions to apply:',
+      choices,
+    });
 
-  const proceed = await confirm({
-    message: `Apply ${selectedNums.length} change(s)?`,
-  });
+    if (selectedNums.length === 0) {
+      log.info('No actions selected.');
+      return;
+    }
 
-  if (!proceed) {
-    log.info('Cancelled.');
-    return;
+    const proceed = await confirm({
+      message: `Apply ${selectedNums.length} change(s)?`,
+    });
+
+    if (!proceed) {
+      log.info('Cancelled.');
+      return;
+    }
   }
 
   // ── Execute actions ────────────────────────────────────────────────────────

@@ -246,6 +246,38 @@ describe('triage command', () => {
     expect(log.success).toHaveBeenCalledWith(expect.stringContaining('All issues look good'));
   });
 
+  it('skips prompts and applies all selected findings with --yes', async () => {
+    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(SAMPLE_FINDINGS);
+    mockCreateIssue.mockReturnValueOnce(10).mockReturnValueOnce(11).mockReturnValueOnce(12);
+
+    await triageCommand({ yes: true });
+
+    // Should not prompt
+    expect(mockCheckbox).not.toHaveBeenCalled();
+    expect(mockConfirm).not.toHaveBeenCalled();
+
+    // Should apply all selected findings
+    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 1, 'not_planned');
+    expect(mockUpdateIssue).toHaveBeenCalledWith('owner/repo', 2, { body: expect.any(String) });
+    expect(mockCreateIssue).toHaveBeenCalledTimes(3);
+    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 4, 'not_planned');
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('--yes: applying all'));
+  });
+
+  it('combines --yes with --dry-run safely', async () => {
+    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(SAMPLE_FINDINGS);
+
+    await triageCommand({ yes: true, dryRun: true });
+
+    expect(log.dry).toHaveBeenCalledWith(expect.stringContaining('Dry run'));
+    expect(mockCheckbox).not.toHaveBeenCalled();
+    expect(mockCloseIssue).not.toHaveBeenCalled();
+  });
+
   it('exits with success message when all issues are ok', async () => {
     mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
     mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });

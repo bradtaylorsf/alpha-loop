@@ -269,6 +269,62 @@ describe('plan command', () => {
     expect(mockCreateMilestone).not.toHaveBeenCalled();
   });
 
+  it('allows non-TTY execution with --yes and --seed', async () => {
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+
+    const tmpSeed = path.join(os.tmpdir(), `plan-yes-test-${Date.now()}.md`);
+    fs.writeFileSync(tmpSeed, 'Build a task app');
+
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(VALID_PLAN_DRAFT);
+    mockCreateMilestone.mockReturnValue(1);
+    mockCreateIssue.mockReturnValueOnce(42).mockReturnValueOnce(43);
+
+    try {
+      await planCommand({ seed: tmpSeed, yes: true });
+    } finally {
+      try { fs.unlinkSync(tmpSeed); } catch { /* cleanup */ }
+    }
+
+    // Should not prompt for anything
+    expect(mockInput).not.toHaveBeenCalled();
+    expect(mockCheckbox).not.toHaveBeenCalled();
+    expect(mockConfirm).not.toHaveBeenCalled();
+
+    // Should auto-select all issues and create resources
+    expect(mockCreateMilestone).toHaveBeenCalledTimes(1);
+    expect(mockCreateIssue).toHaveBeenCalledTimes(2);
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('--yes: selecting all'));
+  });
+
+  it('errors when --yes is used without --seed', async () => {
+    await planCommand({ yes: true });
+
+    expect(log.error).toHaveBeenCalledWith(
+      expect.stringContaining('--yes requires --seed'),
+    );
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it('combines --yes with --dry-run safely', async () => {
+    const tmpSeed = path.join(os.tmpdir(), `plan-yesdry-test-${Date.now()}.md`);
+    fs.writeFileSync(tmpSeed, 'Build something');
+
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(VALID_PLAN_DRAFT);
+
+    try {
+      await planCommand({ seed: tmpSeed, yes: true, dryRun: true });
+    } finally {
+      try { fs.unlinkSync(tmpSeed); } catch { /* cleanup */ }
+    }
+
+    expect(log.dry).toHaveBeenCalledWith(expect.stringContaining('Dry run'));
+    expect(mockCreateMilestone).not.toHaveBeenCalled();
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+    expect(mockCheckbox).not.toHaveBeenCalled();
+  });
+
   it('adds issues to project board when project is configured', async () => {
     mockLoadConfig.mockReturnValue({
       repo: 'owner/repo',

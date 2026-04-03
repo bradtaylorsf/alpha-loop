@@ -72,6 +72,7 @@ program
   .option('--seed <file>', 'Read seed description from a file instead of prompting')
   .option('--no-vision', 'Skip vision generation even if no vision exists')
   .option('--dry-run', 'Display the plan without creating any GitHub resources')
+  .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .action(async (options) => {
     const { planCommand } = await import('./commands/plan.js');
     await planCommand(options);
@@ -81,6 +82,7 @@ program
   .command('triage')
   .description('Analyze and improve existing issues (staleness, clarity, size, duplicates)')
   .option('--dry-run', 'Display findings without making changes')
+  .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .action(async (options) => {
     const { triageCommand } = await import('./commands/triage.js');
     await triageCommand(options);
@@ -90,6 +92,7 @@ program
   .command('roadmap')
   .description('Organize open issues into milestones using AI analysis')
   .option('--dry-run', 'Display proposed roadmap without making changes')
+  .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .action(async (options) => {
     const { roadmapCommand } = await import('./commands/roadmap.js');
     await roadmapCommand(options);
