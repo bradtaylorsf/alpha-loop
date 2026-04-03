@@ -1,0 +1,17 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies the orphaned utility file that is created but never
+      imported anywhere in the diff. Score 1-5 based on:
+      - Score 5: Review explicitly identifies utils/format.ts as an orphaned/unused file that
+        has no imports, and recommends either importing it where needed or removing it
+      - Score 4: Review flags the file as unused or unimported
+      - Score 3: Review mentions the file exists but doesn't clearly flag it as orphaned
+      - Score 2: Review mentions code organization without specifically identifying the orphan
+      - Score 1: Review does not identify the orphaned file
+    min_score: 4

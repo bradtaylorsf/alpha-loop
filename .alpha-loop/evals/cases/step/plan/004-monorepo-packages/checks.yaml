@@ -1,0 +1,19 @@
+type: step
+step: plan
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the plan identifies all affected packages and their dependency order for a
+      shared type change across a monorepo. Score 1-5 based on:
+      - Score 5: Plan explicitly identifies all three affected packages AND mentions updating them
+        in dependency order (shared type first, then consumers)
+      - Score 4: Plan identifies the affected packages and the need to update them, but doesn't
+        explicitly address dependency order
+      - Score 3: Plan acknowledges it's a monorepo change and mentions checking multiple packages
+        but without specific identification
+      - Score 2: Plan treats it as a single-package change
+      - Score 1: Plan ignores the cross-package impact
+    min_score: 4

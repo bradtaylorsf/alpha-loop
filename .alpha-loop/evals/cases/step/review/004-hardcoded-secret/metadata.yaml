@@ -1,0 +1,7 @@
+id: 004-hardcoded-secret
+description: "Review catches hardcoded API key secret in source code"
+tags:
+  - review
+  - security
+  - secrets
+source: manual

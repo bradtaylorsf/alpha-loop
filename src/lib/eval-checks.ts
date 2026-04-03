@@ -78,6 +78,18 @@ export type LlmJudgeCheck = BaseCheck & {
   min_score: number;
 };
 
+/** Contains any — pass if ANY value in the array is found (skill-creator compat). */
+export type ContainsAnyCheck = BaseCheck & {
+  type: 'contains_any';
+  values: string[];
+};
+
+/** Not contains — fail if ANY forbidden keyword is found (skill-creator compat). */
+export type NotContainsCheck = BaseCheck & {
+  type: 'not_contains';
+  values: string[];
+};
+
 /** Union of all check types. */
 export type CheckDefinition =
   | TestPassCheck
@@ -87,7 +99,9 @@ export type CheckDefinition =
   | DiffSizeCheck
   | KeywordPresentCheck
   | KeywordAbsentCheck
-  | LlmJudgeCheck;
+  | LlmJudgeCheck
+  | ContainsAnyCheck
+  | NotContainsCheck;
 
 /** Context passed to check runners. */
 export type CheckContext = {
@@ -126,6 +140,10 @@ export async function runCheck(check: CheckDefinition, ctx: CheckContext): Promi
       return runKeywordAbsentCheck(check, ctx);
     case 'llm_judge':
       return runLlmJudgeCheck(check, ctx);
+    case 'contains_any':
+      return runContainsAnyCheck(check, ctx);
+    case 'not_contains':
+      return runNotContainsCheck(check, ctx);
     default:
       return { passed: false, score: 0, detail: `Unknown check type: ${(check as BaseCheck).type}` };
   }
@@ -310,6 +328,32 @@ Respond with ONLY a single number (1-5) on the first line, followed by a brief e
   }
 }
 
+async function runContainsAnyCheck(check: ContainsAnyCheck, ctx: CheckContext): Promise<CheckResult> {
+  const output = ctx.output ?? '';
+  const found = check.values.filter((v) => output.includes(v));
+  const passed = found.length > 0;
+  return {
+    passed,
+    score: passed ? 1 : 0,
+    detail: passed
+      ? `Found matching value(s): ${found.join(', ')}`
+      : `None of the expected values found: ${check.values.join(', ')}`,
+  };
+}
+
+async function runNotContainsCheck(check: NotContainsCheck, ctx: CheckContext): Promise<CheckResult> {
+  const output = ctx.output ?? '';
+  const present = check.values.filter((v) => output.includes(v));
+  const passed = present.length === 0;
+  return {
+    passed,
+    score: passed ? 1 : 0,
+    detail: passed
+      ? `No forbidden values found`
+      : `Forbidden values present: ${present.join(', ')}`,
+  };
+}
+
 /**
  * Parse check definitions from a checks.yaml object.
  */
@@ -332,6 +376,7 @@ export function parseChecks(raw: unknown): CheckDefinition[] {
           type: 'http',
           method: String(c.method ?? 'GET'),
           path: String(c.path ?? '/'),
+          port: c.port != null ? Number(c.port) : undefined,
           expect_status: Number(c.expect_status ?? 200),
           expect_body_contains: c.expect_body_contains ? String(c.expect_body_contains) : undefined,
         } as HttpCheck;
@@ -358,6 +403,16 @@ export function parseChecks(raw: unknown): CheckDefinition[] {
           rubric: String(c.rubric ?? ''),
           min_score: Number(c.min_score ?? 3),
         } as LlmJudgeCheck;
+      case 'contains_any':
+        return {
+          type: 'contains_any',
+          values: Array.isArray(c.values) ? c.values.map(String) : [],
+        } as ContainsAnyCheck;
+      case 'not_contains':
+        return {
+          type: 'not_contains',
+          values: Array.isArray(c.values) ? c.values.map(String) : [],
+        } as NotContainsCheck;
       default:
         return { type } as BaseCheck as CheckDefinition;
     }

@@ -12,74 +12,315 @@
  * Key insight from Meta-Harness: full trace access (not summaries) is critical.
  * Key insight from autoresearch: fixed eval metric + autonomous iteration.
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, rmdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { log } from '../lib/logger.js';
 import { loadConfig } from '../lib/config.js';
 import { spawnAgent } from '../lib/agent.js';
 import { loadEvalCases, evalsDir } from '../lib/eval.js';
 import { readScores, latestScore, formatScoreEntry } from '../lib/score.js';
-import { listTraces, tracesDir, readTrace } from '../lib/traces.js';
+import { listTraces, readTrace } from '../lib/traces.js';
 import { exec } from '../lib/shell.js';
+import { runEvalSuite } from '../lib/eval-runner.js';
+import type { EvalCaseWithChecks } from '../lib/eval-runner.js';
+import type { Config } from '../lib/config.js';
+import type { Trace } from '../lib/traces.js';
+import type { ScoreEntry } from '../lib/score.js';
 
 export type EvolveOptions = {
   maxIterations?: string;
   dryRun?: boolean;
   verbose?: boolean;
+  continuous?: boolean;
+  surface?: string;
+  resume?: boolean;
 };
 
-/** Files that the proposer is allowed to modify. */
-const ALLOWED_TARGETS = [
-  '.alpha-loop/templates/skills/',
-  '.alpha-loop/templates/agents/',
-  '.alpha-loop.yaml',
-];
+/** Optimization surface levels — what the proposer is allowed to modify. */
+export type SurfaceLevel = 'prompts' | 'skills' | 'config' | 'all';
+
+const SURFACE_LEVELS: SurfaceLevel[] = ['prompts', 'skills', 'config', 'all'];
+
+/** Allowed target paths per surface level. */
+export const SURFACE_TARGETS: Record<SurfaceLevel, string[]> = {
+  prompts: [
+    '.alpha-loop/templates/agents/',
+  ],
+  skills: [
+    '.alpha-loop/templates/agents/',
+    '.alpha-loop/templates/skills/',
+  ],
+  config: [
+    '.alpha-loop/templates/agents/',
+    '.alpha-loop/templates/skills/',
+    '.alpha-loop.yaml',
+  ],
+  all: [
+    '.alpha-loop/templates/agents/',
+    '.alpha-loop/templates/skills/',
+    '.alpha-loop.yaml',
+    'src/lib/prompts.ts',
+    'src/lib/pipeline.ts',
+  ],
+};
+
+/** Path to the evolve log TSV file. */
+export const EVOLVE_LOG_PATH = '.alpha-loop/evals/evolve-log.tsv';
+
+/** A single entry in the evolve log. */
+export type EvolveLogEntry = {
+  commit: string;
+  score: number;
+  cost: number;
+  status: 'baseline' | 'keep' | 'discard' | 'crash';
+  iteration: number;
+  description: string;
+};
+
+const EVOLVE_LOG_HEADER = 'commit\tscore\tcost\tstatus\titeration\tdescription';
+
+/**
+ * Append an entry to the evolve log TSV.
+ */
+export function appendEvolveLog(entry: EvolveLogEntry, cwd?: string): void {
+  const logPath = join(cwd ?? process.cwd(), EVOLVE_LOG_PATH);
+  const dir = join(cwd ?? process.cwd(), '.alpha-loop', 'evals');
+  mkdirSync(dir, { recursive: true });
+
+  if (!existsSync(logPath)) {
+    writeFileSync(logPath, EVOLVE_LOG_HEADER + '\n');
+  }
+
+  const line = [
+    entry.commit,
+    entry.score.toFixed(2),
+    entry.cost.toFixed(2),
+    entry.status,
+    String(entry.iteration),
+    entry.description,
+  ].join('\t');
+
+  appendFileSync(logPath, line + '\n');
+}
+
+/**
+ * Read all entries from the evolve log TSV.
+ */
+export function readEvolveLog(cwd?: string): EvolveLogEntry[] {
+  const logPath = join(cwd ?? process.cwd(), EVOLVE_LOG_PATH);
+  if (!existsSync(logPath)) return [];
+
+  const content = readFileSync(logPath, 'utf-8').trim();
+  const lines = content.split('\n').filter(Boolean);
+
+  // Skip header
+  const entries: EvolveLogEntry[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split('\t');
+    if (parts.length < 6) continue;
+    entries.push({
+      commit: parts[0],
+      score: parseFloat(parts[1]),
+      cost: parseFloat(parts[2]),
+      status: parts[3] as EvolveLogEntry['status'],
+      iteration: parseInt(parts[4], 10),
+      description: parts.slice(5).join('\t'), // description may contain tabs
+    });
+  }
+
+  return entries;
+}
+
+/**
+ * Run pre-checks before expensive eval.
+ * Returns { passed, error } indicating whether the code is safe to eval.
+ */
+export async function runPreChecks(
+  surface: SurfaceLevel,
+  cwd?: string,
+): Promise<{ passed: boolean; error?: string }> {
+  const projectDir = cwd ?? process.cwd();
+
+  // Only run compile check if code files were changed
+  if (surface === 'all') {
+    const tscResult = exec('pnpm tsc --noEmit', { cwd: projectDir, timeout: 60_000 });
+    if (tscResult.exitCode !== 0) {
+      return { passed: false, error: `TypeScript compilation failed:\n${tscResult.stderr || tscResult.stdout}` };
+    }
+  }
+
+  // Run unit tests for all surface levels
+  const testResult = exec('pnpm test', { cwd: projectDir, timeout: 120_000 });
+  if (testResult.exitCode !== 0) {
+    return { passed: false, error: `Unit tests failed:\n${testResult.stderr || testResult.stdout}` };
+  }
+
+  return { passed: true };
+}
+
+/**
+ * Decide whether to keep or discard based on score comparison.
+ * Returns 'keep' if newScore > bestScore, 'discard' otherwise.
+ */
+export function keepOrDiscard(newScore: number, bestScore: number): 'keep' | 'discard' {
+  return newScore > bestScore ? 'keep' : 'discard';
+}
+
+/**
+ * Get the current git commit hash (short form).
+ */
+function getCommitHash(cwd?: string): string {
+  try {
+    const result = exec('git rev-parse --short HEAD', { cwd: cwd ?? process.cwd(), timeout: 5000 });
+    return result.stdout.trim() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Check if a proposed path is safe to modify for a given surface level.
+ */
+export function isSafePath(filePath: string, surface?: SurfaceLevel): boolean {
+  // Reject absolute paths and path traversal
+  if (filePath.startsWith('/') || filePath.includes('..')) return false;
+
+  const targets = SURFACE_TARGETS[surface ?? 'prompts'];
+
+  // Must be in allowed targets: directory prefixes use startsWith, files use exact match
+  return targets.some((prefix) =>
+    prefix.endsWith('/') ? filePath.startsWith(prefix) : filePath === prefix
+  );
+}
 
 /**
  * Run the evolve loop: propose → eval → keep/discard.
  */
 export async function evolveCommand(options: EvolveOptions): Promise<void> {
   const config = loadConfig({ dryRun: options.dryRun });
-  const maxIterations = parseInt(options.maxIterations ?? '5', 10);
+  const surface: SurfaceLevel = parseSurface(options.surface);
+  const continuous = options.continuous ?? false;
+  const maxIterations = continuous ? Infinity : parseInt(options.maxIterations ?? '5', 10);
 
   // Validate prerequisites
-  const cases = loadEvalCases();
-  if (cases.length === 0) {
+  const allCases = loadEvalCases();
+  if (allCases.length === 0) {
     log.warn('No eval cases found. Create eval cases first with `alpha-loop eval capture`.');
     return;
   }
 
-  const scores = readScores(evalsDir(undefined, config.evalDir));
-  const baseline = latestScore(evalsDir(undefined, config.evalDir));
+  const evalDir = evalsDir(undefined, config.evalDir);
+  const scores = readScores(evalDir);
+  const baseline = latestScore(evalDir);
+
+  // Resume support: pick up where we left off
+  let startIteration = 1;
+  let bestScore = baseline?.composite ?? 0;
+  let totalKept = 0;
+  let totalDiscarded = 0;
+  let totalCrashed = 0;
+  let totalCost = 0;
+
+  if (options.resume) {
+    const priorLog = readEvolveLog();
+    if (priorLog.length > 0) {
+      const lastEntry = priorLog[priorLog.length - 1];
+      startIteration = lastEntry.iteration + 1;
+
+      // Find best score from kept entries
+      const keptEntries = priorLog.filter((e) => e.status === 'keep');
+      if (keptEntries.length > 0) {
+        bestScore = Math.max(...keptEntries.map((e) => e.score));
+      }
+
+      totalKept = priorLog.filter((e) => e.status === 'keep').length;
+      totalDiscarded = priorLog.filter((e) => e.status === 'discard').length;
+      totalCrashed = priorLog.filter((e) => e.status === 'crash').length;
+      totalCost = priorLog.reduce((sum, e) => sum + e.cost, 0);
+
+      log.info(`Resuming from iteration ${startIteration} (best score: ${bestScore.toFixed(2)})`);
+    } else {
+      log.info('No prior evolve log found. Starting fresh.');
+    }
+  }
 
   log.step('Alpha Loop Evolve — Meta-Harness Optimization');
   console.log('');
-  console.log(`  Eval cases: ${cases.length}`);
+  console.log(`  Eval cases: ${allCases.length}`);
   console.log(`  Score history: ${scores.length} entries`);
-  console.log(`  Baseline score: ${baseline ? baseline.composite.toFixed(2) : 'none'}`);
-  console.log(`  Max iterations: ${maxIterations}`);
+  console.log(`  Baseline score: ${bestScore > 0 ? bestScore.toFixed(2) : 'none (will run baseline)'}`);
+  console.log(`  Iterations: ${continuous ? 'continuous (until stopped)' : maxIterations}`);
+  console.log(`  Surface: ${surface}`);
   console.log(`  Agent: ${config.agent}`);
   console.log(`  Model: ${config.model || 'default'}`);
+  if (options.resume) console.log(`  Resuming from: iteration ${startIteration}`);
   console.log('');
 
-  // Gather context for the proposer
-  const traces = listTraces();
-  const recentTraces = traces.slice(0, 10);
+  // Graceful shutdown for --continuous
+  let shutdownRequested = false;
+  if (continuous) {
+    const handler = () => {
+      log.info('Shutdown requested. Finishing current iteration...');
+      shutdownRequested = true;
+    };
+    process.on('SIGINT', handler);
+    process.on('SIGTERM', handler);
+  }
 
-  log.info(`Recent traces: ${recentTraces.length} (from ${traces.length} total)`);
+  // Gather context for the proposer (refreshed every 5 iterations)
+  let recentTraces = listTraces().slice(0, 10);
 
-  for (let iteration = 1; iteration <= maxIterations; iteration++) {
-    log.step(`Iteration ${iteration}/${maxIterations}`);
+  log.info(`Recent traces: ${recentTraces.length}`);
+
+  // Step 0: Run baseline eval if no baseline score exists
+  if (bestScore === 0 && !options.dryRun) {
+    log.step('Running baseline eval...');
+    const stepCases = loadEvalCases({ type: 'step' }) as EvalCaseWithChecks[];
+    if (stepCases.length > 0) {
+      const baselineResult = await runEvalSuite(stepCases, config, { verbose: options.verbose });
+      bestScore = baselineResult.composite;
+      const commit = getCommitHash();
+      appendEvolveLog({
+        commit,
+        score: bestScore,
+        cost: 0,
+        status: 'baseline',
+        iteration: 0,
+        description: 'initial baseline eval',
+      });
+      log.info(`Baseline score: ${bestScore.toFixed(2)} (${baselineResult.passCount}/${stepCases.length} passing)`);
+    } else {
+      log.warn('No step-level eval cases found. Using full cases for eval.');
+    }
+  }
+
+  for (let iteration = startIteration; iteration <= (startIteration + maxIterations - 1); iteration++) {
+    if (shutdownRequested) {
+      log.info('Graceful shutdown: stopping before next iteration.');
+      break;
+    }
+
+    log.step(`Iteration ${iteration}${continuous ? '' : `/${startIteration + maxIterations - 1}`}`);
 
     if (config.dryRun) {
       log.dry('Would invoke proposer agent with full trace access');
-      log.dry('Would run eval suite on proposed changes');
+      log.dry(`Would modify files in surface: ${surface}`);
+      log.dry('Would run pre-checks (compile + tests)');
+      log.dry('Would run step-level eval, then e2e eval if step passes');
       log.dry('Would keep if score improves, revert if not');
       continue;
     }
 
+    // Refresh traces every 5 iterations so the proposer sees recent data
+    if ((iteration - startIteration) > 0 && (iteration - startIteration) % 5 === 0) {
+      recentTraces = listTraces().slice(0, 10);
+    }
+
+    // Read evolve log for proposer context
+    const evolveLog = readEvolveLog();
+
     // Build the proposer prompt with full filesystem context
-    const prompt = buildProposerPrompt(config, recentTraces, scores, cases.length);
+    const prompt = buildProposerPrompt(config, recentTraces, scores, allCases.length, surface, evolveLog);
 
     // Invoke proposer agent
     log.info('Invoking proposer agent...');
@@ -92,16 +333,26 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
     });
 
     if (result.exitCode !== 0 || !result.output.trim()) {
-      log.warn(`Proposer failed (exit ${result.exitCode}). Stopping.`);
-      break;
+      log.warn(`Proposer failed (exit ${result.exitCode}). Skipping iteration.`);
+      appendEvolveLog({
+        commit: getCommitHash(),
+        score: bestScore,
+        cost: 0,
+        status: 'crash',
+        iteration,
+        description: 'proposer agent failed',
+      });
+      totalCrashed++;
+      continue;
     }
 
     // Parse proposed changes from agent output
     const changes = parseProposedChanges(result.output);
 
     if (changes.length === 0) {
-      log.info('Proposer returned no changes. Optimization complete.');
-      break;
+      log.info('Proposer returned no changes. Optimization may be complete.');
+      if (!continuous) break;
+      continue;
     }
 
     log.info(`Proposer suggested ${changes.length} change(s):`);
@@ -109,73 +360,220 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
       console.log(`  - ${change.path}: ${change.reason}`);
     }
 
-    // Validate all paths are safe
-    const unsafeChanges = changes.filter((c) => !isSafePath(c.path));
+    // Validate all paths are safe for the current surface level
+    const unsafeChanges = changes.filter((c) => !isSafePath(c.path, surface));
     if (unsafeChanges.length > 0) {
-      log.warn('Proposer suggested changes to unsafe paths — skipping:');
+      log.warn('Proposer suggested changes to paths outside surface — skipping:');
       for (const c of unsafeChanges) {
         console.log(`  - ${c.path}`);
       }
+      appendEvolveLog({
+        commit: getCommitHash(),
+        score: bestScore,
+        cost: 0,
+        status: 'crash',
+        iteration,
+        description: `unsafe paths: ${unsafeChanges.map((c) => c.path).join(', ')}`,
+      });
+      totalCrashed++;
       continue;
     }
 
     // Backup current files
-    const backups = new Map<string, string>();
+    const backups = new Map<string, string | null>();
     for (const change of changes) {
       if (existsSync(change.path)) {
         backups.set(change.path, readFileSync(change.path, 'utf-8'));
+      } else {
+        backups.set(change.path, null); // file didn't exist before
       }
     }
 
     // Apply changes
     for (const change of changes) {
+      const dir = dirname(change.path);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       writeFileSync(change.path, change.content);
       log.info(`Applied: ${change.path}`);
     }
 
-    // TODO: Run eval suite and compare scores
-    // For now, log what would happen
-    log.info('Changes applied. Run `alpha-loop eval` to measure impact.');
-    log.info('If score improves: keep changes. If not: revert with git.');
+    // Pre-checks: compile + unit tests
+    log.info('Running pre-checks...');
+    const preCheckResult = await runPreChecks(surface);
+    if (!preCheckResult.passed) {
+      log.warn(`Pre-checks failed: ${preCheckResult.error?.split('\n')[0]}`);
+      revertChanges(backups);
+      appendEvolveLog({
+        commit: getCommitHash(),
+        score: bestScore,
+        cost: 0,
+        status: 'crash',
+        iteration,
+        description: `pre-check failed: ${preCheckResult.error?.split('\n')[0] ?? 'unknown'}`,
+      });
+      totalCrashed++;
+      continue;
+    }
+    log.info('Pre-checks passed.');
+
+    // Step-level eval (fast gate)
+    log.info('Running step-level eval...');
+    const stepCases = loadEvalCases({ type: 'step' }) as EvalCaseWithChecks[];
+    let stepScore = bestScore;
+    let iterationCost = 0;
+
+    if (stepCases.length > 0) {
+      const stepResult = await runEvalSuite(stepCases, config, { verbose: options.verbose });
+      stepScore = stepResult.composite;
+      iterationCost += stepResult.totalCost;
+
+      if (stepScore < bestScore) {
+        log.warn(`Step-level eval regressed: ${stepScore.toFixed(2)} < ${bestScore.toFixed(2)}. Discarding.`);
+        revertChanges(backups);
+        appendEvolveLog({
+          commit: getCommitHash(),
+          score: stepScore,
+          cost: iterationCost,
+          status: 'discard',
+          iteration,
+          description: `step-level regression: ${changes.map((c) => c.reason).join('; ')}`,
+        });
+        totalDiscarded++;
+        totalCost += iterationCost;
+        continue;
+      }
+
+      log.info(`Step-level eval: ${stepScore.toFixed(2)} (baseline: ${bestScore.toFixed(2)})`);
+    }
+
+    // E2E eval (slow, full validation)
+    const fullCases = loadEvalCases({ type: 'full' }) as EvalCaseWithChecks[];
+    let compositeScore = stepScore;
+
+    if (fullCases.length > 0) {
+      log.info('Running e2e eval...');
+      const e2eResult = await runEvalSuite(fullCases, config, { verbose: options.verbose });
+      compositeScore = e2eResult.composite;
+      iterationCost += e2eResult.totalCost;
+    }
+
+    // Keep or discard
+    const decision = keepOrDiscard(compositeScore, bestScore);
+    totalCost += iterationCost;
+
+    if (decision === 'keep') {
+      log.info(`Score improved: ${compositeScore.toFixed(2)} > ${bestScore.toFixed(2)}. Keeping changes.`);
+
+      // Commit the changes
+      const description = changes.map((c) => c.reason).join('; ');
+      for (const change of changes) {
+        exec(`git add "${change.path}"`, { cwd: process.cwd() });
+      }
+      // Write commit message to a temp file to avoid shell injection
+      const commitMsg = `evolve(${iteration}): ${description.slice(0, 200)}`;
+      const commitMsgFile = join(process.cwd(), '.alpha-loop', 'evals', '.commit-msg.tmp');
+      writeFileSync(commitMsgFile, commitMsg);
+      exec(`git commit --file "${commitMsgFile}"`, { cwd: process.cwd() });
+      try { unlinkSync(commitMsgFile); } catch { /* non-fatal */ }
+
+      bestScore = compositeScore;
+      totalKept++;
+
+      appendEvolveLog({
+        commit: getCommitHash(),
+        score: compositeScore,
+        cost: iterationCost,
+        status: 'keep',
+        iteration,
+        description,
+      });
+    } else {
+      log.info(`Score did not improve: ${compositeScore.toFixed(2)} <= ${bestScore.toFixed(2)}. Discarding.`);
+      revertChanges(backups);
+      totalDiscarded++;
+
+      appendEvolveLog({
+        commit: getCommitHash(),
+        score: compositeScore,
+        cost: iterationCost,
+        status: 'discard',
+        iteration,
+        description: changes.map((c) => c.reason).join('; '),
+      });
+    }
+
     console.log('');
-
-    // In a full implementation, we would:
-    // 1. Run the eval suite
-    // 2. Compare composite score to baseline
-    // 3. If improved: commit and update baseline
-    // 4. If not: revert all changes from backups
-    // 5. Continue to next iteration
-
-    // For now, stop after first proposal (eval execution requires fixture repos)
-    log.info('Stopping after first proposal. Full automated loop requires eval fixtures.');
-    break;
   }
 
   // Summary
   console.log('');
   log.step('Evolve Summary');
-  if (baseline) {
-    console.log(`  Baseline score: ${baseline.composite.toFixed(2)}`);
-  }
-  log.info('Run `alpha-loop eval` to measure current score after changes.');
+  const totalIterations = totalKept + totalDiscarded + totalCrashed;
+  console.log(`  Iterations run: ${totalIterations}`);
+  console.log(`  Kept: ${totalKept}`);
+  console.log(`  Discarded: ${totalDiscarded}`);
+  console.log(`  Crashed: ${totalCrashed}`);
+  console.log(`  Best score: ${bestScore.toFixed(2)}`);
+  console.log(`  Total cost: ~$${totalCost.toFixed(2)}`);
+  console.log('');
   log.info('Run `alpha-loop eval scores` to view score history.');
+  log.info(`Evolve log: ${EVOLVE_LOG_PATH}`);
+}
+
+/**
+ * Revert file changes from backups.
+ * For new files, also removes empty parent directories that were created.
+ */
+function revertChanges(backups: Map<string, string | null>): void {
+  for (const [path, content] of backups) {
+    if (content === null) {
+      // File didn't exist before — remove it and clean empty parents
+      try {
+        unlinkSync(path);
+        // Walk up removing empty directories until we hit a non-empty one
+        let dir = dirname(path);
+        while (dir && dir !== '.' && dir !== '/') {
+          try {
+            rmdirSync(dir); // throws if non-empty
+            dir = dirname(dir);
+          } catch {
+            break; // directory not empty, stop
+          }
+        }
+      } catch { /* ignore */ }
+    } else {
+      writeFileSync(path, content);
+    }
+  }
+}
+
+/**
+ * Parse and validate the surface option.
+ */
+function parseSurface(surface?: string): SurfaceLevel {
+  if (!surface) return 'prompts';
+  if (SURFACE_LEVELS.includes(surface as SurfaceLevel)) return surface as SurfaceLevel;
+  log.warn(`Unknown surface level '${surface}'. Using 'prompts'. Valid: ${SURFACE_LEVELS.join(', ')}`);
+  return 'prompts';
 }
 
 /**
  * Build the proposer prompt with full trace context (Meta-Harness style).
  */
 function buildProposerPrompt(
-  config: import('../lib/config.js').Config,
-  traces: import('../lib/traces.js').Trace[],
-  scores: import('../lib/score.js').ScoreEntry[],
+  config: Config,
+  traces: Trace[],
+  scores: ScoreEntry[],
   evalCaseCount: number,
+  surface: SurfaceLevel,
+  evolveLog: EvolveLogEntry[],
 ): string {
   const sections: string[] = [];
+  const targets = SURFACE_TARGETS[surface];
 
-  sections.push(`# Alpha Loop Optimization Proposer
+  sections.push(`# Harness Optimization Skill
 
-You are an optimization agent. Your goal is to improve AlphaLoop's pipeline performance
-by analyzing execution traces, scores, and source code, then proposing targeted changes.
+You are optimizing AlphaLoop's harness configuration to improve its eval score.
 
 ## Current State
 - Eval cases: ${evalCaseCount}
@@ -183,7 +581,36 @@ by analyzing execution traces, scores, and source code, then proposing targeted 
 - Recent traces: ${traces.length}
 - Agent: ${config.agent}
 - Model: ${config.model || 'default'}
+- Optimization surface: ${surface}
+
+## Your Environment
+- \`.alpha-loop/evals/results/\` — filesystem of ALL prior eval runs
+  - Each run has: harness snapshot, scores, costs, and full execution traces
+  - Use grep/cat to inspect prior code, traces, and scores
+- \`.alpha-loop/templates/\` — current prompts and skills (YOUR optimization target)
+${surface === 'all' ? '- `src/lib/prompts.ts` — prompt builder functions (modifiable)\n- `src/lib/pipeline.ts` — pipeline orchestration (modifiable)\n' : ''}
+## What You Can Modify
+${targets.map((t) => `- \`${t}\``).join('\n')}
+
+## What You CANNOT Modify
+- \`.alpha-loop/evals/\` — eval cases and results (read-only)
+- Test files
+- Any file not listed above
 `);
+
+  // Add evolve log history
+  if (evolveLog.length > 0) {
+    sections.push('## Prior Evolve Iterations');
+    sections.push('Learn from both successes and failures:');
+    sections.push('');
+    sections.push('```');
+    sections.push(EVOLVE_LOG_HEADER);
+    for (const entry of evolveLog.slice(-20)) {
+      sections.push(`${entry.commit}\t${entry.score.toFixed(2)}\t${entry.cost.toFixed(2)}\t${entry.status}\t${entry.iteration}\t${entry.description}`);
+    }
+    sections.push('```');
+    sections.push('');
+  }
 
   // Add score history
   if (scores.length > 0) {
@@ -246,10 +673,22 @@ by analyzing execution traces, scores, and source code, then proposing targeted 
     readDir(join(templatesDir, 'skills'), '.alpha-loop/templates/skills/');
   }
 
-  sections.push(`## Your Task
+  sections.push(`## Your Process
+1. Read at least 5 prior runs (traces, scores, evolve log) before proposing a change
+2. Identify failure patterns and form hypotheses
+3. Compare traces from passing vs failing cases
+4. Propose targeted, additive changes (prefer adding info over changing flow)
+5. Explain your reasoning clearly
 
-Analyze the traces and scores above. Identify patterns in failures and propose specific
-changes to agent prompts, skills, or config that would improve the composite score.
+## Key Lessons from Meta-Harness
+- Additive changes are safer than structural rewrites (iteration 7 won by ADDING info, not changing flow)
+- Prompt edits that modify control flow are high-risk (5 of 7 regressions came from these)
+- If multiple prior changes regressed, the common factor is the problem (confound detection)
+
+## Your Task
+
+Analyze the traces, scores, and evolve log above. Identify patterns in failures and propose
+specific changes that would improve the composite score.
 
 Output your proposed changes as a JSON array:
 
@@ -264,7 +703,7 @@ Output your proposed changes as a JSON array:
 \`\`\`
 
 Rules:
-- Only modify files under: ${ALLOWED_TARGETS.join(', ')}
+- Only modify files under: ${targets.join(', ')}
 - Each change must include a clear reason
 - Focus on the highest-impact changes first
 - If no changes would help, output an empty array: []
@@ -305,17 +744,4 @@ export function parseProposedChanges(output: string): ProposedChange[] {
   } catch {
     return [];
   }
-}
-
-/**
- * Check if a proposed path is safe to modify.
- */
-export function isSafePath(filePath: string): boolean {
-  // Reject absolute paths and path traversal
-  if (filePath.startsWith('/') || filePath.includes('..')) return false;
-
-  // Must be in allowed targets: directory prefixes use startsWith, files use exact match
-  return ALLOWED_TARGETS.some((prefix) =>
-    prefix.endsWith('/') ? filePath.startsWith(prefix) : filePath === prefix
-  );
 }

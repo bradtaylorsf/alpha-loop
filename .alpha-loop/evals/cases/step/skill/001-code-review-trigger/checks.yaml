@@ -1,0 +1,27 @@
+type: step
+step: skill
+eval_method: llm-judge
+status: ready
+checks:
+  - type: contains_any
+    values:
+      - security
+      - vulnerability
+      - findings
+      - quality
+      - issue
+      - concern
+      - suggest
+      - recommend
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the output is appropriate for a code review task. Score 1-5 based on:
+      - Score 5: Output uses code review terminology (security, quality, findings, suggestions),
+        is structured like a review (e.g., lists issues or approvals), and would be useful to
+        a developer receiving a PR review
+      - Score 4: Output reads like a review with appropriate terminology but lacks structure
+      - Score 3: Output addresses the PR but in a generic chat style without review-specific framing
+      - Score 2: Output is off-topic or ignores the review context
+      - Score 1: Output does not engage with code review at all
+    min_score: 4

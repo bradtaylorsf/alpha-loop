@@ -9,10 +9,13 @@ import {
   latestScore,
   scoresByConfig,
   paretoFrontier,
+  buildParetoFrontier,
   formatScoreEntry,
+  formatParetoTable,
   compareRuns,
+  deriveConfigLabel,
 } from '../../src/lib/score.js';
-import type { CaseResult, ScoreEntry } from '../../src/lib/score.js';
+import type { CaseResult, ScoreEntry, ParetoEntry } from '../../src/lib/score.js';
 
 let tempDir: string;
 
@@ -72,6 +75,24 @@ describe('hashConfig', () => {
   it('produces 12-character hex strings', () => {
     const hash = hashConfig({ test: 'value' });
     expect(hash).toMatch(/^[a-f0-9]{12}$/);
+  });
+
+  it('produces same hash regardless of key insertion order', () => {
+    const hash1 = hashConfig({ a: 1, b: 2, c: 3 });
+    const hash2 = hashConfig({ c: 3, a: 1, b: 2 });
+    expect(hash1).toBe(hash2);
+  });
+
+  it('deep-sorts nested objects for deterministic hashing', () => {
+    const hash1 = hashConfig({
+      pipeline: { review: { model: 'haiku' }, implement: { model: 'sonnet' } },
+      agent: 'claude',
+    });
+    const hash2 = hashConfig({
+      agent: 'claude',
+      pipeline: { implement: { model: 'sonnet' }, review: { model: 'haiku' } },
+    });
+    expect(hash1).toBe(hash2);
   });
 });
 
@@ -167,26 +188,125 @@ describe('paretoFrontier', () => {
     expect(paretoFrontier(tempDir)).toEqual([]);
   });
 
-  it('computes Pareto frontier correctly', () => {
+  it('computes Pareto frontier correctly with efficiency', () => {
     const entry = (score: number, cost: number): ScoreEntry => ({
       timestamp: new Date().toISOString(),
       configHash: 'test',
-      config: {},
+      config: { model: 'claude-sonnet-4-6' },
       cases: [],
       composite: score,
       totalCost: cost,
     });
 
-    // Pareto-optimal: highest score at lowest cost
     appendScore(tempDir, entry(90, 10));  // Pareto: best score
     appendScore(tempDir, entry(80, 5));   // Pareto: lower cost
     appendScore(tempDir, entry(70, 8));   // Dominated by (80, 5)
     appendScore(tempDir, entry(60, 3));   // Pareto: cheapest
 
     const frontier = paretoFrontier(tempDir);
-    // Should include: (90,10), (80,5), (60,3) — not (70,8)
     expect(frontier).toHaveLength(3);
     expect(frontier.map((e) => e.composite)).toEqual([90, 80, 60]);
+
+    // Verify efficiency is computed
+    expect(frontier[0].efficiency).toBe(9);   // 90/10
+    expect(frontier[1].efficiency).toBe(16);  // 80/5
+    expect(frontier[2].efficiency).toBe(20);  // 60/3
+
+    // Verify config labels
+    expect(frontier[0].configLabel).toBe('sonnet');
+  });
+
+  it('handles zero cost with Infinity efficiency', () => {
+    const entry: ScoreEntry = {
+      timestamp: new Date().toISOString(),
+      configHash: 'test',
+      config: {},
+      cases: [],
+      composite: 80,
+      totalCost: 0,
+    };
+
+    appendScore(tempDir, entry);
+    const frontier = paretoFrontier(tempDir);
+    expect(frontier[0].efficiency).toBe(Infinity);
+  });
+});
+
+describe('buildParetoFrontier', () => {
+  it('builds frontier from in-memory entries', () => {
+    const entries: ScoreEntry[] = [
+      { timestamp: 't1', configHash: 'a', config: { model: 'claude-opus-4-6' }, cases: [], composite: 90, totalCost: 10 },
+      { timestamp: 't2', configHash: 'b', config: { model: 'claude-haiku-4-5' }, cases: [], composite: 75, totalCost: 2 },
+      { timestamp: 't3', configHash: 'c', config: { model: 'claude-sonnet-4-6' }, cases: [], composite: 85, totalCost: 12 }, // dominated
+    ];
+
+    const frontier = buildParetoFrontier(entries);
+    expect(frontier).toHaveLength(2);
+    expect(frontier.map((e) => e.configHash)).toEqual(['a', 'b']);
+  });
+});
+
+describe('deriveConfigLabel', () => {
+  it('derives label from model name', () => {
+    expect(deriveConfigLabel({ model: 'claude-opus-4-6' })).toBe('opus');
+    expect(deriveConfigLabel({ model: 'claude-sonnet-4-6' })).toBe('sonnet');
+    expect(deriveConfigLabel({ model: 'claude-haiku-4-5' })).toBe('haiku');
+  });
+
+  it('combines unique models from pipeline', () => {
+    const label = deriveConfigLabel({
+      model: 'claude-sonnet-4-6',
+      pipeline: {
+        plan: { model: 'claude-haiku-4-5' },
+        review: { model: 'claude-haiku-4-5' },
+      },
+    });
+    expect(label).toBe('sonnet+haiku');
+  });
+
+  it('includes reviewModel', () => {
+    const label = deriveConfigLabel({
+      model: 'claude-sonnet-4-6',
+      reviewModel: 'claude-haiku-4-5',
+    });
+    expect(label).toBe('sonnet+haiku');
+  });
+
+  it('returns default for empty config', () => {
+    expect(deriveConfigLabel({})).toBe('default');
+  });
+
+  it('handles gpt models', () => {
+    expect(deriveConfigLabel({ model: 'gpt-4o' })).toBe('gpt4o');
+    expect(deriveConfigLabel({ model: 'gpt-4o-mini' })).toBe('gpt4o-mini');
+  });
+});
+
+describe('formatParetoTable', () => {
+  it('formats frontier as ASCII table', () => {
+    const frontier: ParetoEntry[] = [
+      {
+        timestamp: 't1', configHash: 'aaa', config: { model: 'claude-opus-4-6' },
+        cases: [], composite: 90, totalCost: 10, efficiency: 9, configLabel: 'opus',
+      },
+      {
+        timestamp: 't2', configHash: 'bbb', config: { model: 'claude-haiku-4-5' },
+        cases: [], composite: 75, totalCost: 2, efficiency: 37.5, configLabel: 'haiku',
+      },
+    ];
+
+    const table = formatParetoTable(frontier, 'aaa');
+    expect(table).toContain('Pareto Frontier');
+    expect(table).toContain('opus');
+    expect(table).toContain('haiku');
+    expect(table).toContain('Score');
+    expect(table).toContain('Cost');
+    expect(table).toContain('Efficiency');
+  });
+
+  it('returns message for empty frontier', () => {
+    const table = formatParetoTable([]);
+    expect(table).toContain('No data');
   });
 });
 

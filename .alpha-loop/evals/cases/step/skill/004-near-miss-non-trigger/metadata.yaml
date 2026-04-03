@@ -1,0 +1,7 @@
+id: 004-near-miss-non-trigger
+description: "Non-trigger: unrelated query should not produce dev skill structured output"
+tags:
+  - skill
+  - non-trigger
+  - false-positive
+source: manual

@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { log } from './logger.js';
 import { exec } from './shell.js';
 import { spawnAgent } from './agent.js';
-import { buildImplementPrompt, buildReviewPrompt } from './prompts.js';
+import { buildImplementPrompt, buildReviewPrompt, buildLearnPrompt } from './prompts.js';
 import { processIssue } from './pipeline.js';
 import { runChecks } from './eval-checks.js';
 import { computeCompositeScore, appendScore, hashConfig } from './score.js';
@@ -22,12 +22,20 @@ import {
   writeScores as writeTraceScores,
   computeScores as computeTraceScores,
 } from './traces.js';
-import type { Config } from './config.js';
+import {
+  loadEvalConfig,
+  cloneOrCacheFixtureRepo,
+  extractFixture,
+  setupFixture as runFixtureSetup,
+} from './eval-fixtures.js';
+import { estimateCost, resolveStepConfig } from './config.js';
+import type { Config, PipelineConfig, PipelineStepName } from './config.js';
 import type { CheckDefinition } from './eval-checks.js';
 import type { EvalCase, EvalResult, EvalSuiteResult } from './eval.js';
 import type { CaseResult, ScoreEntry } from './score.js';
 import type { SessionContext } from './session.js';
 import type { PipelineResult } from './pipeline.js';
+import type { AgentResult } from './agent.js';
 
 /** Options for running the eval suite. */
 export type EvalRunOptions = {
@@ -35,6 +43,8 @@ export type EvalRunOptions = {
   caseId?: string;
   /** Verbose output. */
   verbose?: boolean;
+  /** Pipeline config overrides to merge into config before running. */
+  configOverrides?: PipelineConfig;
 };
 
 /** Extended eval case with parsed check definitions. */
@@ -52,9 +62,20 @@ export async function runEvalSuite(
   config: Config,
   options: EvalRunOptions = {},
 ): Promise<EvalSuiteResult> {
+  // Apply pipeline config overrides if provided
+  if (options.configOverrides) {
+    const mergedPipeline: PipelineConfig = { ...config.pipeline };
+    for (const [step, override] of Object.entries(options.configOverrides)) {
+      mergedPipeline[step as PipelineStepName] = {
+        ...(mergedPipeline[step as PipelineStepName] ?? {}),
+        ...override,
+      };
+    }
+    config = { ...config, pipeline: mergedPipeline };
+  }
+
   const session = `eval-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
   const results: EvalResult[] = [];
-  let totalCost = 0;
 
   // Snapshot harness for tracking
   const harnessHash = snapshotHarness(config);
@@ -112,6 +133,9 @@ export async function runEvalSuite(
   const failCount = results.length - passCount;
   const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
 
+  // Accumulate real costs from agent token usage
+  const totalCost = results.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
+
   // Record to score history
   const configObj: Record<string, unknown> = {
     agent: config.agent,
@@ -120,6 +144,7 @@ export async function runEvalSuite(
     maxTestRetries: config.maxTestRetries,
     testCommand: config.testCommand,
     harnessHash,
+    pipeline: config.pipeline,
   };
 
   const entry: ScoreEntry = {
@@ -172,7 +197,7 @@ export async function runEvalSuite(
     });
   } catch { /* non-fatal */ }
 
-  return { cases: results, composite, totalDuration, passCount, failCount };
+  return { cases: results, composite, totalDuration, totalCost, passCount, failCount };
 }
 
 /**
@@ -285,20 +310,48 @@ async function runStepEval(
   const input = evalCase.inputText ?? evalCase.issueBody;
   const step = evalCase.step ?? 'review';
 
+  // Map eval step names to PipelineStepName for resolveStepConfig
+  const pipelineStepMap: Record<string, PipelineStepName> = {
+    plan: 'plan',
+    implement: 'implement',
+    'test-fix': 'test_fix',
+    review: 'review',
+    verify: 'verify',
+    learn: 'learn',
+  };
+
+  // Resolve per-step agent/model from pipeline config (falls back to top-level)
+  const pipelineStep = pipelineStepMap[step];
+  const resolved = pipelineStep
+    ? resolveStepConfig(config, pipelineStep)
+    : { agent: config.agent as string, model: config.model };
+  const resolvedAgent = resolved.agent as Config['agent'];
+
   let output = '';
+  // Accumulate cost/token data from agent invocations
+  let caseCostUsd = 0;
+  let caseInputTokens = 0;
+  let caseOutputTokens = 0;
+
+  const trackCost = (result: AgentResult) => {
+    if (result.costUsd) caseCostUsd += result.costUsd;
+    if (result.inputTokens) caseInputTokens += result.inputTokens;
+    if (result.outputTokens) caseOutputTokens += result.outputTokens;
+  };
 
   try {
     // Run the targeted pipeline step
     switch (step) {
       case 'plan': {
         const result = await spawnAgent({
-          agent: config.agent,
-          model: config.model,
+          agent: resolvedAgent,
+          model: resolved.model,
           prompt: `Plan the implementation for the following issue:\n\n${input}`,
           cwd: process.cwd(),
           timeout: (evalCase.timeout || 60) * 1000,
         });
         output = result.output;
+        trackCost(result);
         break;
       }
       case 'implement': {
@@ -308,13 +361,14 @@ async function runStepEval(
           body: input,
         });
         const result = await spawnAgent({
-          agent: config.agent,
-          model: config.model,
+          agent: resolvedAgent,
+          model: resolved.model,
           prompt,
           cwd: process.cwd(),
           timeout: (evalCase.timeout || 120) * 1000,
         });
         output = result.output;
+        trackCost(result);
         break;
       }
       case 'review': {
@@ -325,13 +379,14 @@ async function runStepEval(
           baseBranch: config.baseBranch,
         });
         const result = await spawnAgent({
-          agent: config.agent,
-          model: config.reviewModel || config.model,
+          agent: resolvedAgent,
+          model: resolved.model,
           prompt,
           cwd: process.cwd(),
           timeout: (evalCase.timeout || 60) * 1000,
         });
         output = result.output;
+        trackCost(result);
         break;
       }
       case 'test': {
@@ -344,6 +399,58 @@ async function runStepEval(
       }
       case 'verify': {
         output = 'Verify step eval not yet supported';
+        break;
+      }
+      case 'learn': {
+        const prompt = buildLearnPrompt({
+          issueNum: 0,
+          title: evalCase.issueTitle || 'Eval learn case',
+          status: 'failure',
+          retries: 0,
+          duration: 0,
+          diff: '',
+          testOutput: '',
+          reviewOutput: '',
+          verifyOutput: '',
+          body: input,
+        });
+        const result = await spawnAgent({
+          agent: resolvedAgent,
+          model: config.evalModel || resolved.model,
+          prompt,
+          cwd: process.cwd(),
+          timeout: (evalCase.timeout || 60) * 1000,
+          maxTurns: 1,
+        });
+        output = result.output;
+        trackCost(result);
+        break;
+      }
+      case 'skill': {
+        // Skill evals: spawn agent with the skill context from input
+        const result = await spawnAgent({
+          agent: config.agent,
+          model: config.evalModel || config.model,
+          prompt: input,
+          cwd: process.cwd(),
+          timeout: (evalCase.timeout || 60) * 1000,
+        });
+        output = result.output;
+        trackCost(result);
+        break;
+      }
+      case 'test-fix': {
+        // Test-fix evals: provide failing test output + code, ask agent to fix
+        const prompt = `The following test is failing. Diagnose the root cause and fix it.\n\n${input}`;
+        const result = await spawnAgent({
+          agent: resolvedAgent,
+          model: resolved.model,
+          prompt,
+          cwd: process.cwd(),
+          timeout: (evalCase.timeout || 120) * 1000,
+        });
+        output = result.output;
+        trackCost(result);
         break;
       }
     }
@@ -367,6 +474,9 @@ async function runStepEval(
       partialCredit: checkResults.avgScore,
       retries: 0,
       duration,
+      costUsd: caseCostUsd || undefined,
+      inputTokens: caseInputTokens || undefined,
+      outputTokens: caseOutputTokens || undefined,
       details: {
         successMatch: true,
         filesMatch: true,
@@ -388,6 +498,9 @@ async function runStepEval(
     partialCredit: outputMatch ? 1 : 0,
     retries: 0,
     duration,
+    costUsd: caseCostUsd || undefined,
+    inputTokens: caseInputTokens || undefined,
+    outputTokens: caseOutputTokens || undefined,
     details: {
       successMatch: true,
       filesMatch: true,
@@ -400,10 +513,16 @@ async function runStepEval(
 
 /**
  * Prepare a fixture directory for an e2e eval case.
- * Clones the repo at the specified ref into a worktree.
+ *
+ * Supports three modes:
+ *   1. Monorepo fixture — fixtureRepo matches a name in config.yaml fixture_repo.fixtures
+ *   2. Remote/local repo — fixtureRepo is a GitHub owner/repo or local path
+ *   3. Current project — fixtureRepo is empty, uses the current project as fixture
  */
 export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
   const fixtureDir = resolve(projectDir, '.worktrees', `eval-${evalCase.id}`);
+  const evalDir = join(projectDir, '.alpha-loop', 'evals');
+  const evalConfig = loadEvalConfig(evalDir);
 
   // Clean up any existing fixture
   if (existsSync(fixtureDir)) {
@@ -414,10 +533,40 @@ export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
   const repo = evalCase.fixtureRepo;
   const ref = evalCase.fixtureRef || 'main';
 
+  // Mode 1: Monorepo fixture — repo name matches a configured fixture
+  if (evalConfig.fixture_repo && evalConfig.fixture_repo.fixtures[repo]) {
+    const repoDir = cloneOrCacheFixtureRepo(evalConfig.fixture_repo, projectDir);
+    extractFixture(repoDir, repo, evalConfig.fixture_repo, fixtureDir);
+    const entry = evalConfig.fixture_repo.fixtures[repo];
+    runFixtureSetup(fixtureDir, entry);
+    return fixtureDir;
+  }
+
+  // Mode 1b: SWE-bench repo — look up base_commit from config
+  if (evalConfig.swebench_repos && evalCase.source === 'swe-bench') {
+    const repoConfig = evalConfig.swebench_repos[repo];
+    if (repoConfig) {
+      // Clone the repo at the base commit
+      const url = `https://github.com/${repo}.git`;
+      log.info(`Cloning SWE-bench repo ${repo}...`);
+      const cloneResult = exec(`git clone "${url}" "${fixtureDir}"`, { timeout: 120_000 });
+      if (cloneResult.exitCode !== 0) {
+        throw new Error(`Failed to clone SWE-bench repo ${repo}: ${cloneResult.stderr}`);
+      }
+      // Checkout base commit
+      const checkout = exec(`git checkout "${ref}"`, { cwd: fixtureDir, timeout: 30_000 });
+      if (checkout.exitCode !== 0) {
+        throw new Error(`Failed to checkout ${ref}: ${checkout.stderr}`);
+      }
+      return fixtureDir;
+    }
+  }
+
+  // Mode 2: Remote or local repo
   if (repo.includes('/') && !existsSync(repo)) {
     // Remote repo — clone it
     const cloneResult = exec(
-      `git clone --depth 1 --branch ${ref} https://github.com/${repo}.git ${fixtureDir}`,
+      `git clone --depth 1 --branch "${ref}" "https://github.com/${repo}.git" "${fixtureDir}"`,
       { timeout: 120_000 },
     );
     if (cloneResult.exitCode !== 0) {
@@ -426,32 +575,42 @@ export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
   } else if (existsSync(repo)) {
     // Local repo — copy via git worktree or clone
     const cloneResult = exec(
-      `git clone --local --branch ${ref} ${repo} ${fixtureDir}`,
+      `git clone --local --branch "${ref}" "${repo}" "${fixtureDir}"`,
       { timeout: 30_000 },
     );
     if (cloneResult.exitCode !== 0) {
       throw new Error(`Failed to clone local fixture ${repo}: ${cloneResult.stderr}`);
     }
   } else {
-    // Use current project as fixture
-    const result = exec(`git worktree add ${fixtureDir} ${ref} --detach`, {
+    // Mode 3: Use current project as fixture
+    const result = exec(`git worktree add "${fixtureDir}" "${ref}" --detach`, {
       cwd: projectDir,
       timeout: 30_000,
     });
     if (result.exitCode !== 0) {
       // Worktree might already exist, try direct clone
-      exec(`git clone --local --branch ${ref} ${projectDir} ${fixtureDir}`, { timeout: 30_000 });
+      exec(`git clone --local --branch "${ref}" "${projectDir}" "${fixtureDir}"`, { timeout: 30_000 });
     }
   }
 
   return fixtureDir;
 }
 
-/** Read all files in a directory recursively, sorted, and concatenate contents. */
+/** Extensions to include when hashing template directories. */
+const TEXT_EXTENSIONS = new Set(['.md', '.yaml', '.yml', '.txt', '.json', '.ts', '.js']);
+
+/** Read text files in a directory recursively, sorted, and concatenate contents. */
 function readDirContentsSorted(dirPath: string): string {
   const entries = readdirSync(dirPath, { recursive: true, withFileTypes: true });
   const files = entries
-    .filter((d) => d.isFile())
+    .filter((d) => {
+      if (!d.isFile()) return false;
+      // Skip dotfiles (.DS_Store, .gitkeep, etc.)
+      if (d.name.startsWith('.')) return false;
+      // Only include known text extensions
+      const ext = d.name.slice(d.name.lastIndexOf('.'));
+      return TEXT_EXTENSIONS.has(ext);
+    })
     .map((d) => join(d.parentPath ?? d.path, d.name))
     .sort();
   return files.map((f) => readFileSync(f, 'utf-8')).join('\n');
@@ -520,4 +679,63 @@ function getGitState(): Record<string, string> {
   } catch {
     return { branch: 'unknown', commit: 'unknown' };
   }
+}
+
+/** Default average token estimates per pipeline step (input, output). */
+const DEFAULT_TOKEN_ESTIMATES: Record<PipelineStepName, { input: number; output: number }> = {
+  plan: { input: 5000, output: 2000 },
+  implement: { input: 30000, output: 15000 },
+  test_fix: { input: 20000, output: 10000 },
+  review: { input: 25000, output: 5000 },
+  verify: { input: 15000, output: 3000 },
+  learn: { input: 10000, output: 3000 },
+};
+
+export type CostEstimate = {
+  steps: Array<{
+    step: PipelineStepName;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    costPerCase: number;
+  }>;
+  totalPerCase: number;
+  totalForSuite: number;
+  caseCount: number;
+};
+
+/**
+ * Estimate the cost of running an eval suite with a given config.
+ * Uses average token counts from previous runs if available,
+ * otherwise falls back to default estimates.
+ */
+export function estimateRunCost(
+  caseCount: number,
+  config: Config,
+): CostEstimate {
+  const steps: CostEstimate['steps'] = [];
+  const pipelineSteps: PipelineStepName[] = ['plan', 'implement', 'test_fix', 'review', 'verify', 'learn'];
+
+  for (const step of pipelineSteps) {
+    const { model } = resolveStepConfig(config, step);
+    const tokens = DEFAULT_TOKEN_ESTIMATES[step];
+    const costPerCase = estimateCost(model, tokens.input, tokens.output, config.pricing);
+
+    steps.push({
+      step,
+      model,
+      inputTokens: tokens.input,
+      outputTokens: tokens.output,
+      costPerCase,
+    });
+  }
+
+  const totalPerCase = steps.reduce((sum, s) => sum + s.costPerCase, 0);
+
+  return {
+    steps,
+    totalPerCase,
+    totalForSuite: totalPerCase * caseCount,
+    caseCount,
+  };
 }

@@ -98,7 +98,7 @@ evalCmd
   .option('--suite <suite>', 'Run only a suite: step (fast) or e2e (slow)')
   .option('--case <id>', 'Run a single eval case by ID prefix')
   .option('--type <type>', 'Filter by type: full or step')
-  .option('--step <step>', 'Filter by pipeline step (plan, implement, test, review, verify)')
+  .option('--step <step>', 'Filter by pipeline step (plan, implement, test, test-fix, review, verify, learn, skill)')
   .option('--verbose', 'Show detailed output')
   .action(async (options) => {
     const { evalRunCommand } = await import('./commands/eval.js');
@@ -131,10 +131,14 @@ evalCmd
 
 evalCmd
   .command('search')
-  .description('Greedy search over model/agent configurations')
+  .description('Greedy coordinate descent search over model/agent configurations')
   .option('--models <models>', 'Models to test (comma-separated)')
   .option('--agents <agents>', 'Agents to test (comma-separated)')
   .option('--max-runs <n>', 'Maximum number of eval runs')
+  .option('--budget <n>', 'Maximum number of eval runs (alias for --max-runs)')
+  .option('--step <step>', 'Only search over this pipeline step')
+  .option('--min-score <score>', 'Minimum acceptable score threshold')
+  .option('--optimize <target>', 'Optimize for: cost or efficiency (default: efficiency)')
   .action(async (options) => {
     const { evalSearchCommand } = await import('./commands/eval.js');
     await evalSearchCommand(options);
@@ -157,17 +161,54 @@ evalCmd
   });
 
 evalCmd
+  .command('estimate')
+  .description('Estimate cost of running the eval suite with current or specified config')
+  .option('--config <path>', 'Path to a YAML config file to estimate')
+  .action(async (options) => {
+    const { evalEstimateCommand } = await import('./commands/eval.js');
+    evalEstimateCommand(options);
+  });
+
+evalCmd
+  .command('compare-configs <configA> <configB>')
+  .description('Compare two YAML config files side-by-side')
+  .action(async (configA: string, configB: string) => {
+    const { evalCompareConfigsCommand } = await import('./commands/eval.js');
+    evalCompareConfigsCommand(configA, configB);
+  });
+
+evalCmd
   .command('import-swebench')
   .description('Import eval cases from SWE-bench dataset')
-  .action(async () => {
+  .option('--dataset <path>', 'Path to a downloaded JSONL file (skips auto-download)')
+  .option('--dataset-id <id>', 'HuggingFace dataset ID (default: princeton-nlp/SWE-bench_Lite)')
+  .option('--count <n>', 'Maximum number of cases to import')
+  .option('--repo <owner/repo>', 'Filter by repository (e.g. django/django)')
+  .option('--ids <csv>', 'Import specific instance IDs (comma-separated)')
+  .option('--step <step>', 'Pipeline step to target (default: implement)')
+  .action(async (options) => {
     const { evalImportSwebenchCommand } = await import('./commands/eval.js');
-    await evalImportSwebenchCommand();
+    await evalImportSwebenchCommand(options);
+  });
+
+evalCmd
+  .command('convert')
+  .description('Convert between AlphaLoop eval format and skill-creator format')
+  .option('--direction <dir>', 'Conversion direction: to-skill or from-skill (default: to-skill)')
+  .option('--input <path>', 'Input file path (for from-skill)')
+  .option('--output <path>', 'Output file path')
+  .action(async (options) => {
+    const { evalConvertCommand } = await import('./commands/eval.js');
+    evalConvertCommand(options);
   });
 
 program
   .command('evolve')
   .description('Meta-Harness-style automated optimization loop')
   .option('--max-iterations <n>', 'Maximum optimization iterations (default: 5)')
+  .option('--continuous', 'Run until manually stopped (SIGINT)')
+  .option('--surface <level>', 'Optimization surface: prompts, skills, config, all (default: prompts)')
+  .option('--resume', 'Resume from a previous evolve session')
   .option('--dry-run', 'Preview without making changes')
   .option('--verbose', 'Show detailed agent output')
   .action(async (options) => {

@@ -1,0 +1,23 @@
+type: step
+step: implement
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the refactoring correctly converts the JS utility to TypeScript with proper types.
+      Score 1-5 based on:
+      - Score 5: Converts the file to .ts, adds explicit parameter and return type annotations, defines
+        an interface or type for any object shapes, handles null/undefined edge cases with proper types
+        (e.g., string | null), and the result would pass TypeScript strict mode
+      - Score 4: Adds type annotations for parameters and return types but misses one edge case
+        (e.g., does not handle null input)
+      - Score 3: Renames file to .ts and adds some annotations but uses `any` for complex shapes
+      - Score 2: Renames the file but does not add meaningful type annotations
+      - Score 1: Does not convert the file or add type annotations
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - interface
+      - string

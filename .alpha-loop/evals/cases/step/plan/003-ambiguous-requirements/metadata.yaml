@@ -1,0 +1,7 @@
+id: 003-ambiguous-requirements
+description: "Ambiguous issue: vague performance request without specifics"
+tags:
+  - plan
+  - ambiguous
+  - clarification
+source: manual

@@ -1,0 +1,7 @@
+id: 001-off-by-one
+description: "Test fix: off-by-one array index error in a loop"
+tags:
+  - test-fix
+  - off-by-one
+  - array
+source: manual

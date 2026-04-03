@@ -1,0 +1,7 @@
+id: 005-clean-diff
+description: "Review does not raise false positives on a well-written diff"
+tags:
+  - review
+  - false-positive
+  - quality
+source: manual

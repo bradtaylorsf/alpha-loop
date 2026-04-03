@@ -1,0 +1,18 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review avoids raising false positives on a clean, well-written diff.
+      Score 1-5 based on:
+      - Score 5: Review approves the diff or raises only genuinely minor/optional suggestions
+        (nits), without flagging any false security/correctness issues
+      - Score 4: Review is mostly positive with one minor suggestion that is reasonably justified
+      - Score 3: Review raises one concern that is either a false positive or extremely minor
+        and not truly warranted by the code
+      - Score 2: Review raises multiple concerns that are not supported by the diff content
+      - Score 1: Review incorrectly rejects or raises serious issues about clearly correct code
+    min_score: 4

@@ -1,0 +1,8 @@
+id: 004-test-mock-dependencies
+description: "Write tests that properly mock an external API dependency and test happy and error paths"
+tags:
+  - test
+  - mocking
+  - jest
+  - external-api
+source: manual

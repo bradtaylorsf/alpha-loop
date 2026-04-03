@@ -1,0 +1,7 @@
+id: 004-monorepo-packages
+description: "Monorepo change: updating a shared type used across multiple packages"
+tags:
+  - plan
+  - monorepo
+  - dependencies
+source: manual

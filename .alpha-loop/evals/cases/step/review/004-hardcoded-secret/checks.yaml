@@ -1,0 +1,18 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies the hardcoded API key and recommends moving it to
+      an environment variable. Score 1-5 based on:
+      - Score 5: Review explicitly identifies the hardcoded secret (sk-live-abc123xyz), explains
+        the risk of committing secrets to source control, and recommends using an env var
+      - Score 4: Review identifies the hardcoded secret and recommends env var without full context
+      - Score 3: Review mentions secrets management generically without flagging the specific line
+      - Score 2: Review mentions the API key but treats it as a style issue rather than a
+        security issue
+      - Score 1: Review does not identify the hardcoded secret
+    min_score: 4

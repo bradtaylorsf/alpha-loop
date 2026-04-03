@@ -217,6 +217,18 @@ describe('parseChecks', () => {
     expect((checks[7] as any).min_score).toBe(4);
   });
 
+  it('parses port field for http checks', () => {
+    const raw = {
+      checks: [
+        { type: 'http', method: 'GET', path: '/health', port: 8080, expect_status: 200 },
+        { type: 'http', method: 'GET', path: '/api', expect_status: 200 },
+      ],
+    };
+    const checks = parseChecks(raw);
+    expect((checks[0] as any).port).toBe(8080);
+    expect((checks[1] as any).port).toBeUndefined();
+  });
+
   it('returns empty array for invalid input', () => {
     expect(parseChecks(null)).toEqual([]);
     expect(parseChecks(undefined)).toEqual([]);

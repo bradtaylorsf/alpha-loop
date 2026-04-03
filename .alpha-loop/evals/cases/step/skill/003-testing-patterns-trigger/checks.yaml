@@ -1,0 +1,28 @@
+type: step
+step: skill
+eval_method: llm-judge
+status: ready
+checks:
+  - type: contains_any
+    values:
+      - mock
+      - assert
+      - coverage
+      - test case
+      - describe
+      - it(
+      - expect(
+      - beforeEach
+      - afterEach
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the output is appropriate for writing unit tests. Score 1-5 based on:
+      - Score 5: Output contains testing terminology (mock, assert, coverage, test cases),
+        produces actual test code or a structured test plan, and would be directly useful for
+        testing UserService
+      - Score 4: Output contains test code or testing structure with appropriate terminology
+      - Score 3: Output discusses testing concepts but without concrete test cases
+      - Score 2: Output discusses UserService without testing context
+      - Score 1: Output does not engage with unit testing
+    min_score: 4

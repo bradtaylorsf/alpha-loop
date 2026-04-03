@@ -1,0 +1,8 @@
+id: 005-test-edge-cases
+description: "Write tests covering edge cases for a string truncation utility including empty string, exact length, unicode, and null"
+tags:
+  - test
+  - edge-cases
+  - string-utility
+  - jest
+source: manual

@@ -1,0 +1,27 @@
+type: step
+step: test-fix
+eval_method: llm-judge
+status: ready
+checks:
+  - type: keyword_present
+    values:
+      - off-by-one
+      - arr.length
+      - "< arr.length"
+      - index out of bounds
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the output correctly identifies the off-by-one error in the loop condition.
+      Score 1-5 based on:
+      - Score 5: Output explicitly identifies the off-by-one error (i <= arr.length should be
+        i < arr.length), explains why it causes an array out-of-bounds access, and provides
+        the corrected code
+      - Score 4: Output identifies the loop condition error and provides the fix without full
+        explanation
+      - Score 3: Output identifies something is wrong with the loop but doesn't specifically
+        call out the <= vs < distinction
+      - Score 2: Output suggests the loop area is problematic without identifying the specific
+        condition error
+      - Score 1: Output does not identify the off-by-one error
+    min_score: 4

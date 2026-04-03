@@ -10,7 +10,8 @@ jest.mock('node:child_process', () => ({
 
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
 
-import { loadConfig, detectRepo, estimateCost } from '../../src/lib/config.js';
+import { loadConfig, detectRepo, estimateCost, resolveStepConfig } from '../../src/lib/config.js';
+import type { Config, PipelineConfig } from '../../src/lib/config.js';
 
 let originalCwd: string;
 let tempDir: string;
@@ -218,6 +219,149 @@ pricing:
 
     const config = loadConfig();
     expect(config.pricing['claude-opus-4-6']).toEqual({ input: 20.0, output: 100.0 });
+  });
+
+  it('includes expanded default pricing table', () => {
+    const config = loadConfig();
+    expect(config.pricing['gpt-4o']).toEqual({ input: 2.50, output: 10.0 });
+    expect(config.pricing['gpt-4o-mini']).toEqual({ input: 0.15, output: 0.60 });
+    expect(config.pricing['deepseek-v3']).toEqual({ input: 0.27, output: 1.10 });
+    expect(config.pricing['gemini-2.5-flash']).toEqual({ input: 0.15, output: 0.60 });
+  });
+
+  it('loads pipeline config from YAML', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+pipeline:
+  plan:
+    agent: claude
+    model: claude-haiku-4-5
+  implement:
+    model: claude-sonnet-4-6
+  review:
+    model: claude-haiku-4-5
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.pipeline.plan).toEqual({ agent: 'claude', model: 'claude-haiku-4-5' });
+    expect(config.pipeline.implement).toEqual({ model: 'claude-sonnet-4-6' });
+    expect(config.pipeline.review).toEqual({ model: 'claude-haiku-4-5' });
+    expect(config.pipeline.verify).toBeUndefined();
+  });
+
+  it('merges pipeline overrides with YAML pipeline', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+pipeline:
+  plan:
+    model: claude-haiku-4-5
+  review:
+    model: claude-haiku-4-5
+`,
+    );
+
+    const config = loadConfig({
+      pipeline: {
+        plan: { model: 'claude-opus-4-6' },
+        implement: { model: 'claude-sonnet-4-6' },
+      },
+    });
+    expect(config.pipeline.plan?.model).toBe('claude-opus-4-6');
+    expect(config.pipeline.review?.model).toBe('claude-haiku-4-5');
+    expect(config.pipeline.implement?.model).toBe('claude-sonnet-4-6');
+  });
+
+  it('defaults pipeline to empty object', () => {
+    const config = loadConfig();
+    expect(config.pipeline).toEqual({});
+  });
+
+  it('ignores invalid pipeline step names in YAML', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+pipeline:
+  invalid_step:
+    model: claude-haiku-4-5
+  plan:
+    model: claude-haiku-4-5
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.pipeline.plan).toEqual({ model: 'claude-haiku-4-5' });
+    expect((config.pipeline as any).invalid_step).toBeUndefined();
+  });
+});
+
+describe('resolveStepConfig', () => {
+  it('returns top-level agent/model when no pipeline overrides', () => {
+    const config = loadConfig({ agent: 'claude', model: 'claude-sonnet-4-6' });
+    const resolved = resolveStepConfig(config, 'implement');
+    expect(resolved.agent).toBe('claude');
+    expect(resolved.model).toBe('claude-sonnet-4-6');
+  });
+
+  it('returns pipeline override when set', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+agent: claude
+model: claude-sonnet-4-6
+pipeline:
+  plan:
+    model: claude-haiku-4-5
+`,
+    );
+    const config = loadConfig();
+    const plan = resolveStepConfig(config, 'plan');
+    expect(plan.model).toBe('claude-haiku-4-5');
+    expect(plan.agent).toBe('claude');
+
+    const impl = resolveStepConfig(config, 'implement');
+    expect(impl.model).toBe('claude-sonnet-4-6');
+  });
+
+  it('uses reviewModel as fallback for review step', () => {
+    const config = loadConfig({ model: 'claude-sonnet-4-6', reviewModel: 'claude-haiku-4-5' });
+    const resolved = resolveStepConfig(config, 'review');
+    expect(resolved.model).toBe('claude-haiku-4-5');
+  });
+
+  it('pipeline override takes precedence over reviewModel for review', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+model: claude-sonnet-4-6
+review_model: claude-haiku-4-5
+pipeline:
+  review:
+    model: claude-opus-4-6
+`,
+    );
+    const config = loadConfig();
+    const resolved = resolveStepConfig(config, 'review');
+    expect(resolved.model).toBe('claude-opus-4-6');
+  });
+
+  it('returns pipeline agent override', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+agent: claude
+pipeline:
+  implement:
+    agent: codex
+    model: gpt-4o
+`,
+    );
+    const config = loadConfig();
+    const resolved = resolveStepConfig(config, 'implement');
+    expect(resolved.agent).toBe('codex');
+    expect(resolved.model).toBe('gpt-4o');
   });
 });
 

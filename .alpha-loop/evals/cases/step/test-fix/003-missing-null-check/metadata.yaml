@@ -1,0 +1,7 @@
+id: 003-missing-null-check
+description: "Test fix: null pointer error from missing null check"
+tags:
+  - test-fix
+  - null-check
+  - type-error
+source: manual

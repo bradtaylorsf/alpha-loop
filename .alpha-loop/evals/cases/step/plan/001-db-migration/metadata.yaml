@@ -1,0 +1,7 @@
+id: 001-db-migration
+description: "DB migration scenario: adding a last_login column"
+tags:
+  - plan
+  - database
+  - migration
+source: manual

@@ -1,0 +1,17 @@
+type: step
+step: plan
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the plan adequately addresses all critical aspects of a database migration
+      to add a "last_login" column. Score 1-5 based on:
+      - Score 5: Plan explicitly mentions reading existing migration files, checking test config
+        (e.g., test database setup), AND handling rollback/down migration
+      - Score 4: Plan covers two of the three areas (existing migrations, test config, rollback)
+      - Score 3: Plan covers one area or mentions migration generally without specifics
+      - Score 2: Plan is vague about migration steps
+      - Score 1: Plan ignores migration concerns entirely
+    min_score: 4
