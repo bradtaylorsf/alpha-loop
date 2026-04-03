@@ -212,7 +212,7 @@ function readPlan(planFile: string): IssuePlan {
  * Read and validate a gate result JSON file written by review/verify agents.
  * Falls back to DEFAULT_GATE if the file doesn't exist or is invalid.
  */
-function readGateResult(gateFile: string): GateResult {
+export function readGateResult(gateFile: string): GateResult {
   try {
     if (!existsSync(gateFile)) return DEFAULT_GATE;
 
@@ -252,7 +252,7 @@ function moveToSessionLogs(src: string, dest: string): void {
 /**
  * Format gate findings into a prompt section for the implementer.
  */
-function formatGateFindings(gate: GateResult, gateType: string): string {
+export function formatGateFindings(gate: GateResult, gateType: string): string {
   const unfixed = gate.findings.filter((f) => !f.fixed);
   if (unfixed.length === 0) return '';
 

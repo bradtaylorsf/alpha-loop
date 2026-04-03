@@ -7,7 +7,7 @@ import { log } from './logger.js';
 import { exec, formatTimestamp } from './shell.js';
 import { createPR, updateProjectStatus } from './github.js';
 import type { Config } from './config.js';
-import type { PipelineResult } from './pipeline.js';
+import type { PipelineResult, GateResult } from './pipeline.js';
 
 export type SessionContext = {
   name: string;
@@ -15,6 +15,7 @@ export type SessionContext = {
   resultsDir: string;
   logsDir: string;
   results: PipelineResult[];
+  sessionReviewFindings?: GateResult;
 };
 
 /**
@@ -221,6 +222,23 @@ export async function finalizeSession(
   // Transient failures — brief note, these were re-queued
   if (transientFailures.length > 0) {
     prLines.push(`*${transientFailures.length} issue(s) were re-queued due to agent rate limits.*`);
+    prLines.push('');
+  }
+
+  // Session review findings
+  if (session.sessionReviewFindings) {
+    const gate = session.sessionReviewFindings;
+    prLines.push('### Session Review');
+    prLines.push('');
+    prLines.push(`**Status:** ${gate.passed ? 'PASSED' : 'NEEDS ATTENTION'}`);
+    prLines.push(`**Summary:** ${gate.summary || 'No summary'}`);
+    if (gate.findings.length > 0) {
+      prLines.push('');
+      for (const f of gate.findings) {
+        const fixedTag = f.fixed ? ' (fixed)' : '';
+        prLines.push(`- [${f.severity.toUpperCase()}] ${f.description}${fixedTag}${f.file ? ` — \`${f.file}\`` : ''}`);
+      }
+    }
     prLines.push('');
   }
 

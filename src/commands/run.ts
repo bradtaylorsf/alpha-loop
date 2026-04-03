@@ -16,6 +16,11 @@ import { contextNeedsRefresh } from '../lib/context.js';
 import { runPreflight } from '../lib/preflight.js';
 import { syncAgentAssets, resolveHarnesses } from './sync.js';
 import { saveCapturedCase, detectFailureStep } from '../lib/eval.js';
+import { readGateResult, formatGateFindings } from '../lib/pipeline.js';
+import { spawnAgent } from '../lib/agent.js';
+import { buildSessionReviewPrompt } from '../lib/prompts.js';
+import { writeTraceToSubdir } from '../lib/traces.js';
+import { readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 
 export type RunOptions = {
   dryRun?: boolean;
@@ -403,6 +408,127 @@ export async function runCommand(options: RunOptions): Promise<void> {
       learningsDir,
       config,
     });
+  }
+
+  // Post-session holistic code review
+  if (session.results.length > 0 && !config.skipPostSessionReview && !config.dryRun) {
+    log.step('Running post-session code review...');
+
+    const projectDir = process.cwd();
+
+    // Ensure we're on the session branch
+    exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+
+    // Get full session diff
+    const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: projectDir });
+    const sessionDiff = diffResult.stdout;
+
+    if (sessionDiff.trim()) {
+      // Load vision context if available
+      const visionPath = join(projectDir, '.alpha-loop', 'vision.md');
+      const visionContext = existsSync(visionPath) ? readFileSync(visionPath, 'utf-8') : undefined;
+
+      const reviewFile = join(projectDir, 'review-session.json');
+      const reviewFileSession = join(session.logsDir, 'review-session.json');
+
+      for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+        log.info(`Session review attempt ${attempt} of ${config.maxTestRetries}`);
+
+        try {
+          const reviewPrompt = buildSessionReviewPrompt({
+            sessionName: session.name,
+            baseBranch: config.baseBranch,
+            issuesSummary: session.results.map((r) => ({
+              issueNum: r.issueNum,
+              title: r.title,
+              status: r.status,
+              testsPassing: r.testsPassing,
+            })),
+            includeSecurityScan: !config.skipPostSessionSecurity,
+            visionContext,
+          });
+
+          // Trace review prompt
+          writeTraceToSubdir(session.name, 'prompts', `session-review${attempt > 1 ? `-${attempt}` : ''}.md`, reviewPrompt);
+
+          const reviewResult = await spawnAgent({
+            agent: config.agent,
+            model: config.reviewModel,
+            prompt: reviewPrompt,
+            cwd: projectDir,
+            logFile: join(session.logsDir, `session-review${attempt > 1 ? `-${attempt}` : ''}.log`),
+            verbose: config.verbose,
+          });
+
+          // Trace review output
+          writeTraceToSubdir(session.name, 'outputs', `session-review${attempt > 1 ? `-${attempt}` : ''}.log`, reviewResult.output);
+        } catch {
+          log.warn('Session review failed, continuing without review');
+          break;
+        }
+
+        // Read gate result
+        const gate = readGateResult(reviewFile);
+
+        // Move gate file to session logs
+        if (existsSync(reviewFile)) {
+          try { renameSync(reviewFile, reviewFileSession); } catch { /* cross-device */ }
+        }
+
+        if (gate.passed) {
+          log.success(`Session review passed: ${gate.summary || 'no issues found'}`);
+          session.sessionReviewFindings = gate;
+          break;
+        }
+
+        // Review found unfixed issues — send to implementer
+        const unfixedCount = gate.findings.filter((f) => !f.fixed).length;
+        log.warn(`Session review found ${unfixedCount} unfixed issue(s)`);
+
+        if (attempt < config.maxTestRetries) {
+          const findings = formatGateFindings(gate, 'Session Review');
+          const fixPrompt = `The post-session code review found problems that need to be fixed.\n\n${findings}\n\nInstructions:\n1. Address each finding listed above\n2. Run tests to make sure nothing is broken\n3. Commit your fixes with: git commit -m "fix: address session review findings"`;
+
+          // Trace fix prompt
+          writeTraceToSubdir(session.name, 'prompts', `session-review-fix-${attempt}.md`, fixPrompt);
+
+          try {
+            const fixResult = await spawnAgent({
+              agent: config.agent,
+              model: config.model,
+              prompt: fixPrompt,
+              cwd: projectDir,
+              logFile: join(session.logsDir, `session-review-fix-${attempt}.log`),
+              verbose: config.verbose,
+            });
+
+            // Trace fix output
+            writeTraceToSubdir(session.name, 'outputs', `session-review-fix-${attempt}.log`, fixResult.output);
+
+            // Auto-commit if agent left changes
+            const fixStatus = exec('git status --porcelain', { cwd: projectDir });
+            if (fixStatus.stdout.trim()) {
+              exec('git add -A', { cwd: projectDir });
+              exec('git commit -m "fix: address session review findings"', { cwd: projectDir });
+            }
+          } catch {
+            log.warn('Session review fix failed, continuing');
+          }
+        } else {
+          log.warn('Session review: max attempts reached, continuing with unfixed findings');
+          session.sessionReviewFindings = gate;
+        }
+      }
+
+      // Clean up gate file if it wasn't moved
+      if (existsSync(reviewFile)) {
+        try { unlinkSync(reviewFile); } catch { /* ignore */ }
+      }
+    } else {
+      log.info('No changes in session diff, skipping session review');
+    }
+  } else if (config.skipPostSessionReview) {
+    log.info('Post-session review skipped');
   }
 
   // Finalize session

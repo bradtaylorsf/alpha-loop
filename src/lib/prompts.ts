@@ -176,6 +176,115 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
   return sections.join('\n');
 }
 
+export type SessionReviewPromptOptions = {
+  sessionName: string;
+  baseBranch: string;
+  issuesSummary: Array<{
+    issueNum: number;
+    title: string;
+    status: string;
+    testsPassing: boolean;
+  }>;
+  includeSecurityScan: boolean;
+  visionContext?: string;
+};
+
+/**
+ * Build the post-session holistic code review prompt.
+ * Reviews the FULL session diff (all issues combined) to catch
+ * cross-issue integration problems that per-issue reviews miss.
+ */
+export function buildSessionReviewPrompt(options: SessionReviewPromptOptions): string {
+  const { sessionName, baseBranch, issuesSummary, includeSecurityScan, visionContext } = options;
+
+  const issuesList = issuesSummary.map((i) =>
+    `- #${i.issueNum}: ${i.title} — ${i.status}${i.testsPassing ? '' : ' (tests failing)'}`,
+  ).join('\n');
+
+  const sections: string[] = [
+    `Post-session holistic code review for session: ${sessionName}`,
+    '',
+    `Run \`git diff origin/${baseBranch}...HEAD\` to see ALL changes made in this session.`,
+    'Then read the actual files that were modified.',
+    '',
+    '## Issues Processed in This Session',
+    '',
+    issuesList,
+    '',
+    '## Review Focus',
+    '',
+    'Each issue already received its own per-issue code review.',
+    'Your job is to catch problems that per-issue reviews MISS — things that only become visible when looking at ALL changes together:',
+    '',
+    '### 1. Cross-Issue Integration (MOST IMPORTANT)',
+    '- Do changes from different issues conflict or create inconsistencies?',
+    '- Are there duplicate implementations of the same concept from different issues?',
+    '- Do shared types, interfaces, or utilities remain consistent across all changes?',
+    '- Are there orphaned imports or dead code created when different issues refactored the same area?',
+    '',
+    '### 2. Completeness vs Requirements',
+    '- For each issue above, do the changes actually fulfill what the issue asked for?',
+    '- Are there any partial implementations (e.g., new types defined but never used, API endpoints without callers)?',
+    '- Did any issue introduce a feature that another issue accidentally broke?',
+    '',
+    '### 3. Code Quality',
+    '- Inconsistent naming or patterns across changes from different issues',
+    '- Dead code (functions, imports, variables) that no remaining code references',
+    '- Missing error handling at integration boundaries',
+  ];
+
+  if (includeSecurityScan) {
+    sections.push(
+      '',
+      '### 4. Security Scan',
+      '- Command injection (unquoted shell interpolation, unsanitized user input in exec)',
+      '- Path traversal (unchecked relative paths, missing boundary validation)',
+      '- Unsafe file operations (writing to user-controlled paths without validation)',
+      '- Hardcoded secrets or credentials',
+    );
+  }
+
+  if (visionContext) {
+    sections.push('', '## Product Vision (guide your review decisions)', visionContext);
+  }
+
+  sections.push(
+    '',
+    '## Actions',
+    '',
+    '- CRITICAL: Fix the issue directly, run tests, and commit with: `git commit -m "fix: address session review findings"`',
+    '- WARNING: Fix if possible, commit the fix',
+    '- INFO: Note it but do not block',
+    '',
+    '## Gate Result',
+    '',
+    'After your review, write your findings to a JSON file named `review-session.json` in the current directory.',
+    '',
+    '```json',
+    '{',
+    '  "passed": true,',
+    '  "summary": "One-line summary of session review",',
+    '  "findings": [',
+    '    {',
+    '      "severity": "critical|warning|info",',
+    '      "description": "What the issue is",',
+    '      "fixed": true,',
+    '      "file": "path/to/file.ts"',
+    '    }',
+    '  ]',
+    '}',
+    '```',
+    '',
+    'Rules:',
+    '- passed=true if all critical/warning issues are fixed.',
+    '- passed=false if any critical/warning issues remain unfixed.',
+    '- findings: list ALL issues found, with fixed=true for ones you fixed.',
+    '- If the code is clean, set passed=true with an empty findings array.',
+  );
+
+  return sections.join('\n');
+}
+
 /**
  * Build the learning extraction prompt.
  */

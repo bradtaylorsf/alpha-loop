@@ -61,6 +61,10 @@ export type Config = {
   evalTimeout: number;
   /** Auto-capture failures as eval cases at end of session (default: true). */
   autoCapture: boolean;
+  /** Skip post-session holistic code review (default: false). */
+  skipPostSessionReview: boolean;
+  /** Skip security scanning in post-session review (default: false). */
+  skipPostSessionSecurity: boolean;
   /** Per-model pricing table (cost per million tokens). */
   pricing: Record<string, ModelPricing>;
 };
@@ -102,6 +106,8 @@ const DEFAULTS: Config = {
   skipEval: false,
   evalTimeout: 300,
   autoCapture: true,
+  skipPostSessionReview: false,
+  skipPostSessionSecurity: false,
   pricing: {
     'claude-opus-4-6': { input: 15.0, output: 75.0 },
     'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
@@ -185,6 +191,8 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   SKIP_EVAL: 'skipEval',
   EVAL_TIMEOUT: 'evalTimeout',
   AUTO_CAPTURE: 'autoCapture',
+  SKIP_POST_SESSION_REVIEW: 'skipPostSessionReview',
+  SKIP_POST_SESSION_SECURITY: 'skipPostSessionSecurity',
 };
 
 function coerce(value: string, current: unknown): unknown {
@@ -234,6 +242,13 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     if (yamlKey in parsed) {
       (result as Record<string, unknown>)[configKey] = parsed[yamlKey];
     }
+  }
+
+  // Handle post_session nested config
+  if (parsed.post_session && typeof parsed.post_session === 'object') {
+    const ps = parsed.post_session as Record<string, unknown>;
+    if (ps.review === false) result.skipPostSessionReview = true;
+    if (ps.security_scan === false) result.skipPostSessionSecurity = true;
   }
 
   // Handle pricing table (nested object, not in YAML_KEY_MAP)
