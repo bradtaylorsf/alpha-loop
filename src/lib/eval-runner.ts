@@ -22,6 +22,13 @@ import {
   writeScores as writeTraceScores,
   computeScores as computeTraceScores,
 } from './traces.js';
+import {
+  loadEvalConfig,
+  cloneOrCacheFixtureRepo,
+  extractFixture,
+  setupFixture as runFixtureSetup,
+  cleanupFixture,
+} from './eval-fixtures.js';
 import type { Config } from './config.js';
 import type { CheckDefinition } from './eval-checks.js';
 import type { EvalCase, EvalResult, EvalSuiteResult } from './eval.js';
@@ -449,10 +456,16 @@ async function runStepEval(
 
 /**
  * Prepare a fixture directory for an e2e eval case.
- * Clones the repo at the specified ref into a worktree.
+ *
+ * Supports three modes:
+ *   1. Monorepo fixture — fixtureRepo matches a name in config.yaml fixture_repo.fixtures
+ *   2. Remote/local repo — fixtureRepo is a GitHub owner/repo or local path
+ *   3. Current project — fixtureRepo is empty, uses the current project as fixture
  */
 export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
   const fixtureDir = resolve(projectDir, '.worktrees', `eval-${evalCase.id}`);
+  const evalDir = join(projectDir, '.alpha-loop', 'evals');
+  const evalConfig = loadEvalConfig(evalDir);
 
   // Clean up any existing fixture
   if (existsSync(fixtureDir)) {
@@ -463,6 +476,36 @@ export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
   const repo = evalCase.fixtureRepo;
   const ref = evalCase.fixtureRef || 'main';
 
+  // Mode 1: Monorepo fixture — repo name matches a configured fixture
+  if (evalConfig.fixture_repo && evalConfig.fixture_repo.fixtures[repo]) {
+    const repoDir = cloneOrCacheFixtureRepo(evalConfig.fixture_repo, projectDir);
+    extractFixture(repoDir, repo, evalConfig.fixture_repo, fixtureDir);
+    const entry = evalConfig.fixture_repo.fixtures[repo];
+    runFixtureSetup(fixtureDir, entry);
+    return fixtureDir;
+  }
+
+  // Mode 1b: SWE-bench repo — look up base_commit from config
+  if (evalConfig.swebench_repos && evalCase.source === 'swe-bench') {
+    const repoConfig = evalConfig.swebench_repos[repo];
+    if (repoConfig) {
+      // Clone the repo at the base commit
+      const url = `https://github.com/${repo}.git`;
+      log.info(`Cloning SWE-bench repo ${repo}...`);
+      const cloneResult = exec(`git clone ${url} ${fixtureDir}`, { timeout: 120_000 });
+      if (cloneResult.exitCode !== 0) {
+        throw new Error(`Failed to clone SWE-bench repo ${repo}: ${cloneResult.stderr}`);
+      }
+      // Checkout base commit
+      const checkout = exec(`git checkout ${ref}`, { cwd: fixtureDir, timeout: 30_000 });
+      if (checkout.exitCode !== 0) {
+        throw new Error(`Failed to checkout ${ref}: ${checkout.stderr}`);
+      }
+      return fixtureDir;
+    }
+  }
+
+  // Mode 2: Remote or local repo
   if (repo.includes('/') && !existsSync(repo)) {
     // Remote repo — clone it
     const cloneResult = exec(
@@ -482,7 +525,7 @@ export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
       throw new Error(`Failed to clone local fixture ${repo}: ${cloneResult.stderr}`);
     }
   } else {
-    // Use current project as fixture
+    // Mode 3: Use current project as fixture
     const result = exec(`git worktree add ${fixtureDir} ${ref} --detach`, {
       cwd: projectDir,
       timeout: 30_000,

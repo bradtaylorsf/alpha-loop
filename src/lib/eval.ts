@@ -194,13 +194,23 @@ export function loadEvalCaseDir(dirPath: string): EvalCase | null {
       : checksRaw.status === 'ready' ? 'ready' as CapturedCaseStatus
       : undefined;
 
+    // Resolve fixture repo — support SWE-bench metadata with nested swebench.repo
+    const swebench = metadata.swebench as Record<string, unknown> | undefined;
+    let fixtureRepo = String(checksRaw.repo ?? metadata.repo ?? '');
+    let fixtureRef = String(checksRaw.fixture_ref ?? metadata.fixture_ref ?? 'main');
+
+    if (swebench && typeof swebench === 'object') {
+      if (!fixtureRepo && swebench.repo) fixtureRepo = String(swebench.repo);
+      if (fixtureRef === 'main' && swebench.base_commit) fixtureRef = String(swebench.base_commit);
+    }
+
     return {
       id,
       description: String(metadata.description ?? (issueTitle || id)),
       type: evalType,
       step: checksRaw.step ? String(checksRaw.step) as PipelineStep : undefined,
-      fixtureRepo: String(checksRaw.repo ?? metadata.repo ?? ''),
-      fixtureRef: String(checksRaw.fixture_ref ?? metadata.fixture_ref ?? 'main'),
+      fixtureRepo,
+      fixtureRef,
       issueTitle,
       issueBody: issueBody || inputText || '',
       expected: {
