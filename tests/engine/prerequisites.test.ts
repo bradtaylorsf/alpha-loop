@@ -55,6 +55,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,
     pricing: {},
+    pipeline: {},
     ...overrides,
   };
 }

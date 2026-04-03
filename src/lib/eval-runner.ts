@@ -29,7 +29,8 @@ import {
   setupFixture as runFixtureSetup,
   cleanupFixture,
 } from './eval-fixtures.js';
-import type { Config } from './config.js';
+import { estimateCost, resolveStepConfig } from './config.js';
+import type { Config, PipelineConfig, PipelineStepName } from './config.js';
 import type { CheckDefinition } from './eval-checks.js';
 import type { EvalCase, EvalResult, EvalSuiteResult } from './eval.js';
 import type { CaseResult, ScoreEntry } from './score.js';
@@ -42,6 +43,8 @@ export type EvalRunOptions = {
   caseId?: string;
   /** Verbose output. */
   verbose?: boolean;
+  /** Pipeline config overrides to merge into config before running. */
+  configOverrides?: PipelineConfig;
 };
 
 /** Extended eval case with parsed check definitions. */
@@ -59,6 +62,18 @@ export async function runEvalSuite(
   config: Config,
   options: EvalRunOptions = {},
 ): Promise<EvalSuiteResult> {
+  // Apply pipeline config overrides if provided
+  if (options.configOverrides) {
+    const mergedPipeline: PipelineConfig = { ...config.pipeline };
+    for (const [step, override] of Object.entries(options.configOverrides)) {
+      mergedPipeline[step as PipelineStepName] = {
+        ...(mergedPipeline[step as PipelineStepName] ?? {}),
+        ...override,
+      };
+    }
+    config = { ...config, pipeline: mergedPipeline };
+  }
+
   const session = `eval-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
   const results: EvalResult[] = [];
   let totalCost = 0;
@@ -127,6 +142,7 @@ export async function runEvalSuite(
     maxTestRetries: config.maxTestRetries,
     testCommand: config.testCommand,
     harnessHash,
+    pipeline: config.pipeline,
   };
 
   const entry: ScoreEntry = {
@@ -612,4 +628,75 @@ function getGitState(): Record<string, string> {
   } catch {
     return { branch: 'unknown', commit: 'unknown' };
   }
+}
+
+/** Default average token estimates per pipeline step (input, output). */
+const DEFAULT_TOKEN_ESTIMATES: Record<PipelineStepName, { input: number; output: number }> = {
+  plan: { input: 5000, output: 2000 },
+  implement: { input: 30000, output: 15000 },
+  test_fix: { input: 20000, output: 10000 },
+  review: { input: 25000, output: 5000 },
+  verify: { input: 15000, output: 3000 },
+  learn: { input: 10000, output: 3000 },
+};
+
+/** Estimate per-step token averages from historical score data. */
+function historicalTokenAverages(
+  evalsDir: string,
+): Record<string, { input: number; output: number }> | null {
+  // Token-level tracking isn't in scores.jsonl today, so return null
+  // to fall back to defaults. This hook exists for future enhancement.
+  return null;
+}
+
+export type CostEstimate = {
+  steps: Array<{
+    step: PipelineStepName;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    costPerCase: number;
+  }>;
+  totalPerCase: number;
+  totalForSuite: number;
+  caseCount: number;
+};
+
+/**
+ * Estimate the cost of running an eval suite with a given config.
+ * Uses average token counts from previous runs if available,
+ * otherwise falls back to default estimates.
+ */
+export function estimateRunCost(
+  caseCount: number,
+  config: Config,
+): CostEstimate {
+  const steps: CostEstimate['steps'] = [];
+  const pipelineSteps: PipelineStepName[] = ['plan', 'implement', 'test_fix', 'review', 'verify', 'learn'];
+
+  // Try historical averages first
+  const historical = historicalTokenAverages(join(process.cwd(), config.evalDir));
+
+  for (const step of pipelineSteps) {
+    const { model } = resolveStepConfig(config, step);
+    const tokens = (historical && historical[step]) ?? DEFAULT_TOKEN_ESTIMATES[step];
+    const costPerCase = estimateCost(model, tokens.input, tokens.output, config.pricing);
+
+    steps.push({
+      step,
+      model,
+      inputTokens: tokens.input,
+      outputTokens: tokens.output,
+      costPerCase,
+    });
+  }
+
+  const totalPerCase = steps.reduce((sum, s) => sum + s.costPerCase, 0);
+
+  return {
+    steps,
+    totalPerCase,
+    totalForSuite: totalPerCase * caseCount,
+    caseCount,
+  };
 }

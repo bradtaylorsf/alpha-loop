@@ -8,6 +8,18 @@ export type ModelPricing = {
   output: number;
 };
 
+/** The pipeline steps that support per-step agent/model overrides. */
+export type PipelineStepName = 'plan' | 'implement' | 'test_fix' | 'review' | 'verify' | 'learn';
+
+/** Per-step agent/model override. */
+export type StepConfig = {
+  agent?: string;
+  model?: string;
+};
+
+/** Per-step pipeline configuration. */
+export type PipelineConfig = Partial<Record<PipelineStepName, StepConfig>>;
+
 /**
  * Estimate cost in USD from token counts and a pricing table.
  * Returns 0 if the model is not in the pricing table.
@@ -67,6 +79,8 @@ export type Config = {
   skipPostSessionSecurity: boolean;
   /** Per-model pricing table (cost per million tokens). */
   pricing: Record<string, ModelPricing>;
+  /** Per-step agent/model overrides. */
+  pipeline: PipelineConfig;
 };
 
 const DEFAULTS: Config = {
@@ -113,7 +127,12 @@ const DEFAULTS: Config = {
     'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
     'claude-haiku-4-5': { input: 0.80, output: 4.0 },
     'codex-mini': { input: 1.50, output: 6.0 },
+    'gpt-4o': { input: 2.50, output: 10.0 },
+    'gpt-4o-mini': { input: 0.15, output: 0.60 },
+    'deepseek-v3': { input: 0.27, output: 1.10 },
+    'gemini-2.5-flash': { input: 0.15, output: 0.60 },
   },
+  pipeline: {},
 };
 
 /** Map from YAML key (snake_case) to Config key (camelCase). */
@@ -153,6 +172,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   skip_eval: 'skipEval',
   eval_timeout: 'evalTimeout',
   auto_capture: 'autoCapture',
+  pipeline: 'pipeline',
 };
 
 /** Map from env var name to Config key. */
@@ -244,6 +264,26 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     }
   }
 
+  // Handle pipeline nested config (per-step agent/model overrides)
+  if (parsed.pipeline && typeof parsed.pipeline === 'object') {
+    const pipelineRaw = parsed.pipeline as Record<string, unknown>;
+    const pipeline: PipelineConfig = {};
+    const validSteps: PipelineStepName[] = ['plan', 'implement', 'test_fix', 'review', 'verify', 'learn'];
+    for (const step of validSteps) {
+      const entry = pipelineRaw[step];
+      if (entry && typeof entry === 'object') {
+        const e = entry as Record<string, unknown>;
+        const stepCfg: StepConfig = {};
+        if (typeof e.agent === 'string') stepCfg.agent = e.agent;
+        if (typeof e.model === 'string') stepCfg.model = e.model;
+        if (Object.keys(stepCfg).length > 0) pipeline[step] = stepCfg;
+      }
+    }
+    if (Object.keys(pipeline).length > 0) {
+      result.pipeline = pipeline;
+    }
+  }
+
   // Handle post_session nested config
   if (parsed.post_session && typeof parsed.post_session === 'object') {
     const ps = parsed.post_session as Record<string, unknown>;
@@ -298,6 +338,19 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...overrides?.pricing,
   };
 
+  // Pipeline is merged specially: overrides extend YAML rather than replacing
+  const mergedPipeline: PipelineConfig = {};
+  const allSteps = new Set([
+    ...Object.keys(yamlConfig.pipeline ?? {}),
+    ...Object.keys(overrides?.pipeline ?? {}),
+  ]) as Set<PipelineStepName>;
+  for (const step of allSteps) {
+    mergedPipeline[step] = {
+      ...(yamlConfig.pipeline?.[step] ?? {}),
+      ...(overrides?.pipeline?.[step] ?? {}),
+    };
+  }
+
   const merged: Config = {
     ...DEFAULTS,
     ...autoDetect,
@@ -305,6 +358,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...envConfig,
     ...overrides,
     pricing: mergedPricing,
+    pipeline: mergedPipeline,
   };
 
   // Validate agent is a known value
@@ -319,4 +373,22 @@ export function loadConfig(overrides?: Partial<Config>): Config {
   }
 
   return merged;
+}
+
+/**
+ * Resolve the agent and model for a specific pipeline step.
+ * Checks pipeline[step] overrides first, then falls back to top-level config.
+ * For 'review', falls back to reviewModel before model.
+ */
+export function resolveStepConfig(
+  config: Config,
+  step: PipelineStepName,
+): { agent: string; model: string } {
+  const stepOverride = config.pipeline[step];
+  const agent = stepOverride?.agent ?? config.agent;
+  const fallbackModel = step === 'review'
+    ? (config.reviewModel || config.model)
+    : config.model;
+  const model = stepOverride?.model ?? fallbackModel;
+  return { agent, model };
 }

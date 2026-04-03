@@ -120,6 +120,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,
     pricing: {},
+    pipeline: {},
     ...overrides,
   };
 }

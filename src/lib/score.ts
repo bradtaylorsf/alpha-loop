@@ -128,28 +128,196 @@ export function scoresByConfig(evalsDir: string): Array<{ configHash: string; co
 }
 
 /**
- * Compute the Pareto frontier of score vs cost.
- * Returns entries where no other entry has both higher score AND lower cost.
+ * Derive a human-readable label from a config object.
+ * Looks for model names across pipeline steps and combines unique short names.
  */
-export function paretoFrontier(evalsDir: string): ScoreEntry[] {
+export function deriveConfigLabel(config: Record<string, unknown>): string {
+  const models = new Set<string>();
+
+  // Check top-level model
+  if (typeof config.model === 'string' && config.model) {
+    models.add(shortModelName(config.model));
+  }
+  if (typeof config.reviewModel === 'string' && config.reviewModel) {
+    models.add(shortModelName(config.reviewModel));
+  }
+
+  // Check pipeline step models
+  if (config.pipeline && typeof config.pipeline === 'object') {
+    for (const step of Object.values(config.pipeline as Record<string, unknown>)) {
+      if (step && typeof step === 'object') {
+        const s = step as Record<string, unknown>;
+        if (typeof s.model === 'string' && s.model) {
+          models.add(shortModelName(s.model));
+        }
+      }
+    }
+  }
+
+  return models.size > 0 ? Array.from(models).join('+') : 'default';
+}
+
+/** Shorten a model name for display (e.g. "claude-sonnet-4-6" → "sonnet"). */
+function shortModelName(model: string): string {
+  if (model.includes('opus')) return 'opus';
+  if (model.includes('sonnet')) return 'sonnet';
+  if (model.includes('haiku')) return 'haiku';
+  if (model.includes('gpt-4o-mini')) return 'gpt4o-mini';
+  if (model.includes('gpt-4o')) return 'gpt4o';
+  if (model.includes('codex-mini')) return 'codex-mini';
+  if (model.includes('deepseek')) return 'deepseek';
+  if (model.includes('gemini')) return 'gemini';
+  // Last path segment or full name
+  const parts = model.split('/');
+  return parts[parts.length - 1];
+}
+
+/**
+ * Compute the Pareto frontier of score vs cost.
+ * Returns ParetoEntry[] where no other entry has both higher score AND lower cost.
+ */
+export function paretoFrontier(evalsDir: string): ParetoEntry[] {
   const all = readScores(evalsDir);
   if (all.length === 0) return [];
 
   // Sort by composite score descending
   const sorted = [...all].sort((a, b) => b.composite - a.composite);
 
-  const frontier: ScoreEntry[] = [];
+  const frontier: ParetoEntry[] = [];
   let minCost = Infinity;
 
   for (const entry of sorted) {
     if (entry.totalCost <= minCost) {
-      frontier.push(entry);
+      const efficiency = entry.totalCost > 0 ? entry.composite / entry.totalCost : Infinity;
+      const configLabel = deriveConfigLabel(entry.config);
+      frontier.push({ ...entry, efficiency, configLabel });
       minCost = entry.totalCost;
     }
   }
 
   return frontier;
 }
+
+/**
+ * Build Pareto entries from a pre-loaded array of ScoreEntry (no filesystem).
+ */
+export function buildParetoFrontier(entries: ScoreEntry[]): ParetoEntry[] {
+  if (entries.length === 0) return [];
+
+  const sorted = [...entries].sort((a, b) => b.composite - a.composite);
+  const frontier: ParetoEntry[] = [];
+  let minCost = Infinity;
+
+  for (const entry of sorted) {
+    if (entry.totalCost <= minCost) {
+      const efficiency = entry.totalCost > 0 ? entry.composite / entry.totalCost : Infinity;
+      const configLabel = deriveConfigLabel(entry.config);
+      frontier.push({ ...entry, efficiency, configLabel });
+      minCost = entry.totalCost;
+    }
+  }
+
+  return frontier;
+}
+
+/**
+ * Format the Pareto frontier as an ASCII score-vs-cost chart.
+ * Optionally marks one entry as the current config (★).
+ */
+export function formatParetoTable(
+  frontier: ParetoEntry[],
+  currentConfigHash?: string,
+): string {
+  if (frontier.length === 0) return '  No data on the Pareto frontier.';
+
+  const lines: string[] = [];
+  const width = 58;
+
+  lines.push('┌' + '─'.repeat(width) + '┐');
+  lines.push('│' + ' Pareto Frontier: Score vs Cost'.padEnd(width) + '│');
+  lines.push('│' + ' '.repeat(width) + '│');
+
+  // Find axis bounds
+  const maxScore = Math.max(...frontier.map((e) => e.composite));
+  const minScore = Math.min(...frontier.map((e) => e.composite));
+  const maxCost = Math.max(...frontier.map((e) => e.totalCost));
+
+  // Score axis labels
+  const scoreRange = maxScore - minScore;
+  const rows = 5;
+  for (let i = rows; i >= 0; i--) {
+    const scoreVal = minScore + (scoreRange * i) / rows;
+    const label = scoreVal.toFixed(0).padStart(5);
+    let row = `│ ${label} │`;
+
+    // Plot points on this row
+    const rowChars = Array(40).fill(' ');
+    for (const entry of frontier) {
+      const yPos = scoreRange > 0
+        ? Math.round(((entry.composite - minScore) / scoreRange) * rows)
+        : Math.round(rows / 2);
+      if (yPos === i) {
+        const xPos = maxCost > 0
+          ? Math.round((entry.totalCost / maxCost) * 39)
+          : 20;
+        const marker = entry.configHash === currentConfigHash ? '★' : '●';
+        rowChars[xPos] = marker;
+      }
+    }
+    row += rowChars.join('');
+    row = row.padEnd(width + 1) + '│';
+    lines.push(row);
+  }
+
+  // X-axis
+  const costLabel = `$0${' '.repeat(16)}$${(maxCost / 2).toFixed(0)}${' '.repeat(16)}$${maxCost.toFixed(0)}`;
+  lines.push('│       └' + '─'.repeat(40) + '─' + ' '.repeat(width - 42) + '│');
+  lines.push('│        ' + costLabel.slice(0, width - 9).padEnd(width - 8) + '│');
+  lines.push('│' + ' '.repeat(width) + '│');
+
+  // Legend
+  if (currentConfigHash) {
+    lines.push('│' + ' ★ = current config    ● = alternatives on frontier'.padEnd(width) + '│');
+  }
+
+  // Recommendation: find most efficient entry
+  const sorted = [...frontier].sort((a, b) => b.efficiency - a.efficiency);
+  const best = sorted[0];
+  if (best && frontier.length > 1) {
+    const current = frontier.find((e) => e.configHash === currentConfigHash);
+    if (current && current.configHash !== best.configHash) {
+      const scoreDiff = ((current.composite - best.composite) / current.composite * 100).toFixed(0);
+      const costDiff = ((current.totalCost - best.totalCost) / current.totalCost * 100).toFixed(0);
+      const rec = ` Recommended: "${best.configLabel}" — ${scoreDiff}% less score, ${costDiff}% cheaper`;
+      lines.push('│' + ' '.repeat(width) + '│');
+      lines.push('│' + rec.padEnd(width) + '│');
+    }
+  }
+
+  lines.push('└' + '─'.repeat(width) + '┘');
+
+  // Table of entries
+  lines.push('');
+  lines.push('  Score    Cost       Efficiency  Config');
+  lines.push('  -----    ----       ----------  ------');
+  for (const entry of frontier) {
+    const marker = entry.configHash === currentConfigHash ? '★' : ' ';
+    const score = entry.composite.toFixed(1).padStart(6);
+    const cost = `$${entry.totalCost.toFixed(2)}`.padStart(8);
+    const eff = entry.efficiency === Infinity ? '     ∞' : entry.efficiency.toFixed(1).padStart(10);
+    lines.push(`${marker} ${score}    ${cost}    ${eff}  ${entry.configLabel} (${entry.configHash})`);
+  }
+
+  return lines.join('\n');
+}
+
+/** A Pareto entry with computed efficiency metric and label. */
+export type ParetoEntry = ScoreEntry & {
+  /** Efficiency = score / cost_usd. Infinity if cost is 0. */
+  efficiency: number;
+  /** Human-readable label for the config (e.g. "sonnet+haiku"). */
+  configLabel: string;
+};
 
 /** Comparison of two eval runs showing per-case changes. */
 export type RunComparison = {

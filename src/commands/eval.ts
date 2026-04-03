@@ -14,6 +14,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as readline from 'node:readline';
+import { parse as parseYaml } from 'yaml';
 import { log } from '../lib/logger.js';
 import { loadConfig } from '../lib/config.js';
 import type { Config } from '../lib/config.js';
@@ -39,16 +40,23 @@ import {
   latestScore,
   scoresByConfig,
   paretoFrontier,
+  buildParetoFrontier,
   formatScoreEntry,
+  formatParetoTable,
   compareRuns,
+  hashConfig,
+  deriveConfigLabel,
 } from '../lib/score.js';
+import type { ScoreEntry, ParetoEntry } from '../lib/score.js';
 import {
   listTraceSessions,
   listTraceIssues,
   readTraceMetadata,
   readTrace,
 } from '../lib/traces.js';
-import { runEvalSuite } from '../lib/eval-runner.js';
+import { runEvalSuite, estimateRunCost } from '../lib/eval-runner.js';
+import { resolveStepConfig } from '../lib/config.js';
+import type { PipelineStepName, PipelineConfig, StepConfig } from '../lib/config.js';
 
 export type EvalOptions = {
   tags?: string;
@@ -67,6 +75,14 @@ export type EvalSearchOptions = {
   models?: string;
   agents?: string;
   maxRuns?: string;
+  /** Only search over this pipeline step. */
+  step?: string;
+  /** Minimum acceptable score. */
+  minScore?: string;
+  /** What to optimize: 'cost' or 'efficiency'. */
+  optimize?: string;
+  /** Maximum number of eval runs (alias for maxRuns). */
+  budget?: string;
 };
 
 /** Helper to ask a question via readline. */
@@ -582,30 +598,45 @@ export function evalScoresCommand(): void {
 }
 
 /**
- * Show score/cost Pareto frontier.
+ * Show score/cost Pareto frontier with ASCII chart.
  */
 export function evalParetoCommand(): void {
-  const frontier = paretoFrontier(evalsDir(undefined, loadConfig().evalDir));
+  const config = loadConfig();
+  const frontier = paretoFrontier(evalsDir(undefined, config.evalDir));
 
   if (frontier.length === 0) {
-    log.info('No scores recorded yet.');
+    log.info('No scores recorded yet. Run `alpha-loop eval` to generate scores.');
     return;
   }
 
+  // Determine current config hash for marking
+  const currentConfigObj: Record<string, unknown> = {
+    agent: config.agent,
+    model: config.model,
+    reviewModel: config.reviewModel,
+    pipeline: config.pipeline,
+  };
+  const currentHash = hashConfig(currentConfigObj);
+
   log.step(`Pareto Frontier (${frontier.length} entries):`);
   console.log('');
-  console.log('  Score    Cost      Config');
-  console.log('  -----    ----      ------');
-
-  for (const entry of frontier) {
-    const score = entry.composite.toFixed(2).padStart(6);
-    const cost = `$${entry.totalCost.toFixed(2)}`.padStart(8);
-    console.log(`  ${score}    ${cost}    ${entry.configHash}`);
-  }
+  console.log(formatParetoTable(frontier, currentHash));
 }
 
+/** All pipeline steps available for search. */
+const ALL_PIPELINE_STEPS: PipelineStepName[] = ['plan', 'implement', 'test_fix', 'review', 'verify', 'learn'];
+
+/** Default models to search over if not specified. */
+const DEFAULT_SEARCH_MODELS = ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-opus-4-6'];
+
 /**
- * Greedy search over model/agent configs.
+ * Greedy coordinate descent search over model/agent configs.
+ *
+ * Strategy:
+ *   1. Establish baseline: run eval with current config → S₀, C₀
+ *   2. For each pipeline step, try alternative models (holding others fixed)
+ *   3. Keep Pareto-optimal changes (better score at ≤ cost, or same score at lower cost)
+ *   4. Repeat until no step can be improved or budget is exhausted
  */
 export async function evalSearchCommand(options: EvalSearchOptions): Promise<void> {
   const config = loadConfig();
@@ -616,44 +647,175 @@ export async function evalSearchCommand(options: EvalSearchOptions): Promise<voi
     return;
   }
 
-  const models = options.models?.split(',') ?? [config.model || 'default'];
-  const agents = options.agents?.split(',') ?? [config.agent];
-  const maxRuns = parseInt(options.maxRuns ?? '10', 10);
+  const models = options.models?.split(',').map((m) => m.trim()) ?? DEFAULT_SEARCH_MODELS;
+  const budget = parseInt(options.budget ?? options.maxRuns ?? '20', 10);
+  const minScore = options.minScore ? parseFloat(options.minScore) : 0;
+  const optimizeFor = options.optimize === 'cost' ? 'cost' : 'efficiency';
+  const stepsToSearch: PipelineStepName[] = options.step
+    ? [options.step as PipelineStepName]
+    : ALL_PIPELINE_STEPS;
 
-  log.step('Config Search');
+  log.step('Config Search (Greedy Coordinate Descent)');
   console.log(`  Models: ${models.join(', ')}`);
-  console.log(`  Agents: ${agents.join(', ')}`);
+  console.log(`  Steps:  ${stepsToSearch.join(', ')}`);
+  console.log(`  Budget: ${budget} eval runs`);
+  console.log(`  Min score: ${minScore}`);
+  console.log(`  Optimize: ${optimizeFor}`);
   console.log(`  Eval cases: ${cases.length}`);
-  console.log(`  Max runs: ${maxRuns}`);
   console.log('');
 
-  // Generate config variants
-  const variants: Array<{ agent: string; model: string }> = [];
-  for (const agent of agents) {
+  let runsUsed = 0;
+  const allResults: ScoreEntry[] = [];
+
+  // Step 1: Establish baseline
+  log.step('Step 1: Running baseline eval...');
+  const baselineResult = await runEvalSuite(cases, config, { verbose: options.maxRuns === undefined });
+  runsUsed++;
+
+  const baselineScore = baselineResult.composite;
+  const baselineCost = baselineResult.cases.reduce((sum, c) => sum + (c.duration * 0.001), 0); // rough proxy
+
+  const baselineConfigObj: Record<string, unknown> = {
+    agent: config.agent,
+    model: config.model,
+    reviewModel: config.reviewModel,
+    pipeline: config.pipeline,
+  };
+  allResults.push({
+    timestamp: new Date().toISOString(),
+    configHash: hashConfig(baselineConfigObj),
+    config: baselineConfigObj,
+    cases: baselineResult.cases.map((r) => ({
+      caseId: r.caseId,
+      passed: r.passed,
+      partialCredit: r.partialCredit,
+      retries: r.retries,
+      duration: r.duration,
+    })),
+    composite: baselineScore,
+    totalCost: baselineCost,
+  });
+
+  console.log(`  Baseline: score=${baselineScore.toFixed(1)}, cost=$${baselineCost.toFixed(2)}`);
+  console.log('');
+
+  // Track best config per step
+  let currentPipeline: PipelineConfig = { ...config.pipeline };
+  let bestScore = baselineScore;
+
+  // Step 2: Sweep one step at a time
+  log.step('Step 2: Sweeping pipeline steps...');
+
+  for (const step of stepsToSearch) {
+    if (runsUsed >= budget) {
+      log.info(`  Budget exhausted (${runsUsed}/${budget} runs used). Stopping.`);
+      break;
+    }
+
+    const currentResolved = resolveStepConfig({ ...config, pipeline: currentPipeline }, step);
+    log.info(`  Sweeping step: ${step} (current: ${currentResolved.model})`);
+
+    let stepBestScore = bestScore;
+    let stepBestCost = baselineCost;
+    let stepBestModel: string | null = null;
+
     for (const model of models) {
-      variants.push({ agent, model });
+      if (runsUsed >= budget) break;
+      if (model === currentResolved.model) continue; // skip current
+
+      const override: PipelineConfig = {
+        ...currentPipeline,
+        [step]: { ...(currentPipeline[step] ?? {}), model },
+      };
+
+      log.info(`    Trying ${step}=${model}...`);
+
+      const result = await runEvalSuite(cases, config, {
+        configOverrides: override,
+      });
+      runsUsed++;
+
+      const score = result.composite;
+      const cost = result.cases.reduce((sum, c) => sum + (c.duration * 0.001), 0);
+
+      const configObj: Record<string, unknown> = {
+        agent: config.agent,
+        model: config.model,
+        reviewModel: config.reviewModel,
+        pipeline: override,
+      };
+      allResults.push({
+        timestamp: new Date().toISOString(),
+        configHash: hashConfig(configObj),
+        config: configObj,
+        cases: result.cases.map((r) => ({
+          caseId: r.caseId,
+          passed: r.passed,
+          partialCredit: r.partialCredit,
+          retries: r.retries,
+          duration: r.duration,
+        })),
+        composite: score,
+        totalCost: cost,
+      });
+
+      console.log(`    ${step}=${model}: score=${score.toFixed(1)}, cost=$${cost.toFixed(2)}`);
+
+      // Check if this meets minimum score
+      if (score < minScore) {
+        console.log(`    Rejected: below min-score (${minScore})`);
+        continue;
+      }
+
+      // Is this Pareto-optimal vs current best for this step?
+      const isBetter = optimizeFor === 'cost'
+        ? (score >= stepBestScore && cost < stepBestCost) || (score > stepBestScore && cost <= stepBestCost)
+        : (score >= stepBestScore - 1 && cost < stepBestCost) || (score > stepBestScore);
+
+      if (isBetter) {
+        stepBestScore = score;
+        stepBestCost = cost;
+        stepBestModel = model;
+      }
+    }
+
+    // Keep the best change for this step
+    if (stepBestModel) {
+      currentPipeline = {
+        ...currentPipeline,
+        [step]: { ...(currentPipeline[step] ?? {}), model: stepBestModel },
+      };
+      bestScore = stepBestScore;
+      log.success(`  Adopted: ${step}=${stepBestModel} (score=${stepBestScore.toFixed(1)})`);
+    } else {
+      log.info(`  No improvement found for ${step}, keeping current.`);
     }
   }
 
-  log.info(`Generated ${variants.length} config variant(s).`);
-  log.info('To execute: run `alpha-loop eval` with each config variant.');
-  log.info('Results will be tracked in scores.jsonl for comparison.');
+  // Step 3: Report results
+  console.log('');
+  log.step('Search Complete');
+  console.log(`  Runs used: ${runsUsed}/${budget}`);
+  console.log(`  Baseline score: ${baselineScore.toFixed(1)}`);
+  console.log(`  Final score: ${bestScore.toFixed(1)}`);
   console.log('');
 
-  for (let i = 0; i < Math.min(variants.length, maxRuns); i++) {
-    const v = variants[i];
-    console.log(`  ${i + 1}. agent=${v.agent} model=${v.model}`);
+  // Show final config
+  log.step('Recommended Pipeline Config:');
+  for (const step of ALL_PIPELINE_STEPS) {
+    const resolved = resolveStepConfig({ ...config, pipeline: currentPipeline }, step);
+    const override = currentPipeline[step];
+    const marker = override?.model ? ' (changed)' : '';
+    console.log(`  ${step.padEnd(12)} agent=${resolved.agent}  model=${resolved.model}${marker}`);
   }
+  console.log('');
 
-  // Show current best
-  const configs = scoresByConfig(evalsDir(undefined, config.evalDir));
-  if (configs.length > 0) {
+  // Show Pareto frontier from all results
+  const frontier = buildParetoFrontier(allResults);
+  if (frontier.length > 1) {
+    log.step('Pareto Frontier from Search:');
     console.log('');
-    log.step('Current Rankings:');
-    for (const c of configs.slice(0, 5)) {
-      const best = Math.max(...c.scores.map((s) => s.composite));
-      console.log(`  ${c.configHash}: best=${best.toFixed(2)} (${c.scores.length} runs)`);
-    }
+    console.log(formatParetoTable(frontier, allResults[0]?.configHash));
   }
 }
 
@@ -754,4 +916,156 @@ export function evalConvertCommand(options: EvalConvertOptions): void {
   } else {
     log.warn(`Unknown direction: ${direction}. Use 'to-skill' or 'from-skill'.`);
   }
+}
+
+export type EvalEstimateOptions = {
+  config?: string;
+};
+
+/**
+ * Estimate cost of running the eval suite with a given config.
+ * Shows per-step breakdown using pricing table and average token estimates.
+ */
+export function evalEstimateCommand(options: EvalEstimateOptions): void {
+  let config: Config;
+
+  if (options.config) {
+    // Load config from specified file
+    if (!existsSync(options.config)) {
+      log.warn(`Config file not found: ${options.config}`);
+      return;
+    }
+    // parseYaml imported at top of file
+    const raw = readFileSync(options.config, 'utf-8');
+    const parsed = parseYaml(raw) as Record<string, unknown>;
+    config = loadConfig(parsed as Partial<Config>);
+  } else {
+    config = loadConfig();
+  }
+
+  const cases = loadEvalCases();
+  if (cases.length === 0) {
+    log.warn('No eval cases found.');
+    return;
+  }
+
+  const estimate = estimateRunCost(cases.length, config);
+
+  log.step('Cost Estimate');
+  console.log(`  Eval cases: ${estimate.caseCount}`);
+  console.log('');
+  console.log('  Step          Model                     Cost/Case');
+  console.log('  ----          -----                     ---------');
+
+  for (const step of estimate.steps) {
+    const stepName = step.step.padEnd(14);
+    const modelName = step.model.padEnd(24);
+    const cost = `$${step.costPerCase.toFixed(4)}`;
+    console.log(`  ${stepName}  ${modelName}  ${cost}`);
+  }
+
+  console.log('');
+  console.log(`  Total per case:  $${estimate.totalPerCase.toFixed(4)}`);
+  console.log(`  Total for suite: $${estimate.totalForSuite.toFixed(2)} (${estimate.caseCount} cases)`);
+}
+
+export type EvalCompareConfigsOptions = {
+  configA: string;
+  configB: string;
+};
+
+/**
+ * Compare two YAML config files side-by-side showing per-step model/agent differences.
+ */
+export function evalCompareConfigsCommand(configAPath: string, configBPath: string): void {
+  if (!existsSync(configAPath)) {
+    log.warn(`Config file not found: ${configAPath}`);
+    return;
+  }
+  if (!existsSync(configBPath)) {
+    log.warn(`Config file not found: ${configBPath}`);
+    return;
+  }
+
+  const configA = loadConfig({ ...loadYamlOverrides(configAPath) });
+  const configB = loadConfig({ ...loadYamlOverrides(configBPath) });
+
+  const steps: PipelineStepName[] = ['plan', 'implement', 'test_fix', 'review', 'verify', 'learn'];
+
+  log.step('Config Comparison');
+  console.log('');
+  console.log(`  Config A: ${configAPath}`);
+  console.log(`  Config B: ${configBPath}`);
+  console.log('');
+  console.log('  Step          Config A                  Config B');
+  console.log('  ----          --------                  --------');
+
+  for (const step of steps) {
+    const a = resolveStepConfig(configA, step);
+    const b = resolveStepConfig(configB, step);
+    const stepName = step.padEnd(14);
+    const aDesc = `${a.agent}/${a.model || 'default'}`.padEnd(24);
+    const bDesc = `${b.agent}/${b.model || 'default'}`;
+    const marker = (a.agent !== b.agent || a.model !== b.model) ? ' ←' : '';
+    console.log(`  ${stepName}  ${aDesc}  ${bDesc}${marker}`);
+  }
+
+  // Cost comparison
+  const cases = loadEvalCases();
+  if (cases.length > 0) {
+    const estA = estimateRunCost(cases.length, configA);
+    const estB = estimateRunCost(cases.length, configB);
+    console.log('');
+    console.log(`  Estimated cost (${cases.length} cases):`);
+    console.log(`    Config A: $${estA.totalForSuite.toFixed(2)}`);
+    console.log(`    Config B: $${estB.totalForSuite.toFixed(2)}`);
+    const diff = estB.totalForSuite - estA.totalForSuite;
+    const pct = estA.totalForSuite > 0 ? ((diff / estA.totalForSuite) * 100).toFixed(0) : '0';
+    console.log(`    Delta: ${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} (${diff >= 0 ? '+' : ''}${pct}%)`);
+  }
+}
+
+/** Load a YAML file as partial config overrides. */
+function loadYamlOverrides(path: string): Partial<Config> {
+  // parseYaml imported at top of file
+  const raw = readFileSync(path, 'utf-8');
+  const parsed = parseYaml(raw) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== 'object') return {};
+
+  const result: Partial<Config> = {};
+  if (typeof parsed.agent === 'string') result.agent = parsed.agent as Config['agent'];
+  if (typeof parsed.model === 'string') result.model = parsed.model;
+  if (typeof parsed.review_model === 'string') result.reviewModel = parsed.review_model;
+
+  // Parse pipeline
+  if (parsed.pipeline && typeof parsed.pipeline === 'object') {
+    const pipelineRaw = parsed.pipeline as Record<string, unknown>;
+    const pipeline: PipelineConfig = {};
+    const validSteps: PipelineStepName[] = ['plan', 'implement', 'test_fix', 'review', 'verify', 'learn'];
+    for (const step of validSteps) {
+      const entry = pipelineRaw[step];
+      if (entry && typeof entry === 'object') {
+        const e = entry as Record<string, unknown>;
+        const stepCfg: StepConfig = {};
+        if (typeof e.agent === 'string') stepCfg.agent = e.agent;
+        if (typeof e.model === 'string') stepCfg.model = e.model;
+        if (Object.keys(stepCfg).length > 0) pipeline[step] = stepCfg;
+      }
+    }
+    if (Object.keys(pipeline).length > 0) result.pipeline = pipeline;
+  }
+
+  // Parse pricing
+  if (parsed.pricing && typeof parsed.pricing === 'object') {
+    const pricing: Record<string, { input: number; output: number }> = {};
+    for (const [model, value] of Object.entries(parsed.pricing as Record<string, unknown>)) {
+      const v = value as Record<string, unknown>;
+      if (typeof v?.input === 'number' && typeof v?.output === 'number') {
+        pricing[model] = { input: v.input, output: v.output };
+      }
+    }
+    if (Object.keys(pricing).length > 0) result.pricing = pricing;
+  }
+
+  return result;
 }

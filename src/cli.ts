@@ -131,10 +131,14 @@ evalCmd
 
 evalCmd
   .command('search')
-  .description('Greedy search over model/agent configurations')
+  .description('Greedy coordinate descent search over model/agent configurations')
   .option('--models <models>', 'Models to test (comma-separated)')
   .option('--agents <agents>', 'Agents to test (comma-separated)')
   .option('--max-runs <n>', 'Maximum number of eval runs')
+  .option('--budget <n>', 'Maximum number of eval runs (alias for --max-runs)')
+  .option('--step <step>', 'Only search over this pipeline step')
+  .option('--min-score <score>', 'Minimum acceptable score threshold')
+  .option('--optimize <target>', 'Optimize for: cost or efficiency (default: efficiency)')
   .action(async (options) => {
     const { evalSearchCommand } = await import('./commands/eval.js');
     await evalSearchCommand(options);
@@ -154,6 +158,23 @@ evalCmd
   .action(async (run1: string, run2: string) => {
     const { evalCompareCommand } = await import('./commands/eval.js');
     evalCompareCommand(run1, run2);
+  });
+
+evalCmd
+  .command('estimate')
+  .description('Estimate cost of running the eval suite with current or specified config')
+  .option('--config <path>', 'Path to a YAML config file to estimate')
+  .action(async (options) => {
+    const { evalEstimateCommand } = await import('./commands/eval.js');
+    evalEstimateCommand(options);
+  });
+
+evalCmd
+  .command('compare-configs <configA> <configB>')
+  .description('Compare two YAML config files side-by-side')
+  .action(async (configA: string, configB: string) => {
+    const { evalCompareConfigsCommand } = await import('./commands/eval.js');
+    evalCompareConfigsCommand(configA, configB);
   });
 
 evalCmd
