@@ -30,6 +30,7 @@ import {
   scoresByConfig,
   paretoFrontier,
   formatScoreEntry,
+  compareRuns,
 } from '../lib/score.js';
 import {
   listTraceSessions,
@@ -37,9 +38,12 @@ import {
   readTraceMetadata,
   readTrace,
 } from '../lib/traces.js';
+import { runEvalSuite } from '../lib/eval-runner.js';
 
 export type EvalOptions = {
   tags?: string;
+  suite?: string;
+  case?: string;
   type?: 'full' | 'step';
   step?: string;
   verbose?: boolean;
@@ -67,10 +71,17 @@ function ask(rl: readline.Interface, question: string): Promise<string> {
  */
 export async function evalRunCommand(options: EvalOptions): Promise<void> {
   const config = loadConfig();
+
+  // Map --suite to type filter
+  let type = options.type;
+  if (options.suite === 'step') type = 'step';
+  if (options.suite === 'e2e') type = 'full';
+
   const cases = loadEvalCases({
     tags: options.tags?.split(','),
-    type: options.type,
+    type,
     step: options.step as any,
+    caseId: options.case,
   });
 
   if (cases.length === 0) {
@@ -85,18 +96,76 @@ export async function evalRunCommand(options: EvalOptions): Promise<void> {
   for (const evalCase of cases) {
     console.log(`  ${formatEvalCase(evalCase)}`);
   }
+  console.log('');
+
+  // Show previous score for comparison
+  const previousScore = latestScore(evalsDir());
+
+  // Execute the eval suite
+  const result = await runEvalSuite(cases, config, {
+    caseId: options.case,
+    verbose: options.verbose,
+  });
+
+  // Print results
+  console.log('');
+  log.step('Results:');
+  console.log('');
+
+  for (const caseResult of result.cases) {
+    const icon = caseResult.passed ? 'PASS' : 'FAIL';
+    const credit = caseResult.partialCredit < 1 ? ` (credit=${caseResult.partialCredit.toFixed(2)})` : '';
+    const error = caseResult.error ? ` — ${caseResult.error}` : '';
+    console.log(`  ${icon}  ${caseResult.caseId}  ${caseResult.duration}s${credit}${error}`);
+  }
 
   console.log('');
-  log.info('Eval execution requires fixture repos and agent invocation.');
-  log.info('Use `alpha-loop eval search` for automated config comparison.');
-  log.info('');
+  console.log(`  Score: ${result.composite}`);
+  console.log(`  Pass:  ${result.passCount}/${result.cases.length}`);
+  console.log(`  Time:  ${result.totalDuration}s`);
 
-  // Show current scores
-  const latest = latestScore(evalsDir());
-  if (latest) {
-    log.info(`Latest score: ${formatScoreEntry(latest)}`);
-  } else {
-    log.info('No scores recorded yet. Run evals to generate scores.');
+  // Compare to previous run
+  if (previousScore) {
+    const delta = result.composite - previousScore.composite;
+    const arrow = delta > 0 ? '+' : '';
+    console.log(`  Delta: ${arrow}${delta.toFixed(2)} (prev: ${previousScore.composite})`);
+  }
+}
+
+/**
+ * Compare two eval runs.
+ */
+export function evalCompareCommand(run1: string, run2: string): void {
+  const comparison = compareRuns(evalsDir(), run1, run2);
+
+  if (!comparison) {
+    log.warn('Could not find one or both runs. Use run index (1-based) or timestamp prefix.');
+    log.info('Run `alpha-loop eval scores` to see available runs.');
+    return;
+  }
+
+  log.step('Run Comparison:');
+  console.log('');
+  console.log(`  Run 1: ${comparison.run1.timestamp.split('T')[0]}  score=${comparison.run1.composite}  cost=$${comparison.run1.totalCost.toFixed(2)}`);
+  console.log(`  Run 2: ${comparison.run2.timestamp.split('T')[0]}  score=${comparison.run2.composite}  cost=$${comparison.run2.totalCost.toFixed(2)}`);
+  console.log('');
+
+  const scoreDelta = comparison.scoreDelta;
+  const scoreArrow = scoreDelta > 0 ? '+' : '';
+  console.log(`  Score delta: ${scoreArrow}${scoreDelta.toFixed(2)}`);
+  console.log(`  Cost delta:  ${comparison.costDelta >= 0 ? '+' : ''}$${comparison.costDelta.toFixed(2)}`);
+  console.log('');
+
+  // Per-case breakdown
+  console.log('  Case                              Run 1    Run 2    Delta');
+  console.log('  ----                              -----    -----    -----');
+
+  for (const c of comparison.cases) {
+    const name = c.caseId.padEnd(32);
+    const s1 = c.run1Passed === null ? '  -  ' : (c.run1Passed ? ' PASS' : ' FAIL');
+    const s2 = c.run2Passed === null ? '  -  ' : (c.run2Passed ? ' PASS' : ' FAIL');
+    const delta = c.delta === 0 ? '   =' : (c.delta > 0 ? `  +${c.delta.toFixed(1)}` : `  ${c.delta.toFixed(1)}`);
+    console.log(`  ${name}  ${s1}    ${s2}    ${delta}`);
   }
 }
 

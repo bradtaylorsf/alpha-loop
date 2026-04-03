@@ -18,6 +18,8 @@ import { log } from './logger.js';
 import type { Config } from './config.js';
 import { computeCompositeScore, appendScore, hashConfig } from './score.js';
 import type { CaseResult, ScoreEntry } from './score.js';
+import { parseChecks } from './eval-checks.js';
+import type { CheckDefinition } from './eval-checks.js';
 
 /** The pipeline step that a step-level eval targets. */
 export type PipelineStep = 'plan' | 'implement' | 'test' | 'review' | 'verify';
@@ -64,6 +66,10 @@ export type EvalCase = {
   timeout: number;
   /** Source: how this case was captured ('manual', 'auto-capture', 'swe-bench'). */
   source: string;
+  /** Machine-checkable acceptance criteria (from checks.yaml). */
+  checks?: CheckDefinition[];
+  /** For step cases: raw input text (from input.md). */
+  inputText?: string;
 };
 
 /** Result of running a single eval case. */
@@ -138,41 +144,155 @@ export function loadEvalCase(filePath: string): EvalCase | null {
 }
 
 /**
+ * Load an eval case from a directory containing issue.md, checks.yaml, metadata.yaml.
+ */
+export function loadEvalCaseDir(dirPath: string): EvalCase | null {
+  try {
+    const metadataPath = join(dirPath, 'metadata.yaml');
+    const checksPath = join(dirPath, 'checks.yaml');
+    const issuePath = join(dirPath, 'issue.md');
+    const inputPath = join(dirPath, 'input.md');
+
+    if (!existsSync(metadataPath) || !existsSync(checksPath)) return null;
+
+    const metadata = parseYaml(readFileSync(metadataPath, 'utf-8')) as Record<string, unknown>;
+    const checksRaw = parseYaml(readFileSync(checksPath, 'utf-8')) as Record<string, unknown>;
+
+    // Parse issue.md — title is the first markdown heading, body is the rest
+    let issueTitle = '';
+    let issueBody = '';
+    if (existsSync(issuePath)) {
+      const issueContent = readFileSync(issuePath, 'utf-8');
+      const titleMatch = issueContent.match(/^#\s+(.+)$/m);
+      issueTitle = titleMatch ? titleMatch[1].trim() : '';
+      issueBody = titleMatch
+        ? issueContent.slice(titleMatch.index! + titleMatch[0].length).trim()
+        : issueContent;
+    }
+
+    // Parse input.md for step cases
+    let inputText: string | undefined;
+    if (existsSync(inputPath)) {
+      inputText = readFileSync(inputPath, 'utf-8');
+    }
+
+    const id = basename(dirPath);
+    const type = String(checksRaw.type ?? metadata.type ?? 'e2e');
+    const evalType = type === 'step' ? 'step' : 'full';
+
+    const checks = parseChecks(checksRaw);
+    const pipelineSteps = Array.isArray(metadata.pipeline_steps)
+      ? metadata.pipeline_steps.map(String)
+      : undefined;
+
+    return {
+      id,
+      description: String(metadata.description ?? (issueTitle || id)),
+      type: evalType,
+      step: checksRaw.step ? String(checksRaw.step) as PipelineStep : undefined,
+      fixtureRepo: String(checksRaw.repo ?? metadata.repo ?? ''),
+      fixtureRef: String(checksRaw.fixture_ref ?? metadata.fixture_ref ?? 'main'),
+      issueTitle,
+      issueBody: issueBody || inputText || '',
+      expected: {
+        success: true,
+        testsPassing: checks.some((c) => c.type === 'test_pass') ? true : undefined,
+      },
+      tags: Array.isArray(metadata.tags) ? metadata.tags.map(String) : [],
+      timeout: typeof checksRaw.timeout === 'number' ? checksRaw.timeout : (typeof metadata.timeout === 'number' ? metadata.timeout : 0),
+      source: String(metadata.source ?? 'manual'),
+      checks,
+      inputText,
+    };
+  } catch (err) {
+    log.warn(`Failed to load eval case dir ${dirPath}: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
+/**
  * Load all eval cases from the evals directory.
- * Optionally filter by tags or type.
+ * Supports both flat case-*.yaml files and directory-based cases under cases/{e2e,step}/.
+ * Optionally filter by tags, type, step, or caseId prefix.
  */
 export function loadEvalCases(options?: {
   projectDir?: string;
   tags?: string[];
   type?: 'full' | 'step';
   step?: PipelineStep;
+  caseId?: string;
 }): EvalCase[] {
   const dir = evalsDir(options?.projectDir);
   if (!existsSync(dir)) return [];
 
-  const files = readdirSync(dir).filter((f) => f.endsWith('.yaml') && f.startsWith('case-'));
   const cases: EvalCase[] = [];
 
+  // Load flat case-*.yaml files (backward compat)
+  const files = readdirSync(dir).filter((f) => f.endsWith('.yaml') && f.startsWith('case-'));
   for (const file of files) {
     const evalCase = loadEvalCase(join(dir, file));
-    if (!evalCase) continue;
+    if (evalCase) cases.push(evalCase);
+  }
 
-    // Filter by type
-    if (options?.type && evalCase.type !== options.type) continue;
+  // Load directory-based cases under cases/{e2e,step}/
+  const casesDir = join(dir, 'cases');
+  if (existsSync(casesDir)) {
+    for (const suiteType of ['e2e', 'step']) {
+      const suiteDir = join(casesDir, suiteType);
+      if (!existsSync(suiteDir)) continue;
+
+      // Step cases may have an extra level: step/{review,plan,...}/001-name/
+      if (suiteType === 'step') {
+        const stepDirs = readdirSync(suiteDir, { withFileTypes: true })
+          .filter((d) => d.isDirectory());
+        for (const stepDir of stepDirs) {
+          const stepPath = join(suiteDir, stepDir.name);
+          // Check if this is a case dir or a step-name dir
+          if (existsSync(join(stepPath, 'metadata.yaml'))) {
+            const evalCase = loadEvalCaseDir(stepPath);
+            if (evalCase) cases.push(evalCase);
+          } else {
+            // Nested: step/{stepName}/{caseDir}/
+            const caseDirs = readdirSync(stepPath, { withFileTypes: true })
+              .filter((d) => d.isDirectory());
+            for (const caseDir of caseDirs) {
+              const evalCase = loadEvalCaseDir(join(stepPath, caseDir.name));
+              if (evalCase) cases.push(evalCase);
+            }
+          }
+        }
+      } else {
+        const caseDirs = readdirSync(suiteDir, { withFileTypes: true })
+          .filter((d) => d.isDirectory());
+        for (const caseDir of caseDirs) {
+          const evalCase = loadEvalCaseDir(join(suiteDir, caseDir.name));
+          if (evalCase) cases.push(evalCase);
+        }
+      }
+    }
+  }
+
+  // Apply filters
+  const filtered = cases.filter((evalCase) => {
+    // Filter by case ID prefix
+    if (options?.caseId && !evalCase.id.startsWith(options.caseId)) return false;
+
+    // Filter by type (map 'e2e' suite to 'full' type)
+    if (options?.type && evalCase.type !== options.type) return false;
 
     // Filter by step
-    if (options?.step && evalCase.step !== options.step) continue;
+    if (options?.step && evalCase.step !== options.step) return false;
 
     // Filter by tags (any match)
     if (options?.tags && options.tags.length > 0) {
       const hasTag = options.tags.some((t) => evalCase.tags.includes(t));
-      if (!hasTag) continue;
+      if (!hasTag) return false;
     }
 
-    cases.push(evalCase);
-  }
+    return true;
+  });
 
-  return cases.sort((a, b) => a.id.localeCompare(b.id));
+  return filtered.sort((a, b) => a.id.localeCompare(b.id));
 }
 
 /**

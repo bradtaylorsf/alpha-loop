@@ -1,0 +1,512 @@
+/**
+ * Eval Runner — executes eval cases against the pipeline or individual steps.
+ *
+ * For e2e cases: clones fixture repo, runs processIssue(), runs acceptance checks.
+ * For step cases: loads input, runs a single pipeline step, checks output.
+ */
+import { existsSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { log } from './logger.js';
+import { exec } from './shell.js';
+import { spawnAgent } from './agent.js';
+import { buildImplementPrompt, buildReviewPrompt } from './prompts.js';
+import { processIssue } from './pipeline.js';
+import { runChecks } from './eval-checks.js';
+import { computeCompositeScore, appendScore, hashConfig } from './score.js';
+import {
+  writeTrace,
+  writeTraceMetadata,
+  writeRunManifest,
+  writeConfigSnapshot,
+  writeScores as writeTraceScores,
+  computeScores as computeTraceScores,
+} from './traces.js';
+import type { Config } from './config.js';
+import type { CheckDefinition } from './eval-checks.js';
+import type { EvalCase, EvalResult, EvalSuiteResult } from './eval.js';
+import type { CaseResult, ScoreEntry } from './score.js';
+import type { SessionContext } from './session.js';
+import type { PipelineResult } from './pipeline.js';
+
+/** Options for running the eval suite. */
+export type EvalRunOptions = {
+  /** Only run this specific case ID (prefix match). */
+  caseId?: string;
+  /** Verbose output. */
+  verbose?: boolean;
+};
+
+/** Extended eval case with parsed check definitions. */
+export type EvalCaseWithChecks = EvalCase & {
+  checks?: CheckDefinition[];
+  /** For step cases: raw input text. */
+  inputText?: string;
+};
+
+/**
+ * Run a full eval suite: iterate over cases, execute, collect results.
+ */
+export async function runEvalSuite(
+  cases: EvalCaseWithChecks[],
+  config: Config,
+  options: EvalRunOptions = {},
+): Promise<EvalSuiteResult> {
+  const session = `eval-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
+  const results: EvalResult[] = [];
+  let totalCost = 0;
+
+  // Snapshot harness for tracking
+  const harnessHash = snapshotHarness(config);
+
+  log.step(`Eval run: ${session} (${cases.length} cases, harness=${harnessHash})`);
+
+  // Write config snapshot to traces
+  try {
+    writeConfigSnapshot(session, JSON.stringify(config, null, 2));
+  } catch { /* non-fatal */ }
+
+  for (const evalCase of cases) {
+    if (options.caseId && !evalCase.id.startsWith(options.caseId)) continue;
+
+    log.step(`Running: ${evalCase.id} — ${evalCase.description}`);
+    const startTime = Date.now();
+
+    try {
+      const result = evalCase.type === 'step'
+        ? await runStepEval(evalCase, config, session, options)
+        : await runE2eEval(evalCase, config, session, options);
+
+      results.push(result);
+      if (options.verbose) {
+        const icon = result.passed ? 'PASS' : 'FAIL';
+        log.info(`  ${icon}: ${evalCase.id} (${result.duration}s, credit=${result.partialCredit})`);
+      }
+    } catch (err) {
+      const duration = Math.round((Date.now() - startTime) / 1000);
+      results.push({
+        caseId: evalCase.id,
+        passed: false,
+        partialCredit: 0,
+        retries: 0,
+        duration,
+        error: err instanceof Error ? err.message : String(err),
+        details: { successMatch: false, filesMatch: false, testsMatch: false, diffMatch: false },
+      });
+      log.warn(`  ERROR: ${evalCase.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Compute composite score
+  const caseResults: CaseResult[] = results.map((r) => ({
+    caseId: r.caseId,
+    passed: r.passed,
+    partialCredit: r.partialCredit,
+    retries: r.retries,
+    duration: r.duration,
+    error: r.error,
+  }));
+
+  const composite = computeCompositeScore(caseResults);
+  const passCount = results.filter((r) => r.passed).length;
+  const failCount = results.length - passCount;
+  const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+
+  // Record to score history
+  const configObj: Record<string, unknown> = {
+    agent: config.agent,
+    model: config.model,
+    reviewModel: config.reviewModel,
+    maxTestRetries: config.maxTestRetries,
+    testCommand: config.testCommand,
+    harnessHash,
+  };
+
+  const entry: ScoreEntry = {
+    timestamp: new Date().toISOString(),
+    configHash: hashConfig(configObj),
+    config: configObj,
+    cases: caseResults,
+    composite,
+    totalCost,
+  };
+
+  appendScore(join(process.cwd(), config.evalDir), entry);
+
+  // Write trace scores
+  try {
+    const traceResults = results.map((r) => ({
+      issueNum: parseInt(r.caseId.replace(/\D/g, '')) || 0,
+      status: r.passed ? 'success' as const : 'failure' as const,
+      testsPassing: r.details.testsMatch,
+      verifyPassing: false,
+      verifySkipped: true,
+      retries: r.retries,
+      duration: r.duration,
+      filesChanged: 0,
+      stepsCompleted: [],
+    }));
+    writeTraceScores(session, computeTraceScores(traceResults));
+  } catch { /* non-fatal */ }
+
+  // Write run manifest
+  try {
+    const gitState = getGitState();
+    writeRunManifest(session, {
+      runId: session,
+      startedAt: new Date(Date.now() - totalDuration * 1000).toISOString(),
+      completedAt: new Date().toISOString(),
+      issues: results.map((r) => parseInt(r.caseId.replace(/\D/g, '')) || 0),
+      config: {
+        agent: String(config.agent),
+        model: String(config.model),
+        reviewModel: String(config.reviewModel),
+        testCommand: String(config.testCommand),
+        baseBranch: String(config.baseBranch),
+      },
+      gitState: {
+        branch: gitState.branch,
+        commit: gitState.commit,
+      },
+      totalDuration,
+    });
+  } catch { /* non-fatal */ }
+
+  return { cases: results, composite, totalDuration, passCount, failCount };
+}
+
+/**
+ * Run a single e2e eval case.
+ * Clones/resets the fixture repo, runs processIssue, checks results.
+ */
+async function runE2eEval(
+  evalCase: EvalCaseWithChecks,
+  config: Config,
+  session: string,
+  options: EvalRunOptions,
+): Promise<EvalResult> {
+  const startTime = Date.now();
+  const projectDir = process.cwd();
+  const fixtureDir = prepareFixture(evalCase, projectDir);
+
+  try {
+    // Create a minimal session context for the pipeline
+    const evalSession: SessionContext = {
+      name: session,
+      branch: `eval/${evalCase.id}`,
+      resultsDir: join(projectDir, '.alpha-loop', 'sessions', session),
+      logsDir: join(projectDir, '.alpha-loop', 'sessions', session, 'logs'),
+      results: [],
+    };
+    mkdirSync(evalSession.resultsDir, { recursive: true });
+    mkdirSync(evalSession.logsDir, { recursive: true });
+
+    // Override config for eval context
+    const evalConfig: Config = {
+      ...config,
+      skipReview: config.skipReview,
+      autoMerge: false,
+      evalTimeout: evalCase.timeout || config.evalTimeout,
+    };
+
+    // Run the pipeline
+    const issueNum = parseInt(evalCase.id.replace(/\D/g, '')) || 9999;
+    const pipelineResult = await processIssue(
+      issueNum,
+      evalCase.issueTitle,
+      evalCase.issueBody,
+      evalConfig,
+      evalSession,
+    );
+
+    // Collect actual results for evaluation
+    const diff = getDiff(fixtureDir);
+    const filesChanged = getFilesChanged(fixtureDir);
+    const duration = Math.round((Date.now() - startTime) / 1000);
+
+    // Run checks if defined
+    if (evalCase.checks && evalCase.checks.length > 0) {
+      const checkResults = await runChecks(evalCase.checks, {
+        cwd: fixtureDir,
+        testCommand: config.testCommand,
+        diff,
+        filesChanged,
+        output: '',
+      });
+
+      return {
+        caseId: evalCase.id,
+        passed: checkResults.allPassed,
+        partialCredit: checkResults.avgScore,
+        retries: 0,
+        duration,
+        details: {
+          successMatch: pipelineResult.status === 'success' === evalCase.expected.success,
+          filesMatch: checkResults.results.some((r) => r.passed),
+          testsMatch: pipelineResult.testsPassing === (evalCase.expected.testsPassing ?? true),
+          diffMatch: checkResults.allPassed,
+        },
+      };
+    }
+
+    // Fall back to legacy evaluation
+    const { evaluateResult } = await import('./eval.js');
+    return evaluateResult(evalCase, {
+      success: pipelineResult.status === 'success',
+      testsPassing: pipelineResult.testsPassing,
+      diff,
+      filesChanged,
+      output: '',
+      retries: 0,
+      duration,
+    });
+  } finally {
+    // Clean up fixture
+    try {
+      if (fixtureDir.includes('.worktrees/eval-')) {
+        rmSync(fixtureDir, { recursive: true, force: true });
+      }
+    } catch { /* non-fatal */ }
+  }
+}
+
+/**
+ * Run a single step-level eval case.
+ * Loads input, runs the targeted step, checks output.
+ */
+async function runStepEval(
+  evalCase: EvalCaseWithChecks,
+  config: Config,
+  session: string,
+  options: EvalRunOptions,
+): Promise<EvalResult> {
+  const startTime = Date.now();
+  const input = evalCase.inputText ?? evalCase.issueBody;
+  const step = evalCase.step ?? 'review';
+
+  let output = '';
+
+  try {
+    // Run the targeted pipeline step
+    switch (step) {
+      case 'plan': {
+        const result = await spawnAgent({
+          agent: config.agent,
+          model: config.model,
+          prompt: `Plan the implementation for the following issue:\n\n${input}`,
+          cwd: process.cwd(),
+          timeout: (evalCase.timeout || 60) * 1000,
+        });
+        output = result.output;
+        break;
+      }
+      case 'implement': {
+        const prompt = buildImplementPrompt({
+          issueNum: 0,
+          title: evalCase.issueTitle,
+          body: input,
+        });
+        const result = await spawnAgent({
+          agent: config.agent,
+          model: config.model,
+          prompt,
+          cwd: process.cwd(),
+          timeout: (evalCase.timeout || 120) * 1000,
+        });
+        output = result.output;
+        break;
+      }
+      case 'review': {
+        const prompt = buildReviewPrompt({
+          issueNum: 0,
+          title: evalCase.issueTitle,
+          body: input,
+          baseBranch: config.baseBranch,
+        });
+        const result = await spawnAgent({
+          agent: config.agent,
+          model: config.reviewModel || config.model,
+          prompt,
+          cwd: process.cwd(),
+          timeout: (evalCase.timeout || 60) * 1000,
+        });
+        output = result.output;
+        break;
+      }
+      case 'test': {
+        const result = exec(config.testCommand || 'npm test', {
+          cwd: process.cwd(),
+          timeout: (evalCase.timeout || 120) * 1000,
+        });
+        output = result.stdout + '\n' + result.stderr;
+        break;
+      }
+      case 'verify': {
+        output = 'Verify step eval not yet supported';
+        break;
+      }
+    }
+  } catch (err) {
+    output = `Step ${step} failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  const duration = Math.round((Date.now() - startTime) / 1000);
+
+  // Run checks
+  if (evalCase.checks && evalCase.checks.length > 0) {
+    const checkResults = await runChecks(evalCase.checks, {
+      cwd: process.cwd(),
+      output,
+      judgeModel: config.evalModel || undefined,
+    });
+
+    return {
+      caseId: evalCase.id,
+      passed: checkResults.allPassed,
+      partialCredit: checkResults.avgScore,
+      retries: 0,
+      duration,
+      details: {
+        successMatch: true,
+        filesMatch: true,
+        testsMatch: true,
+        diffMatch: checkResults.allPassed,
+      },
+    };
+  }
+
+  // Fall back to legacy output-contains check
+  const outputMatch = evalCase.expected.outputContains
+    ? evalCase.expected.outputContains.every((s) => output.includes(s))
+    : true;
+
+  return {
+    caseId: evalCase.id,
+    passed: outputMatch,
+    partialCredit: outputMatch ? 1 : 0,
+    retries: 0,
+    duration,
+    details: {
+      successMatch: true,
+      filesMatch: true,
+      testsMatch: true,
+      diffMatch: outputMatch,
+    },
+  };
+}
+
+/**
+ * Prepare a fixture directory for an e2e eval case.
+ * Clones the repo at the specified ref into a worktree.
+ */
+export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
+  const fixtureDir = resolve(projectDir, '.worktrees', `eval-${evalCase.id}`);
+
+  // Clean up any existing fixture
+  if (existsSync(fixtureDir)) {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+  mkdirSync(fixtureDir, { recursive: true });
+
+  const repo = evalCase.fixtureRepo;
+  const ref = evalCase.fixtureRef || 'main';
+
+  if (repo.includes('/') && !existsSync(repo)) {
+    // Remote repo — clone it
+    const cloneResult = exec(
+      `git clone --depth 1 --branch ${ref} https://github.com/${repo}.git ${fixtureDir}`,
+      { timeout: 120_000 },
+    );
+    if (cloneResult.exitCode !== 0) {
+      throw new Error(`Failed to clone fixture repo ${repo}: ${cloneResult.stderr}`);
+    }
+  } else if (existsSync(repo)) {
+    // Local repo — copy via git worktree or clone
+    const cloneResult = exec(
+      `git clone --local --branch ${ref} ${repo} ${fixtureDir}`,
+      { timeout: 30_000 },
+    );
+    if (cloneResult.exitCode !== 0) {
+      throw new Error(`Failed to clone local fixture ${repo}: ${cloneResult.stderr}`);
+    }
+  } else {
+    // Use current project as fixture
+    const result = exec(`git worktree add ${fixtureDir} ${ref} --detach`, {
+      cwd: projectDir,
+      timeout: 30_000,
+    });
+    if (result.exitCode !== 0) {
+      // Worktree might already exist, try direct clone
+      exec(`git clone --local --branch ${ref} ${projectDir} ${fixtureDir}`, { timeout: 30_000 });
+    }
+  }
+
+  return fixtureDir;
+}
+
+/**
+ * Snapshot the current harness state (prompts + skills + config) as a hash.
+ */
+export function snapshotHarness(config: Config): string {
+  const parts: string[] = [];
+
+  // Hash config
+  parts.push(JSON.stringify({
+    agent: config.agent,
+    model: config.model,
+    reviewModel: config.reviewModel,
+    testCommand: config.testCommand,
+    maxTestRetries: config.maxTestRetries,
+  }));
+
+  // Hash skills directory
+  const skillsDir = join(process.cwd(), '.alpha-loop', 'templates', 'skills');
+  if (existsSync(skillsDir)) {
+    try {
+      const result = exec(`find ${skillsDir} -type f | sort | xargs cat`, { timeout: 5000 });
+      parts.push(result.stdout);
+    } catch { /* non-fatal */ }
+  }
+
+  // Hash agent prompts
+  const agentsDir = join(process.cwd(), '.alpha-loop', 'templates', 'agents');
+  if (existsSync(agentsDir)) {
+    try {
+      const result = exec(`find ${agentsDir} -type f | sort | xargs cat`, { timeout: 5000 });
+      parts.push(result.stdout);
+    } catch { /* non-fatal */ }
+  }
+
+  return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 12);
+}
+
+/** Get the current git diff in a directory. */
+function getDiff(cwd: string): string {
+  try {
+    const result = exec('git diff HEAD', { cwd, timeout: 10_000 });
+    return result.stdout;
+  } catch {
+    return '';
+  }
+}
+
+/** Get list of changed files in a directory. */
+function getFilesChanged(cwd: string): string[] {
+  try {
+    const result = exec('git diff HEAD --name-only', { cwd, timeout: 10_000 });
+    return result.stdout.trim().split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Get current git state for manifest. */
+function getGitState(): Record<string, string> {
+  try {
+    const branch = exec('git rev-parse --abbrev-ref HEAD', { timeout: 5000 }).stdout.trim();
+    const commit = exec('git rev-parse HEAD', { timeout: 5000 }).stdout.trim();
+    return { branch, commit };
+  } catch {
+    return { branch: 'unknown', commit: 'unknown' };
+  }
+}

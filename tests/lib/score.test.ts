@@ -10,6 +10,7 @@ import {
   scoresByConfig,
   paretoFrontier,
   formatScoreEntry,
+  compareRuns,
 } from '../../src/lib/score.js';
 import type { CaseResult, ScoreEntry } from '../../src/lib/score.js';
 
@@ -186,6 +187,128 @@ describe('paretoFrontier', () => {
     // Should include: (90,10), (80,5), (60,3) — not (70,8)
     expect(frontier).toHaveLength(3);
     expect(frontier.map((e) => e.composite)).toEqual([90, 80, 60]);
+  });
+});
+
+describe('compareRuns', () => {
+  it('returns null when no scores exist', () => {
+    expect(compareRuns(tempDir, '1', '2')).toBeNull();
+  });
+
+  it('compares two runs by 1-based index', () => {
+    const entry1: ScoreEntry = {
+      timestamp: '2026-04-01T10:00:00Z',
+      configHash: 'aaa',
+      config: {},
+      cases: [
+        { caseId: 'case-a', passed: true, partialCredit: 1, retries: 0, duration: 60 },
+        { caseId: 'case-b', passed: false, partialCredit: 0, retries: 1, duration: 120 },
+      ],
+      composite: 49.5,
+      totalCost: 2.0,
+    };
+    const entry2: ScoreEntry = {
+      timestamp: '2026-04-02T10:00:00Z',
+      configHash: 'bbb',
+      config: {},
+      cases: [
+        { caseId: 'case-a', passed: true, partialCredit: 1, retries: 0, duration: 50 },
+        { caseId: 'case-b', passed: true, partialCredit: 1, retries: 0, duration: 80 },
+      ],
+      composite: 99.35,
+      totalCost: 3.0,
+    };
+
+    appendScore(tempDir, entry1);
+    appendScore(tempDir, entry2);
+
+    const result = compareRuns(tempDir, '1', '2');
+    expect(result).not.toBeNull();
+    expect(result!.scoreDelta).toBeCloseTo(49.85);
+    expect(result!.costDelta).toBe(1.0);
+    expect(result!.cases).toHaveLength(2);
+
+    const caseA = result!.cases.find((c) => c.caseId === 'case-a')!;
+    expect(caseA.run1Passed).toBe(true);
+    expect(caseA.run2Passed).toBe(true);
+    expect(caseA.delta).toBe(0);
+
+    const caseB = result!.cases.find((c) => c.caseId === 'case-b')!;
+    expect(caseB.run1Passed).toBe(false);
+    expect(caseB.run2Passed).toBe(true);
+    expect(caseB.delta).toBe(1);
+  });
+
+  it('compares by timestamp prefix', () => {
+    const entry1: ScoreEntry = {
+      timestamp: '2026-04-01T10:00:00Z',
+      configHash: 'aaa',
+      config: {},
+      cases: [{ caseId: 'x', passed: true, partialCredit: 1, retries: 0, duration: 30 }],
+      composite: 99.7,
+      totalCost: 1.0,
+    };
+    const entry2: ScoreEntry = {
+      timestamp: '2026-04-02T10:00:00Z',
+      configHash: 'bbb',
+      config: {},
+      cases: [{ caseId: 'x', passed: false, partialCredit: 0, retries: 2, duration: 90 }],
+      composite: -0.2,
+      totalCost: 0.5,
+    };
+
+    appendScore(tempDir, entry1);
+    appendScore(tempDir, entry2);
+
+    const result = compareRuns(tempDir, '2026-04-01', '2026-04-02');
+    expect(result).not.toBeNull();
+    expect(result!.run1.timestamp).toContain('2026-04-01');
+    expect(result!.run2.timestamp).toContain('2026-04-02');
+  });
+
+  it('returns null for invalid references', () => {
+    appendScore(tempDir, {
+      timestamp: '2026-04-01T10:00:00Z',
+      configHash: 'aaa',
+      config: {},
+      cases: [],
+      composite: 50,
+      totalCost: 1,
+    });
+
+    expect(compareRuns(tempDir, '1', '99')).toBeNull();
+    expect(compareRuns(tempDir, 'nonexistent', '1')).toBeNull();
+  });
+
+  it('handles cases present in only one run', () => {
+    const entry1: ScoreEntry = {
+      timestamp: '2026-04-01T10:00:00Z',
+      configHash: 'aaa',
+      config: {},
+      cases: [{ caseId: 'only-in-1', passed: true, partialCredit: 1, retries: 0, duration: 30 }],
+      composite: 100,
+      totalCost: 1,
+    };
+    const entry2: ScoreEntry = {
+      timestamp: '2026-04-02T10:00:00Z',
+      configHash: 'bbb',
+      config: {},
+      cases: [{ caseId: 'only-in-2', passed: true, partialCredit: 1, retries: 0, duration: 30 }],
+      composite: 100,
+      totalCost: 1,
+    };
+
+    appendScore(tempDir, entry1);
+    appendScore(tempDir, entry2);
+
+    const result = compareRuns(tempDir, '1', '2')!;
+    expect(result.cases).toHaveLength(2);
+    const c1 = result.cases.find((c) => c.caseId === 'only-in-1')!;
+    expect(c1.run1Passed).toBe(true);
+    expect(c1.run2Passed).toBeNull();
+    const c2 = result.cases.find((c) => c.caseId === 'only-in-2')!;
+    expect(c2.run1Passed).toBeNull();
+    expect(c2.run2Passed).toBe(true);
   });
 });
 
