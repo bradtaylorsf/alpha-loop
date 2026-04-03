@@ -18,6 +18,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './logger.js';
+import { computeCompositeScore } from './score.js';
+import type { CaseResult } from './score.js';
 
 /** Known trace file names within an issue trace directory (backward compat). */
 export type TraceFile =
@@ -282,11 +284,15 @@ export function computeScores(results: PipelineResultForScores[]): ScoresJson {
   const avgRetries = total > 0 ? results.reduce((sum, r) => sum + r.retries, 0) / total : 0;
   const avgDuration = total > 0 ? results.reduce((sum, r) => sum + r.duration, 0) / total : 0;
 
-  // Composite score: weighted combination of pass rate, retry efficiency, and duration efficiency
-  const retryPenalty = Math.min(avgRetries / 3, 1); // 3+ retries avg = max penalty
-  const compositeScore = total > 0
-    ? Math.round((passRate * 80 + (1 - retryPenalty) * 20) * 10) / 10
-    : 0;
+  // Use the canonical composite score formula from score.ts
+  const caseResults: CaseResult[] = results.map((r) => ({
+    caseId: String(r.issueNum),
+    passed: r.status === 'success',
+    partialCredit: r.status === 'success' ? 1 : 0,
+    retries: r.retries,
+    duration: r.duration,
+  }));
+  const compositeScore = computeCompositeScore(caseResults);
 
   return {
     composite_score: compositeScore,
