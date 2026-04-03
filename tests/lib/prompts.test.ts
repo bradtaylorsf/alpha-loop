@@ -91,7 +91,8 @@ describe('buildReviewPrompt', () => {
     expect(prompt).toContain('### 1. Functional Completeness (MOST IMPORTANT)');
     expect(prompt).toContain('### 2. Integration Gaps');
     expect(prompt).toContain('### 3. Code Quality');
-    expect(prompt).toContain('### 4. UX Review');
+    expect(prompt).toContain('### 4. Documentation Sync');
+    expect(prompt).toContain('### 5. UX Review');
   });
 
   test('includes Actions section with severity levels', () => {

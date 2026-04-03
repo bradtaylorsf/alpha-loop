@@ -28,6 +28,7 @@ You review code changes for a completed GitHub issue. You have full edit permiss
 - TypeScript `any` types
 - Console.log left in code
 - Code that doesn't match project conventions
+- **Stale documentation**: if CLI commands, config options, or directory structure changed, update README.md and CLAUDE.md in the same commit
 
 ## What to Report (Not Fix)
 
