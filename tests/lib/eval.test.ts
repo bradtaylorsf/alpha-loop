@@ -147,7 +147,7 @@ describe('evaluateResult', () => {
     });
 
     expect(result.passed).toBe(false);
-    expect(result.partialCredit).toBe(0.5); // 2 of 4 checks pass
+    expect(result.partialCredit).toBe(0.6); // 3 of 5 checks pass (successMatch, filesMatch, outputMatch)
   });
 
   it('checks diffNotContains', () => {

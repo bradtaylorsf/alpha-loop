@@ -52,6 +52,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipEval: false,
     evalTimeout: 300,
     autoCapture: true,
+    skipPostSessionReview: false,
+    skipPostSessionSecurity: false,
     pricing: {},
     ...overrides,
   };

@@ -117,6 +117,8 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     skipEval: false,
     evalTimeout: 300,
     autoCapture: true,
+    skipPostSessionReview: false,
+    skipPostSessionSecurity: false,
     pricing: {},
     ...overrides,
   };

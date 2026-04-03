@@ -274,7 +274,8 @@ describe('computeScores', () => {
 
     const scores = computeScores(results);
     expect(scores.aggregate.pass_rate).toBe(1);
-    expect(scores.composite_score).toBe(100);
+    // score.ts formula: (1/1)*100 - 0.1*0 - 0.01*100 = 99
+    expect(scores.composite_score).toBe(99);
   });
 });
 
