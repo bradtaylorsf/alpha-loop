@@ -419,6 +419,166 @@ export function updateProjectStatus(
 }
 
 /**
+ * Create a new issue. Returns the created issue number.
+ * Uses --body-file for shell safety (same pattern as commentIssue).
+ */
+export function createIssue(repo: string, title: string, body: string, labels: string[], milestone?: number): number {
+  const bodyFile = join(tmpdir(), `alpha-loop-issue-body-${Date.now()}`);
+  writeFileSync(bodyFile, body, 'utf-8');
+  try {
+    const labelFlags = labels.map((l) => `--label ${JSON.stringify(l)}`).join(' ');
+    const milestoneFlag = milestone ? ` --milestone ${milestone}` : '';
+    const result = exec(
+      `gh issue create --repo "${repo}" --title ${JSON.stringify(title)} --body-file "${bodyFile}" ${labelFlags}${milestoneFlag}`,
+    );
+    if (result.exitCode !== 0) {
+      log.warn(`Failed to create issue: ${result.stderr}`);
+      return 0;
+    }
+    // gh issue create returns the URL, e.g. https://github.com/owner/repo/issues/42
+    const match = result.stdout.trim().match(/(\d+)\s*$/);
+    return match ? parseInt(match[1], 10) : 0;
+  } finally {
+    try { unlinkSync(bodyFile); } catch { /* cleanup best-effort */ }
+  }
+}
+
+/**
+ * Update an existing issue's title and/or body.
+ */
+export function updateIssue(repo: string, issueNum: number, updates: { title?: string; body?: string }): void {
+  let bodyFile: string | undefined;
+  try {
+    let cmd = `gh issue edit ${issueNum} --repo "${repo}"`;
+    if (updates.title) {
+      cmd += ` --title ${JSON.stringify(updates.title)}`;
+    }
+    if (updates.body !== undefined) {
+      bodyFile = join(tmpdir(), `alpha-loop-issue-body-${Date.now()}`);
+      writeFileSync(bodyFile, updates.body, 'utf-8');
+      cmd += ` --body-file "${bodyFile}"`;
+    }
+    const result = exec(cmd);
+    if (result.exitCode !== 0) {
+      log.warn(`Failed to update issue #${issueNum}: ${result.stderr}`);
+    }
+  } finally {
+    if (bodyFile) {
+      try { unlinkSync(bodyFile); } catch { /* cleanup best-effort */ }
+    }
+  }
+}
+
+/**
+ * Close an issue with an optional reason.
+ */
+export function closeIssue(repo: string, issueNum: number, reason?: 'completed' | 'not_planned'): void {
+  const reasonFlag = reason ? ` --reason "${reason}"` : '';
+  const result = exec(
+    `gh issue close ${issueNum} --repo "${repo}"${reasonFlag}`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to close issue #${issueNum}: ${result.stderr}`);
+  }
+}
+
+/**
+ * Create a milestone. Returns the milestone number.
+ */
+export function createMilestone(repo: string, title: string, description: string, dueOn?: string): number {
+  const dueOnFlag = dueOn ? ` -f due_on="${dueOn}"` : '';
+  const result = exec(
+    `gh api "repos/${repo}/milestones" -X POST -f title=${JSON.stringify(title)} -f description=${JSON.stringify(description)}${dueOnFlag}`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to create milestone: ${result.stderr}`);
+    return 0;
+  }
+  try {
+    const data = JSON.parse(result.stdout) as { number: number };
+    return data.number;
+  } catch {
+    log.warn('Failed to parse milestone response');
+    return 0;
+  }
+}
+
+/**
+ * Assign an issue to a milestone by milestone number.
+ */
+export function setIssueMilestone(repo: string, issueNum: number, milestoneNum: number): void {
+  const result = exec(
+    `gh api "repos/${repo}/issues/${issueNum}" -X PATCH -F milestone=${milestoneNum}`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to set milestone on issue #${issueNum}: ${result.stderr}`);
+  }
+}
+
+/**
+ * List all open issues (no label filter). Default limit 100.
+ */
+export function listOpenIssues(repo: string, limit = 100): Issue[] {
+  const result = exec(
+    `gh issue list --repo "${repo}" --state open --json number,title,body,labels --limit ${limit}`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to list open issues: ${result.stderr}`);
+    return [];
+  }
+  try {
+    const raw = JSON.parse(result.stdout) as Array<{
+      number: number;
+      title: string;
+      body: string;
+      labels: Array<{ name: string }>;
+    }>;
+    return raw.map((issue) => ({
+      number: issue.number,
+      title: issue.title,
+      body: issue.body ?? '',
+      labels: (issue.labels ?? []).map((l) => l.name),
+    }));
+  } catch {
+    log.warn('Failed to parse open issues JSON');
+    return [];
+  }
+}
+
+/**
+ * Create a GitHub Project v2. Returns the project number.
+ */
+export function createProject(owner: string, title: string): number {
+  const result = exec(
+    `gh project create --owner "${owner}" --title ${JSON.stringify(title)} --format json`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to create project: ${result.stderr}`);
+    return 0;
+  }
+  try {
+    const data = JSON.parse(result.stdout) as { number: number };
+    return data.number;
+  } catch {
+    log.warn('Failed to parse project response');
+    return 0;
+  }
+}
+
+/**
+ * Add an issue to a GitHub Project v2.
+ */
+export function addIssueToProject(owner: string, projectNum: number, repo: string, issueNum: number): void {
+  const issueUrl = `https://github.com/${repo}/issues/${issueNum}`;
+  const result = exec(
+    `gh project item-add ${projectNum} --owner "${owner}" --url "${issueUrl}"`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to add issue #${issueNum} to project: ${result.stderr}`);
+  }
+}
+
+/**
  * Truncate PR body at 30k chars to stay within GitHub limits.
  */
 function truncateBody(body: string): string {
