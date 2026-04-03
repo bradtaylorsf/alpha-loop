@@ -34,6 +34,10 @@ export type Config = {
   verbose: boolean;
   harnesses: string[];
   setupCommand: string;
+  evalDir: string;
+  evalModel: string;
+  skipEval: boolean;
+  evalTimeout: number;
 };
 
 const DEFAULTS: Config = {
@@ -68,6 +72,10 @@ const DEFAULTS: Config = {
   verbose: false,
   harnesses: [],
   setupCommand: '',
+  evalDir: '.alpha-loop/evals',
+  evalModel: '',
+  skipEval: false,
+  evalTimeout: 300,
 };
 
 /** Map from YAML key (snake_case) to Config key (camelCase). */
@@ -102,6 +110,10 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   run_full: 'runFull',
   verbose: 'verbose',
   setup_command: 'setupCommand',
+  eval_dir: 'evalDir',
+  eval_model: 'evalModel',
+  skip_eval: 'skipEval',
+  eval_timeout: 'evalTimeout',
 };
 
 /** Map from env var name to Config key. */
@@ -135,6 +147,10 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   RUN_FULL: 'runFull',
   VERBOSE: 'verbose',
   SETUP_COMMAND: 'setupCommand',
+  EVAL_DIR: 'evalDir',
+  EVAL_MODEL: 'evalModel',
+  SKIP_EVAL: 'skipEval',
+  EVAL_TIMEOUT: 'evalTimeout',
 };
 
 function coerce(value: string, current: unknown): unknown {

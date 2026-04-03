@@ -20,6 +20,7 @@ import { runTests } from './testing.js';
 import { runVerify } from './verify.js';
 import { extractLearnings, getLearningContext } from './learning.js';
 import { saveResult, getPreviousResult } from './session.js';
+import { writeTrace, writeTraceMetadata } from './traces.js';
 import type { Config } from './config.js';
 import type { SessionContext } from './session.js';
 
@@ -192,6 +193,7 @@ export type PipelineResult = {
   verifySkipped: boolean;
   duration: number;
   filesChanged: number;
+  evalScore?: number;
 };
 
 /**
@@ -677,6 +679,34 @@ Rules:
     body,
     config,
   });
+
+  // --- Step 9b: Write full traces (Meta-Harness style) ---
+  if (!config.dryRun) {
+    try {
+      writeTraceMetadata(session.name, issueNum, {
+        issueNum,
+        title,
+        status: testsPassing ? 'success' : 'failure',
+        duration,
+        retries: testRetries,
+        testsPassing,
+        verifyPassing,
+        verifySkipped,
+        filesChanged: runDiff ? (runDiff.match(/^diff --git/gm) ?? []).length : 0,
+        prUrl,
+        timestamp: new Date().toISOString(),
+        agent: config.agent,
+        model: config.model,
+      });
+      if (runDiff) writeTrace(session.name, issueNum, 'diff.patch', runDiff);
+      if (testOutput) writeTrace(session.name, issueNum, 'test-output.txt', testOutput);
+      if (reviewForLearnings) writeTrace(session.name, issueNum, 'review-output.json', reviewForLearnings);
+      if (verifyOutput) writeTrace(session.name, issueNum, 'verify-output.json', verifyOutput);
+      if (plan.summary) writeTrace(session.name, issueNum, 'plan.json', JSON.stringify(plan, null, 2));
+    } catch (err) {
+      log.warn(`Failed to write traces for #${issueNum}: ${err}`);
+    }
+  }
 
   // --- Step 10: Update issue status ---
   log.step('Step 10: Updating issue status');

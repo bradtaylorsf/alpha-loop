@@ -120,6 +120,10 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     milestone: '',
     harnesses: [],
     setupCommand: '',
+    evalDir: '.alpha-loop/evals',
+    evalModel: '',
+    skipEval: false,
+    evalTimeout: 300,
     ...overrides,
   };
 }
