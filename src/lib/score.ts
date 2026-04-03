@@ -151,6 +151,71 @@ export function paretoFrontier(evalsDir: string): ScoreEntry[] {
   return frontier;
 }
 
+/** Comparison of two eval runs showing per-case changes. */
+export type RunComparison = {
+  run1: ScoreEntry;
+  run2: ScoreEntry;
+  scoreDelta: number;
+  costDelta: number;
+  cases: Array<{
+    caseId: string;
+    run1Passed: boolean | null;
+    run2Passed: boolean | null;
+    run1Score: number | null;
+    run2Score: number | null;
+    delta: number;
+  }>;
+};
+
+/**
+ * Compare two eval runs by index (1-based) or timestamp prefix.
+ * Returns per-case deltas and aggregate score/cost changes.
+ */
+export function compareRuns(evalsDir: string, ref1: string, ref2: string): RunComparison | null {
+  const scores = readScores(evalsDir);
+  if (scores.length === 0) return null;
+
+  const resolve = (ref: string): ScoreEntry | undefined => {
+    // Try as 1-based index
+    const idx = parseInt(ref, 10);
+    if (!isNaN(idx) && idx >= 1 && idx <= scores.length) {
+      return scores[idx - 1];
+    }
+    // Try as timestamp prefix
+    return scores.find((s) => s.timestamp.startsWith(ref));
+  };
+
+  const run1 = resolve(ref1);
+  const run2 = resolve(ref2);
+  if (!run1 || !run2) return null;
+
+  // Build per-case comparison
+  const allCaseIds = new Set<string>();
+  for (const c of run1.cases) allCaseIds.add(c.caseId);
+  for (const c of run2.cases) allCaseIds.add(c.caseId);
+
+  const cases = Array.from(allCaseIds).sort().map((caseId) => {
+    const c1 = run1.cases.find((c) => c.caseId === caseId);
+    const c2 = run2.cases.find((c) => c.caseId === caseId);
+    return {
+      caseId,
+      run1Passed: c1?.passed ?? null,
+      run2Passed: c2?.passed ?? null,
+      run1Score: c1?.partialCredit ?? null,
+      run2Score: c2?.partialCredit ?? null,
+      delta: (c2?.partialCredit ?? 0) - (c1?.partialCredit ?? 0),
+    };
+  });
+
+  return {
+    run1,
+    run2,
+    scoreDelta: run2.composite - run1.composite,
+    costDelta: run2.totalCost - run1.totalCost,
+    cases,
+  };
+}
+
 /**
  * Format a score entry for display.
  */

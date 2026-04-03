@@ -95,6 +95,8 @@ evalCmd
   .command('run', { isDefault: true })
   .description('Run the eval suite and compute composite score')
   .option('--tags <tags>', 'Filter by tags (comma-separated)')
+  .option('--suite <suite>', 'Run only a suite: step (fast) or e2e (slow)')
+  .option('--case <id>', 'Run a single eval case by ID prefix')
   .option('--type <type>', 'Filter by type: full or step')
   .option('--step <step>', 'Filter by pipeline step (plan, implement, test, review, verify)')
   .option('--verbose', 'Show detailed output')
@@ -144,6 +146,14 @@ evalCmd
   .action(async () => {
     const { evalParetoCommand } = await import('./commands/eval.js');
     evalParetoCommand();
+  });
+
+evalCmd
+  .command('compare <run1> <run2>')
+  .description('Compare two eval runs showing per-case changes')
+  .action(async (run1: string, run2: string) => {
+    const { evalCompareCommand } = await import('./commands/eval.js');
+    evalCompareCommand(run1, run2);
   });
 
 evalCmd

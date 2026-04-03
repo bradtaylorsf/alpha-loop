@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   loadEvalCase,
+  loadEvalCaseDir,
   loadEvalCases,
   saveEvalCase,
   evaluateResult,
@@ -194,6 +195,136 @@ describe('evaluateResult', () => {
 
     expect(result.retries).toBe(3);
     expect(result.duration).toBe(180);
+  });
+});
+
+describe('loadEvalCaseDir', () => {
+  it('loads a directory-based e2e eval case', () => {
+    const caseDir = join(tempDir, '.alpha-loop', 'evals', 'cases', 'e2e', '001-add-health');
+    mkdirSync(caseDir, { recursive: true });
+
+    writeFileSync(join(caseDir, 'issue.md'), `# Add GET /api/health endpoint
+
+Add a health check endpoint that returns uptime.
+
+## Requirements
+- GET /api/health returns 200
+`);
+
+    writeFileSync(join(caseDir, 'checks.yaml'), `type: e2e
+repo: eval-ts-api
+timeout: 600
+checks:
+  - type: test_pass
+  - type: file_exists
+    path: src/routes/health.ts
+  - type: grep
+    file: src/routes/health.ts
+    pattern: uptime
+`);
+
+    writeFileSync(join(caseDir, 'metadata.yaml'), `category: backend
+difficulty: easy
+tags: [typescript, express, api]
+source: manual
+`);
+
+    const loaded = loadEvalCaseDir(caseDir);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.id).toBe('001-add-health');
+    expect(loaded!.type).toBe('full');
+    expect(loaded!.issueTitle).toBe('Add GET /api/health endpoint');
+    expect(loaded!.issueBody).toContain('health check endpoint');
+    expect(loaded!.tags).toEqual(['typescript', 'express', 'api']);
+    expect(loaded!.checks).toHaveLength(3);
+    expect(loaded!.checks![0].type).toBe('test_pass');
+    expect(loaded!.checks![1].type).toBe('file_exists');
+    expect(loaded!.checks![2].type).toBe('grep');
+  });
+
+  it('loads a directory-based step eval case with input.md', () => {
+    const caseDir = join(tempDir, '.alpha-loop', 'evals', 'cases', 'step', 'review', '001-catch-sqli');
+    mkdirSync(caseDir, { recursive: true });
+
+    writeFileSync(join(caseDir, 'input.md'), `const query = "SELECT * FROM users WHERE id = " + userId;`);
+
+    writeFileSync(join(caseDir, 'checks.yaml'), `type: step
+step: review
+checks:
+  - type: keyword_present
+    keywords: [SQL injection, parameterized]
+  - type: keyword_absent
+    keywords: [looks good]
+`);
+
+    writeFileSync(join(caseDir, 'metadata.yaml'), `category: security
+difficulty: easy
+tags: [security, sql]
+source: manual
+`);
+
+    const loaded = loadEvalCaseDir(caseDir);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.type).toBe('step');
+    expect(loaded!.step).toBe('review');
+    expect(loaded!.inputText).toContain('SELECT * FROM users');
+    expect(loaded!.checks).toHaveLength(2);
+    expect(loaded!.tags).toEqual(['security', 'sql']);
+  });
+
+  it('returns null when metadata.yaml is missing', () => {
+    const caseDir = join(tempDir, 'empty-case');
+    mkdirSync(caseDir, { recursive: true });
+    expect(loadEvalCaseDir(caseDir)).toBeNull();
+  });
+});
+
+describe('loadEvalCases — directory-based', () => {
+  it('loads directory-based cases alongside flat YAML cases', () => {
+    // Create a flat case
+    saveEvalCase({ ...sampleCase, id: 'flat-case' }, tempDir);
+
+    // Create a directory-based e2e case
+    const e2eDir = join(tempDir, '.alpha-loop', 'evals', 'cases', 'e2e', '001-test');
+    mkdirSync(e2eDir, { recursive: true });
+    writeFileSync(join(e2eDir, 'metadata.yaml'), 'tags: [test]\nsource: manual\n');
+    writeFileSync(join(e2eDir, 'checks.yaml'), 'type: e2e\nchecks:\n  - type: test_pass\n');
+    writeFileSync(join(e2eDir, 'issue.md'), '# Test Issue\nBody here.\n');
+
+    const cases = loadEvalCases({ projectDir: tempDir });
+    expect(cases.length).toBeGreaterThanOrEqual(2);
+
+    const ids = cases.map((c) => c.id);
+    expect(ids).toContain('flat-case');
+    expect(ids).toContain('001-test');
+  });
+
+  it('filters directory-based cases by caseId prefix', () => {
+    // Create two directory-based cases
+    for (const name of ['001-alpha', '002-beta']) {
+      const dir = join(tempDir, '.alpha-loop', 'evals', 'cases', 'e2e', name);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'metadata.yaml'), 'tags: [test]\nsource: manual\n');
+      writeFileSync(join(dir, 'checks.yaml'), 'type: e2e\nchecks: []\n');
+      writeFileSync(join(dir, 'issue.md'), `# ${name}\nBody.\n`);
+    }
+
+    const filtered = loadEvalCases({ projectDir: tempDir, caseId: '001' });
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].id).toBe('001-alpha');
+  });
+
+  it('loads step-level cases from nested step directories', () => {
+    const stepDir = join(tempDir, '.alpha-loop', 'evals', 'cases', 'step', 'review', '001-sqli');
+    mkdirSync(stepDir, { recursive: true });
+    writeFileSync(join(stepDir, 'metadata.yaml'), 'tags: [security]\nsource: manual\n');
+    writeFileSync(join(stepDir, 'checks.yaml'), 'type: step\nstep: review\nchecks:\n  - type: keyword_present\n    keywords: [SQLi]\n');
+    writeFileSync(join(stepDir, 'input.md'), 'vulnerable code here');
+
+    const cases = loadEvalCases({ projectDir: tempDir, type: 'step' });
+    expect(cases).toHaveLength(1);
+    expect(cases[0].type).toBe('step');
+    expect(cases[0].step).toBe('review');
   });
 });
 
