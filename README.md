@@ -213,10 +213,13 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop plan` | Generate a full project scope (milestones + issues) from seed inputs using AI |
 | `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
 | `alpha-loop plan --dry-run` | Display the plan without creating any GitHub resources |
+| `alpha-loop plan --yes --seed <file>` | Non-interactive mode: accept all AI recommendations |
 | `alpha-loop triage` | Analyze and improve existing issues (staleness, clarity, size, duplicates) |
 | `alpha-loop triage --dry-run` | Display findings without making changes |
+| `alpha-loop triage --yes` | Non-interactive mode: apply all AI-recommended triage actions |
 | `alpha-loop roadmap` | Organize open issues into milestones using AI analysis |
 | `alpha-loop roadmap --dry-run` | Display proposed roadmap without making changes |
+| `alpha-loop roadmap --yes` | Non-interactive mode: apply all AI-recommended assignments |
 
 ### Run Options
 

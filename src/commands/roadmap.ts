@@ -26,6 +26,7 @@ import {
 
 export type RoadmapOptions = {
   dryRun?: boolean;
+  yes?: boolean;
 };
 
 /** Truncate issue bodies to stay within agent context limits. */
@@ -123,32 +124,39 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
   }
 
   // ── Interactive review ─────────────────────────────────────────────────────
-  const choices = parsed.assignments.map((a) => {
-    const current = a.currentMilestone || 'unassigned';
-    return {
-      name: `#${a.issueNum} ${a.title} → ${a.milestone} [currently: ${current}]`,
-      value: a.issueNum,
-      checked: a.selected,
-    };
-  });
+  let selectedNums: number[];
 
-  const selectedNums = await checkbox({
-    message: 'Select assignments to apply:',
-    choices,
-  });
+  if (options.yes) {
+    selectedNums = parsed.assignments.filter((a) => a.selected).map((a) => a.issueNum);
+    log.info(`--yes: applying all ${selectedNums.length} milestone assignment(s)`);
+  } else {
+    const choices = parsed.assignments.map((a) => {
+      const current = a.currentMilestone || 'unassigned';
+      return {
+        name: `#${a.issueNum} ${a.title} → ${a.milestone} [currently: ${current}]`,
+        value: a.issueNum,
+        checked: a.selected,
+      };
+    });
 
-  if (selectedNums.length === 0) {
-    log.info('No assignments selected.');
-    return;
-  }
+    selectedNums = await checkbox({
+      message: 'Select assignments to apply:',
+      choices,
+    });
 
-  const proceed = await confirm({
-    message: `Create ${newMilestones.length} milestone(s) and assign ${selectedNums.length} issue(s)?`,
-  });
+    if (selectedNums.length === 0) {
+      log.info('No assignments selected.');
+      return;
+    }
 
-  if (!proceed) {
-    log.info('Cancelled.');
-    return;
+    const proceed = await confirm({
+      message: `Create ${newMilestones.length} milestone(s) and assign ${selectedNums.length} issue(s)?`,
+    });
+
+    if (!proceed) {
+      log.info('Cancelled.');
+      return;
+    }
   }
 
   // ── Execute ────────────────────────────────────────────────────────────────
