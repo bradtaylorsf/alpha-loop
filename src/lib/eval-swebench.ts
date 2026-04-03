@@ -9,7 +9,7 @@
  *   - princeton-nlp/SWE-bench_Lite (300 curated issues)
  *   - princeton-nlp/SWE-bench_Verified (500 human-verified issues)
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { exec } from './shell.js';
@@ -60,18 +60,30 @@ export function downloadDataset(datasetId: string, outputPath: string): void {
   const dir = join(outputPath, '..');
   mkdirSync(dir, { recursive: true });
 
-  const script = `
-import json
-from datasets import load_dataset
-ds = load_dataset('${datasetId}', split='test')
-with open('${outputPath}', 'w') as f:
-    for entry in ds:
-        f.write(json.dumps(entry) + '\\n')
-print(f'Downloaded {len(ds)} entries to ${outputPath}')
-`.trim();
+  // Validate datasetId to prevent injection (must be owner/dataset format)
+  if (!/^[\w.-]+\/[\w._-]+$/.test(datasetId)) {
+    throw new Error(`Invalid dataset ID: ${datasetId}. Expected format: owner/dataset-name`);
+  }
+
+  // Use a temp Python script file instead of inline -c to avoid shell escaping issues
+  const scriptPath = join(dir, '_download_dataset.py');
+  const scriptContent = [
+    'import json, sys, os',
+    'from datasets import load_dataset',
+    `ds = load_dataset(${JSON.stringify(datasetId)}, split="test")`,
+    `output_path = ${JSON.stringify(outputPath)}`,
+    'with open(output_path, "w") as f:',
+    '    for entry in ds:',
+    '        f.write(json.dumps(entry) + "\\n")',
+    'print(f"Downloaded {len(ds)} entries to {output_path}")',
+  ].join('\n');
+  writeFileSync(scriptPath, scriptContent);
 
   log.info(`Downloading ${datasetId} from HuggingFace...`);
-  const result = exec(`python3 -c "${script.replace(/"/g, '\\"')}"`, { timeout: 300_000 });
+  const result = exec(`python3 ${scriptPath}`, { timeout: 300_000 });
+
+  // Clean up temp script
+  try { rmSync(scriptPath); } catch { /* non-fatal */ }
   if (result.exitCode !== 0) {
     throw new Error(
       `Failed to download dataset. Ensure Python and 'datasets' are installed:\n` +
