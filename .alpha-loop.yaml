@@ -19,3 +19,18 @@ max_test_retries: 3
 # Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
   - claude-code
+
+# Per-model pricing (cost per million tokens) for cost tracking
+pricing:
+  claude-opus-4-6:
+    input: 15.0
+    output: 75.0
+  claude-sonnet-4-6:
+    input: 3.0
+    output: 15.0
+  claude-haiku-4-5:
+    input: 0.80
+    output: 4.0
+  codex-mini:
+    input: 1.50
+    output: 6.0

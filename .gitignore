@@ -3,6 +3,7 @@ dist/
 .worktrees/
 sessions/
 .alpha-loop/sessions/
+.alpha-loop/traces/
 .alpha-loop/auth/
 logs/*
 !logs/.gitkeep

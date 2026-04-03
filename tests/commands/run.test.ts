@@ -116,6 +116,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     evalModel: '',
     skipEval: false,
     evalTimeout: 300,
+    pricing: {},
     ...overrides,
   };
 }
