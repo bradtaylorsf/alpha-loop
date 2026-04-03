@@ -15,6 +15,7 @@ import { hasVision } from '../lib/vision.js';
 import { contextNeedsRefresh } from '../lib/context.js';
 import { runPreflight } from '../lib/preflight.js';
 import { syncAgentAssets, resolveHarnesses } from './sync.js';
+import { saveCapturedCase, detectFailureStep } from '../lib/eval.js';
 
 export type RunOptions = {
   dryRun?: boolean;
@@ -368,6 +369,28 @@ export async function runCommand(options: RunOptions): Promise<void> {
       }
 
       activeIssueNum = null;
+    }
+  }
+
+  // Auto-capture failures as eval case skeletons
+  if (config.autoCapture && session.results.length > 0) {
+    const failures = session.results.filter((r) => r.status === 'failure');
+    if (failures.length > 0) {
+      log.step(`Auto-capturing ${failures.length} failure(s) as eval cases...`);
+      for (const failure of failures) {
+        try {
+          const step = detectFailureStep(failure);
+          saveCapturedCase({
+            issueNum: failure.issueNum,
+            title: failure.title,
+            step,
+            session: session.name,
+          });
+        } catch (err) {
+          log.warn(`Failed to auto-capture issue #${failure.issueNum}: ${err instanceof Error ? err.message : err}`);
+        }
+      }
+      log.info('Run "alpha-loop eval capture" to add failure descriptions to these cases.');
     }
   }
 
