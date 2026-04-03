@@ -52,7 +52,7 @@ program
 
 program
   .command('vision')
-  .description('Interactive project vision setup')
+  .description('(deprecated) Interactive project vision setup — use "plan" instead')
   .action(visionCommand);
 
 program
