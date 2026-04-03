@@ -149,9 +149,13 @@ alpha-loop eval import-swebench
 The evolve command runs a Meta-Harness-style optimization loop: a proposer agent reads full execution traces, scores, and source code, then proposes targeted changes to prompts, skills, or config. Changes are evaluated against the eval suite — improvements are kept, regressions are reverted (autoresearch keep/discard pattern).
 
 ```bash
-alpha-loop evolve                    # Run up to 5 iterations
-alpha-loop evolve --max-iterations 10
-alpha-loop evolve --dry-run          # Preview without changes
+alpha-loop evolve                         # Run up to 5 iterations
+alpha-loop evolve --max-iterations 10     # Run 10 iterations
+alpha-loop evolve --continuous            # Run until manually stopped (Ctrl-C)
+alpha-loop evolve --surface prompts       # Only modify agent prompts (safest)
+alpha-loop evolve --surface all           # Modify prompts + pipeline code (riskier)
+alpha-loop evolve --resume                # Resume from a previous evolve session
+alpha-loop evolve --dry-run               # Preview without changes
 ```
 
 ### Crash Recovery (`alpha-loop resume`)
