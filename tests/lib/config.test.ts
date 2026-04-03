@@ -10,7 +10,7 @@ jest.mock('node:child_process', () => ({
 
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
 
-import { loadConfig, detectRepo } from '../../src/lib/config.js';
+import { loadConfig, detectRepo, estimateCost } from '../../src/lib/config.js';
 
 let originalCwd: string;
 let tempDir: string;
@@ -178,5 +178,74 @@ model: gpt-5.4
 
     const config = loadConfig();
     expect(config.repo).toBe('explicit/repo');
+  });
+
+  it('includes default pricing table', () => {
+    const config = loadConfig();
+    expect(config.pricing).toBeDefined();
+    expect(config.pricing['claude-opus-4-6']).toEqual({ input: 15.0, output: 75.0 });
+    expect(config.pricing['claude-sonnet-4-6']).toEqual({ input: 3.0, output: 15.0 });
+    expect(config.pricing['claude-haiku-4-5']).toEqual({ input: 0.80, output: 4.0 });
+  });
+
+  it('loads pricing from YAML config', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+pricing:
+  custom-model:
+    input: 5.0
+    output: 25.0
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.pricing['custom-model']).toEqual({ input: 5.0, output: 25.0 });
+    // Defaults are still present (merged)
+    expect(config.pricing['claude-opus-4-6']).toEqual({ input: 15.0, output: 75.0 });
+  });
+
+  it('YAML pricing overrides defaults for same model', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+pricing:
+  claude-opus-4-6:
+    input: 20.0
+    output: 100.0
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.pricing['claude-opus-4-6']).toEqual({ input: 20.0, output: 100.0 });
+  });
+});
+
+describe('estimateCost', () => {
+  const pricing = {
+    'claude-opus-4-6': { input: 15.0, output: 75.0 },
+    'claude-haiku-4-5': { input: 0.80, output: 4.0 },
+  };
+
+  it('calculates cost correctly', () => {
+    const cost = estimateCost('claude-opus-4-6', 1_000_000, 1_000_000, pricing);
+    expect(cost).toBe(90.0); // 15 + 75
+  });
+
+  it('returns 0 for unknown model', () => {
+    const cost = estimateCost('unknown-model', 10000, 5000, pricing);
+    expect(cost).toBe(0);
+  });
+
+  it('handles zero tokens', () => {
+    const cost = estimateCost('claude-opus-4-6', 0, 0, pricing);
+    expect(cost).toBe(0);
+  });
+
+  it('calculates fractional costs', () => {
+    // 10K input tokens at $15/M = $0.15
+    // 3K output tokens at $75/M = $0.225
+    const cost = estimateCost('claude-opus-4-6', 10000, 3000, pricing);
+    expect(cost).toBeCloseTo(0.375, 3);
   });
 });

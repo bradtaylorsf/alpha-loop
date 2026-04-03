@@ -20,11 +20,95 @@ import { runTests } from './testing.js';
 import { runVerify } from './verify.js';
 import { extractLearnings, getLearningContext } from './learning.js';
 import { saveResult, getPreviousResult } from './session.js';
+import {
+  writeTrace,
+  writeTraceMetadata,
+  writeTraceToSubdir,
+  writeRunManifest,
+  writeConfigSnapshot,
+  writeScores,
+  writeCosts,
+  computeScores,
+  computeCosts,
+} from './traces.js';
+import type { StepCost, PipelineResultForScores } from './traces.js';
+import { estimateCost } from './config.js';
 import type { Config } from './config.js';
+import type { AgentResult } from './agent.js';
 import type { SessionContext } from './session.js';
 
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
+
+/**
+ * Build a StepCost entry from an AgentResult.
+ * Uses parsed cost/tokens if available, otherwise estimates from output length.
+ */
+function buildStepCost(
+  step: string,
+  issueNum: number,
+  agentResult: AgentResult,
+  config: Config,
+): StepCost {
+  const model = agentResult.model || config.model;
+  if (agentResult.costUsd != null && agentResult.inputTokens != null && agentResult.outputTokens != null) {
+    return {
+      step,
+      issueNum,
+      model,
+      input_tokens: agentResult.inputTokens,
+      output_tokens: agentResult.outputTokens,
+      cost_usd: agentResult.costUsd,
+    };
+  }
+  // Fallback: estimate tokens from output length (chars / 4 ≈ tokens)
+  const estimatedOutputTokens = Math.round(agentResult.output.length / 4);
+  const estimatedInputTokens = Math.round(estimatedOutputTokens * 1.3);
+  const costUsd = estimateCost(model, estimatedInputTokens, estimatedOutputTokens, config.pricing);
+  return {
+    step,
+    issueNum,
+    model,
+    input_tokens: estimatedInputTokens,
+    output_tokens: estimatedOutputTokens,
+    cost_usd: costUsd,
+  };
+}
+
+/** Record a prompt trace to the prompts/ subdirectory. */
+function tracePrompt(session: string, issueNum: number, step: string, prompt: string): void {
+  try {
+    writeTraceToSubdir(session, 'prompts', `issue-${issueNum}-${step}.md`, prompt);
+  } catch { /* non-fatal */ }
+}
+
+/** Record an agent output trace to the outputs/ subdirectory. */
+function traceOutput(session: string, issueNum: number, step: string, output: string): void {
+  try {
+    writeTraceToSubdir(session, 'outputs', `issue-${issueNum}-${step}.log`, output);
+  } catch { /* non-fatal */ }
+}
+
+/** Record a diff trace to the diffs/ subdirectory. */
+function traceDiff(session: string, issueNum: number, step: string, diff: string): void {
+  try {
+    writeTraceToSubdir(session, 'diffs', `issue-${issueNum}-${step}.patch`, diff);
+  } catch { /* non-fatal */ }
+}
+
+/** Record a test output trace to the tests/ subdirectory. */
+function traceTest(session: string, issueNum: number, attempt: number, output: string): void {
+  try {
+    writeTraceToSubdir(session, 'tests', `issue-${issueNum}-test-${attempt}.txt`, output);
+  } catch { /* non-fatal */ }
+}
+
+/** Record a verify output trace to the verify/ subdirectory. */
+function traceVerify(session: string, issueNum: number, attempt: number, output: string): void {
+  try {
+    writeTraceToSubdir(session, 'verify', `issue-${issueNum}-verify-${attempt}.txt`, output);
+  } catch { /* non-fatal */ }
+}
 
 /** Patterns that indicate a transient agent error (re-queue, don't mark as failed). */
 const TRANSIENT_ERROR_PATTERNS = [
@@ -128,7 +212,7 @@ function readPlan(planFile: string): IssuePlan {
  * Read and validate a gate result JSON file written by review/verify agents.
  * Falls back to DEFAULT_GATE if the file doesn't exist or is invalid.
  */
-function readGateResult(gateFile: string): GateResult {
+export function readGateResult(gateFile: string): GateResult {
   try {
     if (!existsSync(gateFile)) return DEFAULT_GATE;
 
@@ -168,7 +252,7 @@ function moveToSessionLogs(src: string, dest: string): void {
 /**
  * Format gate findings into a prompt section for the implementer.
  */
-function formatGateFindings(gate: GateResult, gateType: string): string {
+export function formatGateFindings(gate: GateResult, gateType: string): string {
   const unfixed = gate.findings.filter((f) => !f.fixed);
   if (unfixed.length === 0) return '';
 
@@ -208,6 +292,8 @@ export async function processIssue(
 ): Promise<PipelineResult> {
   const startTime = Date.now();
   const projectDir = process.cwd();
+  const stepCosts: StepCost[] = [];
+  const stepsCompleted: string[] = [];
 
   // Setup logging
   mkdirSync(session.logsDir, { recursive: true });
@@ -292,6 +378,9 @@ Rules:
 - implementation: be concise and actionable. List files to modify and what to change in each.
 - Write ONLY the JSON file. Do not create any other files or make any code changes.`;
 
+      // Trace the plan prompt
+      tracePrompt(session.name, issueNum, 'plan', planPrompt);
+
       const planResult = await spawnAgent({
         agent: config.agent,
         model: config.model,
@@ -300,6 +389,10 @@ Rules:
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
         verbose: config.verbose,
       });
+
+      // Trace the plan output and costs
+      traceOutput(session.name, issueNum, 'plan', planResult.output);
+      stepCosts.push(buildStepCost('plan', issueNum, planResult, config));
 
       // Detect transient errors (usage limits) during planning
       if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
@@ -310,6 +403,7 @@ Rules:
       }
 
       plan = readPlan(planFileInWorktree);
+      stepsCompleted.push('plan');
       if (plan.summary) {
         // Move plan from worktree to sessions dir for inspection, clean up worktree
         moveToSessionLogs(planFileInWorktree, planFileInSession);
@@ -344,6 +438,9 @@ Rules:
       learningContext: learningContext || undefined,
     });
 
+    // Trace the implement prompt
+    tracePrompt(session.name, issueNum, 'implement', implementPrompt);
+
     const implResult = await spawnAgent({
       agent: config.agent,
       model: config.model,
@@ -353,6 +450,10 @@ Rules:
       logFile: join(session.logsDir, `issue-${issueNum}-implement.log`),
       verbose: config.verbose,
     });
+
+    // Trace the implement output and costs
+    traceOutput(session.name, issueNum, 'implement', implResult.output);
+    stepCosts.push(buildStepCost('implement', issueNum, implResult, config));
 
     if (implResult.exitCode !== 0) {
       if (isTransientError(implResult.output)) {
@@ -374,6 +475,14 @@ Rules:
       exec('git add -A', { cwd: worktreePath });
       exec(`git commit -m "feat: implement issue #${issueNum} - ${title}"`, { cwd: worktreePath });
     }
+
+    stepsCompleted.push('implement');
+
+    // Capture implement diff
+    try {
+      const implDiff = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+      if (implDiff.stdout) traceDiff(session.name, issueNum, 'implement', implDiff.stdout);
+    } catch { /* non-fatal */ }
   } else {
     log.dry('Would run implementation agent');
   }
@@ -396,8 +505,12 @@ Rules:
     const testResult = runTests(worktreePath, config, logFile);
     testOutput = testResult.output;
 
+    // Trace test output
+    traceTest(session.name, issueNum, attempt, testOutput);
+
     if (testResult.passed) {
       testsPassing = true;
+      stepsCompleted.push('test');
       log.success(`All tests passed on attempt ${attempt}`);
       break;
     }
@@ -408,7 +521,10 @@ Rules:
       if (!config.dryRun) {
         const fixPrompt = `Tests are failing for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix ONLY code related to issue #${issueNum} — do NOT modify test infrastructure, build scripts, or unrelated files\n3. If tests fail due to environment issues (missing venv, wrong port, missing deps), fix only YOUR code — do NOT rewrite the test runner or package.json scripts\n4. Run the tests again to verify\n5. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why it was failing>\n   Example: fix(#${issueNum}): use port 5435 for postgres — default 5432 conflicts with host service\n   DO NOT use generic messages like "fix: resolve test failures"`;
 
-        await spawnAgent({
+        // Trace fix prompt
+        tracePrompt(session.name, issueNum, `fix-${attempt}`, fixPrompt);
+
+        const fixResult = await spawnAgent({
           agent: config.agent,
           model: config.model,
           prompt: fixPrompt,
@@ -418,12 +534,23 @@ Rules:
           verbose: config.verbose,
         });
 
+        // Trace fix output and costs
+        traceOutput(session.name, issueNum, `fix-${attempt}`, fixResult.output);
+        stepCosts.push(buildStepCost('test_fix', issueNum, fixResult, config));
+        stepsCompleted.push(`fix-${attempt}`);
+
         // Auto-commit fixes
         const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
         if (fixStatus.stdout.trim()) {
           exec('git add -A', { cwd: worktreePath });
           exec(`git commit -m "fix(#${issueNum}): resolve test failures (attempt ${attempt})"`, { cwd: worktreePath });
         }
+
+        // Capture fix diff
+        try {
+          const fixDiffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+          if (fixDiffResult.stdout) traceDiff(session.name, issueNum, `fix-${attempt}`, fixDiffResult.stdout);
+        } catch { /* non-fatal */ }
       }
     } else {
       log.warn(`Tests still failing after ${config.maxTestRetries} attempts`);
@@ -456,6 +583,9 @@ Rules:
           visionContext: loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md')) ?? undefined,
         });
 
+        // Trace review prompt
+        tracePrompt(session.name, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewPrompt);
+
         const reviewResult = await spawnAgent({
           agent: config.agent,
           model: config.reviewModel,
@@ -464,6 +594,10 @@ Rules:
           logFile: join(session.logsDir, `issue-${issueNum}-review${attempt > 1 ? `-${attempt}` : ''}.log`),
           verbose: config.verbose,
         });
+
+        // Trace review output and costs
+        traceOutput(session.name, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
+        stepCosts.push(buildStepCost('review', issueNum, reviewResult, config));
 
         reviewOutput = reviewResult.output;
       } catch {
@@ -477,6 +611,7 @@ Rules:
       moveToSessionLogs(reviewFileInWorktree, reviewFileInSession);
 
       if (reviewGate.passed) {
+        stepsCompleted.push('review');
         log.success(`Review passed: ${reviewGate.summary || 'no issues found'}`);
         break;
       }
@@ -489,7 +624,10 @@ Rules:
         const findings = formatGateFindings(reviewGate, 'Code Review');
         const fixPrompt = `The code review for issue #${issueNum} found problems that need to be fixed.\n\n${findings}\n\nInstructions:\n1. Address each finding listed above\n2. Run tests to make sure nothing is broken\n3. Commit your fixes with: git commit -m "fix(#${issueNum}): address review findings"`;
 
-        await spawnAgent({
+        // Trace review-fix prompt
+        tracePrompt(session.name, issueNum, `review-fix-${attempt}`, fixPrompt);
+
+        const reviewFixResult = await spawnAgent({
           agent: config.agent,
           model: config.model,
           prompt: fixPrompt,
@@ -498,6 +636,10 @@ Rules:
           logFile: join(session.logsDir, `issue-${issueNum}-review-fix-${attempt}.log`),
           verbose: config.verbose,
         });
+
+        // Trace review-fix output and costs
+        traceOutput(session.name, issueNum, `review-fix-${attempt}`, reviewFixResult.output);
+        stepCosts.push(buildStepCost('review', issueNum, reviewFixResult, config));
 
         // Auto-commit if agent didn't
         const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
@@ -551,6 +693,9 @@ Rules:
       });
       verifyOutput = verifyResult.output;
 
+      // Trace verify output
+      traceVerify(session.name, issueNum, attempt, verifyOutput);
+
       if (verifyResult.skipped) {
         verifyPassing = true;
         verifySkipped = true;
@@ -566,6 +711,7 @@ Rules:
 
       if (passed) {
         verifyPassing = true;
+        stepsCompleted.push('verify');
         log.success(`Verification passed on attempt ${attempt}`);
         break;
       }
@@ -584,7 +730,10 @@ Rules:
 
           const fixPrompt = `Live verification failed for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\n\n${findings}\n\nInstructions:\n1. Read the verification findings and identify the ROOT CAUSE\n2. Fix ONLY code related to issue #${issueNum}\n3. Run tests to make sure nothing is broken\n4. Commit your fixes with: git commit -m "fix(#${issueNum}): address verification findings"`;
 
-          await spawnAgent({
+          // Trace verify-fix prompt
+          tracePrompt(session.name, issueNum, `verify-fix-${attempt}`, fixPrompt);
+
+          const verifyFixResult = await spawnAgent({
             agent: config.agent,
             model: config.model,
             prompt: fixPrompt,
@@ -593,6 +742,10 @@ Rules:
             logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
             verbose: config.verbose,
           });
+
+          // Trace verify-fix output and costs
+          traceOutput(session.name, issueNum, `verify-fix-${attempt}`, verifyFixResult.output);
+          stepCosts.push(buildStepCost('verify', issueNum, verifyFixResult, config));
 
           // Auto-commit if agent didn't
           const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
@@ -636,6 +789,7 @@ Rules:
         body: prBody,
         cwd: worktreePath,
       });
+      stepsCompleted.push('pr');
       log.success(`PR created: ${prUrl}`);
     } catch (err) {
       log.error(`Failed to create PR for issue #${issueNum}: ${err}`);
@@ -678,6 +832,61 @@ Rules:
     config,
   });
 
+  // --- Step 9b: Write full traces (Meta-Harness style) ---
+  stepsCompleted.push('learn');
+  const filesChanged = runDiff ? (runDiff.match(/^diff --git/gm) ?? []).length : 0;
+
+  if (!config.dryRun) {
+    try {
+      // Per-issue metadata (backward compat)
+      writeTraceMetadata(session.name, issueNum, {
+        issueNum,
+        title,
+        status: testsPassing ? 'success' : 'failure',
+        duration,
+        retries: testRetries,
+        testsPassing,
+        verifyPassing,
+        verifySkipped,
+        filesChanged,
+        prUrl,
+        timestamp: new Date().toISOString(),
+        agent: config.agent,
+        model: config.model,
+      });
+      if (runDiff) writeTrace(session.name, issueNum, 'diff.patch', runDiff);
+      if (testOutput) writeTrace(session.name, issueNum, 'test-output.txt', testOutput);
+      if (reviewForLearnings) writeTrace(session.name, issueNum, 'review-output.json', reviewForLearnings);
+      if (verifyOutput) writeTrace(session.name, issueNum, 'verify-output.json', verifyOutput);
+      if (plan.summary) writeTrace(session.name, issueNum, 'plan.json', JSON.stringify(plan, null, 2));
+
+      // Config snapshot (written once per run, idempotent)
+      try {
+        const configPath = join(projectDir, '.alpha-loop.yaml');
+        if (existsSync(configPath)) {
+          writeConfigSnapshot(session.name, readFileSync(configPath, 'utf-8'));
+        }
+      } catch { /* non-fatal */ }
+
+      // Run-level scores and costs for this issue
+      const issueScoreResult: PipelineResultForScores = {
+        issueNum,
+        status: testsPassing ? 'success' : 'failure',
+        testsPassing,
+        verifyPassing,
+        verifySkipped,
+        retries: testRetries,
+        duration,
+        filesChanged,
+        stepsCompleted,
+      };
+      writeScores(session.name, computeScores([issueScoreResult]));
+      writeCosts(session.name, computeCosts(stepCosts));
+    } catch (err) {
+      log.warn(`Failed to write traces for #${issueNum}: ${err}`);
+    }
+  }
+
   // --- Step 10: Update issue status ---
   log.step('Step 10: Updating issue status');
   if (!config.dryRun) {
@@ -719,12 +928,6 @@ Rules:
     autoCleanup: config.autoCleanup,
     dryRun: config.dryRun,
   });
-
-  // Count files changed
-  let filesChanged = 0;
-  if (runDiff) {
-    filesChanged = (runDiff.match(/^diff --git/gm) ?? []).length;
-  }
 
   const result: PipelineResult = {
     issueNum,

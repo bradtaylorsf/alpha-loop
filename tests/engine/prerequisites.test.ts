@@ -47,6 +47,14 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     verbose: false,
     harnesses: [],
     setupCommand: '',
+    evalDir: '.alpha-loop/evals',
+    evalModel: '',
+    skipEval: false,
+    evalTimeout: 300,
+    autoCapture: true,
+    skipPostSessionReview: false,
+    skipPostSessionSecurity: false,
+    pricing: {},
     ...overrides,
   };
 }

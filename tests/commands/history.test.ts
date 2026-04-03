@@ -51,14 +51,14 @@ describe('history', () => {
 
   describe('historyList', () => {
     it('shows message when sessions directory does not exist', () => {
-      historyList(path.join(tmpDir, 'nonexistent'));
+      historyList(path.join(tmpDir, 'nonexistent'), tmpDir);
       expect(consoleSpy).toHaveBeenCalledWith('No sessions found.');
     });
 
     it('shows message when sessions directory is empty', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
       fs.mkdirSync(sessionsDir);
-      historyList(sessionsDir);
+      historyList(sessionsDir, tmpDir);
       expect(consoleSpy).toHaveBeenCalledWith('No sessions found.');
     });
 
@@ -71,7 +71,7 @@ describe('history', () => {
         { issueNum: 2, title: 'Newer issue', status: 'failure', duration: 60 },
       ]);
 
-      historyList(sessionsDir);
+      historyList(sessionsDir, tmpDir);
 
       const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
       expect(output).toContain('Sessions:');
@@ -90,7 +90,7 @@ describe('history', () => {
         { issueNum: 2, title: 'Bad issue', status: 'failure', duration: 120 },
       ]);
 
-      historyList(sessionsDir);
+      historyList(sessionsDir, tmpDir);
 
       const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
       expect(output).toContain('2 issues');
