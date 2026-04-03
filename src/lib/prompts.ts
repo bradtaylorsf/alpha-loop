@@ -350,6 +350,119 @@ date: ${today}
 - (specific skill file changes, or "None")`;
 }
 
+export type TriagePromptOptions = {
+  issues: Array<{ number: number; title: string; body: string }>;
+  projectContext?: string | null;
+  visionContext?: string | null;
+};
+
+/**
+ * Build the triage analysis prompt for an AI agent.
+ * Instructs the agent to categorize open issues and output TriageFinding[] JSON.
+ */
+export function buildTriagePrompt(options: TriagePromptOptions): string {
+  const { issues, projectContext, visionContext } = options;
+
+  const capped = issues.slice(0, 100);
+  const cappedWarning = issues.length > 100
+    ? `\n\nWARNING: Only the first 100 of ${issues.length} issues are included. There may be more issues not shown here.`
+    : '';
+
+  const issueList = capped.map((i) =>
+    `### Issue #${i.number}: ${i.title}\n${i.body || '(no description)'}`
+  ).join('\n\n');
+
+  const sections: string[] = [
+    'You are a project triage assistant. Analyze the following open GitHub issues and categorize any that need attention.',
+    '',
+    '## Open Issues',
+    issueList,
+    cappedWarning,
+  ];
+
+  if (visionContext) {
+    sections.push('', '## Product Vision', visionContext);
+  }
+
+  if (projectContext) {
+    sections.push('', '## Technical Context', projectContext);
+  }
+
+  sections.push(
+    '',
+    '## Instructions',
+    '',
+    'For each issue, determine if it falls into one of these categories:',
+    '- **stale**: No longer relevant given the current codebase state (e.g., referenced files deleted, feature already implemented)',
+    '- **unclear**: Missing acceptance criteria, vague scope, no clear "done" definition',
+    '- **too_large**: Should be split into 2-4 smaller, focused issues',
+    '- **duplicate**: Substantially overlaps with another open issue',
+    '- **ok**: Issue is fine as-is — do NOT include "ok" issues in output',
+    '',
+    'For each finding, provide:',
+    '- `reason`: Brief explanation of why this issue was flagged',
+    '- For `unclear` issues: include `rewrittenBody` with proper acceptance criteria in checkbox format (`- [ ] Criterion`)',
+    '- For `too_large` issues: include `splitInto` array of title strings for the sub-issues',
+    '- For `duplicate` issues: include `duplicateOf` with the canonical issue number',
+    '',
+    'Check the codebase context for staleness signals (referenced files deleted, features already implemented).',
+    'When rewriting unclear issues, use markdown with acceptance criteria in checkbox format.',
+    '',
+    '## Output Requirements',
+    '',
+    'Output ONLY valid JSON matching this schema (no markdown fences, no explanation):',
+    '',
+    '```json',
+    '[',
+    '  {',
+    '    "issueNum": 42,',
+    '    "title": "Issue title",',
+    '    "category": "stale",',
+    '    "reason": "This feature was already implemented in PR #30",',
+    '    "action": "close",',
+    '    "selected": true',
+    '  },',
+    '  {',
+    '    "issueNum": 43,',
+    '    "title": "Vague issue title",',
+    '    "category": "unclear",',
+    '    "reason": "No acceptance criteria, scope is ambiguous",',
+    '    "action": "rewrite",',
+    '    "rewrittenBody": "## Summary\\n...\\n\\n## Acceptance Criteria\\n- [ ] Criterion 1\\n- [ ] Criterion 2",',
+    '    "selected": true',
+    '  },',
+    '  {',
+    '    "issueNum": 44,',
+    '    "title": "Large issue title",',
+    '    "category": "too_large",',
+    '    "reason": "Covers 3 independent features",',
+    '    "action": "split",',
+    '    "splitInto": ["Sub-issue A", "Sub-issue B", "Sub-issue C"],',
+    '    "selected": true',
+    '  },',
+    '  {',
+    '    "issueNum": 45,',
+    '    "title": "Duplicate issue",',
+    '    "category": "duplicate",',
+    '    "reason": "Same scope as #42",',
+    '    "action": "merge",',
+    '    "duplicateOf": 42,',
+    '    "selected": true',
+    '  }',
+    ']',
+    '```',
+    '',
+    '## Rules',
+    '- Only include issues that need action (skip "ok" issues)',
+    '- If ALL issues are fine, output an empty array: `[]`',
+    '- Set `selected: true` for all findings (user will deselect if needed)',
+    '- action mapping: stale→close, unclear→rewrite, too_large→split, duplicate→merge',
+    '- Be conservative — only flag issues when you are confident about the categorization',
+  );
+
+  return sections.join('\n');
+}
+
 export type PlanPromptOptions = {
   seedDescription: string;
   seedFiles?: Array<{ path: string; content: string }>;
