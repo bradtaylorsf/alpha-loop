@@ -1,0 +1,47 @@
+{
+  "name": "session/20260402-180023",
+  "branch": "session/20260402-180023",
+  "completed": "2026-04-03T02:05:06.164Z",
+  "results": [
+    {
+      "issueNum": 90,
+      "title": "epic: self-improving eval system (Meta-Harness + autoresearch patterns)",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/101",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1049,
+      "filesChanged": 2
+    },
+    {
+      "issueNum": 91,
+      "title": "feat: Meta-Harness style trace storage filesystem",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/102",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 900,
+      "filesChanged": 4
+    },
+    {
+      "issueNum": 92,
+      "title": "feat: eval framework core — alpha-loop eval command",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/103",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 854,
+      "filesChanged": 4
+    },
+    {
+      "issueNum": 93,
+      "title": "feat: eval capture workflow — alpha-loop eval capture",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/104",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 824,
+      "filesChanged": 4
+    }
+  ]
+}
