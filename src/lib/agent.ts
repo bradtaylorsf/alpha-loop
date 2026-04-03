@@ -9,6 +9,14 @@ export type AgentResult = {
   exitCode: number;
   output: string;
   duration: number;
+  /** Total cost in USD (parsed from agent output, if available). */
+  costUsd?: number;
+  /** Input tokens consumed (parsed from agent output, if available). */
+  inputTokens?: number;
+  /** Output tokens generated (parsed from agent output, if available). */
+  outputTokens?: number;
+  /** Model used for the invocation. */
+  model?: string;
 };
 
 /**
@@ -187,6 +195,10 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
     // For stream-json: accumulate partial lines, extract final result text
     let lineBuffer = '';
     let finalResultText = '';
+    // Cost/token tracking (parsed from stream-json result blocks)
+    let parsedCostUsd: number | undefined;
+    let parsedInputTokens: number | undefined;
+    let parsedOutputTokens: number | undefined;
 
     // Pipe prompt via stdin (like: echo "$prompt" | claude -p)
     child.stdin.write(options.prompt);
@@ -228,7 +240,7 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
 
         if (!line) continue;
 
-        // Extract the final result text for the return value
+        // Extract the final result text and cost/token data for the return value
         try {
           const obj = JSON.parse(line) as Record<string, unknown>;
           if (obj.type === 'result') {
@@ -236,6 +248,16 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
             // Capture error info so transient error detection works
             if (obj.is_error || obj.subtype === 'error') {
               finalResultText = finalResultText || JSON.stringify(obj);
+            }
+            // Parse cost from result block
+            if (typeof obj.total_cost_usd === 'number') {
+              parsedCostUsd = obj.total_cost_usd;
+            }
+            // Parse token usage from result block
+            const usage = obj.usage as Record<string, unknown> | undefined;
+            if (usage) {
+              if (typeof usage.input_tokens === 'number') parsedInputTokens = usage.input_tokens;
+              if (typeof usage.output_tokens === 'number') parsedOutputTokens = usage.output_tokens;
             }
           }
         } catch { /* not valid JSON, ignore */ }
@@ -275,12 +297,21 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       resolved = true;
       clearTimeout(timer);
       const duration = Date.now() - startTime;
+      const result: AgentResult = {
+        exitCode,
+        output,
+        duration,
+        model: options.model || undefined,
+        costUsd: parsedCostUsd,
+        inputTokens: parsedInputTokens,
+        outputTokens: parsedOutputTokens,
+      };
       if (logStream) {
         logStream.end(() => {
-          resolve({ exitCode, output, duration });
+          resolve(result);
         });
       } else {
-        resolve({ exitCode, output, duration });
+        resolve(result);
       }
     };
 

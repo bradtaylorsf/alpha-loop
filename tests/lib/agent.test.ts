@@ -296,4 +296,55 @@ describe('spawnAgent', () => {
     const result = await spawnAgent(baseOptions);
     expect(result.duration).toBeGreaterThanOrEqual(40);
   });
+
+  test('includes model in result', async () => {
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'close') {
+        setTimeout(() => cb(0), 10);
+      }
+    });
+
+    const result = await spawnAgent(baseOptions);
+    expect(result.model).toBe('opus');
+  });
+
+  test('parses cost and tokens from Claude stream-json result', async () => {
+    let stdoutHandler: Function;
+    mockStdout.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'data') stdoutHandler = cb;
+    });
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'close') {
+        setTimeout(() => {
+          // Simulate a Claude stream-json result with cost and usage
+          const resultLine = JSON.stringify({
+            type: 'result',
+            result: 'Done.',
+            total_cost_usd: 1.234,
+            usage: { input_tokens: 50000, output_tokens: 12000 },
+          }) + '\n';
+          stdoutHandler(Buffer.from(resultLine));
+          cb(0);
+        }, 10);
+      }
+    });
+
+    const result = await spawnAgent(baseOptions);
+    expect(result.costUsd).toBe(1.234);
+    expect(result.inputTokens).toBe(50000);
+    expect(result.outputTokens).toBe(12000);
+  });
+
+  test('cost fields are undefined when not provided', async () => {
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'close') {
+        setTimeout(() => cb(0), 10);
+      }
+    });
+
+    const result = await spawnAgent(baseOptions);
+    expect(result.costUsd).toBeUndefined();
+    expect(result.inputTokens).toBeUndefined();
+    expect(result.outputTokens).toBeUndefined();
+  });
 });

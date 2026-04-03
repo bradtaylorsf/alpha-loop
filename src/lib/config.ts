@@ -2,6 +2,27 @@ import { readFileSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { parse as parseYaml } from 'yaml';
 
+/** Per-model pricing (cost per million tokens). */
+export type ModelPricing = {
+  input: number;
+  output: number;
+};
+
+/**
+ * Estimate cost in USD from token counts and a pricing table.
+ * Returns 0 if the model is not in the pricing table.
+ */
+export function estimateCost(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+  pricing: Record<string, ModelPricing>,
+): number {
+  const p = pricing[model];
+  if (!p) return 0;
+  return (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
+}
+
 export type Config = {
   repo: string;
   repoOwner: string;
@@ -38,6 +59,8 @@ export type Config = {
   evalModel: string;
   skipEval: boolean;
   evalTimeout: number;
+  /** Per-model pricing table (cost per million tokens). */
+  pricing: Record<string, ModelPricing>;
 };
 
 const DEFAULTS: Config = {
@@ -76,6 +99,12 @@ const DEFAULTS: Config = {
   evalModel: '',
   skipEval: false,
   evalTimeout: 300,
+  pricing: {
+    'claude-opus-4-6': { input: 15.0, output: 75.0 },
+    'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
+    'claude-haiku-4-5': { input: 0.80, output: 4.0 },
+    'codex-mini': { input: 1.50, output: 6.0 },
+  },
 };
 
 /** Map from YAML key (snake_case) to Config key (camelCase). */
@@ -201,6 +230,21 @@ function loadYamlConfig(configPath: string): Partial<Config> {
       (result as Record<string, unknown>)[configKey] = parsed[yamlKey];
     }
   }
+
+  // Handle pricing table (nested object, not in YAML_KEY_MAP)
+  if (parsed.pricing && typeof parsed.pricing === 'object') {
+    const pricing: Record<string, { input: number; output: number }> = {};
+    for (const [model, value] of Object.entries(parsed.pricing as Record<string, unknown>)) {
+      const v = value as Record<string, unknown>;
+      if (typeof v?.input === 'number' && typeof v?.output === 'number') {
+        pricing[model] = { input: v.input, output: v.output };
+      }
+    }
+    if (Object.keys(pricing).length > 0) {
+      result.pricing = pricing;
+    }
+  }
+
   return result;
 }
 
@@ -227,12 +271,20 @@ export function loadConfig(overrides?: Partial<Config>): Config {
   }
 
   // Precedence: overrides (CLI flags) > env vars > config file > auto-detect > defaults
+  // Pricing is merged specially: YAML/overrides extend defaults rather than replacing
+  const mergedPricing = {
+    ...DEFAULTS.pricing,
+    ...yamlConfig.pricing,
+    ...overrides?.pricing,
+  };
+
   const merged: Config = {
     ...DEFAULTS,
     ...autoDetect,
     ...yamlConfig,
     ...envConfig,
     ...overrides,
+    pricing: mergedPricing,
   };
 
   // Validate agent is a known value
