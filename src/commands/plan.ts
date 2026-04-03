@@ -29,7 +29,7 @@ import {
 
 export type PlanOptions = {
   seed?: string;
-  noVision?: boolean;
+  vision?: boolean;
   dryRun?: boolean;
 };
 
@@ -110,7 +110,7 @@ export async function planCommand(options: PlanOptions): Promise<void> {
     }
   }
 
-  if (!fs.existsSync(visionFile) && !options.noVision) {
+  if (!fs.existsSync(visionFile) && options.vision !== false) {
     log.step('Generating project vision...');
     const visionPrompt = `Based on this project description, generate a concise project vision document (under 500 words) in markdown.\n\nDescription: ${seedDescription}\n${projectContext ? `\nTechnical context:\n${projectContext}` : ''}`;
     const safeModel = assertSafeShellArg(config.model, 'model');
