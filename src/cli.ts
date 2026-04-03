@@ -78,6 +78,15 @@ program
   });
 
 program
+  .command('triage')
+  .description('Analyze and improve existing issues (staleness, clarity, size, duplicates)')
+  .option('--dry-run', 'Display findings without making changes')
+  .action(async (options) => {
+    const { triageCommand } = await import('./commands/triage.js');
+    await triageCommand(options);
+  });
+
+program
   .command('resume')
   .description('Resume stranded work — push branches, run review, open PRs')
   .option('--issue <num>', 'Only resume a specific issue number')
