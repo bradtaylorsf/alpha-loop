@@ -463,6 +463,100 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
   return sections.join('\n');
 }
 
+export type RoadmapPromptOptions = {
+  issues: Array<{ number: number; title: string; body: string; milestone: string | null }>;
+  milestones: Array<{ title: string; description: string; dueOn: string | null }>;
+  projectContext?: string | null;
+  visionContext?: string | null;
+};
+
+/**
+ * Build the roadmap prompt for an AI agent.
+ * Instructs the agent to suggest milestone groupings for open issues.
+ */
+export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
+  const { issues, milestones, projectContext, visionContext } = options;
+
+  const capped = issues.slice(0, 100);
+  const cappedWarning = issues.length > 100
+    ? `\n\nWARNING: Only the first 100 of ${issues.length} issues are included.`
+    : '';
+
+  const issueList = capped.map((i) => {
+    const ms = i.milestone ? ` [milestone: ${i.milestone}]` : ' [unassigned]';
+    const body = i.body.length > 300 ? i.body.slice(0, 300) + '...' : i.body;
+    return `### Issue #${i.number}: ${i.title}${ms}\n${body || '(no description)'}`;
+  }).join('\n\n');
+
+  const milestoneList = milestones.length > 0
+    ? milestones.map((m) => {
+        const due = m.dueOn ? ` (due: ${m.dueOn})` : '';
+        return `- **${m.title}**${due}: ${m.description || '(no description)'}`;
+      }).join('\n')
+    : '(none)';
+
+  const sections: string[] = [
+    'You are a project roadmap assistant. Analyze the following open issues and existing milestones, then suggest how to organize issues into milestones.',
+    '',
+    '## Open Issues',
+    issueList,
+    cappedWarning,
+    '',
+    '## Existing Milestones',
+    milestoneList,
+  ];
+
+  if (visionContext) {
+    sections.push('', '## Product Vision', visionContext);
+  }
+
+  if (projectContext) {
+    sections.push('', '## Technical Context', projectContext);
+  }
+
+  sections.push(
+    '',
+    '## Output Requirements',
+    '',
+    'Output ONLY valid JSON matching this schema (no markdown fences, no explanation):',
+    '',
+    '```json',
+    '{',
+    '  "milestones": [',
+    '    {',
+    '      "title": "Milestone Name",',
+    '      "description": "What this milestone delivers",',
+    '      "dueOn": "2026-05-01",',
+    '      "order": 1',
+    '    }',
+    '  ],',
+    '  "assignments": [',
+    '    {',
+    '      "issueNum": 3,',
+    '      "title": "Issue title",',
+    '      "milestone": "Milestone Name",',
+    '      "currentMilestone": "",',
+    '      "selected": true',
+    '    }',
+    '  ]',
+    '}',
+    '```',
+    '',
+    '## Instructions',
+    '- Respect existing milestone structure — reuse existing milestones where appropriate',
+    '- Only create new milestones when issues clearly don\'t fit existing ones',
+    '- Consider dependency order: foundational work (database, API, infra) in earlier milestones',
+    '- Suggest realistic due dates based on issue complexity and number of issues per milestone',
+    '- Set `currentMilestone` to the issue\'s current milestone title, or empty string if unassigned',
+    '- Include ALL open issues in assignments (even ones already assigned to milestones)',
+    '- Set `selected: true` for all assignments (user will deselect if needed)',
+    '- Order milestones by suggested execution order (order field)',
+    '- Group related issues together (same feature area, same dependency chain)',
+  );
+
+  return sections.join('\n');
+}
+
 export type PlanPromptOptions = {
   seedDescription: string;
   seedFiles?: Array<{ path: string; content: string }>;

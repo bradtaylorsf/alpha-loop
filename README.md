@@ -210,6 +210,13 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop eval convert` | Convert between AlphaLoop and skill-creator eval formats |
 | `alpha-loop eval import-swebench` | Import eval cases from SWE-bench dataset |
 | `alpha-loop evolve` | Meta-Harness-style automated optimization loop |
+| `alpha-loop plan` | Generate a full project scope (milestones + issues) from seed inputs using AI |
+| `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
+| `alpha-loop plan --dry-run` | Display the plan without creating any GitHub resources |
+| `alpha-loop triage` | Analyze and improve existing issues (staleness, clarity, size, duplicates) |
+| `alpha-loop triage --dry-run` | Display findings without making changes |
+| `alpha-loop roadmap` | Organize open issues into milestones using AI analysis |
+| `alpha-loop roadmap --dry-run` | Display proposed roadmap without making changes |
 
 ### Run Options
 
