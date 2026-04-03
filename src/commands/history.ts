@@ -71,8 +71,8 @@ function findSessionDirs(sessionsRoot: string): Array<{ dir: string; name: strin
  * Load session manifests from the learnings directory (checked into git, shared with team).
  * These are created during session finalization.
  */
-function loadManifests(): Map<string, SessionManifest> {
-  const learningsDir = path.join(process.cwd(), '.alpha-loop', 'learnings');
+function loadManifests(projectDir?: string): Map<string, SessionManifest> {
+  const learningsDir = path.join(projectDir ?? process.cwd(), '.alpha-loop', 'learnings');
   const manifests = new Map<string, SessionManifest>();
   if (!fs.existsSync(learningsDir)) return manifests;
 
@@ -89,9 +89,9 @@ function loadManifests(): Map<string, SessionManifest> {
   return manifests;
 }
 
-export function historyList(sessionsDir: string): void {
+export function historyList(sessionsDir: string, projectDir?: string): void {
   const localSessions = findSessionDirs(sessionsDir);
-  const manifests = loadManifests();
+  const manifests = loadManifests(projectDir);
 
   // Build a unified list: local sessions + manifests not covered by local data
   const seenNames = new Set(localSessions.map((s) => s.name));
