@@ -260,6 +260,64 @@ export function formatTriageFindings(findings: TriageFinding[]): string {
 }
 
 /**
+ * Format a roadmap table grouped by milestone, showing [NEW]/[EXISTS] tags
+ * per milestone and [currently: <milestone>]/[currently: unassigned] per issue.
+ */
+export function formatRoadmapTable(
+  milestones: PlannedMilestone[],
+  assignments: RoadmapAssignment[],
+  existingMilestones: string[],
+): string {
+  if (assignments.length === 0) {
+    return `${GRAY}No assignments to display.${NC}`;
+  }
+
+  const sorted = [...milestones].sort((a, b) => a.order - b.order);
+  const existingSet = new Set(existingMilestones);
+
+  // Group assignments by milestone
+  const grouped = new Map<string, RoadmapAssignment[]>();
+  for (const a of assignments) {
+    const key = a.milestone || '(no milestone)';
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key)!.push(a);
+  }
+
+  const lines: string[] = [];
+
+  for (const ms of sorted) {
+    const group = grouped.get(ms.title);
+    if (!group || group.length === 0) continue;
+    grouped.delete(ms.title);
+
+    const tag = existingSet.has(ms.title) ? `${BLUE}[EXISTS]${NC}` : `${CYAN}[NEW]${NC}`;
+    const due = ms.dueOn ? ` (due: ${ms.dueOn})` : '';
+    lines.push(`\n${BOLD}${CYAN}── ${ms.title}${due} ${tag}${NC}`);
+
+    for (const a of group) {
+      const current = a.currentMilestone
+        ? `${GRAY}[currently: ${a.currentMilestone}]${NC}`
+        : `${GRAY}[currently: unassigned]${NC}`;
+      lines.push(`  #${a.issueNum}  ${a.title}  ${current}`);
+    }
+  }
+
+  // Any remaining assignments not in a known milestone
+  for (const [msTitle, group] of grouped) {
+    if (group.length === 0) continue;
+    lines.push(`\n${BOLD}${CYAN}── ${msTitle} ──${NC}`);
+    for (const a of group) {
+      const current = a.currentMilestone
+        ? `${GRAY}[currently: ${a.currentMilestone}]${NC}`
+        : `${GRAY}[currently: unassigned]${NC}`;
+      lines.push(`  #${a.issueNum}  ${a.title}  ${current}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
  * Read files matching glob patterns for seeding the plan.
  * Uses simple recursive directory walking with minimatch-style matching.
  */

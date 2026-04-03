@@ -87,6 +87,15 @@ program
   });
 
 program
+  .command('roadmap')
+  .description('Organize open issues into milestones using AI analysis')
+  .option('--dry-run', 'Display proposed roadmap without making changes')
+  .action(async (options) => {
+    const { roadmapCommand } = await import('./commands/roadmap.js');
+    await roadmapCommand(options);
+  });
+
+program
   .command('resume')
   .description('Resume stranded work — push branches, run review, open PRs')
   .option('--issue <num>', 'Only resume a specific issue number')
