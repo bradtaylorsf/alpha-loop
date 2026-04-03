@@ -58,7 +58,11 @@ Alpha Loop implements a 12-step pipeline for each issue:
 11. **Auto-Merge** — Merges the PR to the session branch (if enabled)
 12. **Cleanup** — Removes the worktree
 
-After all issues are processed, Alpha Loop generates a **session summary** that aggregates learnings across issues and produces actionable recommendations.
+After all issues are processed, Alpha Loop:
+1. **Auto-captures failures** as eval cases for regression testing
+2. Generates a **session summary** aggregating learnings across issues
+3. Runs a **post-session code review** on the full session diff to catch cross-issue integration problems
+4. Creates the **session PR** with all findings included
 
 ### Milestone-Based Workflow
 
@@ -101,6 +105,38 @@ Run `alpha-loop review` to trigger the self-improvement loop. It reads all accum
 
 Without `--apply`, proposals are saved to `learnings/proposed-updates/` for review. With `--apply`, changes are written and a draft PR is created.
 
+### Eval System (`alpha-loop eval`)
+
+Alpha Loop includes a self-improving eval system inspired by [Meta-Harness](https://arxiv.org/abs/2603.28052) (Lee et al., 2026). It captures real failures as eval cases and tracks composite scores over time to measure whether prompt/skill changes actually help.
+
+```bash
+# Capture failures from recent sessions as eval cases
+alpha-loop eval capture
+
+# Run the eval suite and compute composite score
+alpha-loop eval run
+
+# View score history, Pareto frontier, or compare runs
+alpha-loop eval scores
+alpha-loop eval pareto
+alpha-loop eval compare 1 2
+
+# Greedy search over model/agent configurations
+alpha-loop eval search --models "opus,sonnet" --agents "claude,codex"
+```
+
+Eval cases live in `.alpha-loop/evals/` and scores are appended to `scores.jsonl` (Git-friendly, append-only). The composite score formula is pass-rate primary with lightweight penalties for retries and duration.
+
+### Evolve (`alpha-loop evolve`)
+
+The evolve command runs a Meta-Harness-style optimization loop: a proposer agent reads full execution traces, scores, and source code, then proposes targeted changes to prompts, skills, or config. Changes are evaluated against the eval suite — improvements are kept, regressions are reverted (autoresearch keep/discard pattern).
+
+```bash
+alpha-loop evolve                    # Run up to 5 iterations
+alpha-loop evolve --max-iterations 10
+alpha-loop evolve --dry-run          # Preview without changes
+```
+
 ### Crash Recovery (`alpha-loop resume`)
 
 If the loop hangs or crashes mid-session, work can be stranded on local branches with no PR. Run `alpha-loop resume` to recover:
@@ -135,6 +171,14 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop resume --issue <N>` | Resume a specific issue |
 | `alpha-loop review` | Analyze learnings and propose self-improvements |
 | `alpha-loop review --apply` | Apply proposed improvements and create a draft PR |
+| `alpha-loop eval` | Run the eval suite and compute composite score |
+| `alpha-loop eval capture` | Capture failures as eval cases (interactive) |
+| `alpha-loop eval list` | Show eval cases and recent scores |
+| `alpha-loop eval scores` | Show score history over time |
+| `alpha-loop eval pareto` | Show score/cost Pareto frontier |
+| `alpha-loop eval compare <r1> <r2>` | Compare two eval runs |
+| `alpha-loop eval search` | Greedy search over model/agent configurations |
+| `alpha-loop evolve` | Meta-Harness-style automated optimization loop |
 
 ### Run Options
 
@@ -176,6 +220,15 @@ harnesses:
 # Safety limits (0 = unlimited)
 max_issues: 20
 max_session_duration: 7200  # 2 hours in seconds
+
+# Post-session review (runs after all issues, reviews full session diff)
+post_session:
+  review: true
+  security_scan: true
+
+# Eval system
+auto_capture: true  # capture failures as eval cases
+eval_dir: .alpha-loop/evals
 ```
 
 ### Configuration Reference
@@ -210,6 +263,12 @@ max_session_duration: 7200  # 2 hours in seconds
 | `run_full` | `false` | Run full pipeline without skipping any steps |
 | `verbose` | `false` | Enable verbose agent output |
 | `harnesses` | (auto from agent) | Coding harnesses to sync skills/agents to (e.g., `claude`, `codex`) |
+| `eval_dir` | `.alpha-loop/evals` | Directory for eval cases and scores |
+| `eval_model` | (agent default) | AI model for eval judging |
+| `eval_timeout` | `300` | Timeout in seconds for eval case execution |
+| `auto_capture` | `true` | Auto-capture failures as eval cases at end of session |
+| `post_session.review` | `true` | Run holistic code review on full session diff |
+| `post_session.security_scan` | `true` | Include security scanning in post-session review |
 
 ### Environment Variables
 
@@ -243,6 +302,12 @@ All config options can be set via environment variables (uppercase, same names):
 | `MERGE_TO` | `merge_to` |
 | `RUN_FULL` | `run_full` |
 | `VERBOSE` | `verbose` |
+| `EVAL_DIR` | `eval_dir` |
+| `EVAL_MODEL` | `eval_model` |
+| `EVAL_TIMEOUT` | `eval_timeout` |
+| `AUTO_CAPTURE` | `auto_capture` |
+| `SKIP_POST_SESSION_REVIEW` | `post_session.review` (inverted) |
+| `SKIP_POST_SESSION_SECURITY` | `post_session.security_scan` (inverted) |
 
 **Precedence:** CLI flags > environment variables > `.alpha-loop.yaml` > auto-detection > defaults
 
@@ -331,6 +396,8 @@ What needs to be done.
 | `.alpha-loop/vision.md` | Yes | Project vision document |
 | `.alpha-loop/context.md` | Yes | Auto-generated project context |
 | `.alpha-loop/learnings/` | Yes | Learning files, session manifests, and session summaries (shared with team) |
+| `.alpha-loop/evals/` | Yes | Eval cases (YAML) and score history (`scores.jsonl`) |
+| `.alpha-loop/traces/` | No (gitignored) | Meta-Harness style execution traces per session |
 | `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |
