@@ -86,4 +86,83 @@ program
     await reviewCommand(options);
   });
 
+// Eval subcommands
+const evalCmd = program
+  .command('eval')
+  .description('Run eval suite, capture failures, list cases, view scores');
+
+evalCmd
+  .command('run', { isDefault: true })
+  .description('Run the eval suite and compute composite score')
+  .option('--tags <tags>', 'Filter by tags (comma-separated)')
+  .option('--type <type>', 'Filter by type: full or step')
+  .option('--step <step>', 'Filter by pipeline step (plan, implement, test, review, verify)')
+  .option('--verbose', 'Show detailed output')
+  .action(async (options) => {
+    const { evalRunCommand } = await import('./commands/eval.js');
+    await evalRunCommand(options);
+  });
+
+evalCmd
+  .command('capture [issue]')
+  .description('Capture failures as eval cases (interactive)')
+  .action(async (issue) => {
+    const { evalCaptureCommand } = await import('./commands/eval.js');
+    await evalCaptureCommand({ issue });
+  });
+
+evalCmd
+  .command('list')
+  .description('Show eval cases and recent scores')
+  .action(async () => {
+    const { evalListCommand } = await import('./commands/eval.js');
+    evalListCommand();
+  });
+
+evalCmd
+  .command('scores')
+  .description('Show score history over time')
+  .action(async () => {
+    const { evalScoresCommand } = await import('./commands/eval.js');
+    evalScoresCommand();
+  });
+
+evalCmd
+  .command('search')
+  .description('Greedy search over model/agent configurations')
+  .option('--models <models>', 'Models to test (comma-separated)')
+  .option('--agents <agents>', 'Agents to test (comma-separated)')
+  .option('--max-runs <n>', 'Maximum number of eval runs')
+  .action(async (options) => {
+    const { evalSearchCommand } = await import('./commands/eval.js');
+    await evalSearchCommand(options);
+  });
+
+evalCmd
+  .command('pareto')
+  .description('Show score/cost Pareto frontier')
+  .action(async () => {
+    const { evalParetoCommand } = await import('./commands/eval.js');
+    evalParetoCommand();
+  });
+
+evalCmd
+  .command('import-swebench')
+  .description('Import eval cases from SWE-bench dataset')
+  .action(async () => {
+    const { evalImportSwebenchCommand } = await import('./commands/eval.js');
+    await evalImportSwebenchCommand();
+  });
+
+program
+  .command('evolve')
+  .description('Meta-Harness-style automated optimization loop')
+  .option('--max-iterations <n>', 'Maximum optimization iterations (default: 5)')
+  .option('--dry-run', 'Preview without making changes')
+  .option('--verbose', 'Show detailed agent output')
+  .action(async (options) => {
+    const { evolveCommand } = await import('./commands/evolve.js');
+    await evolveCommand(options);
+  });
+
 program.parse();

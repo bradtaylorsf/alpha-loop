@@ -47,6 +47,10 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     autoCleanup: true,
     runFull: false,
     verbose: false,
+    evalDir: '.alpha-loop/evals',
+    evalModel: '',
+    skipEval: false,
+    evalTimeout: 300,
     ...overrides,
   };
 }
