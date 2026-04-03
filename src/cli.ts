@@ -67,6 +67,17 @@ program
   .action(syncCommand);
 
 program
+  .command('plan')
+  .description('Generate a full project scope (milestones + issues) from seed inputs using AI')
+  .option('--seed <file>', 'Read seed description from a file instead of prompting')
+  .option('--no-vision', 'Skip vision generation even if no vision exists')
+  .option('--dry-run', 'Display the plan without creating any GitHub resources')
+  .action(async (options) => {
+    const { planCommand } = await import('./commands/plan.js');
+    await planCommand(options);
+  });
+
+program
   .command('resume')
   .description('Resume stranded work — push branches, run review, open PRs')
   .option('--issue <num>', 'Only resume a specific issue number')
