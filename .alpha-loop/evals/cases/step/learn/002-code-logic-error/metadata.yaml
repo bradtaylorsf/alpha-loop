@@ -1,0 +1,8 @@
+id: 002-code-logic-error
+description: "Learning extraction from off-by-one error in pagination logic"
+tags:
+  - learn
+  - logic-error
+  - pagination
+  - off-by-one
+source: manual

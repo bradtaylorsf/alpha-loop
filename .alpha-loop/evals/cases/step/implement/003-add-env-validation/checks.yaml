@@ -1,0 +1,23 @@
+type: step
+step: implement
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the implementation correctly adds environment variable validation on startup.
+      Score 1-5 based on:
+      - Score 5: Creates a validation function that checks all required env vars are present, throws
+        or exits with a clear error message listing which variable is missing, and the validation is
+        called before the server starts (e.g., in app.ts or index.ts before app.listen)
+      - Score 4: Creates validation that checks required vars and fails fast, but the error message
+        does not clearly name the missing variable
+      - Score 3: Adds validation but it only logs a warning rather than failing the process
+      - Score 2: Mentions env var validation but does not produce working validation code
+      - Score 1: Does not address environment variable validation
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - process.env
+      - throw

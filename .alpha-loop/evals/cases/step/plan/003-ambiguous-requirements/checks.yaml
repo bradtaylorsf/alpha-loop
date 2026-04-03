@@ -1,0 +1,18 @@
+type: step
+step: plan
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the plan appropriately handles an ambiguous "make the app faster" request
+      by asking clarifying questions or defining measurable targets. Score 1-5 based on:
+      - Score 5: Plan explicitly asks clarifying questions (what is slow? measured how? which
+        users affected?) OR defines specific measurable performance targets before proceeding
+      - Score 4: Plan acknowledges the ambiguity and proposes a scoped investigation step before
+        committing to implementation
+      - Score 3: Plan lists multiple possible optimizations but doesn't prioritize or clarify
+      - Score 2: Plan picks one optimization arbitrarily without acknowledging ambiguity
+      - Score 1: Plan proceeds as if the requirements are clear
+    min_score: 4

@@ -1,0 +1,8 @@
+id: 003-add-env-validation
+description: "Add startup validation for required environment variables with fast-fail error"
+tags:
+  - implement
+  - env-vars
+  - validation
+  - startup
+source: manual

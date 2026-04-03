@@ -1,0 +1,20 @@
+type: step
+step: learn
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the learning output identifies the specific off-by-one error pattern in
+      pagination logic. Score 1-5 based on:
+      - Score 5: Learning explicitly identifies the off-by-one error in pagination (returning
+        n+1 items), names the specific code pattern (e.g., wrong limit/offset calculation),
+        and suggests a prevention strategy (e.g., write boundary tests for pagination)
+      - Score 4: Learning identifies the off-by-one error in pagination without full pattern
+        explanation or prevention
+      - Score 3: Learning mentions a pagination bug but frames it generically without the
+        specific off-by-one pattern
+      - Score 2: Learning identifies tests failed without pinpointing the pagination logic error
+      - Score 1: Learning does not identify the off-by-one error
+    min_score: 4

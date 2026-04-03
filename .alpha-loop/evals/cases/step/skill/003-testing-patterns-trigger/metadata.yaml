@@ -1,0 +1,7 @@
+id: 003-testing-patterns-trigger
+description: "Skill trigger: test writing prompt produces testing-appropriate output"
+tags:
+  - skill
+  - testing
+  - trigger
+source: manual

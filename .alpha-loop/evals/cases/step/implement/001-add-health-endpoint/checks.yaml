@@ -1,0 +1,21 @@
+type: step
+step: implement
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the implementation output correctly addresses the health endpoint issue.
+      Score 1-5 based on:
+      - Score 5: Creates a route handler for GET /health, returns a JSON response (e.g., { status: "ok" }),
+        and adds a corresponding test for the endpoint
+      - Score 4: Creates the route handler and returns JSON but does not add a test
+      - Score 3: Creates a route handler but returns plain text or an incomplete response format
+      - Score 2: Mentions adding a health endpoint but does not produce a concrete route handler
+      - Score 1: Does not address the health endpoint requirement at all
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - /health
+      - json

@@ -1,0 +1,19 @@
+type: step
+step: learn
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the learning output correctly distinguishes between the test suite passing
+      and the verification gate failing (UI rendering issue). Score 1-5 based on:
+      - Score 5: Learning explicitly distinguishes between test pass and verification failure,
+        identifies that unit/integration tests can pass while user-facing behavior fails, and
+        suggests improvements to verification coverage (e.g., add E2E or visual tests)
+      - Score 4: Learning distinguishes the two failure types and notes the gap between them
+        without a concrete prevention suggestion
+      - Score 3: Learning mentions verification failed but conflates it with test failures
+      - Score 2: Learning records the outcome without distinguishing test vs verify
+      - Score 1: Learning does not address the distinction
+    min_score: 4

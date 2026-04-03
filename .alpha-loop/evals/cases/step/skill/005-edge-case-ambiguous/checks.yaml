@@ -1,0 +1,20 @@
+type: step
+step: skill
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate how the agent handles an ambiguous "review" request that involves non-code content
+      ("Help me review my study notes for the exam"). Score 1-5 based on:
+      - Score 5: Output correctly treats this as a non-code task, does not apply code review
+        structure (no security sections, no code findings), and either helps with study notes
+        or asks a clarifying question
+      - Score 4: Output mostly avoids code review framing but has minor structural overlap
+      - Score 3: Output conflates "review" with code review and applies partial code review
+        structure inappropriately
+      - Score 2: Output applies code review terminology (security, vulnerabilities, etc.) to
+        study notes
+      - Score 1: Output fully activates the code review skill for a study notes request
+    min_score: 4

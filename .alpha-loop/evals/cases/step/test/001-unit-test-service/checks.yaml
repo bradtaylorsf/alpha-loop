@@ -1,0 +1,24 @@
+type: step
+step: test
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the test output provides thorough unit tests for the UserService.
+      Score 1-5 based on:
+      - Score 5: Tests cover the happy path for create, get, and update; cover at least one error
+        case per method (e.g., user not found, duplicate email); cover at least one edge case
+        (e.g., empty name, special characters); each test has a clear description; uses
+        beforeEach/afterEach to reset state
+      - Score 4: Tests cover happy paths and error cases for all methods but miss edge cases
+      - Score 3: Tests cover happy paths for all methods but do not test error cases
+      - Score 2: Tests cover only one or two methods
+      - Score 1: Tests are missing or do not exercise the service meaningfully
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - describe
+      - expect
+      - beforeEach

@@ -1,0 +1,24 @@
+type: step
+step: test
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the tests correctly assert that async functions throw errors on invalid input.
+      Score 1-5 based on:
+      - Score 5: Uses `await expect(fn()).rejects.toThrow(...)` pattern correctly for all error
+        cases; tests both the happy path (resolves) and multiple error cases (rejects with correct
+        message); does not use try/catch in tests (which is an antipattern); tests are async
+        functions using await
+      - Score 4: Uses `rejects.toThrow` correctly but uses try/catch for one error case instead
+      - Score 3: Uses `rejects` but asserts on the wrong thing (e.g., rejects.toBeTruthy instead
+        of rejects.toThrow)
+      - Score 2: Uses try/catch in all error tests, which works but misses the rejects pattern
+      - Score 1: Tests do not correctly assert async error throwing
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - rejects
+      - toThrow

@@ -1,0 +1,25 @@
+type: step
+step: test
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the tests correctly mock the external API dependency and test both paths.
+      Score 1-5 based on:
+      - Score 5: Uses jest.mock() to mock the external API module; configures the mock to resolve
+        with data for the happy path test; configures the mock to reject with an error for the
+        error path test; asserts on the return value for success; asserts the error is propagated
+        for failure; resets or clears mocks between tests with beforeEach or afterEach
+      - Score 4: Mocks the dependency and tests both paths correctly but does not reset the mock
+        between tests
+      - Score 3: Mocks the dependency and tests only the happy path
+      - Score 2: Attempts to mock but the mock is not wired up correctly (e.g., mocks wrong module
+        path or does not return the expected shape)
+      - Score 1: Does not mock the external dependency
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - jest.mock
+      - mockResolvedValue

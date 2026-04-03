@@ -1,0 +1,17 @@
+type: step
+step: plan
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the plan adequately covers migrating from Jest to Vitest. Score 1-5 based on:
+      - Score 5: Plan mentions reading existing jest.config, identifying test file patterns, AND
+        a migration strategy (e.g., updating imports, config equivalents, CI changes)
+      - Score 4: Plan covers two of the three areas (jest.config, test patterns, migration steps)
+      - Score 3: Plan mentions "replace Jest with Vitest" and some configuration changes but
+        lacks detail on reading existing setup
+      - Score 2: Plan only lists high-level steps without addressing existing test infrastructure
+      - Score 1: Plan ignores the need to understand the existing Jest setup
+    min_score: 4

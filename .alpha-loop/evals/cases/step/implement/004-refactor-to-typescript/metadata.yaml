@@ -1,0 +1,8 @@
+id: 004-refactor-to-typescript
+description: "Convert a JavaScript utility file to TypeScript with proper type annotations"
+tags:
+  - implement
+  - typescript
+  - refactor
+  - types
+source: manual

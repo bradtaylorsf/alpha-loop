@@ -29,6 +29,12 @@ import {
 } from '../lib/eval.js';
 import type { EvalCase, ExpectedOutcome } from '../lib/eval.js';
 import {
+  toSkillCreatorEval,
+  fromSkillCreatorEval,
+  fromSkillCreatorEvalAll,
+} from '../lib/eval-skill-bridge.js';
+import type { SkillCreatorEval } from '../lib/eval-skill-bridge.js';
+import {
   readScores,
   latestScore,
   scoresByConfig,
@@ -651,24 +657,100 @@ export async function evalSearchCommand(options: EvalSearchOptions): Promise<voi
   }
 }
 
+export type EvalImportSwebenchOptions = {
+  step?: string;
+};
+
 /**
  * Import SWE-bench cases (placeholder — requires HuggingFace download).
  */
-export async function evalImportSwebenchCommand(): Promise<void> {
+export async function evalImportSwebenchCommand(options?: EvalImportSwebenchOptions): Promise<void> {
+  const step = options?.step ?? 'implement';
+
   log.step('SWE-bench Import');
   log.info('');
   log.info('SWE-bench integration imports real GitHub issues with validated patches.');
+  log.info(`Import as: ${step === 'implement' ? 'step-level (implement)' : `step-level (${step})`} eval cases`);
   log.info('');
   log.info('Setup:');
   log.info('  1. Clone the alpha-loop-evals fixture monorepo');
   log.info('  2. Download SWE-bench dataset from HuggingFace:');
-  log.info('     princeton-nlp/SWE-bench');
-  log.info('  3. Run: alpha-loop eval import-swebench --dataset <path>');
+  log.info('     princeton-nlp/SWE-bench_Lite (300 cases)');
+  log.info('     princeton-nlp/SWE-bench_Verified (500 cases)');
+  log.info('  3. Run: alpha-loop eval import-swebench --dataset <path> [--step implement]');
   log.info('');
   log.info('Each SWE-bench instance becomes an eval case with:');
   log.info('  - fixture_repo: the target repo at the specific commit');
   log.info('  - issue_body: the original GitHub issue description');
   log.info('  - expected: validated patch as ground truth');
+  log.info('  - type: step (step-level eval targeting the specified pipeline step)');
+  log.info('');
+  log.info('Available datasets:');
+  log.info('  princeton-nlp/SWE-bench_Lite     — 300 curated cases');
+  log.info('  princeton-nlp/SWE-bench_Verified — 500 human-verified cases');
+  log.info('  openai/openai_humaneval          — 164 simple implement cases');
+  log.info('  google-research-datasets/mbpp    — 974 simple implement cases');
   log.info('');
   log.info('This is planned for M2 (Eval Content). See issue #95.');
+}
+
+export type EvalConvertOptions = {
+  direction?: string;
+  input?: string;
+  output?: string;
+};
+
+/**
+ * Convert between AlphaLoop eval format and skill-creator format.
+ *
+ * Directions:
+ *   to-skill     — Convert AlphaLoop eval case → skill-creator evals.json
+ *   from-skill   — Convert skill-creator evals.json → AlphaLoop eval cases
+ */
+export function evalConvertCommand(options: EvalConvertOptions): void {
+  const direction = options.direction ?? 'to-skill';
+
+  if (direction === 'to-skill') {
+    // Load AlphaLoop eval cases and convert to skill-creator format
+    const cases = loadEvalCases({
+      type: 'step',
+      step: 'skill' as any,
+    });
+
+    if (cases.length === 0) {
+      log.warn('No skill eval cases found. Create some in .alpha-loop/evals/cases/step/skill/');
+      return;
+    }
+
+    const converted: SkillCreatorEval[] = cases.map(toSkillCreatorEval);
+
+    for (const sc of converted) {
+      console.log(JSON.stringify(sc, null, 2));
+      console.log('');
+    }
+
+    log.info(`Converted ${cases.length} case(s) to skill-creator format.`);
+  } else if (direction === 'from-skill') {
+    if (!options.input) {
+      log.warn('Provide --input <path> pointing to a skill-creator evals.json file.');
+      return;
+    }
+
+    if (!existsSync(options.input)) {
+      log.warn(`File not found: ${options.input}`);
+      return;
+    }
+
+    const raw = JSON.parse(readFileSync(options.input, 'utf-8')) as SkillCreatorEval;
+    const cases = fromSkillCreatorEvalAll(raw);
+
+    for (const evalCase of cases) {
+      const path = saveEvalCase(evalCase);
+      log.success(`Created: ${path}`);
+    }
+
+    log.info(`Converted ${cases.length} skill-creator eval(s) to AlphaLoop format.`);
+  } else {
+    log.warn(`Unknown direction: ${direction}. Use 'to-skill' or 'from-skill'.`);
+  }
 }

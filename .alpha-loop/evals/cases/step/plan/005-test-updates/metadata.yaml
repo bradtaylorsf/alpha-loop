@@ -1,0 +1,7 @@
+id: 005-test-updates
+description: "Test configuration change: migrating from Jest to Vitest"
+tags:
+  - plan
+  - testing
+  - migration
+source: manual

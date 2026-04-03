@@ -1,0 +1,8 @@
+id: 003-test-async-error
+description: "Write tests that correctly assert async functions throw errors on invalid input"
+tags:
+  - test
+  - async
+  - error-handling
+  - jest
+source: manual

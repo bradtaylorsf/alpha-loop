@@ -1,0 +1,7 @@
+id: 003-orphaned-file
+description: "Review catches an orphaned utility file that is never imported"
+tags:
+  - review
+  - dead-code
+  - quality
+source: manual

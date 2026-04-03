@@ -1,0 +1,24 @@
+type: step
+step: test
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the tests thoroughly cover edge cases for the truncate utility function.
+      Score 1-5 based on:
+      - Score 5: Tests all of the following edge cases: empty string returns empty string; string
+        shorter than maxLength returns unchanged; string exactly equal to maxLength returns
+        unchanged; string longer than maxLength is truncated with ellipsis; a unicode/multibyte
+        string (e.g., emoji or CJK characters) is handled correctly; null or undefined input is
+        handled without throwing
+      - Score 4: Tests at least 4 of the 6 edge cases listed above
+      - Score 3: Tests 2-3 edge cases plus the happy path, missing unicode and null handling
+      - Score 2: Tests only the happy path (long string truncated) with no edge cases
+      - Score 1: Tests are missing or do not meaningfully test the function
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - ellipsis
+      - unicode

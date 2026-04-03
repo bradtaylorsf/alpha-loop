@@ -1,0 +1,8 @@
+id: 002-fix-pagination-bug
+description: "Fix off-by-one error in pagination that returns wrong total page count"
+tags:
+  - implement
+  - bug-fix
+  - pagination
+  - off-by-one
+source: manual

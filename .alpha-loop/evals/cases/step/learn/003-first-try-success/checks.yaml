@@ -1,0 +1,20 @@
+type: step
+step: learn
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the learning output identifies specific patterns that contributed to the
+      first-try success, rather than simply noting "it worked". Score 1-5 based on:
+      - Score 5: Learning identifies at least two concrete patterns that contributed to success
+        (e.g., thorough upfront planning, reading existing tests before implementing, using
+        typed interfaces, checking edge cases early) rather than generic praise
+      - Score 4: Learning identifies one concrete contributing pattern with enough detail to
+        be actionable
+      - Score 3: Learning notes the success and mentions something worked well, but at a level
+        too vague to replicate (e.g., "good approach was used")
+      - Score 2: Learning notes it was a clean run without identifying why
+      - Score 1: Learning only records "success" with no pattern extraction
+    min_score: 4

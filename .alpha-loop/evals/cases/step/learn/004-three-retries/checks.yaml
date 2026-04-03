@@ -1,0 +1,20 @@
+type: step
+step: learn
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the learning output identifies the root cause that required 3 retries and
+      suggests how to prevent it in future sessions. Score 1-5 based on:
+      - Score 5: Learning identifies the specific root cause behind the retries (e.g., missing
+        async handling in test setup, wrong test database state), explains why it caused
+        multiple retries, and suggests a concrete prevention measure
+      - Score 4: Learning identifies the root cause and suggests prevention without full
+        explanation of why it caused multiple retries
+      - Score 3: Learning notes there were 3 retries and a fix was eventually found, but
+        describes symptoms rather than root cause
+      - Score 2: Learning records retries happened without identifying root cause
+      - Score 1: Learning does not address the retry pattern
+    min_score: 4

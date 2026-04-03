@@ -1,0 +1,7 @@
+id: 004-type-error
+description: "Test fix: TypeScript type mismatch compilation error"
+tags:
+  - test-fix
+  - typescript
+  - type-error
+source: manual

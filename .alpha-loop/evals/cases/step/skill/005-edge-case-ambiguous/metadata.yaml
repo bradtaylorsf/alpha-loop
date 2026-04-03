@@ -1,0 +1,7 @@
+id: 005-edge-case-ambiguous
+description: "Edge case: ambiguous review request for non-code content"
+tags:
+  - skill
+  - ambiguous
+  - edge-case
+source: manual

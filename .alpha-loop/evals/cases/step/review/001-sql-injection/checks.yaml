@@ -1,0 +1,19 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review correctly identifies the SQL injection vulnerability and
+      recommends parameterized queries. Score 1-5 based on:
+      - Score 5: Review explicitly identifies SQL injection vulnerability, explains why string
+        concatenation is dangerous, and suggests parameterized queries or a prepared statement
+      - Score 4: Review identifies the SQL injection risk and recommends parameterized queries
+        without full explanation
+      - Score 3: Review flags the query as potentially unsafe but doesn't clearly identify it
+        as SQL injection or doesn't suggest the fix
+      - Score 2: Review mentions the database query vaguely without identifying the security issue
+      - Score 1: Review does not identify the SQL injection vulnerability
+    min_score: 4
