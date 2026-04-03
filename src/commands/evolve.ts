@@ -466,9 +466,11 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
       // Commit the changes
       const description = changes.map((c) => c.reason).join('; ');
       for (const change of changes) {
-        exec(`git add ${change.path}`, { cwd: process.cwd() });
+        exec(`git add "${change.path}"`, { cwd: process.cwd() });
       }
-      exec(`git commit -m "evolve(${iteration}): ${description.slice(0, 72)}"`, { cwd: process.cwd() });
+      // Sanitize description for shell safety — strip quotes and control chars
+      const safeDesc = description.slice(0, 72).replace(/["`$\\]/g, '');
+      exec(`git commit -m "evolve(${iteration}): ${safeDesc}"`, { cwd: process.cwd() });
 
       bestScore = compositeScore;
       totalKept++;

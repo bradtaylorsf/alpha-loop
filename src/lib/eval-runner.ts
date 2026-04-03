@@ -525,12 +525,12 @@ export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
       // Clone the repo at the base commit
       const url = `https://github.com/${repo}.git`;
       log.info(`Cloning SWE-bench repo ${repo}...`);
-      const cloneResult = exec(`git clone ${url} ${fixtureDir}`, { timeout: 120_000 });
+      const cloneResult = exec(`git clone "${url}" "${fixtureDir}"`, { timeout: 120_000 });
       if (cloneResult.exitCode !== 0) {
         throw new Error(`Failed to clone SWE-bench repo ${repo}: ${cloneResult.stderr}`);
       }
       // Checkout base commit
-      const checkout = exec(`git checkout ${ref}`, { cwd: fixtureDir, timeout: 30_000 });
+      const checkout = exec(`git checkout "${ref}"`, { cwd: fixtureDir, timeout: 30_000 });
       if (checkout.exitCode !== 0) {
         throw new Error(`Failed to checkout ${ref}: ${checkout.stderr}`);
       }
@@ -542,7 +542,7 @@ export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
   if (repo.includes('/') && !existsSync(repo)) {
     // Remote repo — clone it
     const cloneResult = exec(
-      `git clone --depth 1 --branch ${ref} https://github.com/${repo}.git ${fixtureDir}`,
+      `git clone --depth 1 --branch "${ref}" "https://github.com/${repo}.git" "${fixtureDir}"`,
       { timeout: 120_000 },
     );
     if (cloneResult.exitCode !== 0) {
@@ -551,7 +551,7 @@ export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
   } else if (existsSync(repo)) {
     // Local repo — copy via git worktree or clone
     const cloneResult = exec(
-      `git clone --local --branch ${ref} ${repo} ${fixtureDir}`,
+      `git clone --local --branch "${ref}" "${repo}" "${fixtureDir}"`,
       { timeout: 30_000 },
     );
     if (cloneResult.exitCode !== 0) {
@@ -559,13 +559,13 @@ export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
     }
   } else {
     // Mode 3: Use current project as fixture
-    const result = exec(`git worktree add ${fixtureDir} ${ref} --detach`, {
+    const result = exec(`git worktree add "${fixtureDir}" "${ref}" --detach`, {
       cwd: projectDir,
       timeout: 30_000,
     });
     if (result.exitCode !== 0) {
       // Worktree might already exist, try direct clone
-      exec(`git clone --local --branch ${ref} ${projectDir} ${fixtureDir}`, { timeout: 30_000 });
+      exec(`git clone --local --branch "${ref}" "${projectDir}" "${fixtureDir}"`, { timeout: 30_000 });
     }
   }
 

@@ -125,7 +125,7 @@ export function cloneOrCacheFixtureRepo(config: FixtureConfig, projectDir: strin
       // Fetch failed, re-clone
       rmSync(cacheDir, { recursive: true, force: true });
     } else {
-      const checkout = exec(`git checkout ${config.commit}`, { cwd: cacheDir, timeout: 30_000 });
+      const checkout = exec(`git checkout "${config.commit}"`, { cwd: cacheDir, timeout: 30_000 });
       if (checkout.exitCode === 0) return cacheDir;
       // Checkout failed, re-clone
       rmSync(cacheDir, { recursive: true, force: true });
@@ -141,13 +141,13 @@ export function cloneOrCacheFixtureRepo(config: FixtureConfig, projectDir: strin
     : `https://github.com/${config.url}.git`;
 
   log.info(`Cloning fixture repo from ${url}...`);
-  const cloneResult = exec(`git clone ${url} ${cacheDir}`, { timeout: 120_000 });
+  const cloneResult = exec(`git clone "${url}" "${cacheDir}"`, { timeout: 120_000 });
   if (cloneResult.exitCode !== 0) {
     throw new Error(`Failed to clone fixture repo: ${cloneResult.stderr}`);
   }
 
   // Checkout the pinned commit
-  const checkout = exec(`git checkout ${config.commit}`, { cwd: cacheDir, timeout: 30_000 });
+  const checkout = exec(`git checkout "${config.commit}"`, { cwd: cacheDir, timeout: 30_000 });
   if (checkout.exitCode !== 0) {
     throw new Error(`Failed to checkout commit ${config.commit}: ${checkout.stderr}`);
   }
