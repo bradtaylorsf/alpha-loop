@@ -1,0 +1,47 @@
+{
+  "name": "session/20260403-000213",
+  "branch": "session/20260403-000213",
+  "completed": "2026-04-03T08:15:27.830Z",
+  "results": [
+    {
+      "issueNum": 94,
+      "title": "feat: step-level evals for each pipeline stage",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/108",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1451,
+      "filesChanged": 7
+    },
+    {
+      "issueNum": 95,
+      "title": "feat: eval fixture repos + open-source data integration",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/109",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 943,
+      "filesChanged": 7
+    },
+    {
+      "issueNum": 96,
+      "title": "feat: harness configuration search with cost-aware Pareto optimization",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/110",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 929,
+      "filesChanged": 7
+    },
+    {
+      "issueNum": 97,
+      "title": "feat: alpha-loop evolve — automated Meta-Harness optimization loop",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/111",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 673,
+      "filesChanged": 7
+    }
+  ]
+}
