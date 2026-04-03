@@ -98,7 +98,7 @@ evalCmd
   .option('--suite <suite>', 'Run only a suite: step (fast) or e2e (slow)')
   .option('--case <id>', 'Run a single eval case by ID prefix')
   .option('--type <type>', 'Filter by type: full or step')
-  .option('--step <step>', 'Filter by pipeline step (plan, implement, test, review, verify)')
+  .option('--step <step>', 'Filter by pipeline step (plan, implement, test, test-fix, review, verify, learn, skill)')
   .option('--verbose', 'Show detailed output')
   .action(async (options) => {
     const { evalRunCommand } = await import('./commands/eval.js');

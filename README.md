@@ -127,6 +127,23 @@ alpha-loop eval search --models "opus,sonnet" --agents "claude,codex"
 
 Eval cases live in `.alpha-loop/evals/` and scores are appended to `scores.jsonl` (Git-friendly, append-only). The composite score formula is pass-rate primary with lightweight penalties for retries and duration.
 
+Step-level evals test individual pipeline stages (plan, implement, test, test-fix, review, learn, skill) and run in seconds using LLM-judge and keyword checks:
+
+```bash
+# Run only step-level evals (fast, cheap)
+alpha-loop eval --suite step
+
+# Run evals for a specific step
+alpha-loop eval --suite step --step review
+
+# Convert between AlphaLoop and skill-creator eval formats
+alpha-loop eval convert --direction to-skill
+alpha-loop eval convert --direction from-skill --input path/to/evals.json
+
+# Import SWE-bench cases (planned)
+alpha-loop eval import-swebench
+```
+
 ### Evolve (`alpha-loop evolve`)
 
 The evolve command runs a Meta-Harness-style optimization loop: a proposer agent reads full execution traces, scores, and source code, then proposes targeted changes to prompts, skills, or config. Changes are evaluated against the eval suite — improvements are kept, regressions are reverted (autoresearch keep/discard pattern).
@@ -178,6 +195,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop eval pareto` | Show score/cost Pareto frontier |
 | `alpha-loop eval compare <r1> <r2>` | Compare two eval runs |
 | `alpha-loop eval search` | Greedy search over model/agent configurations |
+| `alpha-loop eval convert` | Convert between AlphaLoop and skill-creator eval formats |
+| `alpha-loop eval import-swebench` | Import eval cases from SWE-bench dataset |
 | `alpha-loop evolve` | Meta-Harness-style automated optimization loop |
 
 ### Run Options
