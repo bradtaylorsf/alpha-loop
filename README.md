@@ -187,7 +187,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run` | Fetch matching issues, process them all, then exit |
 | `alpha-loop run --dry-run` | Preview without making changes |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
-| `alpha-loop vision` | Interactive project vision setup (`.alpha-loop/vision.md`) |
+| `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
 | `alpha-loop auth` | Save authenticated browser state for verification |
 | `alpha-loop history` | View session history |
 | `alpha-loop history <name>` | View a specific session |
