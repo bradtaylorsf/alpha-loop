@@ -1,6 +1,6 @@
 {
   "name": "@bradtaylorsf/alpha-loop",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Agent-agnostic automated development loop: Plan → Build → Test → Review → Ship",
   "type": "module",
   "packageManager": "pnpm@9.0.0",
