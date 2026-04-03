@@ -80,7 +80,7 @@ export function downloadDataset(datasetId: string, outputPath: string): void {
   writeFileSync(scriptPath, scriptContent);
 
   log.info(`Downloading ${datasetId} from HuggingFace...`);
-  const result = exec(`python3 ${scriptPath}`, { timeout: 300_000 });
+  const result = exec(`python3 "${scriptPath}"`, { timeout: 300_000 });
 
   // Clean up temp script
   try { rmSync(scriptPath); } catch { /* non-fatal */ }

@@ -27,7 +27,6 @@ import {
   cloneOrCacheFixtureRepo,
   extractFixture,
   setupFixture as runFixtureSetup,
-  cleanupFixture,
 } from './eval-fixtures.js';
 import { estimateCost, resolveStepConfig } from './config.js';
 import type { Config, PipelineConfig, PipelineStepName } from './config.js';
@@ -36,6 +35,7 @@ import type { EvalCase, EvalResult, EvalSuiteResult } from './eval.js';
 import type { CaseResult, ScoreEntry } from './score.js';
 import type { SessionContext } from './session.js';
 import type { PipelineResult } from './pipeline.js';
+import type { AgentResult } from './agent.js';
 
 /** Options for running the eval suite. */
 export type EvalRunOptions = {
@@ -76,7 +76,6 @@ export async function runEvalSuite(
 
   const session = `eval-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
   const results: EvalResult[] = [];
-  let totalCost = 0;
 
   // Snapshot harness for tracking
   const harnessHash = snapshotHarness(config);
@@ -133,6 +132,9 @@ export async function runEvalSuite(
   const passCount = results.filter((r) => r.passed).length;
   const failCount = results.length - passCount;
   const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+
+  // Accumulate real costs from agent token usage
+  const totalCost = results.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
 
   // Record to score history
   const configObj: Record<string, unknown> = {
@@ -195,7 +197,7 @@ export async function runEvalSuite(
     });
   } catch { /* non-fatal */ }
 
-  return { cases: results, composite, totalDuration, passCount, failCount };
+  return { cases: results, composite, totalDuration, totalCost, passCount, failCount };
 }
 
 /**
@@ -326,6 +328,16 @@ async function runStepEval(
   const resolvedAgent = resolved.agent as Config['agent'];
 
   let output = '';
+  // Accumulate cost/token data from agent invocations
+  let caseCostUsd = 0;
+  let caseInputTokens = 0;
+  let caseOutputTokens = 0;
+
+  const trackCost = (result: AgentResult) => {
+    if (result.costUsd) caseCostUsd += result.costUsd;
+    if (result.inputTokens) caseInputTokens += result.inputTokens;
+    if (result.outputTokens) caseOutputTokens += result.outputTokens;
+  };
 
   try {
     // Run the targeted pipeline step
@@ -339,6 +351,7 @@ async function runStepEval(
           timeout: (evalCase.timeout || 60) * 1000,
         });
         output = result.output;
+        trackCost(result);
         break;
       }
       case 'implement': {
@@ -355,6 +368,7 @@ async function runStepEval(
           timeout: (evalCase.timeout || 120) * 1000,
         });
         output = result.output;
+        trackCost(result);
         break;
       }
       case 'review': {
@@ -372,6 +386,7 @@ async function runStepEval(
           timeout: (evalCase.timeout || 60) * 1000,
         });
         output = result.output;
+        trackCost(result);
         break;
       }
       case 'test': {
@@ -408,6 +423,7 @@ async function runStepEval(
           maxTurns: 1,
         });
         output = result.output;
+        trackCost(result);
         break;
       }
       case 'skill': {
@@ -420,6 +436,7 @@ async function runStepEval(
           timeout: (evalCase.timeout || 60) * 1000,
         });
         output = result.output;
+        trackCost(result);
         break;
       }
       case 'test-fix': {
@@ -433,6 +450,7 @@ async function runStepEval(
           timeout: (evalCase.timeout || 120) * 1000,
         });
         output = result.output;
+        trackCost(result);
         break;
       }
     }
@@ -456,6 +474,9 @@ async function runStepEval(
       partialCredit: checkResults.avgScore,
       retries: 0,
       duration,
+      costUsd: caseCostUsd || undefined,
+      inputTokens: caseInputTokens || undefined,
+      outputTokens: caseOutputTokens || undefined,
       details: {
         successMatch: true,
         filesMatch: true,
@@ -477,6 +498,9 @@ async function runStepEval(
     partialCredit: outputMatch ? 1 : 0,
     retries: 0,
     duration,
+    costUsd: caseCostUsd || undefined,
+    inputTokens: caseInputTokens || undefined,
+    outputTokens: caseOutputTokens || undefined,
     details: {
       successMatch: true,
       filesMatch: true,
@@ -572,11 +596,21 @@ export function prepareFixture(evalCase: EvalCase, projectDir: string): string {
   return fixtureDir;
 }
 
-/** Read all files in a directory recursively, sorted, and concatenate contents. */
+/** Extensions to include when hashing template directories. */
+const TEXT_EXTENSIONS = new Set(['.md', '.yaml', '.yml', '.txt', '.json', '.ts', '.js']);
+
+/** Read text files in a directory recursively, sorted, and concatenate contents. */
 function readDirContentsSorted(dirPath: string): string {
   const entries = readdirSync(dirPath, { recursive: true, withFileTypes: true });
   const files = entries
-    .filter((d) => d.isFile())
+    .filter((d) => {
+      if (!d.isFile()) return false;
+      // Skip dotfiles (.DS_Store, .gitkeep, etc.)
+      if (d.name.startsWith('.')) return false;
+      // Only include known text extensions
+      const ext = d.name.slice(d.name.lastIndexOf('.'));
+      return TEXT_EXTENSIONS.has(ext);
+    })
     .map((d) => join(d.parentPath ?? d.path, d.name))
     .sort();
   return files.map((f) => readFileSync(f, 'utf-8')).join('\n');
@@ -657,15 +691,6 @@ const DEFAULT_TOKEN_ESTIMATES: Record<PipelineStepName, { input: number; output:
   learn: { input: 10000, output: 3000 },
 };
 
-/** Estimate per-step token averages from historical score data. */
-function historicalTokenAverages(
-  evalsDir: string,
-): Record<string, { input: number; output: number }> | null {
-  // Token-level tracking isn't in scores.jsonl today, so return null
-  // to fall back to defaults. This hook exists for future enhancement.
-  return null;
-}
-
 export type CostEstimate = {
   steps: Array<{
     step: PipelineStepName;
@@ -691,12 +716,9 @@ export function estimateRunCost(
   const steps: CostEstimate['steps'] = [];
   const pipelineSteps: PipelineStepName[] = ['plan', 'implement', 'test_fix', 'review', 'verify', 'learn'];
 
-  // Try historical averages first
-  const historical = historicalTokenAverages(join(process.cwd(), config.evalDir));
-
   for (const step of pipelineSteps) {
     const { model } = resolveStepConfig(config, step);
-    const tokens = (historical && historical[step]) ?? DEFAULT_TOKEN_ESTIMATES[step];
+    const tokens = DEFAULT_TOKEN_ESTIMATES[step];
     const costPerCase = estimateCost(model, tokens.input, tokens.output, config.pricing);
 
     steps.push({

@@ -13,23 +13,26 @@ import type { EvolveLogEntry, SurfaceLevel } from '../../src/commands/evolve.js'
 
 describe('evolve', () => {
   describe('isSafePath', () => {
-    it('allows paths under .alpha-loop/templates/skills/', () => {
-      expect(isSafePath('.alpha-loop/templates/skills/my-skill.md')).toBe(true);
-      expect(isSafePath('.alpha-loop/templates/skills/sub/dir/file.md')).toBe(true);
-    });
-
-    it('allows paths under .alpha-loop/templates/agents/', () => {
+    it('default surface (prompts) allows agent templates', () => {
       expect(isSafePath('.alpha-loop/templates/agents/implementer.md')).toBe(true);
     });
 
-    it('allows exact match for .alpha-loop.yaml', () => {
-      expect(isSafePath('.alpha-loop.yaml')).toBe(true);
+    it('default surface (prompts) rejects skills and yaml', () => {
+      expect(isSafePath('.alpha-loop/templates/skills/my-skill.md')).toBe(false);
+      expect(isSafePath('.alpha-loop.yaml')).toBe(false);
+    });
+
+    it('config surface allows skills, agents, and yaml', () => {
+      expect(isSafePath('.alpha-loop/templates/skills/my-skill.md', 'config')).toBe(true);
+      expect(isSafePath('.alpha-loop/templates/skills/sub/dir/file.md', 'config')).toBe(true);
+      expect(isSafePath('.alpha-loop/templates/agents/implementer.md', 'config')).toBe(true);
+      expect(isSafePath('.alpha-loop.yaml', 'config')).toBe(true);
     });
 
     it('rejects .alpha-loop.yaml with suffix (prefix bypass)', () => {
-      expect(isSafePath('.alpha-loop.yaml-evil')).toBe(false);
-      expect(isSafePath('.alpha-loop.yaml.bak')).toBe(false);
-      expect(isSafePath('.alpha-loop.yamlFoo')).toBe(false);
+      expect(isSafePath('.alpha-loop.yaml-evil', 'config')).toBe(false);
+      expect(isSafePath('.alpha-loop.yaml.bak', 'config')).toBe(false);
+      expect(isSafePath('.alpha-loop.yamlFoo', 'config')).toBe(false);
     });
 
     it('rejects absolute paths', () => {

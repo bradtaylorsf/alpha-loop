@@ -76,6 +76,24 @@ describe('hashConfig', () => {
     const hash = hashConfig({ test: 'value' });
     expect(hash).toMatch(/^[a-f0-9]{12}$/);
   });
+
+  it('produces same hash regardless of key insertion order', () => {
+    const hash1 = hashConfig({ a: 1, b: 2, c: 3 });
+    const hash2 = hashConfig({ c: 3, a: 1, b: 2 });
+    expect(hash1).toBe(hash2);
+  });
+
+  it('deep-sorts nested objects for deterministic hashing', () => {
+    const hash1 = hashConfig({
+      pipeline: { review: { model: 'haiku' }, implement: { model: 'sonnet' } },
+      agent: 'claude',
+    });
+    const hash2 = hashConfig({
+      agent: 'claude',
+      pipeline: { implement: { model: 'sonnet' }, review: { model: 'haiku' } },
+    });
+    expect(hash1).toBe(hash2);
+  });
 });
 
 describe('appendScore / readScores', () => {

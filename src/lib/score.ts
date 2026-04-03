@@ -59,10 +59,22 @@ export function computeCompositeScore(cases: CaseResult[]): number {
 
 /**
  * Hash a config object to create a stable identifier for comparison.
+ * Deep-sorts all nested objects for deterministic serialization.
  */
 export function hashConfig(config: Record<string, unknown>): string {
-  const sorted = JSON.stringify(config, Object.keys(config).sort());
+  const sorted = JSON.stringify(deepSortKeys(config));
   return createHash('sha256').update(sorted).digest('hex').slice(0, 12);
+}
+
+/** Recursively sort object keys for deterministic JSON output. */
+function deepSortKeys(obj: unknown): unknown {
+  if (obj === null || obj === undefined || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map(deepSortKeys);
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(obj as Record<string, unknown>).sort()) {
+    sorted[key] = deepSortKeys((obj as Record<string, unknown>)[key]);
+  }
+  return sorted;
 }
 
 /**

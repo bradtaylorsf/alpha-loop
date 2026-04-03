@@ -12,8 +12,8 @@
  * Key insight from Meta-Harness: full trace access (not summaries) is critical.
  * Key insight from autoresearch: fixed eval metric + autonomous iteration.
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, rmdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { log } from '../lib/logger.js';
 import { loadConfig } from '../lib/config.js';
 import { spawnAgent } from '../lib/agent.js';
@@ -63,9 +63,6 @@ export const SURFACE_TARGETS: Record<SurfaceLevel, string[]> = {
     'src/lib/pipeline.ts',
   ],
 };
-
-/** Legacy alias for backward compatibility. */
-const ALLOWED_TARGETS = SURFACE_TARGETS.config;
 
 /** Path to the evolve log TSV file. */
 export const EVOLVE_LOG_PATH = '.alpha-loop/evals/evolve-log.tsv';
@@ -188,7 +185,7 @@ export function isSafePath(filePath: string, surface?: SurfaceLevel): boolean {
   // Reject absolute paths and path traversal
   if (filePath.startsWith('/') || filePath.includes('..')) return false;
 
-  const targets = surface ? SURFACE_TARGETS[surface] : ALLOWED_TARGETS;
+  const targets = SURFACE_TARGETS[surface ?? 'prompts'];
 
   // Must be in allowed targets: directory prefixes use startsWith, files use exact match
   return targets.some((prefix) =>
@@ -270,11 +267,10 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
     process.on('SIGTERM', handler);
   }
 
-  // Gather context for the proposer
-  const traces = listTraces();
-  const recentTraces = traces.slice(0, 10);
+  // Gather context for the proposer (refreshed every 5 iterations)
+  let recentTraces = listTraces().slice(0, 10);
 
-  log.info(`Recent traces: ${recentTraces.length} (from ${traces.length} total)`);
+  log.info(`Recent traces: ${recentTraces.length}`);
 
   // Step 0: Run baseline eval if no baseline score exists
   if (bestScore === 0 && !options.dryRun) {
@@ -313,6 +309,11 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
       log.dry('Would run step-level eval, then e2e eval if step passes');
       log.dry('Would keep if score improves, revert if not');
       continue;
+    }
+
+    // Refresh traces every 5 iterations so the proposer sees recent data
+    if ((iteration - startIteration) > 0 && (iteration - startIteration) % 5 === 0) {
+      recentTraces = listTraces().slice(0, 10);
     }
 
     // Read evolve log for proposer context
@@ -390,7 +391,7 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
 
     // Apply changes
     for (const change of changes) {
-      const dir = join(change.path, '..');
+      const dir = dirname(change.path);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       writeFileSync(change.path, change.content);
       log.info(`Applied: ${change.path}`);
@@ -424,7 +425,7 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
     if (stepCases.length > 0) {
       const stepResult = await runEvalSuite(stepCases, config, { verbose: options.verbose });
       stepScore = stepResult.composite;
-      iterationCost += stepResult.totalDuration * 0.001; // rough cost proxy
+      iterationCost += stepResult.totalCost;
 
       if (stepScore < bestScore) {
         log.warn(`Step-level eval regressed: ${stepScore.toFixed(2)} < ${bestScore.toFixed(2)}. Discarding.`);
@@ -453,7 +454,7 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
       log.info('Running e2e eval...');
       const e2eResult = await runEvalSuite(fullCases, config, { verbose: options.verbose });
       compositeScore = e2eResult.composite;
-      iterationCost += e2eResult.totalDuration * 0.001;
+      iterationCost += e2eResult.totalCost;
     }
 
     // Keep or discard
@@ -468,9 +469,12 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
       for (const change of changes) {
         exec(`git add "${change.path}"`, { cwd: process.cwd() });
       }
-      // Sanitize description for shell safety — strip quotes and control chars
-      const safeDesc = description.slice(0, 72).replace(/["`$\\]/g, '');
-      exec(`git commit -m "evolve(${iteration}): ${safeDesc}"`, { cwd: process.cwd() });
+      // Write commit message to a temp file to avoid shell injection
+      const commitMsg = `evolve(${iteration}): ${description.slice(0, 200)}`;
+      const commitMsgFile = join(process.cwd(), '.alpha-loop', 'evals', '.commit-msg.tmp');
+      writeFileSync(commitMsgFile, commitMsg);
+      exec(`git commit --file "${commitMsgFile}"`, { cwd: process.cwd() });
+      try { unlinkSync(commitMsgFile); } catch { /* non-fatal */ }
 
       bestScore = compositeScore;
       totalKept++;
@@ -518,13 +522,24 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
 
 /**
  * Revert file changes from backups.
+ * For new files, also removes empty parent directories that were created.
  */
 function revertChanges(backups: Map<string, string | null>): void {
   for (const [path, content] of backups) {
     if (content === null) {
-      // File didn't exist before — remove it
+      // File didn't exist before — remove it and clean empty parents
       try {
         unlinkSync(path);
+        // Walk up removing empty directories until we hit a non-empty one
+        let dir = dirname(path);
+        while (dir && dir !== '.' && dir !== '/') {
+          try {
+            rmdirSync(dir); // throws if non-empty
+            dir = dirname(dir);
+          } catch {
+            break; // directory not empty, stop
+          }
+        }
       } catch { /* ignore */ }
     } else {
       writeFileSync(path, content);

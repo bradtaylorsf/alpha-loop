@@ -376,6 +376,7 @@ export function parseChecks(raw: unknown): CheckDefinition[] {
           type: 'http',
           method: String(c.method ?? 'GET'),
           path: String(c.path ?? '/'),
+          port: c.port != null ? Number(c.port) : undefined,
           expect_status: Number(c.expect_status ?? 200),
           expect_body_contains: c.expect_body_contains ? String(c.expect_body_contains) : undefined,
         } as HttpCheck;

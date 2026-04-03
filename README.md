@@ -121,11 +121,17 @@ alpha-loop eval scores
 alpha-loop eval pareto
 alpha-loop eval compare 1 2
 
-# Greedy search over model/agent configurations
-alpha-loop eval search --models "opus,sonnet" --agents "claude,codex"
+# Greedy search over model configurations per pipeline step
+alpha-loop eval search --models "haiku,sonnet,opus"
+
+# Estimate cost before running
+alpha-loop eval estimate
+
+# Compare two config files side-by-side
+alpha-loop eval compare-configs config-a.yaml config-b.yaml
 ```
 
-Eval cases live in `.alpha-loop/evals/` and scores are appended to `scores.jsonl` (Git-friendly, append-only). The composite score formula is pass-rate primary with lightweight penalties for retries and duration.
+Eval cases live in `.alpha-loop/evals/` and scores are appended to `scores.jsonl` (Git-friendly, append-only). The composite score formula is pass-rate primary with lightweight penalties for retries and duration. Real API costs (tokens, USD) are tracked per case from agent output and used for the Pareto frontier.
 
 Step-level evals test individual pipeline stages (plan, implement, test, test-fix, review, learn, skill) and run in seconds using LLM-judge and keyword checks:
 
@@ -140,8 +146,8 @@ alpha-loop eval --suite step --step review
 alpha-loop eval convert --direction to-skill
 alpha-loop eval convert --direction from-skill --input path/to/evals.json
 
-# Import SWE-bench cases (planned)
-alpha-loop eval import-swebench
+# Import SWE-bench cases from HuggingFace (requires Python + datasets)
+alpha-loop eval import-swebench --count 10 --repo "django/django"
 ```
 
 ### Evolve (`alpha-loop evolve`)
@@ -198,7 +204,9 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop eval scores` | Show score history over time |
 | `alpha-loop eval pareto` | Show score/cost Pareto frontier |
 | `alpha-loop eval compare <r1> <r2>` | Compare two eval runs |
-| `alpha-loop eval search` | Greedy search over model/agent configurations |
+| `alpha-loop eval search` | Greedy search over model configurations per pipeline step |
+| `alpha-loop eval estimate` | Estimate cost of running the eval suite |
+| `alpha-loop eval compare-configs <a> <b>` | Compare two YAML config files side-by-side |
 | `alpha-loop eval convert` | Convert between AlphaLoop and skill-creator eval formats |
 | `alpha-loop eval import-swebench` | Import eval cases from SWE-bench dataset |
 | `alpha-loop evolve` | Meta-Harness-style automated optimization loop |
@@ -290,6 +298,8 @@ eval_dir: .alpha-loop/evals
 | `eval_model` | (agent default) | AI model for eval judging |
 | `eval_timeout` | `300` | Timeout in seconds for eval case execution |
 | `auto_capture` | `true` | Auto-capture failures as eval cases at end of session |
+| `pipeline` | `{}` | Per-step agent/model overrides (see below) |
+| `pricing` | (built-in) | Custom token pricing per model for cost tracking |
 | `post_session.review` | `true` | Run holistic code review on full session diff |
 | `post_session.security_scan` | `true` | Include security scanning in post-session review |
 
@@ -365,6 +375,27 @@ harnesses:
   - codex
   - claude  # also sync to Claude for teammates using it
 ```
+
+### Per-Step Pipeline Config
+
+Use `pipeline` to assign different models to different pipeline stages. This lets you use cheaper models for simple steps and reserve expensive models for implementation:
+
+```yaml
+agent: claude
+model: claude-sonnet-4-6  # default for all steps
+
+pipeline:
+  plan:
+    model: claude-haiku-4-5       # cheap model for planning
+  implement:
+    model: claude-sonnet-4-6      # main model for coding
+  review:
+    model: claude-opus-4-6        # best model for review
+  learn:
+    model: claude-haiku-4-5       # cheap model for learning
+```
+
+Use `alpha-loop eval search` to automatically find the best model assignment per step via greedy coordinate descent over your eval suite.
 
 ## GitHub Setup
 

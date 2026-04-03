@@ -28,7 +28,7 @@ import {
   formatEvalCase,
   evalsDir,
 } from '../lib/eval.js';
-import type { EvalCase, ExpectedOutcome } from '../lib/eval.js';
+import type { EvalCase, ExpectedOutcome, PipelineStep } from '../lib/eval.js';
 import {
   toSkillCreatorEval,
   fromSkillCreatorEval,
@@ -106,7 +106,7 @@ export async function evalRunCommand(options: EvalOptions): Promise<void> {
   const cases = loadEvalCases({
     tags: options.tags?.split(','),
     type,
-    step: options.step as any,
+    step: options.step as PipelineStep | undefined,
     caseId: options.case,
   });
 
@@ -673,7 +673,7 @@ export async function evalSearchCommand(options: EvalSearchOptions): Promise<voi
   runsUsed++;
 
   const baselineScore = baselineResult.composite;
-  const baselineCost = baselineResult.cases.reduce((sum, c) => sum + (c.duration * 0.001), 0); // rough proxy
+  const baselineCost = baselineResult.totalCost;
 
   const baselineConfigObj: Record<string, unknown> = {
     agent: config.agent,
@@ -736,7 +736,7 @@ export async function evalSearchCommand(options: EvalSearchOptions): Promise<voi
       runsUsed++;
 
       const score = result.composite;
-      const cost = result.cases.reduce((sum, c) => sum + (c.duration * 0.001), 0);
+      const cost = result.totalCost;
 
       const configObj: Record<string, unknown> = {
         agent: config.agent,
@@ -877,7 +877,7 @@ export function evalConvertCommand(options: EvalConvertOptions): void {
     // Load AlphaLoop eval cases and convert to skill-creator format
     const cases = loadEvalCases({
       type: 'step',
-      step: 'skill' as any,
+      step: 'skill' as PipelineStep,
     });
 
     if (cases.length === 0) {
