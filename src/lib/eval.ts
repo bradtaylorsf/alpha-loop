@@ -106,9 +106,9 @@ export type EvalSuiteResult = {
 
 const EVALS_DIR = '.alpha-loop/evals';
 
-/** Get the evals directory path. */
-export function evalsDir(projectDir?: string): string {
-  return join(projectDir ?? process.cwd(), EVALS_DIR);
+/** Get the evals directory path. Uses config evalDir if provided, otherwise default. */
+export function evalsDir(projectDir?: string, evalDir?: string): string {
+  return join(projectDir ?? process.cwd(), evalDir ?? EVALS_DIR);
 }
 
 /**
@@ -227,13 +227,14 @@ export function loadEvalCaseDir(dirPath: string): EvalCase | null {
  */
 export function loadEvalCases(options?: {
   projectDir?: string;
+  evalDir?: string;
   tags?: string[];
   type?: 'full' | 'step';
   step?: PipelineStep;
   caseId?: string;
   includeUnannotated?: boolean;
 }): EvalCase[] {
-  const dir = evalsDir(options?.projectDir);
+  const dir = evalsDir(options?.projectDir, options?.evalDir);
   if (!existsSync(dir)) return [];
 
   const cases: EvalCase[] = [];
@@ -312,8 +313,8 @@ export function loadEvalCases(options?: {
 /**
  * Save an eval case to a YAML file.
  */
-export function saveEvalCase(evalCase: EvalCase, projectDir?: string): string {
-  const dir = evalsDir(projectDir);
+export function saveEvalCase(evalCase: EvalCase, projectDir?: string, evalDirOverride?: string): string {
+  const dir = evalsDir(projectDir, evalDirOverride);
   mkdirSync(dir, { recursive: true });
 
   const filePath = join(dir, `case-${evalCase.id}.yaml`);
@@ -456,7 +457,7 @@ export function recordEvalResults(
     totalCost: cost,
   };
 
-  appendScore(evalsDir(projectDir), entry);
+  appendScore(evalsDir(projectDir, config.evalDir), entry);
 
   const passCount = results.filter((r) => r.passed).length;
   const failCount = results.length - passCount;
@@ -520,8 +521,8 @@ function slugify(title: string): string {
  *
  * Returns the path to the created case directory.
  */
-export function saveCapturedCase(opts: SaveCapturedCaseOptions): string {
-  const dir = evalsDir(opts.projectDir);
+export function saveCapturedCase(opts: SaveCapturedCaseOptions & { evalDir?: string }): string {
+  const dir = evalsDir(opts.projectDir, opts.evalDir);
   const slug = slugify(opts.title);
   const caseDirName = `captured-${String(opts.issueNum).padStart(3, '0')}-${slug}`;
   const casePath = join(dir, 'cases', 'step', opts.step, caseDirName);
@@ -568,13 +569,13 @@ export function saveCapturedCase(opts: SaveCapturedCaseOptions): string {
 /**
  * Load all unannotated (needs-annotation) captured cases.
  */
-export function loadUnannotatedCases(projectDir?: string): Array<{ path: string; evalCase: EvalCase }> {
-  const cases = loadEvalCases({ projectDir, includeUnannotated: true });
+export function loadUnannotatedCases(projectDir?: string, evalDirOverride?: string): Array<{ path: string; evalCase: EvalCase }> {
+  const cases = loadEvalCases({ projectDir, evalDir: evalDirOverride, includeUnannotated: true });
   return cases
     .filter((c) => c.captureStatus === 'needs-annotation')
     .map((c) => {
       // Reconstruct the directory path from the case ID
-      const dir = evalsDir(projectDir);
+      const dir = evalsDir(projectDir, evalDirOverride);
       // Search for the case directory
       const casePath = findCaseDir(dir, c.id);
       return { path: casePath, evalCase: c };

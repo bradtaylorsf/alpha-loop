@@ -49,8 +49,8 @@ export async function evolveCommand(options: EvolveOptions): Promise<void> {
     return;
   }
 
-  const scores = readScores(evalsDir());
-  const baseline = latestScore(evalsDir());
+  const scores = readScores(evalsDir(undefined, config.evalDir));
+  const baseline = latestScore(evalsDir(undefined, config.evalDir));
 
   log.step('Alpha Loop Evolve — Meta-Harness Optimization');
   console.log('');

@@ -90,7 +90,7 @@ export async function evalRunCommand(options: EvalOptions): Promise<void> {
 
   if (cases.length === 0) {
     log.warn('No eval cases found. Use `alpha-loop eval capture` to create some.');
-    log.info(`Eval cases directory: ${evalsDir()}`);
+    log.info(`Eval cases directory: ${evalsDir(undefined, config.evalDir)}`);
     return;
   }
 
@@ -103,7 +103,7 @@ export async function evalRunCommand(options: EvalOptions): Promise<void> {
   console.log('');
 
   // Show previous score for comparison
-  const previousScore = latestScore(evalsDir());
+  const previousScore = latestScore(evalsDir(undefined, config.evalDir));
 
   // Execute the eval suite
   const result = await runEvalSuite(cases, config, {
@@ -140,7 +140,7 @@ export async function evalRunCommand(options: EvalOptions): Promise<void> {
  * Compare two eval runs.
  */
 export function evalCompareCommand(run1: string, run2: string): void {
-  const comparison = compareRuns(evalsDir(), run1, run2);
+  const comparison = compareRuns(evalsDir(undefined, loadConfig().evalDir), run1, run2);
 
   if (!comparison) {
     log.warn('Could not find one or both runs. Use run index (1-based) or timestamp prefix.');
@@ -505,7 +505,7 @@ async function captureFailure(
  */
 export function evalListCommand(): void {
   const cases = loadEvalCases();
-  const dir = evalsDir();
+  const dir = evalsDir(undefined, loadConfig().evalDir);
 
   if (cases.length === 0) {
     log.info('No eval cases found.');
@@ -547,7 +547,7 @@ export function evalListCommand(): void {
  * Show score history.
  */
 export function evalScoresCommand(): void {
-  const scores = readScores(evalsDir());
+  const scores = readScores(evalsDir(undefined, loadConfig().evalDir));
 
   if (scores.length === 0) {
     log.info('No scores recorded yet. Run `alpha-loop eval` to generate scores.');
@@ -579,7 +579,7 @@ export function evalScoresCommand(): void {
  * Show score/cost Pareto frontier.
  */
 export function evalParetoCommand(): void {
-  const frontier = paretoFrontier(evalsDir());
+  const frontier = paretoFrontier(evalsDir(undefined, loadConfig().evalDir));
 
   if (frontier.length === 0) {
     log.info('No scores recorded yet.');
@@ -640,7 +640,7 @@ export async function evalSearchCommand(options: EvalSearchOptions): Promise<voi
   }
 
   // Show current best
-  const configs = scoresByConfig(evalsDir());
+  const configs = scoresByConfig(evalsDir(undefined, config.evalDir));
   if (configs.length > 0) {
     console.log('');
     log.step('Current Rankings:');
