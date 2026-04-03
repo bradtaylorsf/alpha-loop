@@ -349,3 +349,97 @@ date: ${today}
 ## Suggested Skill Updates
 - (specific skill file changes, or "None")`;
 }
+
+export type PlanPromptOptions = {
+  seedDescription: string;
+  seedFiles?: Array<{ path: string; content: string }>;
+  visionContext?: string | null;
+  projectContext?: string | null;
+  existingIssues?: Array<{ number: number; title: string }>;
+};
+
+/**
+ * Build the prompt for AI-driven project plan generation.
+ * Instructs the agent to output a PlanDraft JSON with milestones and issues.
+ */
+export function buildPlanPrompt(options: PlanPromptOptions): string {
+  const { seedDescription, seedFiles, visionContext, projectContext, existingIssues } = options;
+
+  const sections: string[] = [
+    'You are a project planning assistant. Analyze the following inputs and generate a complete project plan as JSON.',
+    '',
+    '## Seed Description',
+    seedDescription,
+  ];
+
+  if (seedFiles && seedFiles.length > 0) {
+    sections.push('', '## Seed Files');
+    for (const file of seedFiles) {
+      sections.push(`### ${file.path}`, '```', file.content, '```');
+    }
+  }
+
+  if (visionContext) {
+    sections.push('', '## Product Vision', visionContext);
+  }
+
+  if (projectContext) {
+    sections.push('', '## Technical Context', projectContext);
+  }
+
+  if (existingIssues && existingIssues.length > 0) {
+    sections.push(
+      '',
+      '## Existing Issues (avoid duplicates)',
+      ...existingIssues.map((i) => `- #${i.number}: ${i.title}`),
+    );
+  }
+
+  sections.push(
+    '',
+    '## Output Requirements',
+    '',
+    'Output ONLY valid JSON matching this schema (no markdown fences, no explanation):',
+    '',
+    '```json',
+    '{',
+    '  "vision": null,',
+    '  "milestones": [',
+    '    {',
+    '      "title": "Milestone Name",',
+    '      "description": "What this milestone delivers",',
+    '      "dueOn": "2026-05-01",',
+    '      "order": 1',
+    '    }',
+    '  ],',
+    '  "issues": [',
+    '    {',
+    '      "id": 1,',
+    '      "title": "Issue title",',
+    '      "body": "## Summary\\n...\\n\\n## Acceptance Criteria\\n- [ ] Criterion 1\\n- [ ] Criterion 2",',
+    '      "labels": ["enhancement"],',
+    '      "milestone": "Milestone Name",',
+    '      "priority": "p1",',
+    '      "complexity": "medium",',
+    '      "dependsOn": [],',
+    '      "selected": true',
+    '    }',
+    '  ],',
+    '  "projectBoard": null',
+    '}',
+    '```',
+    '',
+    '## Instructions',
+    '- Group issues into logical milestones with suggested due dates',
+    '- Each issue body MUST use markdown with acceptance criteria in checkbox format: `- [ ] Criterion`',
+    '- Priority: p0 (critical), p1 (high), p2 (medium), p3 (low)',
+    '- Complexity: trivial, small, medium, large',
+    '- Use `dependsOn` to reference other issue `id` values within the plan',
+    '- Set all issues to `"selected": true`',
+    '- Do NOT duplicate any existing issues listed above',
+    '- Consider the codebase structure for realistic issue scoping',
+    '- Issue `id` values are temporary local IDs (1, 2, 3...) used only for dependency references',
+  );
+
+  return sections.join('\n');
+}
