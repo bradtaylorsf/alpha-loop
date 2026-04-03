@@ -206,6 +206,9 @@ program
   .command('evolve')
   .description('Meta-Harness-style automated optimization loop')
   .option('--max-iterations <n>', 'Maximum optimization iterations (default: 5)')
+  .option('--continuous', 'Run until manually stopped (SIGINT)')
+  .option('--surface <level>', 'Optimization surface: prompts, skills, config, all (default: prompts)')
+  .option('--resume', 'Resume from a previous evolve session')
   .option('--dry-run', 'Preview without making changes')
   .option('--verbose', 'Show detailed agent output')
   .action(async (options) => {
