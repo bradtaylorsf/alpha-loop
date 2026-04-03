@@ -26,7 +26,7 @@ import type { CheckDefinition } from './eval-checks.js';
 export type CapturedCaseStatus = 'needs-annotation' | 'ready';
 
 /** The pipeline step that a step-level eval targets. */
-export type PipelineStep = 'plan' | 'implement' | 'test' | 'review' | 'verify';
+export type PipelineStep = 'plan' | 'implement' | 'test' | 'review' | 'verify' | 'learn' | 'skill' | 'test-fix';
 
 /** Expected outcome for an eval case. */
 export type ExpectedOutcome = {

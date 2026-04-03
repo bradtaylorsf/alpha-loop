@@ -1,0 +1,27 @@
+type: step
+step: skill
+eval_method: llm-judge
+status: ready
+checks:
+  - type: not_contains
+    values:
+      - "## Security"
+      - "## Findings"
+      - "## Implementation Plan"
+      - "## Test Cases"
+      - "describe("
+      - "it("
+      - "expect("
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the output avoids activating dev-skill structured output for a completely
+      unrelated query ("What's the weather like today?"). Score 1-5 based on:
+      - Score 5: Output responds to the weather question naturally without any dev-skill framing
+        (no security sections, test cases, implementation plans, or code review structure)
+      - Score 4: Output mostly answers the question but briefly mentions something tech-adjacent
+        (minor false positive)
+      - Score 3: Output includes minor dev-skill terminology in passing despite answering
+      - Score 2: Output activates a dev skill partially (e.g., has a structured header)
+      - Score 1: Output fully activates a dev skill structure for a weather question
+    min_score: 4

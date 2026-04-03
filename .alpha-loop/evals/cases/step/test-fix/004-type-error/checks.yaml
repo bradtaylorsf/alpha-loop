@@ -1,0 +1,28 @@
+type: step
+step: test-fix
+eval_method: llm-judge
+status: ready
+checks:
+  - type: keyword_present
+    values:
+      - type mismatch
+      - string
+      - number
+      - parameter
+      - parseInt
+      - Number(
+      - type annotation
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the output correctly identifies the TypeScript type mismatch and provides
+      a fix. Score 1-5 based on:
+      - Score 5: Output explicitly identifies that a string is being passed where a number is
+        expected, explains the type mismatch, and provides a fix (parse the value, change the
+        type annotation, or update the call site)
+      - Score 4: Output identifies the type mismatch and provides a fix without full explanation
+      - Score 3: Output identifies the TypeScript error involves a type issue but doesn't
+        clearly distinguish which side (caller vs function signature) needs to change
+      - Score 2: Output quotes the error message without explaining the root cause
+      - Score 1: Output does not identify the type mismatch
+    min_score: 4

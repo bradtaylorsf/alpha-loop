@@ -1,0 +1,7 @@
+id: 005-verify-failure
+description: "Learning extraction distinguishes test pass from verification gate failure"
+tags:
+  - learn
+  - verification
+  - test-vs-verify
+source: manual

@@ -159,9 +159,21 @@ evalCmd
 evalCmd
   .command('import-swebench')
   .description('Import eval cases from SWE-bench dataset')
-  .action(async () => {
+  .option('--step <step>', 'Import as step-level cases for this pipeline step (default: implement)')
+  .action(async (options) => {
     const { evalImportSwebenchCommand } = await import('./commands/eval.js');
-    await evalImportSwebenchCommand();
+    await evalImportSwebenchCommand(options);
+  });
+
+evalCmd
+  .command('convert')
+  .description('Convert between AlphaLoop eval format and skill-creator format')
+  .option('--direction <dir>', 'Conversion direction: to-skill or from-skill (default: to-skill)')
+  .option('--input <path>', 'Input file path (for from-skill)')
+  .option('--output <path>', 'Output file path')
+  .action(async (options) => {
+    const { evalConvertCommand } = await import('./commands/eval.js');
+    evalConvertCommand(options);
   });
 
 program

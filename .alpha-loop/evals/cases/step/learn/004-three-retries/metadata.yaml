@@ -1,0 +1,7 @@
+id: 004-three-retries
+description: "Learning extraction from a session requiring 3 test fix retries"
+tags:
+  - learn
+  - retries
+  - root-cause
+source: manual

@@ -1,0 +1,7 @@
+id: 002-wrong-import
+description: "Test fix: incorrect import path causing module not found error"
+tags:
+  - test-fix
+  - import
+  - module-not-found
+source: manual

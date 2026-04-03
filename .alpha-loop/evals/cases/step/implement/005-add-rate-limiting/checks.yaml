@@ -1,0 +1,23 @@
+type: step
+step: implement
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the implementation correctly adds rate limiting middleware to the API.
+      Score 1-5 based on:
+      - Score 5: Creates rate limiting middleware with configurable windowMs and max options,
+        applies it to API routes, returns HTTP 429 when the limit is exceeded, includes standard
+        rate limit headers (e.g., RateLimit-Remaining), and adds a test verifying the 429 response
+      - Score 4: Creates working rate limiting middleware with configurable limits and 429 response
+        but does not add tests or rate limit headers
+      - Score 3: Adds rate limiting middleware but hard-codes limits without making them configurable
+      - Score 2: References a rate limiting library but does not wire it into the app correctly
+      - Score 1: Does not implement rate limiting
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - 429
+      - windowMs

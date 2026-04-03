@@ -1,0 +1,7 @@
+id: 002-missing-auth
+description: "Review catches missing authentication on admin endpoint"
+tags:
+  - review
+  - security
+  - authentication
+source: manual

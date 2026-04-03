@@ -1,0 +1,18 @@
+type: step
+step: plan
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the plan addresses both backend and frontend layers for building a user
+      profile page. Score 1-5 based on:
+      - Score 5: Plan explicitly covers backend (route/controller/validation) AND frontend
+        (component, API call, state management)
+      - Score 4: Plan covers both layers but misses a sub-concern in one (e.g., mentions route
+        and component but omits validation or state)
+      - Score 3: Plan heavily focuses on one layer and only briefly mentions the other
+      - Score 2: Plan mentions "frontend and backend" generically without actionable detail
+      - Score 1: Plan addresses only one layer
+    min_score: 4

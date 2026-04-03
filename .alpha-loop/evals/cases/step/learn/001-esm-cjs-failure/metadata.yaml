@@ -1,0 +1,8 @@
+id: 001-esm-cjs-failure
+description: "Learning extraction from ESM/CJS module format mismatch failure"
+tags:
+  - learn
+  - esm
+  - module-format
+  - failure
+source: manual

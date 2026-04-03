@@ -1,0 +1,7 @@
+id: 002-impl-planning-trigger
+description: "Skill trigger: implementation planning prompt produces planning output"
+tags:
+  - skill
+  - planning
+  - trigger
+source: manual

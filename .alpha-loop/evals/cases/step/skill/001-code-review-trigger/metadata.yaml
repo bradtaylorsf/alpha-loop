@@ -1,0 +1,7 @@
+id: 001-code-review-trigger
+description: "Skill trigger: code review prompt produces review-appropriate output"
+tags:
+  - skill
+  - code-review
+  - trigger
+source: manual

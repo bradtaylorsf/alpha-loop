@@ -1,0 +1,27 @@
+type: step
+step: skill
+eval_method: llm-judge
+status: ready
+checks:
+  - type: contains_any
+    values:
+      - architecture
+      - dependencies
+      - milestone
+      - phase
+      - implementation
+      - approach
+      - design
+      - plan
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the output is appropriate for an implementation planning task. Score 1-5
+      based on:
+      - Score 5: Output contains planning terminology (architecture, dependencies, milestones,
+        phases, approach), is structured as a plan, and would be actionable for an implementer
+      - Score 4: Output is structured as a plan with some planning terminology
+      - Score 3: Output discusses OAuth2 at a high level without a structured plan
+      - Score 2: Output is informational about OAuth2 but not in planning format
+      - Score 1: Output does not engage with implementation planning
+    min_score: 4

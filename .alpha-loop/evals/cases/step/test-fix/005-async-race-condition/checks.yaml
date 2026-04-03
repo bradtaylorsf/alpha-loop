@@ -1,0 +1,28 @@
+type: step
+step: test-fix
+eval_method: llm-judge
+status: ready
+checks:
+  - type: keyword_present
+    values:
+      - await
+      - async
+      - race condition
+      - missing await
+      - intermittent
+      - flaky
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the output correctly identifies the missing await as the cause of the
+      intermittent test failure. Score 1-5 based on:
+      - Score 5: Output explicitly identifies the missing await keyword on the async call,
+        explains why this creates a race condition (test assertion runs before async operation
+        completes), and provides the fix
+      - Score 4: Output identifies the missing await and provides a fix without full race
+        condition explanation
+      - Score 3: Output identifies the test is intermittent due to async issues but doesn't
+        specifically point to the missing await
+      - Score 2: Output suggests the test is flaky without identifying the async cause
+      - Score 1: Output does not identify the missing await
+    min_score: 4

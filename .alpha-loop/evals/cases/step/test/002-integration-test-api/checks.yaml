@@ -1,0 +1,24 @@
+type: step
+step: test
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the integration tests correctly test the POST /users endpoint using supertest.
+      Score 1-5 based on:
+      - Score 5: Uses supertest to send requests to the Express app; tests HTTP 201 on success with
+        correct response body; tests HTTP 400 or 422 on invalid input; includes afterAll or
+        afterEach to close the server/database connections; tests at least one validation error case
+      - Score 4: Uses supertest correctly and tests success and error cases, but does not close
+        connections in afterAll/afterEach
+      - Score 3: Uses supertest for the success case only, no error case tests
+      - Score 2: Sets up supertest but sends incorrect requests or asserts on wrong status codes
+      - Score 1: Does not use supertest or does not test the HTTP endpoint meaningfully
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - supertest
+      - afterAll
+      - 201

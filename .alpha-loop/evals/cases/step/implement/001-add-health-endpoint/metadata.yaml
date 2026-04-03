@@ -1,0 +1,8 @@
+id: 001-add-health-endpoint
+description: "Implement a GET /health endpoint that returns JSON status"
+tags:
+  - implement
+  - express
+  - health-check
+  - api
+source: manual

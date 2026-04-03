@@ -1,0 +1,8 @@
+id: 005-add-rate-limiting
+description: "Add configurable rate limiting middleware to API routes with proper 429 responses"
+tags:
+  - implement
+  - middleware
+  - rate-limiting
+  - api
+source: manual

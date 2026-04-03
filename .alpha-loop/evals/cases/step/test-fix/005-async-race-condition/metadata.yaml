@@ -1,0 +1,8 @@
+id: 005-async-race-condition
+description: "Test fix: intermittent failure from missing await on async call"
+tags:
+  - test-fix
+  - async
+  - race-condition
+  - await
+source: manual

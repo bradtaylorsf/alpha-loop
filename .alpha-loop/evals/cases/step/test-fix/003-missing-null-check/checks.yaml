@@ -1,0 +1,30 @@
+type: step
+step: test-fix
+eval_method: llm-judge
+status: ready
+checks:
+  - type: keyword_present
+    values:
+      - null check
+      - null input
+      - "=== null"
+      - "!= null"
+      - "?."
+      - guard
+      - undefined
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the output correctly identifies the missing null check as the cause of the
+      TypeError. Score 1-5 based on:
+      - Score 5: Output explicitly identifies that the function doesn't check for null input
+        before accessing .name, explains the TypeError cause, and provides a fix (null guard,
+        optional chaining, or early return)
+      - Score 4: Output identifies the missing null check and provides a fix without full
+        explanation
+      - Score 3: Output identifies the TypeError involves a null value but doesn't clearly
+        recommend adding a null check
+      - Score 2: Output suggests the error is around the .name access without identifying the
+        null check as the solution
+      - Score 1: Output does not identify the missing null check
+    min_score: 4

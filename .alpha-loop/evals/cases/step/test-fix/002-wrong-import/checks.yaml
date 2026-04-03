@@ -1,0 +1,27 @@
+type: step
+step: test-fix
+eval_method: llm-judge
+status: ready
+checks:
+  - type: keyword_present
+    values:
+      - import path
+      - "./utils.js"
+      - "./lib/utils.js"
+      - Cannot find module
+      - wrong path
+      - incorrect path
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the output correctly identifies the wrong import path as the cause of the
+      module not found error. Score 1-5 based on:
+      - Score 5: Output explicitly identifies that './utils.js' should be './lib/utils.js',
+        explains the path mismatch, and provides the corrected import statement
+      - Score 4: Output identifies the incorrect import path and the correct location without
+        full explanation
+      - Score 3: Output identifies the module not found error is an import issue but doesn't
+        specify the exact path correction
+      - Score 2: Output suggests checking imports without identifying the specific wrong path
+      - Score 1: Output does not identify the import path as the problem
+    min_score: 4

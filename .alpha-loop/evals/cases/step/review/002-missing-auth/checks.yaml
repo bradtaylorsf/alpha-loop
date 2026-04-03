@@ -1,0 +1,19 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies the missing authentication/authorization on the
+      admin endpoint. Score 1-5 based on:
+      - Score 5: Review explicitly calls out that the POST /admin/users endpoint lacks auth
+        middleware and recommends adding authentication and/or authorization checks
+      - Score 4: Review identifies missing auth on the endpoint but doesn't specify the mechanism
+      - Score 3: Review mentions security concerns around the endpoint without clearly stating
+        the specific missing check
+      - Score 2: Review mentions auth only in passing or in a generic checklist without
+        flagging this endpoint specifically
+      - Score 1: Review does not identify the missing authentication
+    min_score: 4

@@ -1,0 +1,23 @@
+type: step
+step: implement
+eval_method: llm-judge
+status: ready
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the implementation correctly identifies and fixes the off-by-one pagination bug.
+      Score 1-5 based on:
+      - Score 5: Identifies the off-by-one error in the totalPages calculation (e.g., missing Math.ceil
+        or integer division rounding), fixes it with the correct formula such as
+        Math.ceil(total / limit), and updates or adds a test that validates the correct page count
+      - Score 4: Identifies and fixes the off-by-one calculation but does not update tests
+      - Score 3: Fixes the calculation but the fix is incorrect or incomplete (e.g., adds 1 instead
+        of using Math.ceil)
+      - Score 2: Identifies the bug location but does not produce a correct fix
+      - Score 1: Does not identify the off-by-one error
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - Math.ceil
+      - totalPages

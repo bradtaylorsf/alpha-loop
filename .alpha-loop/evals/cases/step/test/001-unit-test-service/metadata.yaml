@@ -1,0 +1,8 @@
+id: 001-unit-test-service
+description: "Write unit tests for a UserService covering happy path, errors, and edge cases"
+tags:
+  - test
+  - unit-test
+  - service
+  - jest
+source: manual

@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { log } from './logger.js';
 import { exec } from './shell.js';
 import { spawnAgent } from './agent.js';
-import { buildImplementPrompt, buildReviewPrompt } from './prompts.js';
+import { buildImplementPrompt, buildReviewPrompt, buildLearnPrompt } from './prompts.js';
 import { processIssue } from './pipeline.js';
 import { runChecks } from './eval-checks.js';
 import { computeCompositeScore, appendScore, hashConfig } from './score.js';
@@ -344,6 +344,55 @@ async function runStepEval(
       }
       case 'verify': {
         output = 'Verify step eval not yet supported';
+        break;
+      }
+      case 'learn': {
+        const prompt = buildLearnPrompt({
+          issueNum: 0,
+          title: evalCase.issueTitle || 'Eval learn case',
+          status: 'failure',
+          retries: 0,
+          duration: 0,
+          diff: '',
+          testOutput: '',
+          reviewOutput: '',
+          verifyOutput: '',
+          body: input,
+        });
+        const result = await spawnAgent({
+          agent: config.agent,
+          model: config.evalModel || config.model,
+          prompt,
+          cwd: process.cwd(),
+          timeout: (evalCase.timeout || 60) * 1000,
+          maxTurns: 1,
+        });
+        output = result.output;
+        break;
+      }
+      case 'skill': {
+        // Skill evals: spawn agent with the skill context from input
+        const result = await spawnAgent({
+          agent: config.agent,
+          model: config.evalModel || config.model,
+          prompt: input,
+          cwd: process.cwd(),
+          timeout: (evalCase.timeout || 60) * 1000,
+        });
+        output = result.output;
+        break;
+      }
+      case 'test-fix': {
+        // Test-fix evals: provide failing test output + code, ask agent to fix
+        const prompt = `The following test is failing. Diagnose the root cause and fix it.\n\n${input}`;
+        const result = await spawnAgent({
+          agent: config.agent,
+          model: config.model,
+          prompt,
+          cwd: process.cwd(),
+          timeout: (evalCase.timeout || 120) * 1000,
+        });
+        output = result.output;
         break;
       }
     }
