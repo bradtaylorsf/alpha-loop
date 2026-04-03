@@ -308,6 +308,23 @@ async function runStepEval(
   const input = evalCase.inputText ?? evalCase.issueBody;
   const step = evalCase.step ?? 'review';
 
+  // Map eval step names to PipelineStepName for resolveStepConfig
+  const pipelineStepMap: Record<string, PipelineStepName> = {
+    plan: 'plan',
+    implement: 'implement',
+    'test-fix': 'test_fix',
+    review: 'review',
+    verify: 'verify',
+    learn: 'learn',
+  };
+
+  // Resolve per-step agent/model from pipeline config (falls back to top-level)
+  const pipelineStep = pipelineStepMap[step];
+  const resolved = pipelineStep
+    ? resolveStepConfig(config, pipelineStep)
+    : { agent: config.agent as string, model: config.model };
+  const resolvedAgent = resolved.agent as Config['agent'];
+
   let output = '';
 
   try {
@@ -315,8 +332,8 @@ async function runStepEval(
     switch (step) {
       case 'plan': {
         const result = await spawnAgent({
-          agent: config.agent,
-          model: config.model,
+          agent: resolvedAgent,
+          model: resolved.model,
           prompt: `Plan the implementation for the following issue:\n\n${input}`,
           cwd: process.cwd(),
           timeout: (evalCase.timeout || 60) * 1000,
@@ -331,8 +348,8 @@ async function runStepEval(
           body: input,
         });
         const result = await spawnAgent({
-          agent: config.agent,
-          model: config.model,
+          agent: resolvedAgent,
+          model: resolved.model,
           prompt,
           cwd: process.cwd(),
           timeout: (evalCase.timeout || 120) * 1000,
@@ -348,8 +365,8 @@ async function runStepEval(
           baseBranch: config.baseBranch,
         });
         const result = await spawnAgent({
-          agent: config.agent,
-          model: config.reviewModel || config.model,
+          agent: resolvedAgent,
+          model: resolved.model,
           prompt,
           cwd: process.cwd(),
           timeout: (evalCase.timeout || 60) * 1000,
@@ -383,8 +400,8 @@ async function runStepEval(
           body: input,
         });
         const result = await spawnAgent({
-          agent: config.agent,
-          model: config.evalModel || config.model,
+          agent: resolvedAgent,
+          model: config.evalModel || resolved.model,
           prompt,
           cwd: process.cwd(),
           timeout: (evalCase.timeout || 60) * 1000,
@@ -409,8 +426,8 @@ async function runStepEval(
         // Test-fix evals: provide failing test output + code, ask agent to fix
         const prompt = `The following test is failing. Diagnose the root cause and fix it.\n\n${input}`;
         const result = await spawnAgent({
-          agent: config.agent,
-          model: config.model,
+          agent: resolvedAgent,
+          model: resolved.model,
           prompt,
           cwd: process.cwd(),
           timeout: (evalCase.timeout || 120) * 1000,
