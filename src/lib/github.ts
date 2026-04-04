@@ -78,10 +78,16 @@ export function pollIssues(repo: string, label: string, limit = 10, options?: { 
  * Poll from GitHub Project board — items come in the board's display order.
  * Filters to "Todo" status only. When a milestone is specified, cross-references
  * with the GitHub API to only include issues in that milestone.
+ *
+ * Uses --jq to filter out Done items server-side, keeping the response small
+ * even for large project boards.
  */
 function pollIssuesByProject(owner: string, project: number, limit: number, options?: { repo?: string; milestone?: string }): Issue[] {
+  // Fetch all project items but filter to only Todo issues via jq to avoid
+  // truncating results when Done items fill the limit.
+  const jqFilter = `{items: [.items[] | select(.status == "Todo" and .content.type == "Issue")]}`;
   const result = exec(
-    `gh project item-list ${project} --owner "${owner}" --format json --limit 100`,
+    `gh project item-list ${project} --owner "${owner}" --format json --limit 1000 --jq '${jqFilter}'`,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to poll project board: ${result.stderr}`);
@@ -96,8 +102,7 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
       }>;
     };
 
-    let items = data.items
-      .filter((item) => item.status === 'Todo' && item.content?.type === 'Issue');
+    let items = data.items;
 
     // Filter by milestone if specified
     if (options?.milestone && options?.repo) {
