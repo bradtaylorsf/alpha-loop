@@ -1,0 +1,13 @@
+id: 007-silent-none-guard
+description: "Review catches TriggerSystem not connected to SimulationClock — autonomous mode uses wall-clock time for triggers despite clock being available"
+tags:
+  - review
+  - wiring
+  - silent-failure
+  - time-management
+source: manual
+captured_from:
+  project: livestreamtoagi
+  session: layer-7-5-simulation-validation
+  issues: [186, 187]
+  date: "2026-04-04"

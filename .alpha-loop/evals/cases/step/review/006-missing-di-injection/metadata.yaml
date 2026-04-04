@@ -1,0 +1,13 @@
+id: 006-missing-di-injection
+description: "Review catches a service dependency (ArtifactRepo) that is never instantiated or injected into the Services container, making the entire artifact pipeline dead"
+tags:
+  - review
+  - wiring
+  - dependency-injection
+  - silent-failure
+source: manual
+captured_from:
+  project: livestreamtoagi
+  session: layer-7-5-simulation-validation
+  issues: [155, 158, 190]
+  date: "2026-04-04"

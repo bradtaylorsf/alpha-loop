@@ -1,0 +1,36 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+timeout: 180
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies issues in the eval engine that would
+      produce incorrect or misleading eval scores.
+
+      Issues present in this diff:
+      1. The "quick" suite uses available[:3] which takes the first 3 categories
+         alphabetically (dialogue_quality, entertainment, errors) — excluding
+         safety and productivity. This is likely an accident, not intentional.
+
+      2. When an eval category fails to parse (except block), cost is recorded as
+         Decimal("0") but the actual LLM API call was already made and billed.
+         The total_cost will undercount real spending.
+
+      3. The productivity eval prompt scores artifacts, but the artifacts list from
+         load_simulation_data() depends on the artifact pipeline being functional.
+         If artifacts are empty (which they will be — see bootstrap.py), the
+         productivity eval will always score low on tool_diversity and artifact_quality,
+         producing misleading scores that look like agents aren't productive when
+         the actual problem is broken artifact persistence.
+
+      Score 1-5:
+      - Score 5: Review identifies at least 2 of the 3 issues (quick suite selection,
+        cost tracking on parse failure, or empty artifacts feeding misleading eval scores)
+      - Score 4: Review identifies 1 issue clearly with explanation
+      - Score 3: Review mentions concerns about eval accuracy without specifics
+      - Score 2: Review discusses the eval engine positively without finding issues
+      - Score 1: Review does not identify any of these issues
+    min_score: 4

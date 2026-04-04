@@ -1,0 +1,13 @@
+id: 009-clock-not-threaded
+description: "Review catches fabricated token estimate (len//4) and hardcoded cost ('0') violating cost accuracy requirement, when real cost data is available but unused"
+tags:
+  - review
+  - data-integrity
+  - requirements-violation
+  - cost-tracking
+source: manual
+captured_from:
+  project: livestreamtoagi
+  session: layer-7-5-simulation-validation
+  issues: [155, 157]
+  date: "2026-04-04"

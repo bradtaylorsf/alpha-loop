@@ -1,0 +1,33 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+timeout: 180
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies fabricated metrics in the conversation
+      detail endpoint that violate the project's explicit cost accuracy requirement.
+
+      The critical issue:
+      - total_tokens is estimated as len(transcript_text) // 4 — a rough heuristic
+      - total_cost is hardcoded to the string "0"
+      - The product vision states "Cost tracking must be 100% accurate for eval integrity"
+      - The same diff adds get_conversation_cost() to CostRepo which queries real
+        cost data from cost_events by conversation_id
+      - But the conversation detail endpoint uses the estimate instead of calling
+        get_conversation_cost()
+      - The comment says "cost_events lacks conversation_id" but the query in
+        CostRepo clearly filters by conversation_id
+      - The admin dashboard displays these values as MetricCards to users
+
+      Score 1-5:
+      - Score 5: Review flags both the token estimate and hardcoded cost as
+        violations of the accuracy requirement, notes that real cost data is
+        available via get_conversation_cost() but isn't used
+      - Score 4: Review identifies the fabricated values as inaccurate
+      - Score 3: Review notes the estimation but doesn't connect to the requirement
+      - Score 2: Review mentions the fields without flagging them as problematic
+      - Score 1: Review does not identify the fabricated metrics
+    min_score: 4

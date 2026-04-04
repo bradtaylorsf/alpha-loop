@@ -1,0 +1,31 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+timeout: 180
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies that ArtifactRepo is never instantiated
+      or injected into the Services dataclass, despite multiple new features depending
+      on artifact data being present in the database.
+
+      The critical issue:
+      - The Services dataclass has no artifact_repo field
+      - build_agent_tools() never passes artifact_repo to get_core_tools()
+      - check_tool_coverage.py queries the artifacts table expecting data
+      - The admin /artifacts endpoint creates ArtifactRepo locally to READ but
+        nothing in the tool pipeline WRITES artifacts
+      - The acceptance criteria say "All 21 tools appear in the artifacts table"
+        but the artifact persistence pipeline is completely broken
+
+      Score 1-5:
+      - Score 5: Review identifies that artifact_repo is missing from Services and
+        build_agent_tools(), explains that artifacts will never be persisted by
+        tool execution, and flags the downstream impact on tool coverage and admin
+      - Score 4: Review identifies the missing injection and explains artifacts won't be saved
+      - Score 3: Review mentions something about artifacts being incomplete
+      - Score 2: Review discusses the new features without identifying the injection gap
+      - Score 1: Review does not identify the missing dependency injection
+    min_score: 4

@@ -2,6 +2,7 @@ type: step
 step: review
 eval_method: llm-judge
 status: ready
+timeout: 120
 checks:
   - type: llm_judge
     model: claude-haiku-4-5

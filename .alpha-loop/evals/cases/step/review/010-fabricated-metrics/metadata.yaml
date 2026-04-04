@@ -1,0 +1,13 @@
+id: 010-fabricated-metrics
+description: "Review catches eval engine issues: quick suite alphabetical accident, cost lost on parse failure, empty artifacts producing misleading productivity scores"
+tags:
+  - review
+  - eval-accuracy
+  - data-integrity
+  - silent-failure
+source: manual
+captured_from:
+  project: livestreamtoagi
+  session: layer-7-5-simulation-validation
+  issues: [155, 156]
+  date: "2026-04-04"

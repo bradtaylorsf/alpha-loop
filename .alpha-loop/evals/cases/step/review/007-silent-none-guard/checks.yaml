@@ -1,0 +1,33 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+timeout: 180
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies that TriggerSystem is not connected
+      to SimulationClock in run_autonomous(), making all time-based triggers use
+      wall-clock time instead of simulated time.
+
+      The critical issue:
+      - SimulationClock is created in the orchestrator with a speed_multiplier
+      - TriggerSystem.__init__ accepts clock= and now_fn= parameters
+      - But run_autonomous() creates TriggerSystem WITHOUT passing clock or now_fn
+      - TriggerSystem defaults now_fn to lambda: datetime.now(timezone.utc) (wall clock)
+      - idle_seconds still uses time.monotonic() (wall clock)
+      - With speed_multiplier=42, simulated standup at 9am should fire in ~13 real
+        minutes, but it fires after 9 real hours because triggers use wall clock
+      - The ReflectionScheduler IS correctly wired to the clock, making it
+        inconsistent — reflections use simulated time, triggers use wall time
+
+      Score 1-5:
+      - Score 5: Review identifies TriggerSystem is not passed clock/now_fn,
+        explains the wall-clock vs simulated-time divergence, and notes the
+        inconsistency with ReflectionScheduler which IS correctly wired
+      - Score 4: Review flags that TriggerSystem and SimulationClock aren't connected
+      - Score 3: Review mentions time handling concerns without full diagnosis
+      - Score 2: Review discusses the features without catching the wiring gap
+      - Score 1: Review does not identify the clock/trigger disconnect
+    min_score: 4

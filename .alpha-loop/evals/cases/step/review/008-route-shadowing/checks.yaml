@@ -1,0 +1,32 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+timeout: 180
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies the route shadowing bug in FastAPI.
+
+      The problem:
+      - GET /evals/{eval_id} is registered BEFORE GET /evals/compare and GET /evals/history
+      - In FastAPI/Starlette, routes are matched top-down
+      - When a request hits GET /evals/compare, it matches /evals/{eval_id} first with
+        eval_id="compare", which then fails with a 422 (can't parse "compare" as UUID)
+      - Same for /evals/history — captured as eval_id="history"
+      - The admin dashboard's ScoreHistoryChart fires 5 parallel requests on mount, all fail
+      - Fix: static routes must be registered before parameterized routes
+
+      Score 1-5:
+      - Score 5: Review identifies the route ordering issue, explains the shadowing
+        mechanism, and recommends moving static routes before parameterized ones
+      - Score 4: Review flags the route ordering as problematic
+      - Score 3: Review mentions route registration but doesn't explain the shadowing
+      - Score 2: Review notes the endpoints exist without catching the ordering issue
+      - Score 1: Review does not identify the route shadowing
+    min_score: 4
+  - type: keyword_present
+    keywords:
+      - route
+      - shadow

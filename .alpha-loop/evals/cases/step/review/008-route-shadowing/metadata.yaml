@@ -1,0 +1,13 @@
+id: 008-route-shadowing
+description: "Review catches FastAPI route shadowing where parameterized route /evals/{eval_id} is registered before static routes /evals/compare and /evals/history"
+tags:
+  - review
+  - wiring
+  - routing
+  - fastapi
+source: manual
+captured_from:
+  project: livestreamtoagi
+  session: layer-7-5-simulation-validation
+  issues: [157]
+  date: "2026-04-04"
