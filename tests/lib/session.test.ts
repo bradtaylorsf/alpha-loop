@@ -260,6 +260,9 @@ describe('finalizeSession', () => {
       if (cmd.includes('diff --cached --quiet')) {
         return { stdout: '', stderr: '', exitCode: 1 };
       }
+      if (cmd.includes('ls-remote')) {
+        return { stdout: 'abc123\trefs/heads/session/20260101-000000', stderr: '', exitCode: 0 };
+      }
       return { stdout: '', stderr: '', exitCode: 0 };
     });
     mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
@@ -286,6 +289,9 @@ describe('finalizeSession', () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('diff --cached --quiet')) {
         return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      if (cmd.includes('ls-remote')) {
+        return { stdout: 'abc123\trefs/heads/session/20260101-000000', stderr: '', exitCode: 0 };
       }
       return { stdout: '', stderr: '', exitCode: 0 };
     });

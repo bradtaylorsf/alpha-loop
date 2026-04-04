@@ -77,7 +77,46 @@ export function createSession(config: Config, milestone?: string): SessionContex
         log.warn('Could not create draft session PR — will create during finalization');
       }
     } else {
-      log.info(`Session branch already exists: ${branch}`);
+      // Ensure session branch exists on remote (may have been deleted after a previous merge)
+      const remoteCheck = exec(`git ls-remote --heads origin "${branch}"`, { cwd: projectDir });
+      if (!remoteCheck.stdout.trim()) {
+        log.warn(`Session branch "${branch}" exists locally but not on remote — recreating from ${config.baseBranch}`);
+        // Ensure we're not on the branch we're about to delete
+        exec(`git checkout "${config.baseBranch}"`, { cwd: projectDir });
+        // Delete stale local branch and recreate from current base (the old one is behind after merge)
+        exec(`git branch -D "${branch}"`, { cwd: projectDir });
+        const fromRemote = exec(
+          `git checkout -b "${branch}" "origin/${config.baseBranch}"`,
+          { cwd: projectDir },
+        );
+        if (fromRemote.exitCode !== 0) {
+          exec(`git checkout -b "${branch}" "${config.baseBranch}"`, { cwd: projectDir });
+        }
+        exec(`git commit --allow-empty -m "chore: start session ${name}"`, { cwd: projectDir });
+        const pushResult = exec(`git push origin "${branch}"`, { cwd: projectDir });
+        if (pushResult.exitCode !== 0) {
+          log.error(`Failed to push recreated session branch: ${pushResult.stderr}`);
+        }
+        exec(`git checkout -`, { cwd: projectDir });
+        log.info(`Recreated session branch: ${branch}`);
+
+        // Recreate draft PR for the session
+        try {
+          const draftPR = createPR({
+            repo: config.repo,
+            base: config.baseBranch,
+            head: branch,
+            title: milestone ? `Milestone: ${milestone}` : `Session: ${name}`,
+            body: `## Session In Progress\n\n${milestone ? `**Milestone:** ${milestone}\n` : ''}**Branch:** ${branch}\n**Started:** ${new Date().toISOString()}\n\nThis PR will be updated as issues are processed.\n\n---\n*Automated by alpha-loop*`,
+            cwd: projectDir,
+          });
+          log.success(`Session PR (draft): ${draftPR}`);
+        } catch {
+          log.warn('Could not create draft session PR — will create during finalization');
+        }
+      } else {
+        log.info(`Session branch already exists: ${branch}`);
+      }
     }
   }
 
@@ -133,12 +172,19 @@ export async function finalizeSession(
 
   const projectDir = process.cwd();
 
-  // Ensure we're on the session branch
+  // Ensure we're on the session branch and up to date with remote
+  // (batch PRs may have been auto-merged into the remote session branch)
   exec('git fetch origin', { cwd: projectDir });
   const checkout = exec(`git checkout "${session.branch}"`, { cwd: projectDir });
   if (checkout.exitCode !== 0) {
     log.warn('Could not checkout session branch for finalization');
     return null;
+  }
+  // Pull remote changes (auto-merged batch PRs) into local branch
+  const pull = exec(`git pull origin "${session.branch}" --no-edit`, { cwd: projectDir });
+  if (pull.exitCode !== 0) {
+    log.warn(`Could not pull remote session branch — trying rebase`);
+    exec(`git rebase "origin/${session.branch}"`, { cwd: projectDir });
   }
 
   // Save session manifest to learnings directory (tracked in git, shared with team)
@@ -263,10 +309,13 @@ export async function finalizeSession(
     });
     log.success(`Session PR: ${prUrl}`);
 
-    // Mark all successful issues as Done on the project board
+    // Mark successful issues on the project board
+    // When autoMerge is enabled, session PR still needs review — keep issues "In Review"
+    // When not auto-merging, individual PRs were already created, so mark as "Done"
+    const boardStatus = config.autoMerge ? 'In Review' : 'Done';
     for (const r of session.results) {
       if (r.status === 'success' && config.project > 0) {
-        updateProjectStatus(config.repo, config.project, config.repoOwner, r.issueNum, 'Done');
+        updateProjectStatus(config.repo, config.project, config.repoOwner, r.issueNum, boardStatus);
       }
     }
 

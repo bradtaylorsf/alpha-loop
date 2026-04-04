@@ -816,7 +816,7 @@ Rules:
       log.error(`Failed to create PR for issue #${issueNum}: ${err}`);
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, `Agent loop failed: could not create PR. Branch: ${worktreeBranch}`);
-      await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+      log.warn(`Worktree preserved at ${worktreePath} — use "alpha-loop resume --issue ${issueNum}" to retry`);
       return failureResult(issueNum, title, startTime);
     }
   } else {
@@ -1380,7 +1380,7 @@ export async function processBatch(
         labelIssue(config.repo, issue.number, 'failed', 'in-progress');
         commentIssue(config.repo, issue.number, `Agent loop failed: could not create PR. Branch: ${worktreeBranch}`);
       }
-      await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup });
+      log.warn(`Worktree preserved at ${worktreePath} — use "alpha-loop resume" to retry`);
       return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
     }
   }
