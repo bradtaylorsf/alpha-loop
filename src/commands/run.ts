@@ -198,8 +198,17 @@ export async function runCommand(options: RunOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Create session
-  const session = createSession(config);
+  // Milestone selection (interactive or from config/CLI flag) — must happen before session creation
+  let activeMilestone = config.milestone;
+  if (!activeMilestone && !config.dryRun && process.stdin.isTTY) {
+    activeMilestone = await pickMilestone(config.repo);
+  }
+  if (activeMilestone) {
+    log.info(`Filtering issues by milestone: ${activeMilestone}`);
+  }
+
+  // Create session (named after milestone if selected)
+  const session = createSession(config, activeMilestone || undefined);
 
   // Print startup banner
   printBanner(config, session);
@@ -250,16 +259,6 @@ export async function runCommand(options: RunOptions): Promise<void> {
   if (syncResult.synced) {
     log.success('Agent assets synced before run');
   }
-
-  // Milestone selection (interactive or from config/CLI flag)
-  let activeMilestone = config.milestone;
-  if (!activeMilestone && !config.dryRun && process.stdin.isTTY) {
-    activeMilestone = await pickMilestone(config.repo);
-  }
-  if (activeMilestone) {
-    log.info(`Filtering issues by milestone: ${activeMilestone}`);
-  }
-
 
   // Pre-flight test validation
   log.step('Running pre-flight test validation...');

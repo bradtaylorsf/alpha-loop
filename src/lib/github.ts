@@ -260,7 +260,7 @@ export function createPR(options: CreatePROptions): string {
         if (existing.length > 0) {
           const prUrl = existing[0].url;
           log.info(`PR already exists: ${prUrl}, updating...`);
-          exec(`gh pr edit ${existing[0].number} --repo "${repo}" --body-file "${bodyFile}"`);
+          exec(`gh pr edit ${existing[0].number} --repo "${repo}" --base "${base}" --body-file "${bodyFile}"`);
           return prUrl;
         }
       } catch {
