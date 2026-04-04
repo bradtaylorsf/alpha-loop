@@ -7,6 +7,7 @@ export type ImplementPromptOptions = {
   issueNum: number;
   title: string;
   body: string;
+  comments?: Array<{ author: string; body: string; createdAt: string }>;
   planContent?: string;
   visionContext?: string;
   projectContext?: string;
@@ -18,6 +19,7 @@ export type ReviewPromptOptions = {
   issueNum: number;
   title: string;
   body: string;
+  comments?: Array<{ author: string; body: string; createdAt: string }>;
   baseBranch: string;
   visionContext?: string;
 };
@@ -39,13 +41,20 @@ export type LearnPromptOptions = {
  * Build the implementation prompt for an AI agent.
  */
 export function buildImplementPrompt(options: ImplementPromptOptions): string {
-  const { issueNum, title, body, planContent, visionContext, projectContext, previousResult, learningContext } = options;
+  const { issueNum, title, body, comments, planContent, visionContext, projectContext, previousResult, learningContext } = options;
 
   const sections: string[] = [
     `Implement GitHub issue #${issueNum}: ${title}`,
     '',
     body,
   ];
+
+  if (comments && comments.length > 0) {
+    sections.push('', '', '## Discussion (issue comments)');
+    for (const c of comments) {
+      sections.push(`- **@${c.author}** (${c.createdAt}): ${c.body}`);
+    }
+  }
 
   if (planContent) {
     sections.push('', '', `## Implementation Plan`, planContent);
@@ -95,7 +104,7 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
  * Build the code review prompt for an AI agent.
  */
 export function buildReviewPrompt(options: ReviewPromptOptions): string {
-  const { issueNum, title, body, baseBranch, visionContext } = options;
+  const { issueNum, title, body, comments, baseBranch, visionContext } = options;
 
   const sections: string[] = [
     `Review the code changes for issue #${issueNum}: ${title}`,
@@ -105,6 +114,13 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     'Original requirements:',
     body,
   ];
+
+  if (comments && comments.length > 0) {
+    sections.push('', 'Discussion (issue comments):');
+    for (const c of comments) {
+      sections.push(`- **@${c.author}** (${c.createdAt}): ${c.body}`);
+    }
+  }
 
   if (visionContext) {
     sections.push('', '', '## Product Vision (guide your review decisions)', visionContext);
@@ -350,8 +366,51 @@ date: ${today}
 - (specific skill file changes, or "None")`;
 }
 
+export type AssumptionsPromptOptions = {
+  issueNum: number;
+  title: string;
+  body: string;
+  diff: string;
+  reviewSummary: string;
+};
+
+/**
+ * Build a prompt that asks the agent to summarize assumptions and decisions
+ * made during implementation. Posted as a comment for user validation.
+ */
+export function buildAssumptionsPrompt(options: AssumptionsPromptOptions): string {
+  const { issueNum, title, body, diff, reviewSummary } = options;
+
+  return `You just implemented GitHub issue #${issueNum}: ${title}
+
+## Original Requirements
+${body}
+
+## Code Changes (first 5000 chars)
+${diff.slice(0, 5000)}
+
+## Review Summary
+${reviewSummary}
+
+Analyze the implementation and list any assumptions or decisions you had to make where the requirements were ambiguous or incomplete. Output ONLY a markdown document with this structure:
+
+## Assumptions
+- (list each assumption made, e.g. "Assumed the date format should be ISO 8601 since it wasn't specified")
+- If no assumptions were needed, write "None — requirements were fully specified"
+
+## Decisions
+- (list each design/implementation decision where multiple valid approaches existed, e.g. "Chose to validate on the server side rather than client side for security")
+- If no notable decisions, write "None — implementation was straightforward"
+
+## Items to Validate
+- (list specific things the user should check, e.g. "Verify the error message wording matches your team's style guide")
+- If nothing needs validation, write "None"
+
+Keep it concise. Only include genuinely ambiguous items, not obvious implementation choices.`;
+}
+
 export type TriagePromptOptions = {
-  issues: Array<{ number: number; title: string; body: string }>;
+  issues: Array<{ number: number; title: string; body: string; comments?: Array<{ author: string; body: string; createdAt: string }> }>;
   projectContext?: string | null;
   visionContext?: string | null;
 };
@@ -368,9 +427,16 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     ? `\n\nWARNING: Only the first 100 of ${issues.length} issues are included. There may be more issues not shown here.`
     : '';
 
-  const issueList = capped.map((i) =>
-    `### Issue #${i.number}: ${i.title}\n${i.body || '(no description)'}`
-  ).join('\n\n');
+  const issueList = capped.map((i) => {
+    let entry = `### Issue #${i.number}: ${i.title}\n${i.body || '(no description)'}`;
+    if (i.comments && i.comments.length > 0) {
+      const commentLines = i.comments.map((c) =>
+        `- **@${c.author}** (${c.createdAt}): ${c.body.length > 200 ? c.body.slice(0, 200) + '...' : c.body}`
+      ).join('\n');
+      entry += `\n\n**Comments:**\n${commentLines}`;
+    }
+    return entry;
+  }).join('\n\n');
 
   const sections: string[] = [
     'You are a project triage assistant. Analyze the following open GitHub issues and categorize any that need attention.',
@@ -397,20 +463,24 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     '- **unclear**: Missing acceptance criteria, vague scope, no clear "done" definition',
     '- **too_large**: Should be split into 2-4 smaller, focused issues',
     '- **duplicate**: Substantially overlaps with another open issue',
+    '- **enrich**: Raw support ticket, sparse form submission, or bug report that needs investigation and enrichment — has some useful info but lacks technical detail, affected areas, acceptance criteria, or reproduction steps',
     '- **ok**: Issue is fine as-is — do NOT include "ok" issues in output',
     '',
     'For each finding, provide:',
     '- `reason`: Brief explanation of why this issue was flagged',
     '- For `unclear` issues: include `rewrittenBody` with proper acceptance criteria in checkbox format (`- [ ] Criterion`)',
+    '- For `enrich` issues: include `enrichedBody` — a thorough rewrite that preserves the original description in a collapsed `<details>` block, then adds: summary, affected files/areas (inferred from codebase context), acceptance criteria, and reproduction steps if applicable. Use the issue comments for additional context.',
     '- For `too_large` issues: include `splitInto` array of title strings for the sub-issues',
     '- For `duplicate` issues: include `duplicateOf` with the canonical issue number',
     '',
     'Check the codebase context for staleness signals (referenced files deleted, features already implemented).',
     'When rewriting unclear issues, use markdown with acceptance criteria in checkbox format.',
+    'When enriching issues, analyze the codebase context to identify affected files and areas, and validate that the reported issue is plausible.',
     '',
     '## Output Requirements',
     '',
-    'Output ONLY valid JSON matching this schema (no markdown fences, no explanation):',
+    'Output ONLY valid JSON matching this schema (no explanation, no surrounding text).',
+    'The example below uses fences for illustration only — your output must be raw JSON with no fences:',
     '',
     '```json',
     '[',
@@ -448,6 +518,15 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     '    "action": "merge",',
     '    "duplicateOf": 42,',
     '    "selected": true',
+    '  },',
+    '  {',
+    '    "issueNum": 46,',
+    '    "title": "Button broken on settings page",',
+    '    "category": "enrich",',
+    '    "reason": "Raw support ticket with minimal detail — needs affected areas, reproduction steps, and acceptance criteria",',
+    '    "action": "enrich",',
+    '    "enrichedBody": "<details><summary>Original description</summary>\\n\\nButton broken on settings page\\n\\n</details>\\n\\n## Summary\\nThe save button on the settings page is non-functional...\\n\\n## Affected Areas\\n- `src/components/Settings.tsx`\\n\\n## Acceptance Criteria\\n- [ ] Save button triggers form submission\\n- [ ] Success feedback shown to user\\n\\n## Reproduction Steps\\n1. Navigate to Settings\\n2. Click Save\\n3. Observe no response",',
+    '    "selected": true',
     '  }',
     ']',
     '```',
@@ -456,8 +535,9 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     '- Only include issues that need action (skip "ok" issues)',
     '- If ALL issues are fine, output an empty array: `[]`',
     '- Set `selected: true` for all findings (user will deselect if needed)',
-    '- action mapping: stale→close, unclear→rewrite, too_large→split, duplicate→merge',
+    '- action mapping: stale→close, unclear→rewrite, too_large→split, duplicate→merge, enrich→enrich',
     '- Be conservative — only flag issues when you are confident about the categorization',
+    '- Prefer `enrich` over `unclear` for issues that have some useful info (e.g., support tickets, bug reports) but need technical detail added',
   );
 
   return sections.join('\n');
@@ -518,7 +598,8 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     '',
     '## Output Requirements',
     '',
-    'Output ONLY valid JSON matching this schema (no markdown fences, no explanation):',
+    'Output ONLY valid JSON matching this schema (no explanation, no surrounding text).',
+    'The example below uses fences for illustration only — your output must be raw JSON with no fences:',
     '',
     '```json',
     '{',
@@ -606,7 +687,8 @@ export function buildPlanPrompt(options: PlanPromptOptions): string {
     '',
     '## Output Requirements',
     '',
-    'Output ONLY valid JSON matching this schema (no markdown fences, no explanation):',
+    'Output ONLY valid JSON matching this schema (no explanation, no surrounding text).',
+    'The example below uses fences for illustration only — your output must be raw JSON with no fences:',
     '',
     '```json',
     '{',

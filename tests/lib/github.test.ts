@@ -1,7 +1,7 @@
 import {
   pollIssues, labelIssue, commentIssue, createPR, mergePR,
   createIssue, updateIssue, closeIssue, createMilestone,
-  setIssueMilestone, listOpenIssues, createProject, addIssueToProject,
+  setIssueMilestone, listOpenIssues, addIssueToProject,
 } from '../../src/lib/github';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -491,41 +491,6 @@ describe('listOpenIssues', () => {
 
     const issues = listOpenIssues('owner/repo');
     expect(issues).toEqual([]);
-  });
-});
-
-describe('createProject', () => {
-  test('creates project and returns number', () => {
-    mockExec.mockReturnValue({
-      stdout: JSON.stringify({ number: 7 }),
-      stderr: '',
-      exitCode: 0,
-    });
-
-    const num = createProject('owner', 'My Project');
-    expect(num).toBe(7);
-    expect(mockExec).toHaveBeenCalledWith(
-      expect.stringContaining('gh project create --owner "owner"'),
-    );
-    expect(mockExec).toHaveBeenCalledWith(
-      expect.stringContaining('--format json'),
-    );
-  });
-
-  test('returns 0 on failure', () => {
-    mockExec.mockReturnValue({ stdout: '', stderr: 'error', exitCode: 1 });
-
-    const { log: mockLog } = require('../../src/lib/logger');
-    const num = createProject('owner', 'Project');
-    expect(num).toBe(0);
-    expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to create project'));
-  });
-
-  test('returns 0 on invalid JSON', () => {
-    mockExec.mockReturnValue({ stdout: 'not json', stderr: '', exitCode: 0 });
-
-    const num = createProject('owner', 'Project');
-    expect(num).toBe(0);
   });
 });
 

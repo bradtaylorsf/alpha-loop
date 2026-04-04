@@ -10,11 +10,18 @@ import { log } from './logger.js';
 /** Max PR body length. GitHub supports 65536 but we leave room for metadata. */
 const MAX_PR_BODY_CHARS = 60_000;
 
+export type Comment = {
+  author: string;
+  body: string;
+  createdAt: string;
+};
+
 export type Issue = {
   number: number;
   title: string;
   body: string;
   labels: string[];
+  comments?: Comment[];
 };
 
 export type Milestone = {
@@ -447,6 +454,7 @@ export function createIssue(repo: string, title: string, body: string, labels: s
  * Update an existing issue's title and/or body.
  */
 export function updateIssue(repo: string, issueNum: number, updates: { title?: string; body?: string }): void {
+  if (!updates.title && updates.body === undefined) return;
   let bodyFile: string | undefined;
   try {
     let cmd = `gh issue edit ${issueNum} --repo "${repo}"`;
@@ -519,8 +527,9 @@ export function setIssueMilestone(repo: string, issueNum: number, milestoneNum: 
  * List all open issues (no label filter). Default limit 100.
  */
 export function listOpenIssues(repo: string, limit = 100): Issue[] {
+  const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
   const result = exec(
-    `gh issue list --repo "${repo}" --state open --json number,title,body,labels --limit ${limit}`,
+    `gh issue list --repo "${repo}" --state open --json number,title,body,labels --limit ${safeLimit}`,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to list open issues: ${result.stderr}`);
@@ -546,22 +555,64 @@ export function listOpenIssues(repo: string, limit = 100): Issue[] {
 }
 
 /**
- * Create a GitHub Project v2. Returns the project number.
+ * Fetch comments for a specific issue.
  */
-export function createProject(owner: string, title: string): number {
+export function getIssueComments(repo: string, issueNum: number): Comment[] {
   const result = exec(
-    `gh project create --owner "${owner}" --title ${JSON.stringify(title)} --format json`,
+    `gh issue view ${issueNum} --repo "${repo}" --json comments`,
   );
   if (result.exitCode !== 0) {
-    log.warn(`Failed to create project: ${result.stderr}`);
-    return 0;
+    log.warn(`Failed to fetch comments for issue #${issueNum}: ${result.stderr}`);
+    return [];
   }
   try {
-    const data = JSON.parse(result.stdout) as { number: number };
-    return data.number;
+    const data = JSON.parse(result.stdout) as {
+      comments: Array<{ author: { login: string }; body: string; createdAt: string }>;
+    };
+    return (data.comments ?? []).map((c) => ({
+      author: c.author?.login ?? 'unknown',
+      body: c.body ?? '',
+      createdAt: c.createdAt ?? '',
+    }));
   } catch {
-    log.warn('Failed to parse project response');
-    return 0;
+    log.warn(`Failed to parse comments for issue #${issueNum}`);
+    return [];
+  }
+}
+
+/**
+ * Fetch a single issue with its full body and comments.
+ */
+export function getIssueWithComments(repo: string, issueNum: number): Issue | null {
+  const result = exec(
+    `gh issue view ${issueNum} --repo "${repo}" --json number,title,body,labels,comments`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to fetch issue #${issueNum}: ${result.stderr}`);
+    return null;
+  }
+  try {
+    const data = JSON.parse(result.stdout) as {
+      number: number;
+      title: string;
+      body: string;
+      labels: Array<{ name: string }>;
+      comments: Array<{ author: { login: string }; body: string; createdAt: string }>;
+    };
+    return {
+      number: data.number,
+      title: data.title,
+      body: data.body ?? '',
+      labels: (data.labels ?? []).map((l) => l.name),
+      comments: (data.comments ?? []).map((c) => ({
+        author: c.author?.login ?? 'unknown',
+        body: c.body ?? '',
+        createdAt: c.createdAt ?? '',
+      })),
+    };
+  } catch {
+    log.warn(`Failed to parse issue #${issueNum}`);
+    return null;
   }
 }
 

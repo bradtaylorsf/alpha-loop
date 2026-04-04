@@ -55,6 +55,7 @@ jest.mock('../../src/lib/github', () => ({
   updateIssue: jest.fn(),
   createIssue: jest.fn(() => 0),
   commentIssue: jest.fn(),
+  getIssueComments: jest.fn(() => []),
 }));
 
 import { checkbox, confirm } from '@inquirer/prompts';

@@ -3,6 +3,9 @@
  * and duplicates using an AI agent, then apply user-selected fixes.
  */
 
+import { writeFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { checkbox, confirm } from '@inquirer/prompts';
 import { loadConfig, assertSafeShellArg } from '../lib/config.js';
 import { buildOneShotCommand } from '../lib/agent.js';
@@ -22,6 +25,7 @@ import {
   updateIssue,
   createIssue,
   commentIssue,
+  getIssueComments,
 } from '../lib/github.js';
 
 export type TriageOptions = {
@@ -46,13 +50,18 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
   log.info(`Found ${issues.length} open issue(s)`);
 
-  // Truncate issue bodies
-  const truncatedIssues = issues.map((issue) => ({
-    ...issue,
-    body: issue.body.length > MAX_BODY_CHARS
-      ? issue.body.slice(0, MAX_BODY_CHARS) + '...'
-      : issue.body,
-  }));
+  // Fetch comments and truncate issue bodies for context
+  log.step('Fetching issue comments...');
+  const truncatedIssues = issues.map((issue) => {
+    const comments = getIssueComments(config.repo, issue.number);
+    return {
+      ...issue,
+      body: issue.body.length > MAX_BODY_CHARS
+        ? issue.body.slice(0, MAX_BODY_CHARS) + '...'
+        : issue.body,
+      comments: comments.slice(0, 5), // Cap at 5 most recent comments
+    };
+  });
 
   // ── Build context ──────────────────────────────────────────────────────────
   const ctx = buildPlanningContext(config);
@@ -67,10 +76,17 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
   const safeModel = assertSafeShellArg(config.model, 'model');
   const agentCmd = buildOneShotCommand(config.agent, safeModel);
-  const result = exec(
-    `echo ${JSON.stringify(triagePrompt)} | ${agentCmd} 2>/dev/null`,
-    { cwd: process.cwd(), timeout: 10 * 60 * 1000 },
-  );
+  const promptFile = join(tmpdir(), `alpha-loop-prompt-${Date.now()}`);
+  writeFileSync(promptFile, triagePrompt, 'utf-8');
+  let result;
+  try {
+    result = exec(
+      `${agentCmd} < "${promptFile}" 2>/dev/null`,
+      { cwd: process.cwd(), timeout: 10 * 60 * 1000 },
+    );
+  } finally {
+    try { unlinkSync(promptFile); } catch { /* cleanup best-effort */ }
+  }
 
   if (result.exitCode !== 0 || !result.stdout.trim()) {
     log.error('Agent failed to analyze issues. Check agent configuration and try again.');
@@ -116,6 +132,7 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
       rewrite: 'Rewrite body',
       split: 'Split into sub-issues',
       merge: 'Close as duplicate',
+      enrich: 'Enrich with details',
     };
 
     const choices = findings.map((f) => ({
@@ -164,12 +181,18 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
         case 'unclear': {
           if (finding.rewrittenBody) {
-            updateIssue(config.repo, finding.issueNum, { body: finding.rewrittenBody });
+            // Preserve original body in a collapsed block
+            const original = issues.find((i) => i.number === finding.issueNum)?.body;
+            const preserved = original
+              ? `<details><summary>Original description</summary>\n\n${original}\n\n</details>\n\n`
+              : '';
+            updateIssue(config.repo, finding.issueNum, { body: preserved + finding.rewrittenBody });
+            commentIssue(config.repo, finding.issueNum, '_Issue rewritten by alpha-loop triage. Original description preserved above._');
             log.success(`Rewrote body for #${finding.issueNum}`);
+            applied++;
           } else {
             log.warn(`No rewritten body for #${finding.issueNum}, skipping`);
           }
-          applied++;
           break;
         }
 
@@ -191,11 +214,11 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
                 `Split into smaller issues:\n${links}\n\n_Triaged by alpha-loop._`);
               closeIssue(config.repo, finding.issueNum, 'completed');
               log.success(`Closed #${finding.issueNum} after splitting`);
+              applied++;
             }
           } else {
             log.warn(`No split suggestions for #${finding.issueNum}, skipping`);
           }
-          applied++;
           break;
         }
 
@@ -205,10 +228,22 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
               `Closing as duplicate of #${finding.duplicateOf}.\n\n_Triaged by alpha-loop._`);
             closeIssue(config.repo, finding.issueNum, 'not_planned');
             log.success(`Closed duplicate #${finding.issueNum} (duplicate of #${finding.duplicateOf})`);
+            applied++;
           } else {
             log.warn(`No duplicate reference for #${finding.issueNum}, skipping`);
           }
-          applied++;
+          break;
+        }
+
+        case 'enrich': {
+          if (finding.enrichedBody) {
+            updateIssue(config.repo, finding.issueNum, { body: finding.enrichedBody });
+            commentIssue(config.repo, finding.issueNum, '_Issue enriched by alpha-loop triage. Original description preserved in collapsed block above._');
+            log.success(`Enriched #${finding.issueNum}`);
+            applied++;
+          } else {
+            log.warn(`No enriched body for #${finding.issueNum}, skipping`);
+          }
           break;
         }
       }

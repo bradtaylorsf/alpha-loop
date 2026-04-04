@@ -207,7 +207,7 @@ describe('plan command', () => {
 
     await planCommand({});
 
-    expect(log.warn).toHaveBeenCalledWith(
+    expect(log.error).toHaveBeenCalledWith(
       expect.stringContaining('Agent failed'),
     );
     expect(mockCreateMilestone).not.toHaveBeenCalled();

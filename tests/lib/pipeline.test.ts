@@ -34,6 +34,7 @@ jest.mock('../../src/lib/github', () => ({
   createPR: jest.fn(),
   mergePR: jest.fn(),
   updateProjectStatus: jest.fn(),
+  getIssueComments: jest.fn(() => []),
 }));
 
 jest.mock('../../src/lib/testing', () => ({

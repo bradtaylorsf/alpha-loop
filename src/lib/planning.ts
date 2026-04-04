@@ -14,8 +14,8 @@ import type { Config } from './config.js';
 
 export type Priority = 'p0' | 'p1' | 'p2' | 'p3';
 export type Complexity = 'trivial' | 'small' | 'medium' | 'large';
-export type TriageCategory = 'stale' | 'unclear' | 'too_large' | 'duplicate';
-export type TriageAction = 'close' | 'rewrite' | 'split' | 'merge';
+export type TriageCategory = 'stale' | 'unclear' | 'too_large' | 'duplicate' | 'enrich';
+export type TriageAction = 'close' | 'rewrite' | 'split' | 'merge' | 'enrich';
 
 export type PlannedIssue = {
   id: number;
@@ -50,6 +50,7 @@ export type TriageFinding = {
   reason: string;
   action: TriageAction;
   rewrittenBody?: string;
+  enrichedBody?: string;
   splitInto?: string[];
   duplicateOf?: number;
   selected: boolean;
@@ -221,12 +222,13 @@ export function formatTriageFindings(findings: TriageFinding[]): string {
     return `${GRAY}No triage findings.${NC}`;
   }
 
-  const categories: TriageCategory[] = ['stale', 'unclear', 'too_large', 'duplicate'];
+  const categories: TriageCategory[] = ['stale', 'unclear', 'too_large', 'duplicate', 'enrich'];
   const categoryLabels: Record<TriageCategory, string> = {
     stale: 'Stale Issues',
     unclear: 'Unclear Issues',
     too_large: 'Too Large',
     duplicate: 'Duplicates',
+    enrich: 'Needs Enrichment',
   };
 
   const grouped = new Map<TriageCategory, TriageFinding[]>();

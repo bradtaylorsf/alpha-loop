@@ -4,6 +4,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { input, checkbox, confirm, editor } from '@inquirer/prompts';
 import { loadConfig, assertSafeShellArg } from '../lib/config.js';
@@ -127,10 +128,17 @@ export async function planCommand(options: PlanOptions): Promise<void> {
     const visionPrompt = `Based on this project description, generate a concise project vision document (under 500 words) in markdown.\n\nDescription: ${seedDescription}\n${projectContext ? `\nTechnical context:\n${projectContext}` : ''}`;
     const safeModel = assertSafeShellArg(config.model, 'model');
     const agentCmd = buildOneShotCommand(config.agent, safeModel);
-    const visionResult = exec(
-      `echo ${JSON.stringify(visionPrompt)} | ${agentCmd} 2>/dev/null`,
-      { cwd: projectDir, timeout: 5 * 60 * 1000 },
-    );
+    const visionPromptFile = path.join(os.tmpdir(), `alpha-loop-prompt-${Date.now()}`);
+    fs.writeFileSync(visionPromptFile, visionPrompt, 'utf-8');
+    let visionResult;
+    try {
+      visionResult = exec(
+        `${agentCmd} < "${visionPromptFile}" 2>/dev/null`,
+        { cwd: projectDir, timeout: 5 * 60 * 1000 },
+      );
+    } finally {
+      try { fs.unlinkSync(visionPromptFile); } catch { /* cleanup best-effort */ }
+    }
     if (visionResult.exitCode === 0 && visionResult.stdout) {
       fs.mkdirSync(contextDir, { recursive: true });
       fs.writeFileSync(visionFile, visionResult.stdout + '\n');
@@ -155,13 +163,20 @@ export async function planCommand(options: PlanOptions): Promise<void> {
 
   const safeModel = assertSafeShellArg(config.model, 'model');
   const agentCmd = buildOneShotCommand(config.agent, safeModel);
-  const planResult = exec(
-    `echo ${JSON.stringify(planPrompt)} | ${agentCmd} 2>/dev/null`,
-    { cwd: projectDir, timeout: 10 * 60 * 1000 },
-  );
+  const planPromptFile = path.join(os.tmpdir(), `alpha-loop-prompt-${Date.now()}`);
+  fs.writeFileSync(planPromptFile, planPrompt, 'utf-8');
+  let planResult;
+  try {
+    planResult = exec(
+      `${agentCmd} < "${planPromptFile}" 2>/dev/null`,
+      { cwd: projectDir, timeout: 10 * 60 * 1000 },
+    );
+  } finally {
+    try { fs.unlinkSync(planPromptFile); } catch { /* cleanup best-effort */ }
+  }
 
   if (planResult.exitCode !== 0 || !planResult.stdout.trim()) {
-    log.warn('Agent failed to generate a plan. Check agent configuration and try again.');
+    log.error('Agent failed to generate a plan. Check agent configuration and try again.');
     if (planResult.stderr) log.error(planResult.stderr.slice(0, 500));
     return;
   }

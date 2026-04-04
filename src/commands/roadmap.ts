@@ -3,6 +3,9 @@
  * milestones using an AI agent, then create milestones and assign issues.
  */
 
+import { writeFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { checkbox, confirm } from '@inquirer/prompts';
 import { loadConfig, assertSafeShellArg } from '../lib/config.js';
 import { buildOneShotCommand } from '../lib/agent.js';
@@ -83,10 +86,17 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
 
   const safeModel = assertSafeShellArg(config.model, 'model');
   const agentCmd = buildOneShotCommand(config.agent, safeModel);
-  const result = exec(
-    `echo ${JSON.stringify(roadmapPrompt)} | ${agentCmd} 2>/dev/null`,
-    { cwd: process.cwd(), timeout: 10 * 60 * 1000 },
-  );
+  const promptFile = join(tmpdir(), `alpha-loop-prompt-${Date.now()}`);
+  writeFileSync(promptFile, roadmapPrompt, 'utf-8');
+  let result;
+  try {
+    result = exec(
+      `${agentCmd} < "${promptFile}" 2>/dev/null`,
+      { cwd: process.cwd(), timeout: 10 * 60 * 1000 },
+    );
+  } finally {
+    try { unlinkSync(promptFile); } catch { /* cleanup best-effort */ }
+  }
 
   if (result.exitCode !== 0 || !result.stdout.trim()) {
     log.error('Agent failed to analyze issues. Check agent configuration and try again.');
@@ -171,11 +181,13 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
   }
 
   // Create new milestones
+  let milestonesCreated = 0;
   for (const ms of newMilestones) {
     try {
       const num = createMilestone(config.repo, ms.title, ms.description, ms.dueOn ?? undefined);
       if (num > 0) {
         milestoneNumMap.set(ms.title, num);
+        milestonesCreated++;
         log.success(`Created milestone: ${ms.title}`);
       } else {
         failures.push(`Milestone "${ms.title}": creation returned 0`);
@@ -218,7 +230,7 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
 
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log('');
-  log.success(`Created ${newMilestones.length - failures.filter((f) => f.startsWith('Milestone')).length} milestone(s), assigned ${assigned} issue(s)`);
+  log.success(`Created ${milestonesCreated} milestone(s), assigned ${assigned} issue(s)`);
 
   if (failures.length > 0) {
     console.log('');
