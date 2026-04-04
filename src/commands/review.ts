@@ -507,7 +507,7 @@ export async function reviewCommand(options: ReviewOptions): Promise<void> {
     log.info(`Found ${learningFiles.length} learning file(s)`);
   }
 
-  // Read learning contents
+  // Read learning contents — extract only structured sections, not raw agent output
   const learnings = learningFiles.map((f) => {
     try {
       return readFileSync(join(learningsDir, f), 'utf-8');
@@ -516,8 +516,31 @@ export async function reviewCommand(options: ReviewOptions): Promise<void> {
     }
   }).filter(Boolean);
 
-  // Truncate combined learnings if too long
-  let learningsContent = learnings.join('\n\n---\n\n');
+  // Extract key sections from each learning file instead of using raw content.
+  // Raw files can be 170KB+ (full agent session logs). We only need the structured sections.
+  const extractedLearnings = learnings.map((content) => {
+    const sections: string[] = [];
+
+    // Keep frontmatter
+    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    if (fmMatch) sections.push(`---\n${fmMatch[1]}\n---`);
+
+    // Extract only the learning sections we care about
+    const sectionNames = [
+      'What Worked', 'What Failed', 'Patterns', 'Anti-Patterns',
+      'Suggested Skill Updates', 'Run Info', 'Issue Requirements',
+    ];
+    for (const name of sectionNames) {
+      const match = content.match(new RegExp(`## ${name}\\n([\\s\\S]*?)(?=\\n## |$)`));
+      if (match) sections.push(`## ${name}\n${match[1].trim()}`);
+    }
+
+    // If we extracted nothing useful, take first 2000 chars as fallback
+    if (sections.length <= 1) return content.slice(0, 2000);
+    return sections.join('\n\n');
+  });
+
+  let learningsContent = extractedLearnings.join('\n\n---\n\n');
   if (learningsContent.length > MAX_LEARNINGS_CHARS) {
     log.info(`Learnings truncated from ${learningsContent.length} to ${MAX_LEARNINGS_CHARS} chars`);
     learningsContent = learningsContent.slice(0, MAX_LEARNINGS_CHARS) + '\n\n[... truncated ...]';
