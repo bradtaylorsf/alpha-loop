@@ -23,7 +23,10 @@ alpha-loop run           # Run the loop continuously
 alpha-loop run --once    # Process one issue and exit
 alpha-loop run --dry-run # Dry run (preview, no changes)
 alpha-loop scan          # Generate/refresh project context
-alpha-loop vision        # Interactive project vision setup
+alpha-loop plan          # Generate project scope (milestones + issues) from seed inputs
+alpha-loop triage        # Analyze and improve existing issues
+alpha-loop roadmap       # Organize open issues into milestones
+alpha-loop vision        # (deprecated) Use "alpha-loop plan" instead
 alpha-loop auth          # Save authenticated browser state
 alpha-loop resume        # Resume stranded work from crashed sessions
 alpha-loop resume --issue 34     # Resume a specific issue

@@ -1,0 +1,87 @@
+{
+  "name": "session/20260403-095517",
+  "branch": "session/20260403-095517",
+  "completed": "2026-04-03T17:53:11.664Z",
+  "results": [
+    {
+      "issueNum": 112,
+      "title": "Add @inquirer/prompts dependency for rich interactive CLI UX",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/121",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 93,
+      "filesChanged": 2
+    },
+    {
+      "issueNum": 113,
+      "title": "Create shared planning library (src/lib/planning.ts)",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/122",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 331,
+      "filesChanged": 2
+    },
+    {
+      "issueNum": 114,
+      "title": "Add GitHub API functions for issue/milestone/project creation",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/123",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 285,
+      "filesChanged": 2
+    },
+    {
+      "issueNum": 115,
+      "title": "Implement `alpha-loop plan` command — create project scope from scratch",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/124",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 754,
+      "filesChanged": 2
+    },
+    {
+      "issueNum": 116,
+      "title": "Implement `alpha-loop triage` command — analyze and improve existing issues",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/125",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 454,
+      "filesChanged": 2
+    },
+    {
+      "issueNum": 117,
+      "title": "Implement `alpha-loop roadmap` command — organize issues into milestones",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/126",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 539,
+      "filesChanged": 3
+    },
+    {
+      "issueNum": 118,
+      "title": "Deprecate `alpha-loop vision` in favor of `alpha-loop plan`",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/127",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 209,
+      "filesChanged": 4
+    },
+    {
+      "issueNum": 119,
+      "title": "Add `--yes` flag for non-interactive batch mode in planning commands",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/128",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 414,
+      "filesChanged": 4
+    }
+  ]
+}

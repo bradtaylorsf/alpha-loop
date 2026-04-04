@@ -10,11 +10,18 @@ import { log } from './logger.js';
 /** Max PR body length. GitHub supports 65536 but we leave room for metadata. */
 const MAX_PR_BODY_CHARS = 60_000;
 
+export type Comment = {
+  author: string;
+  body: string;
+  createdAt: string;
+};
+
 export type Issue = {
   number: number;
   title: string;
   body: string;
   labels: string[];
+  comments?: Comment[];
 };
 
 export type Milestone = {
@@ -416,6 +423,210 @@ export function updateProjectStatus(
   }
 
   log.info(`Project board: #${issueNum} -> ${status}`);
+}
+
+/**
+ * Create a new issue. Returns the created issue number.
+ * Uses --body-file for shell safety (same pattern as commentIssue).
+ */
+export function createIssue(repo: string, title: string, body: string, labels: string[], milestone?: number): number {
+  const bodyFile = join(tmpdir(), `alpha-loop-issue-body-${Date.now()}`);
+  writeFileSync(bodyFile, body, 'utf-8');
+  try {
+    const labelFlags = labels.map((l) => `--label ${JSON.stringify(l)}`).join(' ');
+    const milestoneFlag = milestone ? ` --milestone ${milestone}` : '';
+    const result = exec(
+      `gh issue create --repo "${repo}" --title ${JSON.stringify(title)} --body-file "${bodyFile}" ${labelFlags}${milestoneFlag}`,
+    );
+    if (result.exitCode !== 0) {
+      log.warn(`Failed to create issue: ${result.stderr}`);
+      return 0;
+    }
+    // gh issue create returns the URL, e.g. https://github.com/owner/repo/issues/42
+    const match = result.stdout.trim().match(/(\d+)\s*$/);
+    return match ? parseInt(match[1], 10) : 0;
+  } finally {
+    try { unlinkSync(bodyFile); } catch { /* cleanup best-effort */ }
+  }
+}
+
+/**
+ * Update an existing issue's title and/or body.
+ */
+export function updateIssue(repo: string, issueNum: number, updates: { title?: string; body?: string }): void {
+  if (!updates.title && updates.body === undefined) return;
+  let bodyFile: string | undefined;
+  try {
+    let cmd = `gh issue edit ${issueNum} --repo "${repo}"`;
+    if (updates.title) {
+      cmd += ` --title ${JSON.stringify(updates.title)}`;
+    }
+    if (updates.body !== undefined) {
+      bodyFile = join(tmpdir(), `alpha-loop-issue-body-${Date.now()}`);
+      writeFileSync(bodyFile, updates.body, 'utf-8');
+      cmd += ` --body-file "${bodyFile}"`;
+    }
+    const result = exec(cmd);
+    if (result.exitCode !== 0) {
+      log.warn(`Failed to update issue #${issueNum}: ${result.stderr}`);
+    }
+  } finally {
+    if (bodyFile) {
+      try { unlinkSync(bodyFile); } catch { /* cleanup best-effort */ }
+    }
+  }
+}
+
+/**
+ * Close an issue with an optional reason.
+ */
+export function closeIssue(repo: string, issueNum: number, reason?: 'completed' | 'not_planned'): void {
+  const reasonFlag = reason ? ` --reason "${reason}"` : '';
+  const result = exec(
+    `gh issue close ${issueNum} --repo "${repo}"${reasonFlag}`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to close issue #${issueNum}: ${result.stderr}`);
+  }
+}
+
+/**
+ * Create a milestone. Returns the milestone number.
+ */
+export function createMilestone(repo: string, title: string, description: string, dueOn?: string): number {
+  const dueOnFlag = dueOn ? ` -f due_on=${JSON.stringify(dueOn)}` : '';
+  const result = exec(
+    `gh api "repos/${repo}/milestones" -X POST -f title=${JSON.stringify(title)} -f description=${JSON.stringify(description)}${dueOnFlag}`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to create milestone: ${result.stderr}`);
+    return 0;
+  }
+  try {
+    const data = JSON.parse(result.stdout) as { number: number };
+    return data.number;
+  } catch {
+    log.warn('Failed to parse milestone response');
+    return 0;
+  }
+}
+
+/**
+ * Assign an issue to a milestone by milestone number.
+ */
+export function setIssueMilestone(repo: string, issueNum: number, milestoneNum: number): void {
+  const result = exec(
+    `gh api "repos/${repo}/issues/${issueNum}" -X PATCH -F milestone=${milestoneNum}`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to set milestone on issue #${issueNum}: ${result.stderr}`);
+  }
+}
+
+/**
+ * List all open issues (no label filter). Default limit 100.
+ */
+export function listOpenIssues(repo: string, limit = 100): Issue[] {
+  const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
+  const result = exec(
+    `gh issue list --repo "${repo}" --state open --json number,title,body,labels --limit ${safeLimit}`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to list open issues: ${result.stderr}`);
+    return [];
+  }
+  try {
+    const raw = JSON.parse(result.stdout) as Array<{
+      number: number;
+      title: string;
+      body: string;
+      labels: Array<{ name: string }>;
+    }>;
+    return raw.map((issue) => ({
+      number: issue.number,
+      title: issue.title,
+      body: issue.body ?? '',
+      labels: (issue.labels ?? []).map((l) => l.name),
+    }));
+  } catch {
+    log.warn('Failed to parse open issues JSON');
+    return [];
+  }
+}
+
+/**
+ * Fetch comments for a specific issue.
+ */
+export function getIssueComments(repo: string, issueNum: number): Comment[] {
+  const result = exec(
+    `gh issue view ${issueNum} --repo "${repo}" --json comments`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to fetch comments for issue #${issueNum}: ${result.stderr}`);
+    return [];
+  }
+  try {
+    const data = JSON.parse(result.stdout) as {
+      comments: Array<{ author: { login: string }; body: string; createdAt: string }>;
+    };
+    return (data.comments ?? []).map((c) => ({
+      author: c.author?.login ?? 'unknown',
+      body: c.body ?? '',
+      createdAt: c.createdAt ?? '',
+    }));
+  } catch {
+    log.warn(`Failed to parse comments for issue #${issueNum}`);
+    return [];
+  }
+}
+
+/**
+ * Fetch a single issue with its full body and comments.
+ */
+export function getIssueWithComments(repo: string, issueNum: number): Issue | null {
+  const result = exec(
+    `gh issue view ${issueNum} --repo "${repo}" --json number,title,body,labels,comments`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to fetch issue #${issueNum}: ${result.stderr}`);
+    return null;
+  }
+  try {
+    const data = JSON.parse(result.stdout) as {
+      number: number;
+      title: string;
+      body: string;
+      labels: Array<{ name: string }>;
+      comments: Array<{ author: { login: string }; body: string; createdAt: string }>;
+    };
+    return {
+      number: data.number,
+      title: data.title,
+      body: data.body ?? '',
+      labels: (data.labels ?? []).map((l) => l.name),
+      comments: (data.comments ?? []).map((c) => ({
+        author: c.author?.login ?? 'unknown',
+        body: c.body ?? '',
+        createdAt: c.createdAt ?? '',
+      })),
+    };
+  } catch {
+    log.warn(`Failed to parse issue #${issueNum}`);
+    return null;
+  }
+}
+
+/**
+ * Add an issue to a GitHub Project v2.
+ */
+export function addIssueToProject(owner: string, projectNum: number, repo: string, issueNum: number): void {
+  const issueUrl = `https://github.com/${repo}/issues/${issueNum}`;
+  const result = exec(
+    `gh project item-add ${projectNum} --owner "${owner}" --url "${issueUrl}"`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to add issue #${issueNum} to project: ${result.stderr}`);
+  }
 }
 
 /**

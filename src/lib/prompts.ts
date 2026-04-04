@@ -7,6 +7,7 @@ export type ImplementPromptOptions = {
   issueNum: number;
   title: string;
   body: string;
+  comments?: Array<{ author: string; body: string; createdAt: string }>;
   planContent?: string;
   visionContext?: string;
   projectContext?: string;
@@ -18,6 +19,7 @@ export type ReviewPromptOptions = {
   issueNum: number;
   title: string;
   body: string;
+  comments?: Array<{ author: string; body: string; createdAt: string }>;
   baseBranch: string;
   visionContext?: string;
 };
@@ -39,13 +41,20 @@ export type LearnPromptOptions = {
  * Build the implementation prompt for an AI agent.
  */
 export function buildImplementPrompt(options: ImplementPromptOptions): string {
-  const { issueNum, title, body, planContent, visionContext, projectContext, previousResult, learningContext } = options;
+  const { issueNum, title, body, comments, planContent, visionContext, projectContext, previousResult, learningContext } = options;
 
   const sections: string[] = [
     `Implement GitHub issue #${issueNum}: ${title}`,
     '',
     body,
   ];
+
+  if (comments && comments.length > 0) {
+    sections.push('', '', '## Discussion (issue comments)');
+    for (const c of comments) {
+      sections.push(`- **@${c.author}** (${c.createdAt}): ${c.body}`);
+    }
+  }
 
   if (planContent) {
     sections.push('', '', `## Implementation Plan`, planContent);
@@ -95,7 +104,7 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
  * Build the code review prompt for an AI agent.
  */
 export function buildReviewPrompt(options: ReviewPromptOptions): string {
-  const { issueNum, title, body, baseBranch, visionContext } = options;
+  const { issueNum, title, body, comments, baseBranch, visionContext } = options;
 
   const sections: string[] = [
     `Review the code changes for issue #${issueNum}: ${title}`,
@@ -105,6 +114,13 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     'Original requirements:',
     body,
   ];
+
+  if (comments && comments.length > 0) {
+    sections.push('', 'Discussion (issue comments):');
+    for (const c of comments) {
+      sections.push(`- **@${c.author}** (${c.createdAt}): ${c.body}`);
+    }
+  }
 
   if (visionContext) {
     sections.push('', '', '## Product Vision (guide your review decisions)', visionContext);
@@ -348,4 +364,371 @@ date: ${today}
 
 ## Suggested Skill Updates
 - (specific skill file changes, or "None")`;
+}
+
+export type AssumptionsPromptOptions = {
+  issueNum: number;
+  title: string;
+  body: string;
+  diff: string;
+  reviewSummary: string;
+};
+
+/**
+ * Build a prompt that asks the agent to summarize assumptions and decisions
+ * made during implementation. Posted as a comment for user validation.
+ */
+export function buildAssumptionsPrompt(options: AssumptionsPromptOptions): string {
+  const { issueNum, title, body, diff, reviewSummary } = options;
+
+  return `You just implemented GitHub issue #${issueNum}: ${title}
+
+## Original Requirements
+${body}
+
+## Code Changes (first 5000 chars)
+${diff.slice(0, 5000)}
+
+## Review Summary
+${reviewSummary}
+
+Analyze the implementation and list any assumptions or decisions you had to make where the requirements were ambiguous or incomplete. Output ONLY a markdown document with this structure:
+
+## Assumptions
+- (list each assumption made, e.g. "Assumed the date format should be ISO 8601 since it wasn't specified")
+- If no assumptions were needed, write "None — requirements were fully specified"
+
+## Decisions
+- (list each design/implementation decision where multiple valid approaches existed, e.g. "Chose to validate on the server side rather than client side for security")
+- If no notable decisions, write "None — implementation was straightforward"
+
+## Items to Validate
+- (list specific things the user should check, e.g. "Verify the error message wording matches your team's style guide")
+- If nothing needs validation, write "None"
+
+Keep it concise. Only include genuinely ambiguous items, not obvious implementation choices.`;
+}
+
+export type TriagePromptOptions = {
+  issues: Array<{ number: number; title: string; body: string; comments?: Array<{ author: string; body: string; createdAt: string }> }>;
+  projectContext?: string | null;
+  visionContext?: string | null;
+};
+
+/**
+ * Build the triage analysis prompt for an AI agent.
+ * Instructs the agent to categorize open issues and output TriageFinding[] JSON.
+ */
+export function buildTriagePrompt(options: TriagePromptOptions): string {
+  const { issues, projectContext, visionContext } = options;
+
+  const capped = issues.slice(0, 100);
+  const cappedWarning = issues.length > 100
+    ? `\n\nWARNING: Only the first 100 of ${issues.length} issues are included. There may be more issues not shown here.`
+    : '';
+
+  const issueList = capped.map((i) => {
+    let entry = `### Issue #${i.number}: ${i.title}\n${i.body || '(no description)'}`;
+    if (i.comments && i.comments.length > 0) {
+      const commentLines = i.comments.map((c) =>
+        `- **@${c.author}** (${c.createdAt}): ${c.body.length > 200 ? c.body.slice(0, 200) + '...' : c.body}`
+      ).join('\n');
+      entry += `\n\n**Comments:**\n${commentLines}`;
+    }
+    return entry;
+  }).join('\n\n');
+
+  const sections: string[] = [
+    'You are a project triage assistant. Analyze the following open GitHub issues and categorize any that need attention.',
+    '',
+    '## Open Issues',
+    issueList,
+    cappedWarning,
+  ];
+
+  if (visionContext) {
+    sections.push('', '## Product Vision', visionContext);
+  }
+
+  if (projectContext) {
+    sections.push('', '## Technical Context', projectContext);
+  }
+
+  sections.push(
+    '',
+    '## Instructions',
+    '',
+    'For each issue, determine if it falls into one of these categories:',
+    '- **stale**: No longer relevant given the current codebase state (e.g., referenced files deleted, feature already implemented)',
+    '- **unclear**: Missing acceptance criteria, vague scope, no clear "done" definition',
+    '- **too_large**: Should be split into 2-4 smaller, focused issues',
+    '- **duplicate**: Substantially overlaps with another open issue',
+    '- **enrich**: Raw support ticket, sparse form submission, or bug report that needs investigation and enrichment — has some useful info but lacks technical detail, affected areas, acceptance criteria, or reproduction steps',
+    '- **ok**: Issue is fine as-is — do NOT include "ok" issues in output',
+    '',
+    'For each finding, provide:',
+    '- `reason`: Brief explanation of why this issue was flagged',
+    '- For `unclear` issues: include `rewrittenBody` with proper acceptance criteria in checkbox format (`- [ ] Criterion`)',
+    '- For `enrich` issues: include `enrichedBody` — a thorough rewrite that preserves the original description in a collapsed `<details>` block, then adds: summary, affected files/areas (inferred from codebase context), acceptance criteria, and reproduction steps if applicable. Use the issue comments for additional context.',
+    '- For `too_large` issues: include `splitInto` array of title strings for the sub-issues',
+    '- For `duplicate` issues: include `duplicateOf` with the canonical issue number',
+    '',
+    'Check the codebase context for staleness signals (referenced files deleted, features already implemented).',
+    'When rewriting unclear issues, use markdown with acceptance criteria in checkbox format.',
+    'When enriching issues, analyze the codebase context to identify affected files and areas, and validate that the reported issue is plausible.',
+    '',
+    '## Output Requirements',
+    '',
+    'Output ONLY valid JSON matching this schema (no explanation, no surrounding text).',
+    'The example below uses fences for illustration only — your output must be raw JSON with no fences:',
+    '',
+    '```json',
+    '[',
+    '  {',
+    '    "issueNum": 42,',
+    '    "title": "Issue title",',
+    '    "category": "stale",',
+    '    "reason": "This feature was already implemented in PR #30",',
+    '    "action": "close",',
+    '    "selected": true',
+    '  },',
+    '  {',
+    '    "issueNum": 43,',
+    '    "title": "Vague issue title",',
+    '    "category": "unclear",',
+    '    "reason": "No acceptance criteria, scope is ambiguous",',
+    '    "action": "rewrite",',
+    '    "rewrittenBody": "## Summary\\n...\\n\\n## Acceptance Criteria\\n- [ ] Criterion 1\\n- [ ] Criterion 2",',
+    '    "selected": true',
+    '  },',
+    '  {',
+    '    "issueNum": 44,',
+    '    "title": "Large issue title",',
+    '    "category": "too_large",',
+    '    "reason": "Covers 3 independent features",',
+    '    "action": "split",',
+    '    "splitInto": ["Sub-issue A", "Sub-issue B", "Sub-issue C"],',
+    '    "selected": true',
+    '  },',
+    '  {',
+    '    "issueNum": 45,',
+    '    "title": "Duplicate issue",',
+    '    "category": "duplicate",',
+    '    "reason": "Same scope as #42",',
+    '    "action": "merge",',
+    '    "duplicateOf": 42,',
+    '    "selected": true',
+    '  },',
+    '  {',
+    '    "issueNum": 46,',
+    '    "title": "Button broken on settings page",',
+    '    "category": "enrich",',
+    '    "reason": "Raw support ticket with minimal detail — needs affected areas, reproduction steps, and acceptance criteria",',
+    '    "action": "enrich",',
+    '    "enrichedBody": "<details><summary>Original description</summary>\\n\\nButton broken on settings page\\n\\n</details>\\n\\n## Summary\\nThe save button on the settings page is non-functional...\\n\\n## Affected Areas\\n- `src/components/Settings.tsx`\\n\\n## Acceptance Criteria\\n- [ ] Save button triggers form submission\\n- [ ] Success feedback shown to user\\n\\n## Reproduction Steps\\n1. Navigate to Settings\\n2. Click Save\\n3. Observe no response",',
+    '    "selected": true',
+    '  }',
+    ']',
+    '```',
+    '',
+    '## Rules',
+    '- Only include issues that need action (skip "ok" issues)',
+    '- If ALL issues are fine, output an empty array: `[]`',
+    '- Set `selected: true` for all findings (user will deselect if needed)',
+    '- action mapping: stale→close, unclear→rewrite, too_large→split, duplicate→merge, enrich→enrich',
+    '- Be conservative — only flag issues when you are confident about the categorization',
+    '- Prefer `enrich` over `unclear` for issues that have some useful info (e.g., support tickets, bug reports) but need technical detail added',
+  );
+
+  return sections.join('\n');
+}
+
+export type RoadmapPromptOptions = {
+  issues: Array<{ number: number; title: string; body: string; milestone: string | null }>;
+  milestones: Array<{ title: string; description: string; dueOn: string | null }>;
+  projectContext?: string | null;
+  visionContext?: string | null;
+};
+
+/**
+ * Build the roadmap prompt for an AI agent.
+ * Instructs the agent to suggest milestone groupings for open issues.
+ */
+export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
+  const { issues, milestones, projectContext, visionContext } = options;
+
+  const capped = issues.slice(0, 100);
+  const cappedWarning = issues.length > 100
+    ? `\n\nWARNING: Only the first 100 of ${issues.length} issues are included.`
+    : '';
+
+  const issueList = capped.map((i) => {
+    const ms = i.milestone ? ` [milestone: ${i.milestone}]` : ' [unassigned]';
+    const body = i.body.length > 300 ? i.body.slice(0, 300) + '...' : i.body;
+    return `### Issue #${i.number}: ${i.title}${ms}\n${body || '(no description)'}`;
+  }).join('\n\n');
+
+  const milestoneList = milestones.length > 0
+    ? milestones.map((m) => {
+        const due = m.dueOn ? ` (due: ${m.dueOn})` : '';
+        return `- **${m.title}**${due}: ${m.description || '(no description)'}`;
+      }).join('\n')
+    : '(none)';
+
+  const sections: string[] = [
+    'You are a project roadmap assistant. Analyze the following open issues and existing milestones, then suggest how to organize issues into milestones.',
+    '',
+    '## Open Issues',
+    issueList,
+    cappedWarning,
+    '',
+    '## Existing Milestones',
+    milestoneList,
+  ];
+
+  if (visionContext) {
+    sections.push('', '## Product Vision', visionContext);
+  }
+
+  if (projectContext) {
+    sections.push('', '## Technical Context', projectContext);
+  }
+
+  sections.push(
+    '',
+    '## Output Requirements',
+    '',
+    'Output ONLY valid JSON matching this schema (no explanation, no surrounding text).',
+    'The example below uses fences for illustration only — your output must be raw JSON with no fences:',
+    '',
+    '```json',
+    '{',
+    '  "milestones": [',
+    '    {',
+    '      "title": "Milestone Name",',
+    '      "description": "What this milestone delivers",',
+    '      "dueOn": "2026-05-01",',
+    '      "order": 1',
+    '    }',
+    '  ],',
+    '  "assignments": [',
+    '    {',
+    '      "issueNum": 3,',
+    '      "title": "Issue title",',
+    '      "milestone": "Milestone Name",',
+    '      "currentMilestone": "",',
+    '      "selected": true',
+    '    }',
+    '  ]',
+    '}',
+    '```',
+    '',
+    '## Instructions',
+    '- Respect existing milestone structure — reuse existing milestones where appropriate',
+    '- Only create new milestones when issues clearly don\'t fit existing ones',
+    '- Consider dependency order: foundational work (database, API, infra) in earlier milestones',
+    '- Suggest realistic due dates based on issue complexity and number of issues per milestone',
+    '- Set `currentMilestone` to the issue\'s current milestone title, or empty string if unassigned',
+    '- Include ALL open issues in assignments (even ones already assigned to milestones)',
+    '- Set `selected: true` for all assignments (user will deselect if needed)',
+    '- Order milestones by suggested execution order (order field)',
+    '- Group related issues together (same feature area, same dependency chain)',
+  );
+
+  return sections.join('\n');
+}
+
+export type PlanPromptOptions = {
+  seedDescription: string;
+  seedFiles?: Array<{ path: string; content: string }>;
+  visionContext?: string | null;
+  projectContext?: string | null;
+  existingIssues?: Array<{ number: number; title: string }>;
+};
+
+/**
+ * Build the prompt for AI-driven project plan generation.
+ * Instructs the agent to output a PlanDraft JSON with milestones and issues.
+ */
+export function buildPlanPrompt(options: PlanPromptOptions): string {
+  const { seedDescription, seedFiles, visionContext, projectContext, existingIssues } = options;
+
+  const sections: string[] = [
+    'You are a project planning assistant. Analyze the following inputs and generate a complete project plan as JSON.',
+    '',
+    '## Seed Description',
+    seedDescription,
+  ];
+
+  if (seedFiles && seedFiles.length > 0) {
+    sections.push('', '## Seed Files');
+    for (const file of seedFiles) {
+      sections.push(`### ${file.path}`, '```', file.content, '```');
+    }
+  }
+
+  if (visionContext) {
+    sections.push('', '## Product Vision', visionContext);
+  }
+
+  if (projectContext) {
+    sections.push('', '## Technical Context', projectContext);
+  }
+
+  if (existingIssues && existingIssues.length > 0) {
+    sections.push(
+      '',
+      '## Existing Issues (avoid duplicates)',
+      ...existingIssues.map((i) => `- #${i.number}: ${i.title}`),
+    );
+  }
+
+  sections.push(
+    '',
+    '## Output Requirements',
+    '',
+    'Output ONLY valid JSON matching this schema (no explanation, no surrounding text).',
+    'The example below uses fences for illustration only — your output must be raw JSON with no fences:',
+    '',
+    '```json',
+    '{',
+    '  "vision": null,',
+    '  "milestones": [',
+    '    {',
+    '      "title": "Milestone Name",',
+    '      "description": "What this milestone delivers",',
+    '      "dueOn": "2026-05-01",',
+    '      "order": 1',
+    '    }',
+    '  ],',
+    '  "issues": [',
+    '    {',
+    '      "id": 1,',
+    '      "title": "Issue title",',
+    '      "body": "## Summary\\n...\\n\\n## Acceptance Criteria\\n- [ ] Criterion 1\\n- [ ] Criterion 2",',
+    '      "labels": ["enhancement"],',
+    '      "milestone": "Milestone Name",',
+    '      "priority": "p1",',
+    '      "complexity": "medium",',
+    '      "dependsOn": [],',
+    '      "selected": true',
+    '    }',
+    '  ],',
+    '  "projectBoard": null',
+    '}',
+    '```',
+    '',
+    '## Instructions',
+    '- Group issues into logical milestones with suggested due dates',
+    '- Each issue body MUST use markdown with acceptance criteria in checkbox format: `- [ ] Criterion`',
+    '- Priority: p0 (critical), p1 (high), p2 (medium), p3 (low)',
+    '- Complexity: trivial, small, medium, large',
+    '- Use `dependsOn` to reference other issue `id` values within the plan',
+    '- Set all issues to `"selected": true`',
+    '- Do NOT duplicate any existing issues listed above',
+    '- Consider the codebase structure for realistic issue scoping',
+    '- Issue `id` values are temporary local IDs (1, 2, 3...) used only for dependency references',
+  );
+
+  return sections.join('\n');
 }

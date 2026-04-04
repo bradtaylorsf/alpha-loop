@@ -48,11 +48,13 @@ Alpha Loop implements a 12-step pipeline for each issue:
 1. **Status Update** — Labels issue `in-progress`, assigns to you, updates project board
 2. **Worktree** — Creates an isolated git worktree so work doesn't conflict with other issues
 3. **Plan** — Agent analyzes the issue and enriches it with implementation details
-4. **Implement** — Agent writes the code, guided by project vision, context, and learnings from previous issues
+3b. **Fetch Comments** — Loads issue comments so the agent has the full conversation context
+4. **Implement** — Agent writes the code, guided by project vision, context, comments, and learnings from previous issues
 5. **Test + Retry** — Runs your test command; if tests fail, agent fixes and retries (up to `max_test_retries`)
 6. **Verify + Retry** — Starts your dev server, uses playwright-cli to test the feature like a real user, takes screenshots
 7. **Review** — A review agent reads the diff, checks for gaps, security issues, and missing wiring — fixes what it can
 8. **Create PR** — Opens a PR with test results, review summary, and verification status
+8b. **Assumptions** — Agent summarizes assumptions and decisions made, posts as a comment on the issue for user validation
 9. **Learn** — Extracts learnings (patterns, anti-patterns, what worked/failed) for future sessions
 10. **Update Issue** — Posts results as a comment, updates labels
 11. **Auto-Merge** — Merges the PR to the session branch (if enabled)
@@ -187,7 +189,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run` | Fetch matching issues, process them all, then exit |
 | `alpha-loop run --dry-run` | Preview without making changes |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
-| `alpha-loop vision` | Interactive project vision setup (`.alpha-loop/vision.md`) |
+| `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
 | `alpha-loop auth` | Save authenticated browser state for verification |
 | `alpha-loop history` | View session history |
 | `alpha-loop history <name>` | View a specific session |
@@ -210,6 +212,16 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop eval convert` | Convert between AlphaLoop and skill-creator eval formats |
 | `alpha-loop eval import-swebench` | Import eval cases from SWE-bench dataset |
 | `alpha-loop evolve` | Meta-Harness-style automated optimization loop |
+| `alpha-loop plan` | Generate a full project scope (milestones + issues) from seed inputs using AI |
+| `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
+| `alpha-loop plan --dry-run` | Display the plan without creating any GitHub resources |
+| `alpha-loop plan --yes --seed <file>` | Non-interactive mode: accept all AI recommendations |
+| `alpha-loop triage` | Analyze and improve existing issues (staleness, clarity, size, duplicates, support ticket enrichment) |
+| `alpha-loop triage --dry-run` | Display findings without making changes |
+| `alpha-loop triage --yes` | Non-interactive mode: apply all AI-recommended triage actions |
+| `alpha-loop roadmap` | Organize open issues into milestones using AI analysis |
+| `alpha-loop roadmap --dry-run` | Display proposed roadmap without making changes |
+| `alpha-loop roadmap --yes` | Non-interactive mode: apply all AI-recommended assignments |
 
 ### Run Options
 

@@ -399,18 +399,15 @@ export async function initCommand(): Promise<void> {
   log.step('Step 5: Playwright CLI');
   installPlaywrightSkills(projectDir, projectTemplatesDir);
 
-  // --- Step 6: Vision (interactive) ---
-  if (process.stdin.isTTY) {
+  // --- Step 6: Vision ---
+  {
     const { hasVision } = await import('../lib/vision.js');
     if (!hasVision()) {
       log.step('Step 6: Project vision');
-      const { visionCommand } = await import('./vision.js');
-      await visionCommand();
+      log.info('Run "alpha-loop plan" to set up your project vision and scope');
     } else {
       log.step('Step 6: Project vision (already exists)');
     }
-  } else {
-    log.step('Step 6: Project vision (skipped — non-interactive)');
   }
 
   // --- Step 7: Scan (context + instructions) ---

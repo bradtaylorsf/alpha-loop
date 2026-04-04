@@ -34,6 +34,8 @@ const PRIORITIES: Record<string, string> = {
 };
 
 export async function visionCommand(): Promise<void> {
+  log.warn('vision is deprecated — use "alpha-loop plan" instead');
+
   if (!process.stdin.isTTY) {
     log.info('Not running in an interactive terminal. Skipping vision setup.');
     return;

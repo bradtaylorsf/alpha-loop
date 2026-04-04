@@ -14,8 +14,10 @@ import {
   createPR,
   mergePR,
   updateProjectStatus,
+  getIssueComments,
+  type Comment,
 } from './github.js';
-import { buildImplementPrompt, buildReviewPrompt } from './prompts.js';
+import { buildImplementPrompt, buildReviewPrompt, buildAssumptionsPrompt } from './prompts.js';
 import { runTests } from './testing.js';
 import { runVerify } from './verify.js';
 import { extractLearnings, getLearningContext } from './learning.js';
@@ -418,6 +420,15 @@ Rules:
     log.dry('Would run planning agent');
   }
 
+  // --- Step 3b: Fetch issue comments for full context ---
+  let issueComments: Comment[] = [];
+  if (!config.dryRun) {
+    issueComments = getIssueComments(config.repo, issueNum);
+    if (issueComments.length > 0) {
+      log.info(`Loaded ${issueComments.length} comment(s) from issue #${issueNum}`);
+    }
+  }
+
   // --- Step 4: Implement ---
   log.step('Step 4: Implementing');
   if (!config.dryRun) {
@@ -431,6 +442,7 @@ Rules:
       issueNum,
       title,
       body,
+      comments: issueComments.length > 0 ? issueComments : undefined,
       planContent: plan.implementation || undefined,
       visionContext: visionContext ?? undefined,
       projectContext: projectContext ?? undefined,
@@ -579,6 +591,7 @@ Rules:
           issueNum,
           title,
           body,
+          comments: issueComments.length > 0 ? issueComments : undefined,
           baseBranch: config.baseBranch,
           visionContext: loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md')) ?? undefined,
         });
@@ -800,6 +813,44 @@ Rules:
     }
   } else {
     log.dry('Would create PR');
+  }
+
+  // --- Step 8b: Post assumptions/decisions comment ---
+  if (!config.dryRun && prUrl) {
+    try {
+      const assumptionsDiff = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+      const reviewSummary = reviewGate.summary || 'No review findings';
+      const assumptionsPrompt = buildAssumptionsPrompt({
+        issueNum,
+        title,
+        body,
+        diff: assumptionsDiff.stdout,
+        reviewSummary,
+      });
+
+      tracePrompt(session.name, issueNum, 'assumptions', assumptionsPrompt);
+
+      const assumptionsResult = await spawnAgent({
+        agent: config.agent,
+        model: config.model,
+        prompt: assumptionsPrompt,
+        cwd: worktreePath,
+        logFile: join(session.logsDir, `issue-${issueNum}-assumptions.log`),
+        verbose: config.verbose,
+      });
+
+      traceOutput(session.name, issueNum, 'assumptions', assumptionsResult.output);
+      stepCosts.push(buildStepCost('assumptions', issueNum, assumptionsResult, config));
+
+      if (assumptionsResult.exitCode === 0 && assumptionsResult.output.trim()) {
+        commentIssue(config.repo, issueNum,
+          `## AI Implementation Notes\n\n${assumptionsResult.output.trim()}\n\n---\n_Posted by alpha-loop for user validation._`,
+        );
+        log.success('Posted assumptions/decisions comment');
+      }
+    } catch (err) {
+      log.warn(`Failed to post assumptions comment: ${err}`);
+    }
   }
 
   // --- Step 9: Extract learnings ---
