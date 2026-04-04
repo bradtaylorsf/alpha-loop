@@ -22,10 +22,13 @@ export type SessionContext = {
  * Create a new session context with timestamp-based name.
  * Optionally creates a session branch when autoMerge is enabled.
  */
-export function createSession(config: Config): SessionContext {
+export function createSession(config: Config, milestone?: string): SessionContext {
   const now = new Date();
   const timestamp = formatTimestamp(now);
-  const name = `session/${timestamp}`;
+  const slug = milestone
+    ? milestone.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    : timestamp;
+  const name = `session/${slug}`;
   const branch = config.mergeTo || name;
 
   const projectDir = process.cwd();
@@ -64,8 +67,8 @@ export function createSession(config: Config): SessionContext {
           repo: config.repo,
           base: config.baseBranch,
           head: branch,
-          title: `Session: ${name}`,
-          body: `## Session In Progress\n\n**Branch:** ${branch}\n**Started:** ${new Date().toISOString()}\n\nThis PR will be updated as issues are processed.\n\n---\n*Automated by alpha-loop*`,
+          title: milestone ? `Milestone: ${milestone}` : `Session: ${name}`,
+          body: `## Session In Progress\n\n${milestone ? `**Milestone:** ${milestone}\n` : ''}**Branch:** ${branch}\n**Started:** ${new Date().toISOString()}\n\nThis PR will be updated as issues are processed.\n\n---\n*Automated by alpha-loop*`,
           cwd: projectDir,
         });
         log.success(`Session PR (draft): ${draftPR}`);

@@ -7,7 +7,7 @@ import { log } from '../lib/logger.js';
 import { exec } from '../lib/shell.js';
 import { loadConfig, assertSafeShellArg, type Config } from '../lib/config.js';
 import { pollIssues, listMilestones, type Milestone } from '../lib/github.js';
-import { processIssue } from '../lib/pipeline.js';
+import { processIssue, processBatch } from '../lib/pipeline.js';
 import { createSession, finalizeSession, type SessionContext } from '../lib/session.js';
 import { cleanupWorktree } from '../lib/worktree.js';
 import { generateSessionSummary } from '../lib/learning.js';
@@ -31,6 +31,8 @@ export type RunOptions = {
   skipLearn?: boolean;
   autoMerge?: boolean;
   mergeTo?: string;
+  batch?: boolean;
+  batchSize?: number;
   verbose?: boolean;
 };
 
@@ -104,6 +106,10 @@ function printBanner(config: Config, session: SessionContext): void {
   console.error(`  Max Issues:     ${BOLD}${config.maxIssues || 'unlimited'}${NC}`);
   console.error(`  Max Duration:   ${BOLD}${config.maxSessionDuration ? config.maxSessionDuration + 's' : 'unlimited'}${NC}`);
   console.error(`  Auto Merge:     ${BOLD}${config.autoMerge}${NC}`);
+  console.error(`  Batch Mode:     ${BOLD}${config.batch}${NC}`);
+  if (config.batch) {
+    console.error(`  Batch Size:     ${BOLD}${config.batchSize}${NC}`);
+  }
   console.error(`  Session:        ${BOLD}${session.branch}${NC}`);
   console.error('');
 }
@@ -189,6 +195,8 @@ export async function runCommand(options: RunOptions): Promise<void> {
   if (options.milestone) overrides.milestone = options.milestone;
   if (options.autoMerge) overrides.autoMerge = true;
   if (options.mergeTo) overrides.mergeTo = options.mergeTo;
+  if (options.batch) overrides.batch = true;
+  if (options.batchSize) overrides.batchSize = options.batchSize;
   if (options.verbose) overrides.verbose = true;
 
   const config = loadConfig(overrides);
@@ -198,8 +206,17 @@ export async function runCommand(options: RunOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Create session
-  const session = createSession(config);
+  // Milestone selection (interactive or from config/CLI flag) — must happen before session creation
+  let activeMilestone = config.milestone;
+  if (!activeMilestone && !config.dryRun && process.stdin.isTTY) {
+    activeMilestone = await pickMilestone(config.repo);
+  }
+  if (activeMilestone) {
+    log.info(`Filtering issues by milestone: ${activeMilestone}`);
+  }
+
+  // Create session (named after milestone if selected)
+  const session = createSession(config, activeMilestone || undefined);
 
   // Print startup banner
   printBanner(config, session);
@@ -250,16 +267,6 @@ export async function runCommand(options: RunOptions): Promise<void> {
   if (syncResult.synced) {
     log.success('Agent assets synced before run');
   }
-
-  // Milestone selection (interactive or from config/CLI flag)
-  let activeMilestone = config.milestone;
-  if (!activeMilestone && !config.dryRun && process.stdin.isTTY) {
-    activeMilestone = await pickMilestone(config.repo);
-  }
-  if (activeMilestone) {
-    log.info(`Filtering issues by milestone: ${activeMilestone}`);
-  }
-
 
   // Pre-flight test validation
   log.step('Running pre-flight test validation...');
@@ -338,42 +345,86 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
     const sessionStartTime = Date.now();
 
-    for (const issue of issuesToProcess) {
-      // Check duration limit before each issue
-      if (config.maxSessionDuration > 0) {
-        const elapsed = Math.round((Date.now() - sessionStartTime) / 1000);
-        if (elapsed >= config.maxSessionDuration) {
-          log.info(`Stopping: max_session_duration reached (${elapsed}s / ${config.maxSessionDuration}s)`);
-          break;
+    if (config.batch) {
+      // --- Batch mode: chunk issues and process each chunk as one agent session ---
+      const batchSize = config.batchSize;
+      const totalBatches = Math.ceil(issuesToProcess.length / batchSize);
+      log.info(`Batch mode: ${issuesToProcess.length} issues in ${totalBatches} batch(es) of up to ${batchSize}`);
+
+      for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
+        // Check duration limit before each batch
+        if (config.maxSessionDuration > 0) {
+          const elapsed = Math.round((Date.now() - sessionStartTime) / 1000);
+          if (elapsed >= config.maxSessionDuration) {
+            log.info(`Stopping: max_session_duration reached (${elapsed}s / ${config.maxSessionDuration}s)`);
+            break;
+          }
         }
-      }
 
-      log.info('==========================================');
-      log.info(`Processing issue #${issue.number}: ${issue.title}`);
-      log.info('==========================================');
+        const batchStart = batchIdx * batchSize;
+        const batchIssues = issuesToProcess.slice(batchStart, batchStart + batchSize);
+        const batchNums = batchIssues.map((i) => `#${i.number}`).join(', ');
 
-      activeIssueNum = issue.number;
+        log.info('==========================================');
+        log.info(`Batch ${batchIdx + 1}/${totalBatches}: ${batchNums} (${batchIssues.length} issues)`);
+        log.info('==========================================');
 
-      try {
-        const result = await processIssue(
-          issue.number,
-          issue.title,
-          issue.body,
-          config,
-          session,
-        );
-        session.results.push(result);
+        activeIssueNum = batchIssues[0].number;
 
-        // Stop processing if agent hit a transient error (usage/rate limit)
-        if (result.failureReason === 'transient') {
-          log.warn('Agent hit a rate/usage limit — stopping session to avoid wasting cycles');
-          break;
+        try {
+          const results = await processBatch(batchIssues, config, session);
+          session.results.push(...results);
+
+          // Stop if any issue hit a transient error
+          if (results.some((r) => r.failureReason === 'transient')) {
+            log.warn('Agent hit a rate/usage limit — stopping session to avoid wasting cycles');
+            break;
+          }
+        } catch (err) {
+          log.error(`Failed to process batch ${batchIdx + 1}: ${err}`);
         }
-      } catch (err) {
-        log.error(`Failed to process issue #${issue.number}: ${err}`);
-      }
 
-      activeIssueNum = null;
+        activeIssueNum = null;
+      }
+    } else {
+      // --- Sequential mode (original behavior) ---
+      for (const issue of issuesToProcess) {
+        // Check duration limit before each issue
+        if (config.maxSessionDuration > 0) {
+          const elapsed = Math.round((Date.now() - sessionStartTime) / 1000);
+          if (elapsed >= config.maxSessionDuration) {
+            log.info(`Stopping: max_session_duration reached (${elapsed}s / ${config.maxSessionDuration}s)`);
+            break;
+          }
+        }
+
+        log.info('==========================================');
+        log.info(`Processing issue #${issue.number}: ${issue.title}`);
+        log.info('==========================================');
+
+        activeIssueNum = issue.number;
+
+        try {
+          const result = await processIssue(
+            issue.number,
+            issue.title,
+            issue.body,
+            config,
+            session,
+          );
+          session.results.push(result);
+
+          // Stop processing if agent hit a transient error (usage/rate limit)
+          if (result.failureReason === 'transient') {
+            log.warn('Agent hit a rate/usage limit — stopping session to avoid wasting cycles');
+            break;
+          }
+        } catch (err) {
+          log.error(`Failed to process issue #${issue.number}: ${err}`);
+        }
+
+        activeIssueNum = null;
+      }
     }
   }
 

@@ -77,6 +77,10 @@ export type Config = {
   skipPostSessionReview: boolean;
   /** Skip security scanning in post-session review (default: false). */
   skipPostSessionSecurity: boolean;
+  /** Enable batch mode — process multiple issues per agent call (default: false). */
+  batch: boolean;
+  /** Number of issues per batch when batch mode is enabled (default: 5). */
+  batchSize: number;
   /** Per-model pricing table (cost per million tokens). */
   pricing: Record<string, ModelPricing>;
   /** Per-step agent/model overrides. */
@@ -122,6 +126,8 @@ const DEFAULTS: Config = {
   autoCapture: true,
   skipPostSessionReview: false,
   skipPostSessionSecurity: false,
+  batch: false,
+  batchSize: 5,
   pricing: {
     'claude-opus-4-6': { input: 15.0, output: 75.0 },
     'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
@@ -172,6 +178,8 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   skip_eval: 'skipEval',
   eval_timeout: 'evalTimeout',
   auto_capture: 'autoCapture',
+  batch: 'batch',
+  batch_size: 'batchSize',
   pipeline: 'pipeline',
 };
 
@@ -213,6 +221,8 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   AUTO_CAPTURE: 'autoCapture',
   SKIP_POST_SESSION_REVIEW: 'skipPostSessionReview',
   SKIP_POST_SESSION_SECURITY: 'skipPostSessionSecurity',
+  BATCH: 'batch',
+  BATCH_SIZE: 'batchSize',
 };
 
 function coerce(value: string, current: unknown): unknown {

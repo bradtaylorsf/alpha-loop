@@ -80,6 +80,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,
+    batch: false,
+    batchSize: 5,
     pricing: {},
     pipeline: {},
     ...overrides,

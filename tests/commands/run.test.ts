@@ -119,6 +119,8 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,
+    batch: false,
+    batchSize: 5,
     pricing: {},
     pipeline: {},
     ...overrides,
