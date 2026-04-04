@@ -166,6 +166,43 @@ alpha-loop evolve --resume                # Resume from a previous evolve sessio
 alpha-loop evolve --dry-run               # Preview without changes
 ```
 
+### Batch Mode
+
+By default, Alpha Loop processes issues one at a time — each issue gets its own plan, implement, test, and review agent calls. Batch mode combines multiple issues into single agent calls, dramatically reducing overhead:
+
+```bash
+# Process issues in batches of 5 (default)
+alpha-loop run --batch
+
+# Custom batch size
+alpha-loop run --batch --batch-size 3
+```
+
+**How it works:** If a milestone has 13 issues, batch mode processes them in 3 rounds:
+
+| Batch | Issues | Agent Calls |
+|-------|--------|-------------|
+| Batch 1 | #1-#5 | 1 plan + 1 implement + 1 review |
+| Batch 2 | #6-#10 | 1 plan + 1 implement + 1 review |
+| Batch 3 | #11-#13 | 1 plan + 1 implement + 1 review |
+
+Each batch goes through the full pipeline:
+1. **Batch plan** — One agent call plans all issues, writing per-issue plan JSONs
+2. **Batch implement** — One agent call implements all issues, committing per-issue
+3. **Test** — Runs the test suite once (with retry loop if needed)
+4. **Batch review** — One agent call reviews the entire diff for all issues
+5. **PR** — Creates one PR that closes all issues in the batch
+6. **Per-issue updates** — Each issue gets individually updated with labels, comments, and PR link
+
+This reduces agent calls from ~3-4 per issue to ~3 per batch. For 5 issues, that's 3 agent calls instead of 15-20.
+
+Or set it permanently in `.alpha-loop.yaml`:
+
+```yaml
+batch: true
+batch_size: 5
+```
+
 ### Crash Recovery (`alpha-loop resume`)
 
 If the loop hangs or crashes mid-session, work can be stranded on local branches with no PR. Run `alpha-loop resume` to recover:
@@ -238,6 +275,8 @@ Options:
   --skip-learn        Skip learning extraction
   --auto-merge        Auto-merge PRs to session branch
   --merge-to <branch> Use an existing branch instead of creating a new session branch
+  --batch             Batch mode: process multiple issues per agent call (faster, fewer tokens)
+  --batch-size <n>    Issues per batch (default: 5)
 ```
 
 ## Configuration
@@ -310,6 +349,8 @@ eval_dir: .alpha-loop/evals
 | `eval_model` | (agent default) | AI model for eval judging |
 | `eval_timeout` | `300` | Timeout in seconds for eval case execution |
 | `auto_capture` | `true` | Auto-capture failures as eval cases at end of session |
+| `batch` | `false` | Enable batch mode — process multiple issues per agent call |
+| `batch_size` | `5` | Number of issues per batch when batch mode is enabled |
 | `pipeline` | `{}` | Per-step agent/model overrides (see below) |
 | `pricing` | (built-in) | Custom token pricing per model for cost tracking |
 | `post_session.review` | `true` | Run holistic code review on full session diff |
@@ -351,6 +392,8 @@ All config options can be set via environment variables (uppercase, same names):
 | `EVAL_MODEL` | `eval_model` |
 | `EVAL_TIMEOUT` | `eval_timeout` |
 | `AUTO_CAPTURE` | `auto_capture` |
+| `BATCH` | `batch` |
+| `BATCH_SIZE` | `batch_size` |
 | `SKIP_POST_SESSION_REVIEW` | `post_session.review` (inverted) |
 | `SKIP_POST_SESSION_SECURITY` | `post_session.security_scan` (inverted) |
 

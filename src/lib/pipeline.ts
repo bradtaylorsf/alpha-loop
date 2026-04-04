@@ -17,7 +17,15 @@ import {
   getIssueComments,
   type Comment,
 } from './github.js';
-import { buildImplementPrompt, buildReviewPrompt, buildAssumptionsPrompt } from './prompts.js';
+import {
+  buildImplementPrompt,
+  buildReviewPrompt,
+  buildAssumptionsPrompt,
+  buildBatchPlanPrompt,
+  buildBatchImplementPrompt,
+  buildBatchReviewPrompt,
+  type BatchIssue,
+} from './prompts.js';
 import { runTests } from './testing.js';
 import { runVerify } from './verify.js';
 import { extractLearnings, getLearningContext } from './learning.js';
@@ -1001,6 +1009,523 @@ Rules:
   return result;
 }
 
+/**
+ * Process a batch of issues through a single plan → implement → test → review cycle.
+ * Instead of spawning separate agents per issue, combines all issues into one prompt
+ * for each stage, dramatically reducing agent spin-up and context loading overhead.
+ *
+ * After the batch completes, each issue is individually updated with labels, comments, and PR.
+ */
+export async function processBatch(
+  issues: Array<{ number: number; title: string; body: string }>,
+  config: Config,
+  session: SessionContext,
+): Promise<PipelineResult[]> {
+  const startTime = Date.now();
+  const projectDir = process.cwd();
+  const stepCosts: StepCost[] = [];
+  const stepsCompleted: string[] = [];
+  const issueNums = issues.map((i) => i.number);
+
+  mkdirSync(session.logsDir, { recursive: true });
+  const logFile = join(session.logsDir, `batch-${issueNums.join('-')}.log`);
+
+  log.step(`Batch processing ${issues.length} issues: ${issueNums.map((n) => `#${n}`).join(', ')}`);
+
+  // --- Step 1: Update all issue statuses ---
+  log.step('Batch Step 1: Updating issue statuses');
+  if (!config.dryRun) {
+    for (const issue of issues) {
+      updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'In progress');
+      labelIssue(config.repo, issue.number, 'in-progress', config.labelReady);
+      assignIssue(config.repo, issue.number, '@me');
+    }
+  }
+
+  // --- Step 2: Setup single worktree for the batch ---
+  log.step('Batch Step 2: Setting up worktree');
+  const batchId = issueNums.join('-');
+  let worktreePath: string;
+  let worktreeBranch: string;
+
+  try {
+    const wt = await setupWorktree({
+      issueNum: issues[0].number, // Use first issue number for branch naming
+      projectDir,
+      baseBranch: config.baseBranch,
+      sessionBranch: session.branch,
+      autoMerge: config.autoMerge,
+      skipInstall: config.skipInstall,
+      setupCommand: config.setupCommand,
+      dryRun: config.dryRun,
+    });
+    worktreePath = wt.path;
+    worktreeBranch = wt.branch;
+  } catch (err) {
+    log.error(`Failed to set up worktree for batch: ${err}`);
+    return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
+  }
+
+  // --- Step 3: Fetch comments for all issues ---
+  const issueComments = new Map<number, Comment[]>();
+  if (!config.dryRun) {
+    for (const issue of issues) {
+      const comments = getIssueComments(config.repo, issue.number);
+      if (comments.length > 0) {
+        issueComments.set(issue.number, comments);
+        log.info(`Loaded ${comments.length} comment(s) from issue #${issue.number}`);
+      }
+    }
+  }
+
+  // Build BatchIssue array with comments
+  const batchIssues: BatchIssue[] = issues.map((i) => ({
+    issueNum: i.number,
+    title: i.title,
+    body: i.body,
+    comments: issueComments.get(i.number)?.map((c) => ({
+      author: c.author,
+      body: c.body,
+      createdAt: c.createdAt,
+    })),
+  }));
+
+  // --- Step 4: Batch plan ---
+  log.step('Batch Step 3: Planning all issues');
+  const plans = new Map<number, IssuePlan>();
+
+  if (!config.dryRun) {
+    try {
+      const planPrompt = buildBatchPlanPrompt({ issues: batchIssues });
+      tracePrompt(session.name, issues[0].number, 'batch-plan', planPrompt);
+
+      const planResult = await spawnAgent({
+        agent: config.agent,
+        model: config.model,
+        prompt: planPrompt,
+        cwd: worktreePath,
+        logFile: join(session.logsDir, `batch-plan.log`),
+        verbose: config.verbose,
+      });
+
+      traceOutput(session.name, issues[0].number, 'batch-plan', planResult.output);
+      stepCosts.push(buildStepCost('plan', issues[0].number, planResult, config));
+
+      if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
+        log.warn('Agent hit a transient error during batch planning — re-queuing all issues');
+        for (const issue of issues) requeueIssue(config, issue.number);
+        await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup });
+        return issues.map((i) => failureResult(i.number, i.title, startTime, 'transient'));
+      }
+
+      // Read plan files for each issue
+      for (const issue of issues) {
+        const planFile = join(worktreePath, `plan-issue-${issue.number}.json`);
+        const planFileSession = join(session.logsDir, `plan-issue-${issue.number}.json`);
+        const plan = readPlan(planFile);
+        plans.set(issue.number, plan);
+        moveToSessionLogs(planFile, planFileSession);
+        if (plan.summary) {
+          log.success(`Plan #${issue.number}: ${plan.summary}`);
+        }
+      }
+      stepsCompleted.push('plan');
+    } catch {
+      log.warn('Batch planning failed, using defaults for all issues');
+    }
+  }
+
+  // --- Step 5: Batch implement ---
+  log.step('Batch Step 4: Implementing all issues');
+  if (!config.dryRun) {
+    const visionContext = loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md'));
+    const projectContext = loadFileIfExists(join(projectDir, '.alpha-loop', 'context.md'));
+    const learningContext = getLearningContext(join(projectDir, '.alpha-loop', 'learnings'));
+
+    // Combine all plans into one content block
+    const allPlans = issues.map((i) => {
+      const plan = plans.get(i.number) ?? DEFAULT_PLAN;
+      return `### Plan for #${i.number}: ${i.title}\n${plan.implementation || '(no plan)'}`;
+    }).join('\n\n');
+
+    const implementPrompt = buildBatchImplementPrompt({
+      issues: batchIssues,
+      planContent: allPlans,
+      visionContext: visionContext ?? undefined,
+      projectContext: projectContext ?? undefined,
+      learningContext: learningContext || undefined,
+    });
+
+    tracePrompt(session.name, issues[0].number, 'batch-implement', implementPrompt);
+
+    const implResult = await spawnAgent({
+      agent: config.agent,
+      model: config.model,
+      prompt: implementPrompt,
+      cwd: worktreePath,
+      logFile: join(session.logsDir, `batch-implement.log`),
+      verbose: config.verbose,
+    });
+
+    traceOutput(session.name, issues[0].number, 'batch-implement', implResult.output);
+    stepCosts.push(buildStepCost('implement', issues[0].number, implResult, config));
+
+    if (implResult.exitCode !== 0) {
+      if (isTransientError(implResult.output)) {
+        log.warn('Agent hit a transient error during batch implementation — re-queuing');
+        for (const issue of issues) requeueIssue(config, issue.number);
+        await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup });
+        return issues.map((i) => failureResult(i.number, i.title, startTime, 'transient'));
+      }
+      log.error('Batch implementation failed');
+      for (const issue of issues) {
+        labelIssue(config.repo, issue.number, 'failed', 'in-progress');
+        commentIssue(config.repo, issue.number, 'Agent loop failed during batch implementation. See logs.');
+      }
+      await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup });
+      return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
+    }
+
+    // Auto-commit if agent didn't
+    const statusResult = exec('git status --porcelain', { cwd: worktreePath });
+    if (statusResult.stdout.trim()) {
+      exec('git add -A', { cwd: worktreePath });
+      const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
+      exec(`git commit -m "feat: batch implement issues ${issueRefs}"`, { cwd: worktreePath });
+    }
+
+    stepsCompleted.push('implement');
+
+    // Capture implement diff
+    try {
+      const implDiff = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+      if (implDiff.stdout) traceDiff(session.name, issues[0].number, 'batch-implement', implDiff.stdout);
+    } catch { /* non-fatal */ }
+  }
+
+  // --- Step 6: Test + retry loop ---
+  log.step('Batch Step 5: Running tests');
+  let testOutput = '';
+  let testsPassing = false;
+
+  // Check if any plan says testing is needed
+  const anyTestsNeeded = issues.some((i) => (plans.get(i.number) ?? DEFAULT_PLAN).testing.needed);
+  if (!anyTestsNeeded) {
+    log.info('Tests skipped by all plans');
+    testsPassing = true;
+    testOutput = 'Tests skipped by plan';
+  }
+
+  for (let attempt = 1; testsPassing ? false : attempt <= config.maxTestRetries; attempt++) {
+    log.info(`Test attempt ${attempt} of ${config.maxTestRetries}`);
+
+    const testResult = runTests(worktreePath, config, logFile);
+    testOutput = testResult.output;
+    traceTest(session.name, issues[0].number, attempt, testOutput);
+
+    if (testResult.passed) {
+      testsPassing = true;
+      stepsCompleted.push('test');
+      log.success(`All tests passed on attempt ${attempt}`);
+      break;
+    }
+
+    if (attempt < config.maxTestRetries) {
+      log.warn(`Tests failed on attempt ${attempt}, invoking agent to fix...`);
+      if (!config.dryRun) {
+        const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
+        const fixPrompt = `Tests are failing for batch implementation (issues ${issueRefs}, attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix ONLY code related to the batch issues — do NOT modify test infrastructure\n3. Run the tests again to verify\n4. Commit your fixes with a descriptive message`;
+
+        tracePrompt(session.name, issues[0].number, `batch-fix-${attempt}`, fixPrompt);
+
+        const fixResult = await spawnAgent({
+          agent: config.agent,
+          model: config.model,
+          prompt: fixPrompt,
+          cwd: worktreePath,
+          resume: true,
+          logFile: join(session.logsDir, `batch-fix-${attempt}.log`),
+          verbose: config.verbose,
+        });
+
+        traceOutput(session.name, issues[0].number, `batch-fix-${attempt}`, fixResult.output);
+        stepCosts.push(buildStepCost('test_fix', issues[0].number, fixResult, config));
+
+        const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
+        if (fixStatus.stdout.trim()) {
+          exec('git add -A', { cwd: worktreePath });
+          exec(`git commit -m "fix: resolve batch test failures (attempt ${attempt})"`, { cwd: worktreePath });
+        }
+      }
+    } else {
+      log.warn(`Tests still failing after ${config.maxTestRetries} attempts`);
+    }
+  }
+
+  // --- Step 7: Batch review ---
+  log.step('Batch Step 6: Code review');
+  let reviewOutput = '';
+  let reviewGate: GateResult = DEFAULT_GATE;
+
+  if (config.skipReview) {
+    log.info('Code review skipped');
+  } else if (!config.dryRun) {
+    const reviewFileInWorktree = join(worktreePath, 'review-batch.json');
+    const reviewFileInSession = join(session.logsDir, 'review-batch.json');
+
+    for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+      log.info(`Review attempt ${attempt} of ${config.maxTestRetries}`);
+
+      try {
+        const reviewPrompt = buildBatchReviewPrompt({
+          issues: batchIssues,
+          baseBranch: config.baseBranch,
+          visionContext: loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md')) ?? undefined,
+        });
+
+        tracePrompt(session.name, issues[0].number, `batch-review${attempt > 1 ? `-${attempt}` : ''}`, reviewPrompt);
+
+        const reviewResult = await spawnAgent({
+          agent: config.agent,
+          model: config.reviewModel,
+          prompt: reviewPrompt,
+          cwd: worktreePath,
+          logFile: join(session.logsDir, `batch-review${attempt > 1 ? `-${attempt}` : ''}.log`),
+          verbose: config.verbose,
+        });
+
+        traceOutput(session.name, issues[0].number, `batch-review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
+        stepCosts.push(buildStepCost('review', issues[0].number, reviewResult, config));
+        reviewOutput = reviewResult.output;
+      } catch {
+        log.warn('Batch review failed, continuing without review');
+        break;
+      }
+
+      reviewGate = readGateResult(reviewFileInWorktree);
+      moveToSessionLogs(reviewFileInWorktree, reviewFileInSession);
+
+      if (reviewGate.passed) {
+        stepsCompleted.push('review');
+        log.success(`Batch review passed: ${reviewGate.summary || 'no issues found'}`);
+        break;
+      }
+
+      const unfixedCount = reviewGate.findings.filter((f) => !f.fixed).length;
+      log.warn(`Review found ${unfixedCount} unfixed issue(s), sending back to implementer...`);
+
+      if (attempt < config.maxTestRetries) {
+        const findings = formatGateFindings(reviewGate, 'Code Review');
+        const fixPrompt = `The code review for the batch found problems that need to be fixed.\n\n${findings}\n\nInstructions:\n1. Address each finding listed above\n2. Run tests to make sure nothing is broken\n3. Commit your fixes`;
+
+        tracePrompt(session.name, issues[0].number, `batch-review-fix-${attempt}`, fixPrompt);
+
+        const reviewFixResult = await spawnAgent({
+          agent: config.agent,
+          model: config.model,
+          prompt: fixPrompt,
+          cwd: worktreePath,
+          resume: true,
+          logFile: join(session.logsDir, `batch-review-fix-${attempt}.log`),
+          verbose: config.verbose,
+        });
+
+        traceOutput(session.name, issues[0].number, `batch-review-fix-${attempt}`, reviewFixResult.output);
+        stepCosts.push(buildStepCost('review', issues[0].number, reviewFixResult, config));
+
+        const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
+        if (fixStatus.stdout.trim()) {
+          exec('git add -A', { cwd: worktreePath });
+          exec(`git commit -m "fix: address batch review findings (attempt ${attempt})"`, { cwd: worktreePath });
+        }
+
+        const retest = runTests(worktreePath, config, logFile);
+        if (!retest.passed) {
+          log.warn('Tests failed after review fixes');
+          testOutput = retest.output;
+          testsPassing = false;
+        }
+      }
+    }
+  }
+
+  // --- Step 8: Create single PR for the batch ---
+  log.step('Batch Step 7: Creating PR');
+  let prUrl: string | undefined;
+
+  if (!config.dryRun) {
+    const prBase = config.autoMerge ? session.branch : config.baseBranch;
+    const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
+    const prBody = buildBatchPRBody(
+      issues.map((i) => ({ issueNum: i.number, title: i.title })),
+      reviewGate,
+      testOutput,
+      testsPassing,
+    );
+
+    try {
+      prUrl = createPR({
+        repo: config.repo,
+        base: prBase,
+        head: worktreeBranch,
+        title: `feat: batch implementation (${issueRefs})`,
+        body: prBody,
+        cwd: worktreePath,
+      });
+      stepsCompleted.push('pr');
+      log.success(`Batch PR created: ${prUrl}`);
+    } catch (err) {
+      log.error(`Failed to create batch PR: ${err}`);
+      for (const issue of issues) {
+        labelIssue(config.repo, issue.number, 'failed', 'in-progress');
+        commentIssue(config.repo, issue.number, `Agent loop failed: could not create PR. Branch: ${worktreeBranch}`);
+      }
+      await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup });
+      return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
+    }
+  }
+
+  // --- Step 9: Update each issue individually ---
+  log.step('Batch Step 8: Updating individual issues');
+  const duration = Math.round((Date.now() - startTime) / 1000);
+  const perIssueDuration = Math.round(duration / issues.length);
+
+  // Get diff for traces
+  let runDiff = '';
+  if (!config.dryRun) {
+    const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+    runDiff = diffResult.stdout.slice(0, MAX_DIFF_CHARS);
+  }
+
+  const filesChanged = runDiff ? (runDiff.match(/^diff --git/gm) ?? []).length : 0;
+  const results: PipelineResult[] = [];
+
+  for (const issue of issues) {
+    if (!config.dryRun) {
+      const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
+      updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'In Review');
+      labelIssue(config.repo, issue.number, 'in-review', 'in-progress');
+      commentIssue(config.repo, issue.number,
+        `Automated batch implementation complete.\n\n**PR**: ${prUrl ?? 'N/A'}\n**Tests**: ${testsStatus}\n**Batch**: ${issues.length} issues processed together\n\n---\n*Processed by alpha-loop batch mode in ${duration}s total*`,
+      );
+    }
+
+    const result: PipelineResult = {
+      issueNum: issue.number,
+      title: issue.title,
+      status: testsPassing ? 'success' : 'failure',
+      prUrl,
+      testsPassing,
+      verifyPassing: true,
+      verifySkipped: true,
+      duration: perIssueDuration,
+      filesChanged,
+    };
+
+    results.push(result);
+    saveResult(session, result);
+
+    // Write per-issue traces
+    if (!config.dryRun) {
+      try {
+        const issueScoreResult: PipelineResultForScores = {
+          issueNum: issue.number,
+          status: testsPassing ? 'success' : 'failure',
+          testsPassing,
+          verifyPassing: true,
+          verifySkipped: true,
+          retries: 0,
+          duration: perIssueDuration,
+          filesChanged,
+          stepsCompleted,
+        };
+
+        writeTraceMetadata(session.name, issue.number, {
+          issueNum: issue.number,
+          title: issue.title,
+          status: testsPassing ? 'success' : 'failure',
+          duration: perIssueDuration,
+          retries: 0,
+          testsPassing,
+          verifyPassing: true,
+          verifySkipped: true,
+          filesChanged,
+          prUrl,
+          timestamp: new Date().toISOString(),
+          agent: config.agent,
+          model: config.model,
+          batchMode: true,
+          batchSize: issues.length,
+        });
+      } catch (err) {
+        log.warn(`Failed to write traces for #${issue.number}: ${err}`);
+      }
+    }
+
+    log.success(`Issue #${issue.number} updated`);
+  }
+
+  // Write aggregate scores and costs
+  if (!config.dryRun) {
+    try {
+      const scoreResults: PipelineResultForScores[] = results.map((r) => ({
+        issueNum: r.issueNum,
+        status: r.status,
+        testsPassing: r.testsPassing,
+        verifyPassing: r.verifyPassing,
+        verifySkipped: r.verifySkipped,
+        retries: 0,
+        duration: r.duration,
+        filesChanged: r.filesChanged,
+        stepsCompleted,
+      }));
+      writeScores(session.name, computeScores(scoreResults));
+      writeCosts(session.name, computeCosts(stepCosts));
+
+      // Config snapshot
+      try {
+        const configPath = join(projectDir, '.alpha-loop.yaml');
+        if (existsSync(configPath)) {
+          writeConfigSnapshot(session.name, readFileSync(configPath, 'utf-8'));
+        }
+      } catch { /* non-fatal */ }
+    } catch (err) {
+      log.warn(`Failed to write batch traces: ${err}`);
+    }
+  }
+
+  // --- Step 10: Auto-merge ---
+  if (config.autoMerge && !config.dryRun && prUrl) {
+    log.step('Batch Step 9: Auto-merging PR');
+    try {
+      mergePR(config.repo, worktreeBranch);
+      exec('git fetch origin', { cwd: projectDir });
+      const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
+      if (currentBranch !== session.branch) {
+        exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+      }
+      exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+    } catch (err) {
+      log.warn(`Auto-merge failed: ${err}`);
+    }
+  }
+
+  // --- Step 11: Cleanup ---
+  log.step('Batch Step 10: Cleanup');
+  await cleanupWorktree({
+    issueNum: issues[0].number,
+    projectDir,
+    autoCleanup: config.autoCleanup,
+    dryRun: config.dryRun,
+  });
+
+  const successCount = results.filter((r) => r.status === 'success').length;
+  log.success(`Batch complete: ${successCount}/${issues.length} issues succeeded in ${duration}s`);
+  if (prUrl) log.info(`PR: ${prUrl}`);
+
+  return results;
+}
+
 function failureResult(issueNum: number, title: string, startTime: number, reason?: 'transient' | 'permanent'): PipelineResult {
   return {
     issueNum,
@@ -1079,6 +1604,60 @@ function extractTestSummary(testOutput: string): string {
   if (totalFailed > 0) parts.push(`${totalFailed} failed`);
   if (totalSkipped > 0) parts.push(`${totalSkipped} skipped`);
   return parts.join(', ');
+}
+
+function buildBatchPRBody(
+  issues: Array<{ issueNum: number; title: string }>,
+  reviewGate: GateResult,
+  testOutput: string,
+  testsPassing: boolean,
+): string {
+  const testSummary = extractTestSummary(testOutput);
+  const reviewStatus = reviewGate.passed ? 'PASS' : 'FAIL';
+  const closesRefs = issues.map((i) => `Closes #${i.issueNum}`).join('\n');
+
+  const lines: string[] = [
+    closesRefs,
+    '',
+    '## Summary',
+    '',
+    `Batch implementation of ${issues.length} issues:`,
+    ...issues.map((i) => `- **#${i.issueNum}**: ${i.title}`),
+    '',
+    '## Test Results',
+    '',
+    `| Check | Status |`,
+    `|-------|--------|`,
+    `| Unit tests | ${testsPassing ? 'PASS' : 'FAIL'} |`,
+    `| Code review | ${reviewStatus} |`,
+  ];
+
+  if (testSummary) {
+    lines.push(`| Details | ${testSummary} |`);
+  }
+
+  lines.push('');
+
+  if (reviewGate.findings.length > 0) {
+    lines.push('## Code Review', '');
+    lines.push(reviewGate.summary || 'Review completed');
+    lines.push('');
+    for (const f of reviewGate.findings) {
+      const status = f.fixed ? 'FIXED' : 'OPEN';
+      const fileRef = f.file ? ` \`${f.file}\`` : '';
+      lines.push(`- **${f.severity.toUpperCase()}** [${status}]${fileRef}: ${f.description}`);
+    }
+    lines.push('');
+  } else {
+    lines.push('## Code Review', '', reviewGate.summary || 'No issues found', '');
+  }
+
+  lines.push(
+    '---',
+    `*Automated by [alpha-loop](https://github.com/bradtaylorsf/alpha-loop) · Batch mode · Full logs in \`.alpha-loop/sessions/\`*`,
+  );
+
+  return lines.join('\n');
 }
 
 function buildPRBody(

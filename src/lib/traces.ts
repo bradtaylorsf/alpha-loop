@@ -47,6 +47,8 @@ export type TraceMetadata = {
   timestamp: string;
   agent: string;
   model: string;
+  batchMode?: boolean;
+  batchSize?: number;
 };
 
 /** A complete trace for one issue run. */

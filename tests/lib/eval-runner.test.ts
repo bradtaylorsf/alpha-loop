@@ -37,6 +37,8 @@ const makeConfig = (overrides?: Partial<Config>): Config => ({
   autoCapture: true,
   skipPostSessionReview: false,
   skipPostSessionSecurity: false,
+    batch: false,
+    batchSize: 5,
   pricing: {
     'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
     'claude-haiku-4-5': { input: 0.80, output: 4.0 },

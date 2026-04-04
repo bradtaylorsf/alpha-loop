@@ -31,6 +31,8 @@ program
   .option('--auto-merge', 'Auto-merge PRs to session branch')
   .option('--merge-to <branch>', 'Use existing branch instead of creating session branch')
   .option('--once', 'Process one issue and exit')
+  .option('--batch', 'Batch mode: process multiple issues per agent call (faster, fewer tokens)')
+  .option('--batch-size <n>', 'Issues per batch (default: 5)', parseInt)
   .option('--verbose', 'Stream live agent output to terminal')
   .action(async (options) => {
     const { runCommand } = await import('./commands/run.js');

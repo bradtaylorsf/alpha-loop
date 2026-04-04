@@ -24,6 +24,32 @@ export type ReviewPromptOptions = {
   visionContext?: string;
 };
 
+/** A single issue within a batch. */
+export type BatchIssue = {
+  issueNum: number;
+  title: string;
+  body: string;
+  comments?: Array<{ author: string; body: string; createdAt: string }>;
+};
+
+export type BatchPlanPromptOptions = {
+  issues: BatchIssue[];
+};
+
+export type BatchImplementPromptOptions = {
+  issues: BatchIssue[];
+  planContent?: string;
+  visionContext?: string;
+  projectContext?: string;
+  learningContext?: string;
+};
+
+export type BatchReviewPromptOptions = {
+  issues: BatchIssue[];
+  baseBranch: string;
+  visionContext?: string;
+};
+
 export type LearnPromptOptions = {
   issueNum: number;
   title: string;
@@ -95,6 +121,222 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
     '1. Write tests for your changes',
     '2. Run the test command to verify',
     `3. Commit with: git commit -m "feat: ${title} (closes #${issueNum})"`,
+  );
+
+  return sections.join('\n');
+}
+
+/**
+ * Build a batch planning prompt — plans all issues in a single agent call.
+ * The agent writes one plan JSON per issue.
+ */
+export function buildBatchPlanPrompt(options: BatchPlanPromptOptions): string {
+  const { issues } = options;
+
+  const issueList = issues.map((i) => {
+    let entry = `### Issue #${i.issueNum}: ${i.title}\n${i.body || '(no description)'}`;
+    if (i.comments && i.comments.length > 0) {
+      entry += '\n\n**Comments:**';
+      for (const c of i.comments) {
+        entry += `\n- **@${c.author}** (${c.createdAt}): ${c.body}`;
+      }
+    }
+    return entry;
+  }).join('\n\n');
+
+  const fileList = issues.map((i) => `plan-issue-${i.issueNum}.json`).join(', ');
+
+  return `Analyze the following GitHub issues and produce a structured implementation plan for EACH one.
+
+## Issues to Plan
+
+${issueList}
+
+## Output
+
+Write one JSON file per issue: ${fileList}
+
+Each file must contain ONLY valid JSON with this exact schema:
+
+{
+  "summary": "One-line description of what needs to be done",
+  "files": ["src/path/to/file.ts", "..."],
+  "implementation": "Concise step-by-step plan. What to create, modify, wire up.",
+  "testing": {
+    "needed": true,
+    "reason": "Why tests are or aren't needed for this change"
+  },
+  "verification": {
+    "needed": false,
+    "instructions": "If needed: specific steps to verify the feature.",
+    "reason": "Why verification is or isn't needed"
+  }
+}
+
+## Rules
+- Consider dependencies BETWEEN issues — if issue A creates something issue B uses, note that in the plan.
+- testing.needed: true if ANY code changes could affect behavior. false only for docs, config, or comments.
+- verification.needed: true ONLY if the issue changes user-visible UI that can be tested in a browser.
+- implementation: be concise and actionable. List files to modify and what to change in each.
+- Write ONLY the JSON files. Do not create any other files or make any code changes.`;
+}
+
+/**
+ * Build a batch implementation prompt — implements all issues in a single agent call.
+ */
+export function buildBatchImplementPrompt(options: BatchImplementPromptOptions): string {
+  const { issues, planContent, visionContext, projectContext, learningContext } = options;
+
+  const issueList = issues.map((i) => {
+    let entry = `### Issue #${i.issueNum}: ${i.title}\n${i.body || '(no description)'}`;
+    if (i.comments && i.comments.length > 0) {
+      entry += '\n\n**Comments:**';
+      for (const c of i.comments) {
+        entry += `\n- **@${c.author}** (${c.createdAt}): ${c.body}`;
+      }
+    }
+    return entry;
+  }).join('\n\n');
+
+  const closesRefs = issues.map((i) => `closes #${i.issueNum}`).join(', ');
+
+  const sections: string[] = [
+    `Implement the following ${issues.length} GitHub issues. Work through them in order, committing after each one.`,
+    '',
+    '## Issues to Implement',
+    '',
+    issueList,
+  ];
+
+  if (planContent) {
+    sections.push('', '', '## Implementation Plans', planContent);
+  }
+
+  if (visionContext) {
+    sections.push('', '', '## Product Vision', visionContext);
+  }
+
+  if (projectContext) {
+    sections.push('', '', '## Technical Context', projectContext);
+  }
+
+  if (learningContext) {
+    sections.push('', '', learningContext);
+  }
+
+  sections.push(
+    '',
+    '## Scope Rules (CRITICAL)',
+    '- ONLY modify files directly related to these issues',
+    '- If tests fail due to environment issues (missing venv, wrong port, missing deps), report it — do NOT rewrite test infrastructure',
+    '- Do NOT fix unrelated code, even if you notice problems',
+    '- Do NOT modify dev server config, build config, fonts, or styling unless an issue specifically requires it',
+    '',
+    '## Workflow',
+    '1. Read the product vision and technical context above',
+    '2. Consider dependencies between the issues — implement foundational ones first',
+    '3. For EACH issue, in order:',
+    '   a. Implement the changes',
+    '   b. Write tests for those changes',
+    '   c. Run the test command to verify',
+    '   d. Commit with: `git commit -m "feat: <title> (closes #<issueNum>)"`',
+    '4. After all issues are done, run the full test suite one final time',
+    '',
+    '## Commit Convention',
+    'Make ONE commit per issue. Each commit message must include `closes #<issueNum>` for the specific issue.',
+    `Example: git commit -m "feat: add user auth (closes #42)"`,
+  );
+
+  return sections.join('\n');
+}
+
+/**
+ * Build a batch review prompt — reviews all issues' changes in a single agent call.
+ */
+export function buildBatchReviewPrompt(options: BatchReviewPromptOptions): string {
+  const { issues, baseBranch, visionContext } = options;
+
+  const issueList = issues.map((i) => {
+    let entry = `### Issue #${i.issueNum}: ${i.title}\n${i.body || '(no description)'}`;
+    if (i.comments && i.comments.length > 0) {
+      entry += '\n\n**Comments:**';
+      for (const c of i.comments) {
+        entry += `\n- **@${c.author}** (${c.createdAt}): ${c.body}`;
+      }
+    }
+    return entry;
+  }).join('\n\n');
+
+  const sections: string[] = [
+    `Review the code changes for the following ${issues.length} issues.`,
+    '',
+    `Run git diff origin/${baseBranch}...HEAD to see all changes. Then read the actual files that were modified.`,
+    '',
+    '## Issues Implemented',
+    '',
+    issueList,
+  ];
+
+  if (visionContext) {
+    sections.push('', '', '## Product Vision (guide your review decisions)', visionContext);
+  }
+
+  sections.push(
+    '',
+    '## Review Checklist',
+    '',
+    '### 1. Per-Issue Completeness (MOST IMPORTANT)',
+    '- For EACH issue above, does the implementation FULLY address the requirements?',
+    '- Are there any acceptance criteria that were NOT implemented?',
+    '- Are there dead code paths (created but never wired in)?',
+    '',
+    '### 2. Cross-Issue Integration',
+    '- Do changes from different issues conflict or create inconsistencies?',
+    '- Are there duplicate implementations across issues?',
+    '- Do shared types, interfaces, or utilities remain consistent?',
+    '',
+    '### 3. Integration Gaps',
+    '- Are new routes/endpoints registered in the server entry point?',
+    '- Are new components imported and rendered in the app?',
+    '- Are there missing imports, missing route registrations, or orphaned files?',
+    '',
+    '### 4. Code Quality',
+    '- Security issues (injection, XSS, auth bypass)',
+    '- Missing error handling for user-facing operations',
+    '- Missing tests for new functionality',
+    '',
+    '## Actions',
+    '',
+    'For any issues you find:',
+    '- CRITICAL: FIX THEM directly, run tests, commit with `git commit -m "fix: address review findings"`',
+    '- WARNING: FIX THEM directly if possible',
+    '- INFO: Note them but don\'t block',
+    '',
+    '## Gate Result (REQUIRED)',
+    '',
+    'After your review, write a JSON file to: review-batch.json',
+    '',
+    'The file must contain ONLY valid JSON with this exact schema:',
+    '',
+    '{',
+    '  "passed": true,',
+    '  "summary": "One-line summary of review outcome",',
+    '  "findings": [',
+    '    {',
+    '      "severity": "critical",',
+    '      "description": "What the issue is",',
+    '      "fixed": true,',
+    '      "file": "path/to/affected/file.ts",',
+    '      "issueNum": 42',
+    '    }',
+    '  ]',
+    '}',
+    '',
+    'Rules:',
+    '- passed: true if all critical/warning issues were fixed.',
+    '- findings: list ALL issues found, with fixed=true for ones you fixed.',
+    '- Include issueNum in each finding to track which issue it relates to.',
+    '- If everything is clean, set passed=true with an empty findings array.',
   );
 
   return sections.join('\n');
