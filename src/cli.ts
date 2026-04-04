@@ -9,7 +9,7 @@ import { syncCommand } from './commands/sync.js';
 program
   .name('alpha-loop')
   .description('Agent-agnostic automated development loop')
-  .version('1.7.1');
+  .version('1.7.2');
 
 program
   .command('init')
