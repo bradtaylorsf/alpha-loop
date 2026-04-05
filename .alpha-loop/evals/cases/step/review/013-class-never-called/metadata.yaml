@@ -1,0 +1,13 @@
+id: 013-class-never-called
+description: "Review catches a fully implemented and tested class that is never instantiated or called from the orchestration layer"
+tags:
+  - review
+  - wiring
+  - dead-code
+  - silent-failure
+source: manual
+captured_from:
+  project: livestreamtoagi
+  session: pr-203-review
+  issues: [191, 194]
+  date: "2026-04-04"

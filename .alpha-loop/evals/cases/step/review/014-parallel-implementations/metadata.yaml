@@ -1,0 +1,13 @@
+id: 014-parallel-implementations
+description: "Review catches two modules solving the same problem (comparison/diff) with different APIs and data structures, CLI only uses the simpler one"
+tags:
+  - review
+  - architecture
+  - dead-code
+  - redundancy
+source: manual
+captured_from:
+  project: livestreamtoagi
+  session: pr-203-review
+  issues: [195]
+  date: "2026-04-04"

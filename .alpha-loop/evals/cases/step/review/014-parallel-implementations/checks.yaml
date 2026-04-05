@@ -1,0 +1,35 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+timeout: 180
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies that there are two parallel
+      implementations for comparing simulation runs, with different APIs
+      and data structures, and the CLI only uses the simpler one.
+
+      The issues:
+      - CrossRunComparison is a full-featured class with detailed metrics,
+        statistical analysis, and structured output (agent-level, category-level)
+      - TimelineReporter.compare() is a simple method returning just
+        conversation count deltas
+      - The CLI script (compare_runs.py) imports and uses TimelineReporter.compare()
+      - CrossRunComparison is never imported outside its own test file
+      - Both solve "compare two simulation runs" but at different fidelity levels
+      - The rich comparison class is effectively dead code in production
+
+      Score 1-5:
+      - Score 5: Review identifies both implementations, explains the CLI uses
+        the simpler one, flags CrossRunComparison as unused in production, and
+        recommends consolidating or wiring the richer implementation into the CLI
+      - Score 4: Review identifies the redundancy and that one implementation
+        is unused
+      - Score 3: Review mentions the comparison feature without noticing the
+        duplication
+      - Score 2: Review discusses both classes positively without noticing
+        the redundancy
+      - Score 1: Review does not identify the parallel implementations
+    min_score: 4

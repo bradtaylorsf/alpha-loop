@@ -1,0 +1,37 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+timeout: 180
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies that RelationshipTracker and
+      AssertionEngine are fully implemented with tests but never called from
+      the orchestration layer (ConversationEngine, PhaseRunner, ReflectionManager).
+
+      The critical issues:
+      - RelationshipTracker has complete implementation: track_interaction(),
+        get_relationship(), get_all_relationships(), update_sentiment()
+      - AssertionEngine has complete implementation: evaluate_phase(),
+        check_assertions(), generate_report()
+      - Both have thorough test files (200+ lines each) that all pass
+      - Neither is imported or instantiated in ConversationEngine,
+        PhaseRunner, SimulationOrchestrator, or ReflectionManager
+      - The issues (#191, #194) require these to be integrated into the
+        simulation pipeline, not just implemented in isolation
+      - This is the difference between "code exists" and "feature works"
+
+      Score 1-5:
+      - Score 5: Review identifies both classes are inert, explains they need
+        to be wired into specific orchestration points, and flags that the
+        acceptance criteria require integration not just implementation
+      - Score 4: Review identifies at least one class is never called from the
+        pipeline and explains the feature is non-functional as a result
+      - Score 3: Review mentions something about integration without clearly
+        identifying that the classes are completely unwired
+      - Score 2: Review praises the implementation and tests without noticing
+        the missing integration
+      - Score 1: Review does not identify the missing wiring
+    min_score: 4

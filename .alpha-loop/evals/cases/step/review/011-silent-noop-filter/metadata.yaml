@@ -1,0 +1,13 @@
+id: 011-silent-noop-filter
+description: "Review catches a filter function where both branches unconditionally append every item, making the filter a silent no-op"
+tags:
+  - review
+  - logic-error
+  - silent-failure
+  - no-op
+source: manual
+captured_from:
+  project: livestreamtoagi
+  session: pr-203-review
+  issues: [192]
+  date: "2026-04-04"

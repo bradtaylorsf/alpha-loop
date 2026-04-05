@@ -1,0 +1,32 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+timeout: 180
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies that _filter_by_days is a no-op.
+      Both the "recent only" branch and the "all time" branch unconditionally
+      append every conversation to the result list. The --days CLI flag silently
+      produces a full unfiltered report regardless of input.
+
+      The critical issue:
+      - _filter_by_days accepts a days parameter (e.g., [1, 3, 7])
+      - The "recent" branch iterates conversations and appends ALL of them
+        without checking whether the conversation falls within the day window
+      - The "all time" branch also appends ALL conversations
+      - Both code paths produce identical output
+      - The CLI advertises --days 1,3,7 but the flag has no effect
+
+      Score 1-5:
+      - Score 5: Review identifies both branches produce identical output, explains
+        the filter never compares dates, and flags the --days CLI flag as misleading
+      - Score 4: Review identifies the filter is a no-op and that conversations are
+        never actually filtered by date
+      - Score 3: Review mentions the filtering logic looks suspicious without
+        pinpointing the exact problem
+      - Score 2: Review discusses the reporting feature without noticing the filter bug
+      - Score 1: Review does not identify the no-op filter
+    min_score: 4

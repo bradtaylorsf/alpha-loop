@@ -1,0 +1,34 @@
+type: step
+step: review
+eval_method: llm-judge
+status: ready
+timeout: 180
+checks:
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the review identifies that helper functions query the
+      database without scoping to the current simulation_id, returning data
+      from ALL simulations instead of just the one being reported on.
+
+      The critical issues:
+      - _load_core_memory_history queries core_memory_snapshots without a
+        simulation_id WHERE clause — returns memory from all simulations
+      - _load_recall_memory_counts queries recall_memory without scoping —
+        counts memories across all simulations
+      - _load_journal_entries queries journal_entries without scoping —
+        returns entries from all simulations
+      - _get_agent_ids fetches agents from the agents table globally instead
+        of filtering to agents that participated in this simulation
+      - All of these accept a simulation_id parameter but never use it in
+        the actual SQL query
+
+      Score 1-5:
+      - Score 5: Review identifies the unscoped queries, explains that results
+        will bleed across simulations, and flags the unused simulation_id parameter
+      - Score 4: Review identifies that queries are not scoped and data will
+        be incorrect when multiple simulations exist
+      - Score 3: Review mentions the queries look incomplete without specifics
+      - Score 2: Review discusses the reporting features without noticing scope issues
+      - Score 1: Review does not identify the unscoped queries
+    min_score: 4

@@ -1,0 +1,13 @@
+id: 012-unscoped-db-query
+description: "Review catches database queries that should be scoped to a parent entity (simulation_id) but fetch all rows across all entities"
+tags:
+  - review
+  - data-integrity
+  - query-scope
+  - silent-failure
+source: manual
+captured_from:
+  project: livestreamtoagi
+  session: pr-203-review
+  issues: [192, 193]
+  date: "2026-04-04"
