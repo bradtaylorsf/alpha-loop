@@ -334,9 +334,12 @@ export function updateProjectStatus(
   issueNum: number,
   status: string,
 ): void {
-  // Find the item ID for this issue in the project
+  // Find the item ID for this issue in the project.
+  // Use --jq to filter server-side for the specific issue number, avoiding
+  // truncation when Done items fill the --limit cap.
+  const jqFilter = `{items: [.items[] | select(.content.number == ${issueNum})]}`;
   const itemResult = exec(
-    `gh project item-list ${projectNum} --owner "${owner}" --format json --limit 100`,
+    `gh project item-list ${projectNum} --owner "${owner}" --format json --limit 1000 --jq '${jqFilter}'`,
   );
   if (itemResult.exitCode !== 0) {
     log.warn(`Could not list project items: ${itemResult.stderr}`);
@@ -348,8 +351,7 @@ export function updateProjectStatus(
     const data = JSON.parse(itemResult.stdout) as {
       items: Array<{ id: string; content: { number: number } }>;
     };
-    const item = data.items.find((i) => i.content?.number === issueNum);
-    itemId = item?.id;
+    itemId = data.items[0]?.id;
   } catch {
     log.warn('Failed to parse project items');
     return;
@@ -499,7 +501,8 @@ export function closeIssue(repo: string, issueNum: number, reason?: 'completed' 
  * Create a milestone. Returns the milestone number.
  */
 export function createMilestone(repo: string, title: string, description: string, dueOn?: string): number {
-  const dueOnFlag = dueOn ? ` -f due_on=${JSON.stringify(dueOn)}` : '';
+  const dueOnIso = dueOn && !dueOn.includes('T') ? `${dueOn}T00:00:00Z` : dueOn;
+  const dueOnFlag = dueOnIso ? ` -f due_on=${JSON.stringify(dueOnIso)}` : '';
   const result = exec(
     `gh api "repos/${repo}/milestones" -X POST -f title=${JSON.stringify(title)} -f description=${JSON.stringify(description)}${dueOnFlag}`,
   );
