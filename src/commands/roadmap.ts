@@ -202,14 +202,13 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
   for (const assignment of parsed.assignments) {
     if (!selectedNums.includes(assignment.issueNum)) continue;
 
-    const msNum = milestoneNumMap.get(assignment.milestone);
-    if (!msNum) {
+    if (!milestoneNumMap.has(assignment.milestone)) {
       failures.push(`#${assignment.issueNum}: milestone "${assignment.milestone}" not found`);
       continue;
     }
 
     try {
-      setIssueMilestone(config.repo, assignment.issueNum, msNum);
+      setIssueMilestone(config.repo, assignment.issueNum, assignment.milestone);
       assigned++;
     } catch (err) {
       failures.push(`#${assignment.issueNum}: ${(err as Error).message}`);

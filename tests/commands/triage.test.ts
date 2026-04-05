@@ -36,6 +36,7 @@ jest.mock('../../src/lib/logger', () => ({
     step: jest.fn(),
     dry: jest.fn(),
     debug: jest.fn(),
+    rate: jest.fn(),
   },
 }));
 
@@ -49,8 +50,20 @@ jest.mock('../../src/lib/planning', () => ({
   })),
 }));
 
+jest.mock('../../src/lib/rate-limit', () => ({
+  ghExec: jest.fn(() => ({ stdout: '', stderr: '', exitCode: 0 })),
+  getRateLimitStatus: jest.fn(() => ({ remaining: 5000, limit: 5000, used: 0, resetAt: 0, ratio: 1 })),
+  getProjectCache: jest.fn(() => null),
+  setProjectCache: jest.fn(),
+  clearProjectCache: jest.fn(),
+  resetRateLimitState: jest.fn(),
+  parseRateLimitHeaders: jest.fn(() => null),
+  stripDebugOutput: jest.fn((s: string) => s),
+}));
+
 jest.mock('../../src/lib/github', () => ({
   listOpenIssues: jest.fn(() => []),
+  listOpenIssuesWithComments: jest.fn(() => []),
   closeIssue: jest.fn(),
   updateIssue: jest.fn(),
   createIssue: jest.fn(() => 0),
@@ -63,7 +76,7 @@ import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { extractJsonFromResponse } from '../../src/lib/planning';
 import {
-  listOpenIssues,
+  listOpenIssuesWithComments,
   closeIssue,
   updateIssue,
   createIssue,
@@ -74,7 +87,7 @@ const mockCheckbox = checkbox as jest.MockedFunction<typeof checkbox>;
 const mockConfirm = confirm as jest.MockedFunction<typeof confirm>;
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockExtractJson = extractJsonFromResponse as jest.MockedFunction<typeof extractJsonFromResponse>;
-const mockListOpenIssues = listOpenIssues as jest.MockedFunction<typeof listOpenIssues>;
+const mockListOpenIssuesWithComments = listOpenIssuesWithComments as jest.MockedFunction<typeof listOpenIssuesWithComments>;
 const mockCloseIssue = closeIssue as jest.MockedFunction<typeof closeIssue>;
 const mockUpdateIssue = updateIssue as jest.MockedFunction<typeof updateIssue>;
 const mockCreateIssue = createIssue as jest.MockedFunction<typeof createIssue>;
@@ -138,7 +151,7 @@ describe('triage command', () => {
   });
 
   it('exits early when no open issues exist', async () => {
-    mockListOpenIssues.mockReturnValue([]);
+    mockListOpenIssuesWithComments.mockReturnValue([]);
 
     await triageCommand({});
 
@@ -148,7 +161,7 @@ describe('triage command', () => {
   });
 
   it('applies correct GitHub calls for each finding category', async () => {
-    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
     mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
     mockExtractJson.mockReturnValue(SAMPLE_FINDINGS);
     mockCreateIssue.mockReturnValueOnce(10).mockReturnValueOnce(11).mockReturnValueOnce(12);
@@ -190,7 +203,7 @@ describe('triage command', () => {
   });
 
   it('exits gracefully on agent failure', async () => {
-    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
     mockExec.mockReturnValue({ stdout: '', stderr: 'agent crashed', exitCode: 1 });
 
     await triageCommand({});
@@ -201,7 +214,7 @@ describe('triage command', () => {
   });
 
   it('exits gracefully on JSON parse failure', async () => {
-    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
     mockExec.mockReturnValue({ stdout: 'not json', stderr: '', exitCode: 0 });
     mockExtractJson.mockImplementation(() => {
       throw new Error('Could not extract valid JSON');
@@ -214,7 +227,7 @@ describe('triage command', () => {
   });
 
   it('does not make GitHub calls in dry-run mode', async () => {
-    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
     mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
     mockExtractJson.mockReturnValue(SAMPLE_FINDINGS);
 
@@ -231,7 +244,7 @@ describe('triage command', () => {
 
   it('truncates large issue bodies before building prompt', async () => {
     const longBody = 'x'.repeat(1000);
-    mockListOpenIssues.mockReturnValue([
+    mockListOpenIssuesWithComments.mockReturnValue([
       { number: 1, title: 'Long body issue', body: longBody, labels: [] },
     ]);
     mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
@@ -248,7 +261,7 @@ describe('triage command', () => {
   });
 
   it('skips prompts and applies all selected findings with --yes', async () => {
-    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
     mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
     mockExtractJson.mockReturnValue(SAMPLE_FINDINGS);
     mockCreateIssue.mockReturnValueOnce(10).mockReturnValueOnce(11).mockReturnValueOnce(12);
@@ -268,7 +281,7 @@ describe('triage command', () => {
   });
 
   it('combines --yes with --dry-run safely', async () => {
-    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
     mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
     mockExtractJson.mockReturnValue(SAMPLE_FINDINGS);
 
@@ -280,7 +293,7 @@ describe('triage command', () => {
   });
 
   it('exits with success message when all issues are ok', async () => {
-    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
     mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });
     mockExtractJson.mockReturnValue([]);
 

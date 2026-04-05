@@ -2,6 +2,7 @@ const RED = '\x1b[0;31m';
 const GREEN = '\x1b[0;32m';
 const YELLOW = '\x1b[1;33m';
 const BLUE = '\x1b[0;34m';
+const MAGENTA = '\x1b[0;35m';
 const CYAN = '\x1b[0;36m';
 const GRAY = '\x1b[0;90m';
 const BOLD = '\x1b[1m';
@@ -27,4 +28,5 @@ export const log = {
   step: (msg: string): void => fmt('STEP', CYAN, msg),
   dry: (msg: string): void => fmt('DRY', YELLOW, msg),
   debug: (msg: string): void => fmt('DEBUG', GRAY, msg),
+  rate: (msg: string): void => fmt('RATE', MAGENTA, msg),
 };

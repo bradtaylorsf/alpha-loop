@@ -20,12 +20,11 @@ import {
   type TriageAction,
 } from '../lib/planning.js';
 import {
-  listOpenIssues,
+  listOpenIssuesWithComments,
   closeIssue,
   updateIssue,
   createIssue,
   commentIssue,
-  getIssueComments,
 } from '../lib/github.js';
 
 export type TriageOptions = {
@@ -39,9 +38,9 @@ const MAX_BODY_CHARS = 500;
 export async function triageCommand(options: TriageOptions): Promise<void> {
   const config = loadConfig({ dryRun: options.dryRun });
 
-  // ── Fetch open issues ──────────────────────────────────────────────────────
-  log.step('Fetching open issues...');
-  const issues = listOpenIssues(config.repo);
+  // ── Fetch open issues with comments (single API call) ──────────────────────
+  log.step('Fetching open issues with comments...');
+  const issues = listOpenIssuesWithComments(config.repo);
 
   if (issues.length === 0) {
     log.info('No open issues found. Nothing to triage.');
@@ -50,18 +49,14 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
   log.info(`Found ${issues.length} open issue(s)`);
 
-  // Fetch comments and truncate issue bodies for context
-  log.step('Fetching issue comments...');
-  const truncatedIssues = issues.map((issue) => {
-    const comments = getIssueComments(config.repo, issue.number);
-    return {
-      ...issue,
-      body: issue.body.length > MAX_BODY_CHARS
-        ? issue.body.slice(0, MAX_BODY_CHARS) + '...'
-        : issue.body,
-      comments: comments.slice(0, 5), // Cap at 5 most recent comments
-    };
-  });
+  // Truncate issue bodies for context
+  const truncatedIssues = issues.map((issue) => ({
+    ...issue,
+    body: issue.body.length > MAX_BODY_CHARS
+      ? issue.body.slice(0, MAX_BODY_CHARS) + '...'
+      : issue.body,
+    comments: (issue.comments ?? []).slice(0, 5),
+  }));
 
   // ── Build context ──────────────────────────────────────────────────────────
   const ctx = buildPlanningContext(config);

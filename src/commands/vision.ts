@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
 import { exec } from '../lib/shell.js';
+import { ghExec } from '../lib/rate-limit.js';
 import { assertSafeShellArg, loadConfig } from '../lib/config.js';
 import { buildOneShotCommand } from '../lib/agent.js';
 import { log } from '../lib/logger.js';
@@ -127,7 +128,7 @@ export async function visionCommand(): Promise<void> {
         const issueNum = issueMatch[1];
         log.info(`Fetching issue #${issueNum}...`);
         const repo = assertSafeShellArg(config.repo, 'repo');
-        const result = exec(`gh issue view ${issueNum} --repo ${repo} --json title,body`);
+        const result = ghExec(`gh issue view ${issueNum} --repo ${repo} --json title,body`);
         if (result.exitCode === 0 && result.stdout) {
           const issueData = JSON.parse(result.stdout);
           northStarContent = `### North Star: #${issueNum} \u2014 ${issueData.title}\n\n${issueData.body}`;

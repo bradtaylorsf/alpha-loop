@@ -12,6 +12,7 @@ import { buildOneShotCommand } from '../lib/agent.js';
 import { buildPlanPrompt } from '../lib/prompts.js';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
+import { getRateLimitStatus } from '../lib/rate-limit.js';
 import {
   extractJsonFromResponse,
   formatIssueTable,
@@ -261,12 +262,23 @@ export async function planCommand(options: PlanOptions): Promise<void> {
 
   // ── GitHub execution ───────────────────────────────────────────────────────
   const failures: string[] = [];
-  const totalOps = draft.milestones.length + selectedIssues.length;
-  const needsDelay = totalOps > 10;
+
+  // Pre-flight budget check
+  const callsPerIssue = config.project > 0 ? 2 : 1; // createIssue + optional addToProject
+  const estimatedCost = draft.milestones.length + (selectedIssues.length * callsPerIssue);
+  const budget = getRateLimitStatus();
+  if (estimatedCost > budget.remaining) {
+    const resetDate = new Date(budget.resetAt * 1000);
+    log.rate(`Budget warning: need ~${estimatedCost} calls but only ${budget.remaining}/${budget.limit} remaining. Resets at ${resetDate.toLocaleTimeString()}`);
+    log.rate('Proceeding with adaptive throttling — mutations may be delayed');
+  } else {
+    log.rate(`Budget OK: ~${estimatedCost} calls needed, ${budget.remaining}/${budget.limit} remaining`);
+  }
 
   // Create milestones
   const milestoneMap = new Map<string, number>();
-  for (const ms of draft.milestones) {
+  for (let i = 0; i < draft.milestones.length; i++) {
+    const ms = draft.milestones[i];
     try {
       const msNum = createMilestone(
         config.repo,
@@ -276,19 +288,19 @@ export async function planCommand(options: PlanOptions): Promise<void> {
       );
       if (msNum > 0) {
         milestoneMap.set(ms.title, msNum);
-        log.success(`Created milestone: ${ms.title}`);
+        log.success(`Created milestone ${i + 1}/${draft.milestones.length}: ${ms.title}`);
       } else {
         failures.push(`Milestone "${ms.title}": creation returned 0`);
       }
     } catch (err) {
       failures.push(`Milestone "${ms.title}": ${(err as Error).message}`);
     }
-    if (needsDelay) await delay(100);
   }
 
   // Create issues
   const createdIssues: Array<{ num: number; title: string }> = [];
-  for (const issue of selectedIssues) {
+  for (let i = 0; i < selectedIssues.length; i++) {
+    const issue = selectedIssues[i];
     try {
       const milestoneNum = milestoneMap.get(issue.milestone);
       const labels = [...issue.labels];
@@ -304,7 +316,8 @@ export async function planCommand(options: PlanOptions): Promise<void> {
       );
       if (issueNum > 0) {
         createdIssues.push({ num: issueNum, title: issue.title });
-        log.success(`Created issue #${issueNum}: ${issue.title}`);
+        const rateSt = getRateLimitStatus();
+        log.success(`Created issue ${i + 1}/${selectedIssues.length} #${issueNum}: ${issue.title} [rate: ${rateSt.remaining}/${rateSt.limit}]`);
 
         // Add to project board if configured
         if (config.project > 0) {
@@ -320,7 +333,6 @@ export async function planCommand(options: PlanOptions): Promise<void> {
     } catch (err) {
       failures.push(`Issue "${issue.title}": ${(err as Error).message}`);
     }
-    if (needsDelay) await delay(100);
   }
 
   // ── Summary ────────────────────────────────────────────────────────────────
@@ -337,8 +349,4 @@ export async function planCommand(options: PlanOptions): Promise<void> {
       console.log(`  - ${f}`);
     }
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
