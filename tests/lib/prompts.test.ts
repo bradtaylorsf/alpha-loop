@@ -1,4 +1,4 @@
-import { buildImplementPrompt, buildReviewPrompt, buildLearnPrompt } from '../../src/lib/prompts';
+import { buildImplementPrompt, buildReviewPrompt, buildLearnPrompt, buildBatchPlanPrompt, buildBatchReviewPrompt, buildSessionReviewPrompt } from '../../src/lib/prompts';
 
 describe('buildImplementPrompt', () => {
   test('includes issue number, title, and body', () => {
@@ -222,5 +222,67 @@ describe('buildLearnPrompt', () => {
     expect(prompt).toContain('(no test output)');
     expect(prompt).toContain('(no review output)');
     expect(prompt).toContain('(no verification output)');
+  });
+});
+
+describe('buildBatchPlanPrompt', () => {
+  test('includes dependency_chain in JSON schema', () => {
+    const prompt = buildBatchPlanPrompt({
+      issues: [{ issueNum: 1, title: 'Test', body: 'Body' }],
+    });
+    expect(prompt).toContain('dependency_chain');
+    expect(prompt).toContain('where_created');
+    expect(prompt).toContain('where_consumed');
+    expect(prompt).toContain('verified');
+  });
+
+  test('instructs planner to grep for dependency verification', () => {
+    const prompt = buildBatchPlanPrompt({
+      issues: [{ issueNum: 1, title: 'Test', body: 'Body' }],
+    });
+    expect(prompt).toContain('grep the codebase to verify it exists');
+  });
+});
+
+describe('buildBatchReviewPrompt', () => {
+  test('includes REQUIRED end-to-end flow verification', () => {
+    const prompt = buildBatchReviewPrompt({
+      issues: [{ issueNum: 1, title: 'Test', body: 'Body' }],
+      baseBranch: 'master',
+    });
+    expect(prompt).toContain('End-to-End Flow Verification (REQUIRED)');
+  });
+
+  test('includes silent failure detection in dependency wiring', () => {
+    const prompt = buildBatchReviewPrompt({
+      issues: [{ issueNum: 1, title: 'Test', body: 'Body' }],
+      baseBranch: 'master',
+    });
+    expect(prompt).toContain('RED FLAG');
+    expect(prompt).toContain('silently hide missing injection');
+  });
+});
+
+describe('buildSessionReviewPrompt', () => {
+  test('includes boot test section', () => {
+    const prompt = buildSessionReviewPrompt({
+      sessionName: 'test-session',
+      baseBranch: 'master',
+      issuesSummary: [{ issueNum: 1, title: 'Test', status: 'success', testsPassing: true }],
+      includeSecurityScan: false,
+    });
+    expect(prompt).toContain('Boot Test (REQUIRED before gate result)');
+    expect(prompt).toContain('entry point');
+    expect(prompt).toContain('smoke_test');
+  });
+
+  test('numbers security scan as section 6 when present', () => {
+    const prompt = buildSessionReviewPrompt({
+      sessionName: 'test-session',
+      baseBranch: 'master',
+      issuesSummary: [{ issueNum: 1, title: 'Test', status: 'success', testsPassing: true }],
+      includeSecurityScan: true,
+    });
+    expect(prompt).toContain('### 6. Security Scan');
   });
 });
