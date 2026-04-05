@@ -321,9 +321,9 @@ describe('createIssue', () => {
       exitCode: 0,
     });
 
-    createIssue('owner/repo', 'Title', 'Body', [], 5);
+    createIssue('owner/repo', 'Title', 'Body', [], 'MVP');
     expect(mockExec).toHaveBeenCalledWith(
-      expect.stringContaining('--milestone 5'),
+      expect.stringContaining('--milestone "MVP"'),
     );
   });
 

@@ -58,6 +58,7 @@ jest.mock('../../src/lib/planning', () => ({
   formatIssueTable: jest.fn(() => 'FORMATTED TABLE'),
   readSeedFiles: jest.fn(() => []),
   savePlanDraft: jest.fn(),
+  loadPlanDraft: jest.fn(() => null),
   buildPlanningContext: jest.fn(() => ({
     visionContext: null,
     projectContext: null,
@@ -70,13 +71,16 @@ jest.mock('../../src/lib/github', () => ({
   createIssue: jest.fn(() => 42),
   addIssueToProject: jest.fn(),
   listOpenIssues: jest.fn(() => []),
+  listMilestones: jest.fn(() => []),
+  listLabels: jest.fn(() => ['bug', 'enhancement', 'ready']),
+  createLabel: jest.fn(() => true),
 }));
 
 import { input, checkbox, confirm } from '@inquirer/prompts';
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
-import { extractJsonFromResponse, savePlanDraft } from '../../src/lib/planning';
-import { createMilestone, createIssue, addIssueToProject } from '../../src/lib/github';
+import { extractJsonFromResponse, savePlanDraft, loadPlanDraft } from '../../src/lib/planning';
+import { createMilestone, createIssue, addIssueToProject, listMilestones, listLabels, createLabel } from '../../src/lib/github';
 import { loadConfig } from '../../src/lib/config';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -91,7 +95,11 @@ const mockCreateMilestone = createMilestone as jest.MockedFunction<typeof create
 const mockCreateIssue = createIssue as jest.MockedFunction<typeof createIssue>;
 const mockAddIssueToProject = addIssueToProject as jest.MockedFunction<typeof addIssueToProject>;
 const mockSavePlanDraft = savePlanDraft as jest.MockedFunction<typeof savePlanDraft>;
+const mockLoadPlanDraft = loadPlanDraft as jest.MockedFunction<typeof loadPlanDraft>;
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>;
+const mockListMilestones = listMilestones as jest.MockedFunction<typeof listMilestones>;
+const mockListLabels = listLabels as jest.MockedFunction<typeof listLabels>;
+const mockCreateLabel = createLabel as jest.MockedFunction<typeof createLabel>;
 
 const VALID_PLAN_DRAFT = {
   vision: null,
@@ -195,14 +203,14 @@ describe('plan command', () => {
       'owner/repo', 'MVP', 'Core features', '2026-06-01',
     );
 
-    // Verify issues created with ready label
+    // Verify issues created with ready label and milestone title
     expect(mockCreateIssue).toHaveBeenCalledTimes(2);
     expect(mockCreateIssue).toHaveBeenCalledWith(
       'owner/repo',
       'Add login page',
       expect.any(String),
       expect.arrayContaining(['enhancement', 'ready']),
-      1,
+      'MVP',
     );
 
     expect(log.success).toHaveBeenCalledWith(
@@ -366,5 +374,127 @@ describe('plan command', () => {
     expect(mockAddIssueToProject).toHaveBeenCalledTimes(2);
     expect(mockAddIssueToProject).toHaveBeenCalledWith('owner', 5, 'owner/repo', 42);
     expect(mockAddIssueToProject).toHaveBeenCalledWith('owner', 5, 'owner/repo', 43);
+  });
+
+  it('auto-creates missing labels before creating issues', async () => {
+    // Labels on repo: bug, enhancement, ready
+    // Plan uses: enhancement + "blocking" (missing)
+    const draftWithCustomLabel = {
+      ...VALID_PLAN_DRAFT,
+      issues: [
+        {
+          ...VALID_PLAN_DRAFT.issues[0],
+          labels: ['enhancement', 'blocking'],
+        },
+      ],
+    };
+
+    mockInput.mockResolvedValueOnce('Build an app');
+    mockCheckbox
+      .mockResolvedValueOnce([]) // no seed sources
+      .mockResolvedValueOnce([1]); // select issue
+    mockConfirm
+      .mockResolvedValueOnce(false) // don't edit bodies
+      .mockResolvedValueOnce(true); // confirm creation
+
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(draftWithCustomLabel);
+    mockCreateMilestone.mockReturnValue(1);
+    mockCreateIssue.mockReturnValueOnce(42);
+
+    await planCommand({});
+
+    // Should create the missing "blocking" label
+    expect(mockCreateLabel).toHaveBeenCalledWith('owner/repo', 'blocking');
+    // Should NOT try to create "enhancement" or "ready" (already exist)
+    expect(mockCreateLabel).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes from saved plan draft with --resume --yes', async () => {
+    mockLoadPlanDraft.mockReturnValue(VALID_PLAN_DRAFT);
+    mockListMilestones.mockReturnValue([
+      {
+        number: 1,
+        title: 'MVP',
+        description: 'Core features',
+        openIssues: 0,
+        closedIssues: 0,
+        dueOn: '2026-06-01',
+        state: 'open',
+      },
+    ]);
+    mockCreateIssue.mockReturnValueOnce(42).mockReturnValueOnce(43);
+
+    await planCommand({ resume: true, yes: true });
+
+    // Should NOT invoke the AI agent
+    expect(mockExec).not.toHaveBeenCalled();
+
+    // Should reuse the existing milestone
+    expect(mockCreateMilestone).not.toHaveBeenCalled();
+
+    // Should create both issues
+    expect(mockCreateIssue).toHaveBeenCalledTimes(2);
+
+    expect(log.success).toHaveBeenCalledWith(
+      expect.stringContaining('Resumed plan'),
+    );
+  });
+
+  it('errors when --resume has no saved draft', async () => {
+    mockLoadPlanDraft.mockReturnValue(null);
+
+    await planCommand({ resume: true, yes: true });
+
+    expect(log.error).toHaveBeenCalledWith(
+      expect.stringContaining('No saved plan found'),
+    );
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+  });
+
+  it('reuses existing milestones instead of creating duplicates', async () => {
+    // Simulate an existing "MVP" milestone on GitHub
+    mockListMilestones.mockReturnValue([
+      {
+        number: 7,
+        title: 'MVP',
+        description: 'Core features',
+        openIssues: 3,
+        closedIssues: 0,
+        dueOn: '2026-06-01',
+        state: 'open',
+      },
+    ]);
+
+    mockInput.mockResolvedValueOnce('Build an e-commerce app');
+    mockCheckbox
+      .mockResolvedValueOnce([]) // no seed sources
+      .mockResolvedValueOnce([1, 2]); // select all issues
+    mockConfirm
+      .mockResolvedValueOnce(false) // don't edit bodies
+      .mockResolvedValueOnce(true); // confirm creation
+
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(VALID_PLAN_DRAFT);
+    mockCreateIssue.mockReturnValueOnce(42).mockReturnValueOnce(43);
+
+    await planCommand({});
+
+    // Should NOT create the milestone — it already exists
+    expect(mockCreateMilestone).not.toHaveBeenCalled();
+
+    // Issues should be assigned to existing milestone by title
+    expect(mockCreateIssue).toHaveBeenCalledTimes(2);
+    expect(mockCreateIssue).toHaveBeenCalledWith(
+      'owner/repo',
+      'Add login page',
+      expect.any(String),
+      expect.arrayContaining(['enhancement', 'ready']),
+      'MVP',
+    );
+
+    expect(log.success).toHaveBeenCalledWith(
+      expect.stringContaining('Reusing existing milestone'),
+    );
   });
 });

@@ -921,6 +921,7 @@ export type PlanPromptOptions = {
   visionContext?: string | null;
   projectContext?: string | null;
   existingIssues?: Array<{ number: number; title: string }>;
+  existingMilestones?: Array<{ title: string; description: string; openIssues: number }>;
 };
 
 /**
@@ -928,7 +929,7 @@ export type PlanPromptOptions = {
  * Instructs the agent to output a PlanDraft JSON with milestones and issues.
  */
 export function buildPlanPrompt(options: PlanPromptOptions): string {
-  const { seedDescription, seedFiles, visionContext, projectContext, existingIssues } = options;
+  const { seedDescription, seedFiles, visionContext, projectContext, existingIssues, existingMilestones } = options;
 
   const sections: string[] = [
     'You are a project planning assistant. Analyze the following inputs and generate a complete project plan as JSON.',
@@ -957,6 +958,16 @@ export function buildPlanPrompt(options: PlanPromptOptions): string {
       '',
       '## Existing Issues (avoid duplicates)',
       ...existingIssues.map((i) => `- #${i.number}: ${i.title}`),
+    );
+  }
+
+  if (existingMilestones && existingMilestones.length > 0) {
+    sections.push(
+      '',
+      '## Existing Milestones (reuse when appropriate)',
+      'These milestones already exist on GitHub. Assign issues to existing milestones when they fit.',
+      'Only create new milestones for work that does not belong in any existing milestone.',
+      ...existingMilestones.map((m) => `- **${m.title}**: ${m.description} (${m.openIssues} open issue(s))`),
     );
   }
 
@@ -1003,6 +1014,7 @@ export function buildPlanPrompt(options: PlanPromptOptions): string {
     '- Use `dependsOn` to reference other issue `id` values within the plan',
     '- Set all issues to `"selected": true`',
     '- Do NOT duplicate any existing issues listed above',
+    '- Reuse existing milestones when the work fits; only create new milestones for genuinely new scope',
     '- Consider the codebase structure for realistic issue scoping',
     '- Issue `id` values are temporary local IDs (1, 2, 3...) used only for dependency references',
   );

@@ -77,6 +77,7 @@ program
   .option('--no-vision', 'Skip vision generation even if no vision exists')
   .option('--dry-run', 'Display the plan without creating any GitHub resources')
   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
+  .option('--resume', 'Resume from a previously saved plan draft (.alpha-loop/plan.json)')
   .action(async (options) => {
     const { planCommand } = await import('./commands/plan.js');
     await planCommand(options);
