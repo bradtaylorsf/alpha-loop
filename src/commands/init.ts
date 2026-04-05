@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import * as readline from 'node:readline';
 import { detectRepo, loadConfig } from '../lib/config.js';
 import { exec } from '../lib/shell.js';
+import { ghExec } from '../lib/rate-limit.js';
 import { log } from '../lib/logger.js';
 import { syncAgentAssets, migrateToTemplates, resolveHarnesses } from './sync.js';
 import { findDistributionTemplatesDir } from '../lib/templates.js';
@@ -174,7 +175,7 @@ export async function ensureLabels(repo: string, labelReady: string): Promise<vo
     l.name === 'ready' ? { ...l, name: labelReady } : l,
   );
 
-  const result = exec(`gh label list --repo "${repo}" --json name --limit 200`);
+  const result = ghExec(`gh label list --repo "${repo}" --json name --limit 200`);
   if (result.exitCode !== 0) {
     log.warn('Could not check labels (gh CLI issue or repo not found)');
     return;
@@ -211,8 +212,9 @@ export async function ensureLabels(repo: string, labelReady: string): Promise<vo
   }
 
   for (const label of missing) {
-    const createResult = exec(
+    const createResult = ghExec(
       `gh label create "${label.name}" --repo "${repo}" --color "${label.color}" --description "${label.description}"`,
+      undefined, true,
     );
     if (createResult.exitCode === 0) {
       log.success(`Created label: ${label.name}`);
@@ -232,7 +234,7 @@ export async function ensureProjectStatuses(repoOwner: string, project: number):
   }
 
   // Get project ID and status field
-  const projectResult = exec(`gh project view ${project} --owner "${repoOwner}" --format json`);
+  const projectResult = ghExec(`gh project view ${project} --owner "${repoOwner}" --format json`);
   if (projectResult.exitCode !== 0) {
     log.warn(`Could not access project board ${project}`);
     return;
@@ -246,7 +248,7 @@ export async function ensureProjectStatuses(repoOwner: string, project: number):
     return;
   }
 
-  const fieldResult = exec(`gh project field-list ${project} --owner "${repoOwner}" --format json`);
+  const fieldResult = ghExec(`gh project field-list ${project} --owner "${repoOwner}" --format json`);
   if (fieldResult.exitCode !== 0) {
     log.warn('Could not list project fields');
     return;
@@ -312,7 +314,7 @@ export async function ensureProjectStatuses(repoOwner: string, project: number):
     }) { projectV2Field { ... on ProjectV2SingleSelectField { id } } }
   }`;
 
-  const createResult = exec(`gh api graphql -f query="${mutation}"`);
+  const createResult = ghExec(`gh api graphql -f query="${mutation}"`, undefined, true);
   if (createResult.exitCode === 0) {
     log.success(`Created project statuses: ${missing.join(', ')}`);
   } else {

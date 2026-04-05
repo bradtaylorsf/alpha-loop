@@ -38,7 +38,19 @@ jest.mock('../../src/lib/logger', () => ({
     step: jest.fn(),
     dry: jest.fn(),
     debug: jest.fn(),
+    rate: jest.fn(),
   },
+}));
+
+jest.mock('../../src/lib/rate-limit', () => ({
+  ghExec: jest.fn(() => ({ stdout: '', stderr: '', exitCode: 0 })),
+  getRateLimitStatus: jest.fn(() => ({ remaining: 5000, limit: 5000, used: 0, resetAt: 0, ratio: 1 })),
+  getProjectCache: jest.fn(() => null),
+  setProjectCache: jest.fn(),
+  clearProjectCache: jest.fn(),
+  resetRateLimitState: jest.fn(),
+  parseRateLimitHeaders: jest.fn(() => null),
+  stripDebugOutput: jest.fn((s: string) => s),
 }));
 
 jest.mock('../../src/lib/planning', () => ({

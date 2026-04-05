@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../lib/config.js';
 import { log } from '../lib/logger.js';
 import { exec } from '../lib/shell.js';
+import { ghExec } from '../lib/rate-limit.js';
 import { spawnAgent } from '../lib/agent.js';
 import { buildReviewPrompt } from '../lib/prompts.js';
 import {
@@ -91,7 +92,7 @@ function findStrandedBranches(baseBranch: string, filterIssue?: number): Strande
  * Return true if an open PR already exists for the given branch.
  */
 function prExists(repo: string, branch: string): boolean {
-  const result = exec(
+  const result = ghExec(
     `gh pr list --repo "${repo}" --head "${branch}" --state open --json number --limit 1`,
   );
   if (result.exitCode !== 0) return false;
@@ -107,7 +108,7 @@ function prExists(repo: string, branch: string): boolean {
  * Fetch the issue title from GitHub.
  */
 function getIssueTitle(repo: string, issueNum: number): string {
-  const result = exec(
+  const result = ghExec(
     `gh issue view ${issueNum} --repo "${repo}" --json title`,
   );
   if (result.exitCode !== 0) return `Issue #${issueNum}`;
@@ -323,7 +324,7 @@ function updateSessionPR(
   const sessionBranch = sessionName;
 
   // Find the PR for this session branch
-  const prResult = exec(
+  const prResult = ghExec(
     `gh pr list --repo "${repo}" --head "${sessionBranch}" --state open --json number,url --limit 1`,
   );
   if (prResult.exitCode !== 0 || !prResult.stdout.trim()) {
@@ -376,13 +377,13 @@ This PR collects all changes from this session for final review before merging t
 
 *Automated by alpha-loop*`;
 
-  exec(`gh pr edit ${prNumber} --repo "${repo}" --title ${JSON.stringify(title)}`);
+  ghExec(`gh pr edit ${prNumber} --repo "${repo}" --title ${JSON.stringify(title)}`, undefined, true);
 
   // Use --body-file to avoid escaping issues
   const { tmpdir } = require('node:os') as typeof import('node:os');
   const bodyFile = join(tmpdir(), `alpha-loop-session-pr-${Date.now()}`);
   writeFileSync(bodyFile, body, 'utf-8');
-  exec(`gh pr edit ${prNumber} --repo "${repo}" --body-file "${bodyFile}"`);
+  ghExec(`gh pr edit ${prNumber} --repo "${repo}" --body-file "${bodyFile}"`, undefined, true);
   try { require('node:fs').unlinkSync(bodyFile); } catch { /* cleanup */ }
 
   log.success(`Session PR updated: ${prUrl}`);

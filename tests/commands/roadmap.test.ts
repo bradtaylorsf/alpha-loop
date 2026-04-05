@@ -36,7 +36,19 @@ jest.mock('../../src/lib/logger', () => ({
     step: jest.fn(),
     dry: jest.fn(),
     debug: jest.fn(),
+    rate: jest.fn(),
   },
+}));
+
+jest.mock('../../src/lib/rate-limit', () => ({
+  ghExec: jest.fn(() => ({ stdout: '', stderr: '', exitCode: 0 })),
+  getRateLimitStatus: jest.fn(() => ({ remaining: 5000, limit: 5000, used: 0, resetAt: 0, ratio: 1 })),
+  getProjectCache: jest.fn(() => null),
+  setProjectCache: jest.fn(),
+  clearProjectCache: jest.fn(),
+  resetRateLimitState: jest.fn(),
+  parseRateLimitHeaders: jest.fn(() => null),
+  stripDebugOutput: jest.fn((s: string) => s),
 }));
 
 jest.mock('../../src/lib/planning', () => ({
@@ -138,11 +150,11 @@ describe('roadmap command', () => {
     expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', 'v1.0 Core', 'Core infrastructure', '2026-05-01');
     expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', 'v1.1 Features', 'User-facing features', '2026-06-15');
 
-    // Should assign all 3 issues
+    // Should assign all 3 issues (now passes milestone title, not number)
     expect(mockSetIssueMilestone).toHaveBeenCalledTimes(3);
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 3, 1);
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 7, 1);
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, 2);
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 3, 'v1.0 Core');
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 7, 'v1.0 Core');
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, 'v1.1 Features');
 
     expect(log.success).toHaveBeenCalledWith(expect.stringContaining('milestone'));
   });
@@ -168,11 +180,11 @@ describe('roadmap command', () => {
     expect(mockCreateMilestone).toHaveBeenCalledTimes(1);
     expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', 'v1.1 Features', 'User-facing features', '2026-06-15');
 
-    // Issues assigned to v1.0 Core should use existing milestone number 5
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 3, 5);
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 7, 5);
-    // Issue assigned to v1.1 Features should use new milestone number 6
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, 6);
+    // Issues assigned to v1.0 Core should use milestone title (not number)
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 3, 'v1.0 Core');
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 7, 'v1.0 Core');
+    // Issue assigned to v1.1 Features should use milestone title
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, 'v1.1 Features');
   });
 
   it('does not make GitHub calls in dry-run mode', async () => {

@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './logger.js';
 import { exec, formatTimestamp } from './shell.js';
+import { ghExec } from './rate-limit.js';
 import { createPR, updateProjectStatus } from './github.js';
 import type { Config } from './config.js';
 import type { PipelineResult, GateResult } from './pipeline.js';
@@ -324,9 +325,9 @@ export async function finalizeSession(
     // If createPR failed (e.g. nothing to compare), try creating via gh directly
     log.warn(`createPR failed: ${err instanceof Error ? err.message : err}`);
     try {
-      const fallback = exec(
+      const fallback = ghExec(
         `gh pr create --repo "${config.repo}" --base "${config.baseBranch}" --head "${session.branch}" --title "${prTitle}" --body "Session finalization — see branch for details"`,
-        { cwd: projectDir },
+        { cwd: projectDir }, true,
       );
       if (fallback.exitCode === 0 && fallback.stdout.trim()) {
         log.success(`Session PR (fallback): ${fallback.stdout.trim()}`);

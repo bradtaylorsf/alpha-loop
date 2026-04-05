@@ -17,8 +17,24 @@ jest.mock('../../src/lib/logger', () => ({
     step: jest.fn(),
     dry: jest.fn(),
     debug: jest.fn(),
+    rate: jest.fn(),
   },
 }));
+
+// Mock ghExec to delegate to the already-mocked exec from shell.ts
+jest.mock('../../src/lib/rate-limit', () => {
+  const shell = require('../../src/lib/shell');
+  return {
+    ghExec: jest.fn((cmd: string) => shell.exec(cmd)),
+    getProjectCache: jest.fn(() => null),
+    setProjectCache: jest.fn(),
+    clearProjectCache: jest.fn(),
+    resetRateLimitState: jest.fn(),
+    getRateLimitStatus: jest.fn(() => ({ remaining: 5000, limit: 5000, used: 0, resetAt: 0, ratio: 1 })),
+    parseRateLimitHeaders: jest.fn(() => null),
+    stripDebugOutput: jest.fn((s: string) => s),
+  };
+});
 
 import { exec } from '../../src/lib/shell';
 
@@ -427,11 +443,11 @@ describe('createMilestone', () => {
 });
 
 describe('setIssueMilestone', () => {
-  test('sets milestone via API', () => {
-    setIssueMilestone('owner/repo', 42, 3);
+  test('sets milestone via CLI', () => {
+    setIssueMilestone('owner/repo', 42, 'v1.0 Core');
 
     expect(mockExec).toHaveBeenCalledWith(
-      'gh api "repos/owner/repo/issues/42" -X PATCH -F milestone=3',
+      'gh issue edit 42 --repo "owner/repo" --milestone "v1.0 Core"',
     );
   });
 
@@ -439,7 +455,7 @@ describe('setIssueMilestone', () => {
     mockExec.mockReturnValue({ stdout: '', stderr: 'error', exitCode: 1 });
 
     const { log: mockLog } = require('../../src/lib/logger');
-    setIssueMilestone('owner/repo', 42, 3);
+    setIssueMilestone('owner/repo', 42, 'v1.0 Core');
     expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to set milestone'));
   });
 });

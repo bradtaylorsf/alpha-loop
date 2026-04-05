@@ -9,8 +9,23 @@ jest.mock('node:child_process', () => ({
 
 // Silence all logger output during tests
 jest.mock('../../src/lib/logger', () => ({
-  log: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), success: jest.fn(), step: jest.fn(), dry: jest.fn() },
+  log: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), success: jest.fn(), step: jest.fn(), dry: jest.fn(), rate: jest.fn(), debug: jest.fn() },
 }));
+
+// Mock rate-limit — ghExec delegates to the shell mock so existing assertions still work
+jest.mock('../../src/lib/rate-limit', () => {
+  const shell = require('../../src/lib/shell');
+  return {
+    ghExec: jest.fn((cmd: string) => shell.exec(cmd)),
+    getRateLimitStatus: jest.fn(() => ({ remaining: 5000, limit: 5000, used: 0, resetAt: 0, ratio: 1 })),
+    getProjectCache: jest.fn(() => null),
+    setProjectCache: jest.fn(),
+    clearProjectCache: jest.fn(),
+    resetRateLimitState: jest.fn(),
+    parseRateLimitHeaders: jest.fn(() => null),
+    stripDebugOutput: jest.fn((s: string) => s),
+  };
+});
 
 // Mock shell exec so init steps that shell out (scan, sync, git) don't run real commands
 jest.mock('../../src/lib/shell', () => ({

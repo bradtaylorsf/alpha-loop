@@ -5,6 +5,7 @@ import { writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { exec } from './shell.js';
+import { ghExec, getProjectCache, setProjectCache } from './rate-limit.js';
 import { log } from './logger.js';
 
 /** Max PR body length. GitHub supports 65536 but we leave room for metadata. */
@@ -38,7 +39,7 @@ export type Milestone = {
  * List open milestones for a repository.
  */
 export function listMilestones(repo: string): Milestone[] {
-  const result = exec(
+  const result = ghExec(
     `gh api "repos/${repo}/milestones?state=open&sort=due_on&direction=asc" --jq '[.[] | {number, title, description, openIssues: .open_issues, closedIssues: .closed_issues, dueOn: .due_on, state}]'`,
   );
   if (result.exitCode !== 0) {
@@ -86,8 +87,8 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
   // Fetch all project items but filter to only Todo issues via jq to avoid
   // truncating results when Done items fill the limit.
   const jqFilter = `{items: [.items[] | select(.status == "Todo" and .content.type == "Issue")]}`;
-  const result = exec(
-    `gh project item-list ${project} --owner "${owner}" --format json --limit 1000 --jq '${jqFilter}'`,
+  const result = ghExec(
+    `gh project item-list ${project} --owner "${owner}" --format json --limit 200 --jq '${jqFilter}'`,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to poll project board: ${result.stderr}`);
@@ -130,7 +131,7 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
  * Get the set of open issue numbers belonging to a milestone.
  */
 function getMilestoneIssueNumbers(repo: string, milestone: string): Set<number> | null {
-  const result = exec(
+  const result = ghExec(
     `gh issue list --repo "${repo}" --milestone "${milestone}" --state open --json number --limit 100`,
   );
   if (result.exitCode !== 0) return null;
@@ -148,7 +149,7 @@ function getMilestoneIssueNumbers(repo: string, milestone: string): Set<number> 
  */
 function pollIssuesByLabel(repo: string, label: string, limit: number, milestone?: string): Issue[] {
   const milestoneFlag = milestone ? ` --milestone "${milestone}"` : '';
-  const result = exec(
+  const result = ghExec(
     `gh issue list --repo "${repo}" --label "${label}" --state open${milestoneFlag} --json number,title,body,labels --limit ${limit}`,
   );
   if (result.exitCode !== 0) {
@@ -185,7 +186,7 @@ export function labelIssue(repo: string, issueNum: number, addLabel: string, rem
   if (removeLabel) {
     args[0] += ` --remove-label "${removeLabel}"`;
   }
-  const result = exec(args[0]);
+  const result = ghExec(args[0], undefined, true);
   if (result.exitCode !== 0) {
     log.warn(`Failed to update labels on issue #${issueNum}: ${result.stderr}`);
   }
@@ -199,8 +200,9 @@ export function commentIssue(repo: string, issueNum: number, body: string): void
   const bodyFile = join(tmpdir(), `alpha-loop-comment-${Date.now()}`);
   writeFileSync(bodyFile, body, 'utf-8');
   try {
-    const result = exec(
+    const result = ghExec(
       `gh issue comment ${issueNum} --repo "${repo}" --body-file "${bodyFile}"`,
+      undefined, true,
     );
     if (result.exitCode !== 0) {
       log.warn(`Failed to comment on issue #${issueNum}: ${result.stderr}`);
@@ -214,8 +216,9 @@ export function commentIssue(repo: string, issueNum: number, body: string): void
  * Assign an issue to a user.
  */
 export function assignIssue(repo: string, issueNum: number, assignee: string): void {
-  const result = exec(
+  const result = ghExec(
     `gh issue edit ${issueNum} --repo "${repo}" --add-assignee "${assignee}"`,
+    undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to assign issue #${issueNum} to ${assignee}: ${result.stderr}`);
@@ -256,7 +259,7 @@ export function createPR(options: CreatePROptions): string {
 
   try {
     // Check if PR already exists for this branch
-    const existingResult = exec(
+    const existingResult = ghExec(
       `gh pr list --repo "${repo}" --head "${head}" --json number,url --limit 1`,
     );
     if (existingResult.exitCode === 0 && existingResult.stdout) {
@@ -265,7 +268,7 @@ export function createPR(options: CreatePROptions): string {
         if (existing.length > 0) {
           const prUrl = existing[0].url;
           log.info(`PR already exists: ${prUrl}, updating...`);
-          exec(`gh pr edit ${existing[0].number} --repo "${repo}" --base "${base}" --title ${JSON.stringify(title)} --body-file "${bodyFile}"`);
+          ghExec(`gh pr edit ${existing[0].number} --repo "${repo}" --base "${base}" --title ${JSON.stringify(title)} --body-file "${bodyFile}"`, undefined, true);
           return prUrl;
         }
       } catch {
@@ -274,8 +277,9 @@ export function createPR(options: CreatePROptions): string {
     }
 
     // Create new PR using --body-file to avoid shell escaping issues
-    const createResult = exec(
+    const createResult = ghExec(
       `gh pr create --repo "${repo}" --base "${base}" --head "${head}" --title ${JSON.stringify(title)} --body-file "${bodyFile}"`,
+      undefined, true,
     );
     if (createResult.exitCode !== 0) {
       throw new Error(`Failed to create PR: ${createResult.stderr}`);
@@ -292,7 +296,7 @@ export function createPR(options: CreatePROptions): string {
  */
 export function mergePR(repo: string, head: string, method: 'squash' | 'merge' = 'squash'): void {
   // Find the PR number by branch
-  const listResult = exec(
+  const listResult = ghExec(
     `gh pr list --repo "${repo}" --head "${head}" --json number --limit 1`,
   );
   if (listResult.exitCode !== 0 || !listResult.stdout) {
@@ -314,8 +318,9 @@ export function mergePR(repo: string, head: string, method: 'squash' | 'merge' =
   }
 
   const mergeFlag = method === 'squash' ? '--squash' : '--merge';
-  const result = exec(
+  const result = ghExec(
     `gh pr merge ${prNum} --repo "${repo}" ${mergeFlag} --delete-branch`,
+    undefined, true,
   );
   if (result.exitCode !== 0) {
     throw new Error(`Failed to merge PR #${prNum}: ${result.stderr}`);
@@ -334,12 +339,84 @@ export function updateProjectStatus(
   issueNum: number,
   status: string,
 ): void {
-  // Find the item ID for this issue in the project.
-  // Use --jq to filter server-side for the specific issue number, avoiding
-  // truncation when Done items fill the --limit cap.
+  // ── Resolve project metadata (cached after first call) ────────────────
+  let cache = getProjectCache(owner, projectNum);
+  if (!cache) {
+    // Fetch field list (contains field IDs and option IDs)
+    const fieldResult = ghExec(
+      `gh project field-list ${projectNum} --owner "${owner}" --format json`,
+    );
+    if (fieldResult.exitCode !== 0) {
+      log.warn(`Could not list project fields: ${fieldResult.stderr}`);
+      return;
+    }
+
+    let fieldId: string | undefined;
+    const optionMap = new Map<string, string>();
+    try {
+      const data = JSON.parse(fieldResult.stdout) as {
+        fields: Array<{
+          id: string;
+          name: string;
+          options?: Array<{ id: string; name: string }>;
+        }>;
+      };
+      const statusField = data.fields.find((f) => f.name === 'Status');
+      if (statusField) {
+        fieldId = statusField.id;
+        for (const opt of statusField.options ?? []) {
+          optionMap.set(opt.name, opt.id);
+        }
+      }
+    } catch {
+      log.warn('Failed to parse project fields');
+      return;
+    }
+
+    if (!fieldId || optionMap.size === 0) {
+      log.warn('Could not resolve project Status field');
+      return;
+    }
+
+    // Fetch project ID
+    const projectResult = ghExec(
+      `gh project view ${projectNum} --owner "${owner}" --format json`,
+    );
+    if (projectResult.exitCode !== 0) {
+      log.warn(`Could not view project: ${projectResult.stderr}`);
+      return;
+    }
+
+    let projectId: string | undefined;
+    try {
+      const data = JSON.parse(projectResult.stdout) as { id: string };
+      projectId = data.id;
+    } catch {
+      log.warn('Failed to parse project data');
+      return;
+    }
+
+    if (!projectId) {
+      log.warn('Could not get project ID');
+      return;
+    }
+
+    cache = { projectId, fieldId, optionMap };
+    setProjectCache(owner, projectNum, cache);
+    log.debug(`Cached project metadata for ${owner}/${projectNum}`);
+  }
+
+  // ── Resolve option ID for the requested status ──────────────────────
+  const optionId = cache.optionMap.get(status);
+  if (!optionId) {
+    log.warn(`Could not resolve project option for status '${status}'`);
+    return;
+  }
+
+  // ── Find the item ID for this issue (not cached — items change) ─────
   const jqFilter = `{items: [.items[] | select(.content.number == ${issueNum})]}`;
-  const itemResult = exec(
-    `gh project item-list ${projectNum} --owner "${owner}" --format json --limit 1000 --jq '${jqFilter}'`,
+  const itemResult = ghExec(
+    `gh project item-list ${projectNum} --owner "${owner}" --format json --limit 200 --jq '${jqFilter}'`,
   );
   if (itemResult.exitCode !== 0) {
     log.warn(`Could not list project items: ${itemResult.stderr}`);
@@ -362,67 +439,10 @@ export function updateProjectStatus(
     return;
   }
 
-  // Get the Status field ID and option ID
-  const fieldResult = exec(
-    `gh project field-list ${projectNum} --owner "${owner}" --format json`,
-  );
-  if (fieldResult.exitCode !== 0) {
-    log.warn(`Could not list project fields: ${fieldResult.stderr}`);
-    return;
-  }
-
-  let fieldId: string | undefined;
-  let optionId: string | undefined;
-  try {
-    const data = JSON.parse(fieldResult.stdout) as {
-      fields: Array<{
-        id: string;
-        name: string;
-        options?: Array<{ id: string; name: string }>;
-      }>;
-    };
-    const statusField = data.fields.find((f) => f.name === 'Status');
-    if (statusField) {
-      fieldId = statusField.id;
-      const option = statusField.options?.find((o) => o.name === status);
-      optionId = option?.id;
-    }
-  } catch {
-    log.warn('Failed to parse project fields');
-    return;
-  }
-
-  if (!fieldId || !optionId) {
-    log.warn(`Could not resolve project field/option for status '${status}'`);
-    return;
-  }
-
-  // Get project ID
-  const projectResult = exec(
-    `gh project view ${projectNum} --owner "${owner}" --format json`,
-  );
-  if (projectResult.exitCode !== 0) {
-    log.warn(`Could not view project: ${projectResult.stderr}`);
-    return;
-  }
-
-  let projectId: string | undefined;
-  try {
-    const data = JSON.parse(projectResult.stdout) as { id: string };
-    projectId = data.id;
-  } catch {
-    log.warn('Failed to parse project data');
-    return;
-  }
-
-  if (!projectId) {
-    log.warn('Could not get project ID');
-    return;
-  }
-
-  // Update the item
-  const editResult = exec(
-    `gh project item-edit --project-id "${projectId}" --id "${itemId}" --field-id "${fieldId}" --single-select-option-id "${optionId}"`,
+  // ── Update the item ─────────────────────────────────────────────────
+  const editResult = ghExec(
+    `gh project item-edit --project-id "${cache.projectId}" --id "${itemId}" --field-id "${cache.fieldId}" --single-select-option-id "${optionId}"`,
+    undefined, true,
   );
   if (editResult.exitCode !== 0) {
     log.warn(`Failed to update project status for #${issueNum}: ${editResult.stderr}`);
@@ -442,8 +462,9 @@ export function createIssue(repo: string, title: string, body: string, labels: s
   try {
     const labelFlags = labels.map((l) => `--label ${JSON.stringify(l)}`).join(' ');
     const milestoneFlag = milestone ? ` --milestone ${milestone}` : '';
-    const result = exec(
+    const result = ghExec(
       `gh issue create --repo "${repo}" --title ${JSON.stringify(title)} --body-file "${bodyFile}" ${labelFlags}${milestoneFlag}`,
+      undefined, true,
     );
     if (result.exitCode !== 0) {
       log.warn(`Failed to create issue: ${result.stderr}`);
@@ -473,7 +494,7 @@ export function updateIssue(repo: string, issueNum: number, updates: { title?: s
       writeFileSync(bodyFile, updates.body, 'utf-8');
       cmd += ` --body-file "${bodyFile}"`;
     }
-    const result = exec(cmd);
+    const result = ghExec(cmd, undefined, true);
     if (result.exitCode !== 0) {
       log.warn(`Failed to update issue #${issueNum}: ${result.stderr}`);
     }
@@ -489,8 +510,9 @@ export function updateIssue(repo: string, issueNum: number, updates: { title?: s
  */
 export function closeIssue(repo: string, issueNum: number, reason?: 'completed' | 'not_planned'): void {
   const reasonFlag = reason ? ` --reason "${reason}"` : '';
-  const result = exec(
+  const result = ghExec(
     `gh issue close ${issueNum} --repo "${repo}"${reasonFlag}`,
+    undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to close issue #${issueNum}: ${result.stderr}`);
@@ -503,8 +525,9 @@ export function closeIssue(repo: string, issueNum: number, reason?: 'completed' 
 export function createMilestone(repo: string, title: string, description: string, dueOn?: string): number {
   const dueOnIso = dueOn && !dueOn.includes('T') ? `${dueOn}T00:00:00Z` : dueOn;
   const dueOnFlag = dueOnIso ? ` -f due_on=${JSON.stringify(dueOnIso)}` : '';
-  const result = exec(
+  const result = ghExec(
     `gh api "repos/${repo}/milestones" -X POST -f title=${JSON.stringify(title)} -f description=${JSON.stringify(description)}${dueOnFlag}`,
+    undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to create milestone: ${result.stderr}`);
@@ -520,11 +543,12 @@ export function createMilestone(repo: string, title: string, description: string
 }
 
 /**
- * Assign an issue to a milestone by milestone number.
+ * Assign an issue to a milestone by title.
  */
-export function setIssueMilestone(repo: string, issueNum: number, milestoneNum: number): void {
-  const result = exec(
-    `gh api "repos/${repo}/issues/${issueNum}" -X PATCH -F milestone=${milestoneNum}`,
+export function setIssueMilestone(repo: string, issueNum: number, milestoneTitle: string): void {
+  const result = ghExec(
+    `gh issue edit ${issueNum} --repo "${repo}" --milestone ${JSON.stringify(milestoneTitle)}`,
+    undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to set milestone on issue #${issueNum}: ${result.stderr}`);
@@ -536,7 +560,7 @@ export function setIssueMilestone(repo: string, issueNum: number, milestoneNum: 
  */
 export function listOpenIssues(repo: string, limit = 100): Issue[] {
   const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
-  const result = exec(
+  const result = ghExec(
     `gh issue list --repo "${repo}" --state open --json number,title,body,labels --limit ${safeLimit}`,
   );
   if (result.exitCode !== 0) {
@@ -563,10 +587,48 @@ export function listOpenIssues(repo: string, limit = 100): Issue[] {
 }
 
 /**
+ * List all open issues with their comments in a single API call.
+ * Avoids the N+1 problem of fetching comments per-issue.
+ */
+export function listOpenIssuesWithComments(repo: string, limit = 100): Issue[] {
+  const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
+  const result = ghExec(
+    `gh issue list --repo "${repo}" --state open --json number,title,body,labels,comments --limit ${safeLimit}`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to list open issues with comments: ${result.stderr}`);
+    return [];
+  }
+  try {
+    const raw = JSON.parse(result.stdout) as Array<{
+      number: number;
+      title: string;
+      body: string;
+      labels: Array<{ name: string }>;
+      comments: Array<{ author: { login: string }; body: string; createdAt: string }>;
+    }>;
+    return raw.map((issue) => ({
+      number: issue.number,
+      title: issue.title,
+      body: issue.body ?? '',
+      labels: (issue.labels ?? []).map((l) => l.name),
+      comments: (issue.comments ?? []).map((c) => ({
+        author: c.author?.login ?? 'unknown',
+        body: c.body ?? '',
+        createdAt: c.createdAt ?? '',
+      })),
+    }));
+  } catch {
+    log.warn('Failed to parse open issues with comments JSON');
+    return [];
+  }
+}
+
+/**
  * Fetch comments for a specific issue.
  */
 export function getIssueComments(repo: string, issueNum: number): Comment[] {
-  const result = exec(
+  const result = ghExec(
     `gh issue view ${issueNum} --repo "${repo}" --json comments`,
   );
   if (result.exitCode !== 0) {
@@ -592,7 +654,7 @@ export function getIssueComments(repo: string, issueNum: number): Comment[] {
  * Fetch a single issue with its full body and comments.
  */
 export function getIssueWithComments(repo: string, issueNum: number): Issue | null {
-  const result = exec(
+  const result = ghExec(
     `gh issue view ${issueNum} --repo "${repo}" --json number,title,body,labels,comments`,
   );
   if (result.exitCode !== 0) {
@@ -629,8 +691,9 @@ export function getIssueWithComments(repo: string, issueNum: number): Issue | nu
  */
 export function addIssueToProject(owner: string, projectNum: number, repo: string, issueNum: number): void {
   const issueUrl = `https://github.com/${repo}/issues/${issueNum}`;
-  const result = exec(
+  const result = ghExec(
     `gh project item-add ${projectNum} --owner "${owner}" --url "${issueUrl}"`,
+    undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to add issue #${issueNum} to project: ${result.stderr}`);
