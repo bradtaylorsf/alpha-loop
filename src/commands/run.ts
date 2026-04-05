@@ -364,8 +364,8 @@ export async function runCommand(options: RunOptions): Promise<void> {
         }
       }
 
-      // Skip incomplete issues
-      if (report.skippedIssues.length > 0) {
+      // Skip incomplete issues only when --fix is active
+      if (options.fix && report.skippedIssues.length > 0) {
         const skippedSet = new Set(report.skippedIssues);
         issuesToProcess = issuesToProcess.filter((i) => !skippedSet.has(i.number));
         log.info(`Skipped ${report.skippedIssues.length} incomplete issue(s)`);

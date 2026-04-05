@@ -66,7 +66,7 @@ export function parseDependencies(body: string): number[] {
 export function extractFilePaths(body: string): string[] {
   const paths: string[] = [];
   // Match file paths in backticks or standalone that look like relative paths with extensions
-  const pattern = /(?:`([^`]+\.[a-z]{1,5})`|(?:^|\s)((?:src|tests|lib|templates|\.alpha-loop)\/[\w./\-]+\.[a-z]{1,5}))/gm;
+  const pattern = /(?:`([^`]*\/[^`]+\.[a-z]{1,5})`|(?:^|\s)((?:src|tests|lib|templates|\.alpha-loop)\/[\w./\-]+\.[a-z]{1,5}))/gm;
   let match;
   while ((match = pattern.exec(body)) !== null) {
     const path = match[1] || match[2];
@@ -301,7 +301,7 @@ export function printValidationReport(report: ValidationReport): void {
 
   const totalWarnings = report.dependencyWarnings.length + report.completenessWarnings.length + report.overlapWarnings.length;
   if (totalWarnings === 0) {
-    console.error(`${GREEN}  All issues passed validation.${NC}`);
+    console.log(`${GREEN}  All issues passed validation.${NC}`);
   } else {
     console.error(`  ${totalWarnings} warning(s) found.`);
   }
@@ -332,7 +332,11 @@ ${reasons}
 
 _This comment was generated automatically by alpha-loop pre-session validation._`;
 
-    commentIssue(repo, w.issueNum, body);
-    log.info(`Posted validation comment on #${w.issueNum}`);
+    try {
+      commentIssue(repo, w.issueNum, body);
+      log.info(`Posted validation comment on #${w.issueNum}`);
+    } catch (err) {
+      log.warn(`Failed to post validation comment on #${w.issueNum}: ${err}`);
+    }
   }
 }

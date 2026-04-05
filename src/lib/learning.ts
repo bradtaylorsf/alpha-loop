@@ -143,17 +143,28 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
   const { frontmatter: parsedFm, sections } = parseLearningOutput(rawOutput);
   const today = new Date().toISOString().split('T')[0];
 
-  // Build frontmatter with trace pointers
+  // Build frontmatter with trace pointers — always ensure key fields exist
+  const requiredFields: Record<string, string> = {
+    issue: String(options.issueNum),
+    status: options.status,
+    retries: String(options.retries),
+    duration: String(options.duration),
+    date: today,
+  };
+
   const fmLines: string[] = [];
   if (parsedFm) {
-    // Use parsed frontmatter but ensure key fields exist
     fmLines.push(parsedFm);
+    // Inject any missing required fields
+    for (const [key, value] of Object.entries(requiredFields)) {
+      if (!new RegExp(`^${key}:`, 'm').test(parsedFm)) {
+        fmLines.push(`${key}: ${value}`);
+      }
+    }
   } else {
-    fmLines.push(`issue: ${options.issueNum}`);
-    fmLines.push(`status: ${options.status}`);
-    fmLines.push(`retries: ${options.retries}`);
-    fmLines.push(`duration: ${options.duration}`);
-    fmLines.push(`date: ${today}`);
+    for (const [key, value] of Object.entries(requiredFields)) {
+      fmLines.push(`${key}: ${value}`);
+    }
   }
 
   // Add trace pointers if session info available
