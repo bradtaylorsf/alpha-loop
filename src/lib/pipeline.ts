@@ -889,6 +889,8 @@ Rules:
     verifyOutput,
     body,
     config,
+    sessionLogsDir: session.logsDir,
+    sessionName: session.name,
   });
 
   // --- Step 9b: Write full traces (Meta-Harness style) ---
