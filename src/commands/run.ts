@@ -21,6 +21,7 @@ import { spawnAgent } from '../lib/agent.js';
 import { buildSessionReviewPrompt } from '../lib/prompts.js';
 import { writeTraceToSubdir } from '../lib/traces.js';
 import { readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
+import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, type ValidationReport } from '../lib/validation.js';
 
 export type RunOptions = {
   dryRun?: boolean;
@@ -34,6 +35,8 @@ export type RunOptions = {
   batch?: boolean;
   batchSize?: number;
   verbose?: boolean;
+  validate?: boolean;
+  fix?: boolean;
 };
 
 /**
@@ -335,7 +338,43 @@ export async function runCommand(options: RunOptions): Promise<void> {
     log.info('No issues found. Nothing to do.');
   } else {
     const issueLimit = config.maxIssues > 0 ? Math.min(issues.length, config.maxIssues) : issues.length;
-    const issuesToProcess = issues.slice(0, issueLimit);
+    let issuesToProcess = issues.slice(0, issueLimit);
+
+    // Pre-session validation
+    if (options.validate) {
+      log.step('Running pre-session validation...');
+      const report: ValidationReport = validateIssueQueue(
+        issuesToProcess.map((i) => ({ number: i.number, title: i.title, body: i.body })),
+      );
+      printValidationReport(report);
+
+      if (options.fix) {
+        // Reorder based on dependency analysis
+        if (report.dependencyWarnings.length > 0) {
+          const reorderedNums = report.reorderedQueue.map((i) => i.number);
+          issuesToProcess = reorderedNums
+            .map((num) => issuesToProcess.find((i) => i.number === num))
+            .filter((i): i is typeof issuesToProcess[number] => i !== undefined);
+          log.info(`Reordered queue: ${issuesToProcess.map((i) => `#${i.number}`).join(', ')}`);
+        }
+
+        // Comment on incomplete issues and skip them
+        if (report.completenessWarnings.length > 0 && !config.dryRun) {
+          commentOnIncompleteIssues(config.repo, report);
+        }
+      }
+
+      // Skip incomplete issues
+      if (report.skippedIssues.length > 0) {
+        const skippedSet = new Set(report.skippedIssues);
+        issuesToProcess = issuesToProcess.filter((i) => !skippedSet.has(i.number));
+        log.info(`Skipped ${report.skippedIssues.length} incomplete issue(s)`);
+      }
+
+      if (issuesToProcess.length === 0) {
+        log.info('No issues remaining after validation. Nothing to do.');
+      }
+    }
 
     if (config.maxIssues > 0 && issues.length > config.maxIssues) {
       log.info(`Found ${issues.length} issue(s), processing first ${issueLimit} (max_issues=${config.maxIssues})`);
