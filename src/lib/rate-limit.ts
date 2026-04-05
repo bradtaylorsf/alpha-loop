@@ -6,6 +6,7 @@
  * hitting GitHub's primary (5,000 pts/hr) and secondary (80 mutations/min)
  * rate limits.
  */
+import { execSync } from 'node:child_process';
 import { exec, type ExecResult } from './shell.js';
 import { log } from './logger.js';
 
@@ -71,19 +72,32 @@ export function stripDebugOutput(stderr: string): string {
 
 // ── Throttle tiers ──────────────────────────────────────────────────────────
 
-function getThrottleTier(ratio: number): { tier: string; delayMs: number } {
+export function getThrottleTier(ratio: number): { tier: string; delayMs: number } {
   if (ratio > 0.5) return { tier: 'normal', delayMs: 0 };
   if (ratio > 0.2) return { tier: 'cautious', delayMs: 200 };
   if (ratio > 0.05) return { tier: 'slow', delayMs: 1000 };
   return { tier: 'critical', delayMs: 0 }; // handled specially — waits for reset
 }
 
+/** Maximum time sleepSync will wait before throwing (60 seconds). */
+const MAX_SLEEP_MS = 60_000;
+
+/**
+ * Synchronous sleep that does NOT busy-wait.
+ * Uses child_process.execSync('sleep') for CPU-friendly blocking.
+ * Throws if requested duration exceeds MAX_SLEEP_MS.
+ */
 function sleepSync(ms: number): void {
   if (ms <= 0) return;
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    // busy-wait since exec() is synchronous
+  if (ms > MAX_SLEEP_MS) {
+    throw new Error(
+      `Rate limit sleep of ${Math.ceil(ms / 1000)}s exceeds maximum ${MAX_SLEEP_MS / 1000}s. ` +
+      `GitHub rate limit is likely exhausted — wait for reset or increase your limit.`,
+    );
   }
+  // Use execSync('sleep') to block without pegging CPU
+  const seconds = ms / 1000;
+  execSync(`sleep ${seconds.toFixed(3)}`, { stdio: 'ignore' });
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -125,13 +139,20 @@ export function ghExec(
   }
   lastTier = tier;
 
-  // Critical: wait for reset window
-  if (tier === 'critical' && rateLimitState.resetAt > 0) {
-    const waitMs = (rateLimitState.resetAt * 1000) - Date.now();
-    if (waitMs > 0) {
-      const waitMin = Math.ceil(waitMs / 60_000);
-      log.rate(`Rate limit critical (${rateLimitState.remaining}/${rateLimitState.limit}). Waiting ${waitMin}m for reset...`);
-      sleepSync(waitMs);
+  // Critical: wait for reset window or apply fallback delay
+  if (tier === 'critical') {
+    if (rateLimitState.resetAt > 0) {
+      const waitMs = (rateLimitState.resetAt * 1000) - Date.now();
+      if (waitMs > 0) {
+        const waitSec = Math.ceil(waitMs / 1000);
+        log.rate(`Rate limit critical (${rateLimitState.remaining}/${rateLimitState.limit}). Waiting ${waitSec}s for reset...`);
+        sleepSync(waitMs); // throws if > MAX_SLEEP_MS
+      }
+    } else {
+      // No reset time known yet — apply a conservative fallback delay
+      const CRITICAL_FALLBACK_MS = 5000;
+      log.rate(`Rate limit critical (${rateLimitState.remaining}/${rateLimitState.limit}). No reset time known, waiting ${CRITICAL_FALLBACK_MS / 1000}s...`);
+      sleepSync(CRITICAL_FALLBACK_MS);
     }
   } else if (delayMs > 0) {
     sleepSync(delayMs);
@@ -167,7 +188,10 @@ export function ghExec(
 
   // ── Periodic logging ────────────────────────────────────────────────────
   if (callCount % LOG_INTERVAL === 0) {
-    log.rate(`${rateLimitState.remaining}/${rateLimitState.limit} remaining (${Math.round(ratio * 100)}%)`);
+    const currentRatio = rateLimitState.limit > 0
+      ? rateLimitState.remaining / rateLimitState.limit
+      : 1;
+    log.rate(`${rateLimitState.remaining}/${rateLimitState.limit} remaining (${Math.round(currentRatio * 100)}%)`);
   }
 
   return result;
