@@ -1,0 +1,37 @@
+{
+  "name": "session/core-pipeline-quality",
+  "branch": "session/core-pipeline-quality",
+  "completed": "2026-04-05T02:37:05.418Z",
+  "results": [
+    {
+      "issueNum": 129,
+      "title": "feat: Pre-session validation step — validate all queued issues before execution",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/140",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 250,
+      "filesChanged": 6
+    },
+    {
+      "issueNum": 134,
+      "title": "Review prompts: Add dependency-chain tracing and wiring detection",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/140",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 250,
+      "filesChanged": 6
+    },
+    {
+      "issueNum": 138,
+      "title": "Learning files are bloated raw agent output — should be concise summaries with trace pointers",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/140",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 250,
+      "filesChanged": 6
+    }
+  ]
+}

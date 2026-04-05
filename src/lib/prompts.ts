@@ -170,11 +170,20 @@ Each file must contain ONLY valid JSON with this exact schema:
     "needed": false,
     "instructions": "If needed: specific steps to verify the feature.",
     "reason": "Why verification is or isn't needed"
-  }
+  },
+  "dependency_chain": [
+    {
+      "what": "service or module this feature depends on",
+      "where_created": "file:line where it's instantiated",
+      "where_consumed": "file:line where this feature uses it",
+      "verified": true
+    }
+  ]
 }
 
 ## Rules
 - Consider dependencies BETWEEN issues — if issue A creates something issue B uses, note that in the plan.
+- For each dependency your plan references, grep the codebase to verify it exists and note where it is instantiated. Set verified=true only if you confirmed the dependency exists.
 - testing.needed: true if ANY code changes could affect behavior. false only for docs, config, or comments.
 - verification.needed: true ONLY if the issue changes user-visible UI that can be tested in a browser.
 - implementation: be concise and actionable. List files to modify and what to change in each.
@@ -302,7 +311,7 @@ export function buildBatchReviewPrompt(options: BatchReviewPromptOptions): strin
     '- For new data consumers: trace data back to its source — if a script reads from a table, verify something writes to it.',
     '- For metrics: are values real or estimated/hardcoded?',
     '',
-    '### 4. End-to-End Flow Verification (batch only)',
+    '### 4. End-to-End Flow Verification (REQUIRED)',
     '- Pick the MOST critical data flow touched by this batch and trace it:',
     '  1. Where is data created? (tool execution, API call, user action)',
     '  2. Where is it persisted? (repo.save(), DB write)',
@@ -515,10 +524,18 @@ export function buildSessionReviewPrompt(options: SessionReviewPromptOptions): s
     '- Missing error handling at integration boundaries',
   ];
 
+  sections.push(
+    '',
+    '### 5. Boot Test (REQUIRED before gate result)',
+    '- Run the application\'s entry point and verify it starts without import errors.',
+    '- If a smoke_test command is configured in .alpha-loop.yaml, run it and report results.',
+    '- If the entry point fails to start (import errors, missing modules, syntax errors), that is a CRITICAL finding.',
+  );
+
   if (includeSecurityScan) {
     sections.push(
       '',
-      '### 5. Security Scan',
+      '### 6. Security Scan',
       '- Command injection (unquoted shell interpolation, unsanitized user input in exec)',
       '- Path traversal (unchecked relative paths, missing boundary validation)',
       '- Unsafe file operations (writing to user-controlled paths without validation)',

@@ -1,4 +1,4 @@
-import { extractLearnings, getLearningContext, countLearnings } from '../../src/lib/learning';
+import { extractLearnings, getLearningContext, countLearnings, parseLearningOutput } from '../../src/lib/learning';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
@@ -115,10 +115,10 @@ describe('extractLearnings', () => {
     expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
 
-  test('calls spawnAgent with learn prompt and saves output', async () => {
+  test('calls spawnAgent with learn prompt and saves parsed output', async () => {
     mockSpawnAgent.mockResolvedValue({
       exitCode: 0,
-      output: '---\nissue: 42\nstatus: success\n---\n## What Worked\n- Everything',
+      output: '---\nissue: 42\nstatus: success\n---\n## What Worked\n- Everything\n\n## What Failed\n- Nothing',
       duration: 5000,
     });
 
@@ -130,7 +130,7 @@ describe('extractLearnings', () => {
     }));
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       expect.stringContaining('issue-42-'),
-      expect.stringContaining('---'),
+      expect.stringContaining('## What Worked'),
     );
   });
 
@@ -149,6 +149,45 @@ describe('extractLearnings', () => {
     );
   });
 
+  test('saves raw output to session traces directory when sessionLogsDir provided', async () => {
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: '---\nissue: 42\nstatus: success\n---\n## What Worked\n- Everything',
+      duration: 5000,
+    });
+
+    await extractLearnings({
+      ...baseOptions,
+      config: makeConfig(),
+      sessionLogsDir: '/fake/session/logs',
+    });
+
+    // Should write both raw and parsed files
+    expect(mockWriteFileSync).toHaveBeenCalledTimes(2);
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('issue-42-raw.md'),
+      expect.any(String),
+    );
+  });
+
+  test('adds trace pointers when sessionName provided', async () => {
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: '---\nissue: 42\nstatus: success\n---\n## What Worked\n- Everything',
+      duration: 5000,
+    });
+
+    await extractLearnings({
+      ...baseOptions,
+      config: makeConfig(),
+      sessionName: 'test-session',
+    });
+
+    const writtenContent = mockWriteFileSync.mock.calls[0][1] as string;
+    expect(writtenContent).toContain('traces:');
+    expect(writtenContent).toContain('.alpha-loop/sessions/test-session');
+  });
+
   test('handles agent failure gracefully', async () => {
     mockSpawnAgent.mockResolvedValue({
       exitCode: 1,
@@ -159,6 +198,72 @@ describe('extractLearnings', () => {
     await extractLearnings({ ...baseOptions, config: makeConfig() });
 
     expect(mockWriteFileSync).not.toHaveBeenCalled();
+  });
+});
+
+describe('parseLearningOutput', () => {
+  test('extracts expected sections from clean output', () => {
+    const raw = `---
+issue: 42
+status: success
+---
+## What Worked
+- Tests passed first try
+
+## What Failed
+- Nothing
+
+## Patterns
+- Good test coverage
+
+## Anti-Patterns
+- Skipping validation
+
+## Suggested Skill Updates
+- None`;
+
+    const { frontmatter, sections } = parseLearningOutput(raw);
+    expect(frontmatter).toContain('issue: 42');
+    expect(sections).toContain('## What Worked');
+    expect(sections).toContain('Tests passed first try');
+    expect(sections).toContain('## Anti-Patterns');
+  });
+
+  test('discards noise around expected sections', () => {
+    const raw = `Some random agent preamble and tool calls...
+
+---
+issue: 42
+status: success
+---
+
+A bunch of prompt echo text that should be discarded.
+
+## What Worked
+- Clean implementation
+
+## What Failed
+- Nothing
+
+Some trailing garbage text`;
+
+    const { sections } = parseLearningOutput(raw);
+    expect(sections).toContain('## What Worked');
+    expect(sections).toContain('Clean implementation');
+    expect(sections).not.toContain('random agent preamble');
+    expect(sections).not.toContain('prompt echo text');
+  });
+
+  test('returns null frontmatter when none present', () => {
+    const raw = '## What Worked\n- Good stuff';
+    const { frontmatter } = parseLearningOutput(raw);
+    expect(frontmatter).toBeNull();
+  });
+
+  test('handles output with no expected sections', () => {
+    const raw = 'Just some random text with no sections';
+    const { sections } = parseLearningOutput(raw);
+    expect(sections).toBe('');
   });
 });
 

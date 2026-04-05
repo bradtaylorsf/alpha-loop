@@ -1,5 +1,9 @@
 <!-- managed by alpha-loop -->
-Here's the project instructions file:
+Now I have a clear picture of what's changed. Key differences from the existing instructions:
+
+1. **New commands**: `eval`, `evolve`, `plan`, `roadmap`, `triage`, `sync` (some already listed, some not)
+2. **New lib files**: `eval-checks.ts`, `eval-fixtures.ts`, `eval-runner.ts`, `eval-skill-bridge.ts`, `eval-swebench.ts`, `eval.ts`, `planning.ts`, `score.ts`, `templates.ts`, `traces.ts`, `verify.ts`
+3. Commands list in instructions is missing `eval`, `evolve`, `plan`, `roadmap`, `triage`
 
 <!-- managed by alpha-loop -->
 # Alpha Loop
@@ -16,9 +20,15 @@ Agent-agnostic automated development loop that orchestrates AI coding agents thr
 
 ## Directory Structure
 - `src/cli.ts` — CLI entry point, Commander program definition
-- `src/commands/` — Subcommand handlers (run, init, scan, vision, review, resume, history, auth, sync)
+- `src/commands/` — Subcommand handlers: run, init, scan, plan, triage, roadmap, review, evolve, eval, resume, history, auth, sync, vision
 - `src/engine/` — Multi-agent engine: agent CLI mapping (`agents.ts`) and system prerequisite checks
-- `src/lib/` — Core libraries: pipeline orchestration, GitHub API via `gh` CLI, git worktree management, agent runner abstraction, config loading, prompt generation, session/learning tracking
+- `src/lib/` — Core libraries:
+  - Pipeline orchestration (`pipeline.ts`), GitHub API via `gh` CLI (`github.ts`), git worktree management (`worktree.ts`)
+  - Agent runner abstraction (`agent.ts`), config loading (`config.ts`), prompt generation (`prompts.ts`)
+  - Session/learning tracking (`session.ts`, `learning.ts`), structured logging (`logger.ts`)
+  - Planning and scoring (`planning.ts`, `score.ts`, `verify.ts`)
+  - Eval system (`eval.ts`, `eval-runner.ts`, `eval-checks.ts`, `eval-fixtures.ts`, `eval-skill-bridge.ts`, `eval-swebench.ts`)
+  - Template management (`templates.ts`), execution traces (`traces.ts`)
 - `tests/` — Jest test suite mirroring `src/` structure
 - `templates/` — **Distribution templates** shipped to users via `alpha-loop init`
 - `.alpha-loop/templates/` — **This repo's own** skill and agent definitions for self-development

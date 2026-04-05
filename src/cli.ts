@@ -33,6 +33,8 @@ program
   .option('--once', 'Process one issue and exit')
   .option('--batch', 'Batch mode: process multiple issues per agent call (faster, fewer tokens)')
   .option('--batch-size <n>', 'Issues per batch (default: 5)', parseInt)
+  .option('--validate', 'Run pre-session validation on all queued issues before processing')
+  .option('--fix', 'Auto-fix validation issues (reorder deps, comment on incomplete issues)')
   .option('--verbose', 'Stream live agent output to terminal')
   .action(async (options) => {
     const { runCommand } = await import('./commands/run.js');
