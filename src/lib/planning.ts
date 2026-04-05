@@ -415,3 +415,17 @@ export function savePlanDraft(draft: PlanDraft, projectDir: string): void {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'plan.json'), JSON.stringify(draft, null, 2), 'utf-8');
 }
+
+/**
+ * Load a previously saved plan draft from .alpha-loop/plan.json.
+ * Returns null if the file does not exist or cannot be parsed.
+ */
+export function loadPlanDraft(projectDir: string): PlanDraft | null {
+  const draftPath = join(projectDir, '.alpha-loop', 'plan.json');
+  try {
+    const content = readFileSync(draftPath, 'utf-8');
+    return JSON.parse(content) as PlanDraft;
+  } catch {
+    return null;
+  }
+}

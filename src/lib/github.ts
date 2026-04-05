@@ -456,12 +456,12 @@ export function updateProjectStatus(
  * Create a new issue. Returns the created issue number.
  * Uses --body-file for shell safety (same pattern as commentIssue).
  */
-export function createIssue(repo: string, title: string, body: string, labels: string[], milestone?: number): number {
+export function createIssue(repo: string, title: string, body: string, labels: string[], milestone?: string): number {
   const bodyFile = join(tmpdir(), `alpha-loop-issue-body-${Date.now()}`);
   writeFileSync(bodyFile, body, 'utf-8');
   try {
     const labelFlags = labels.map((l) => `--label ${JSON.stringify(l)}`).join(' ');
-    const milestoneFlag = milestone ? ` --milestone ${milestone}` : '';
+    const milestoneFlag = milestone ? ` --milestone ${JSON.stringify(milestone)}` : '';
     const result = ghExec(
       `gh issue create --repo "${repo}" --title ${JSON.stringify(title)} --body-file "${bodyFile}" ${labelFlags}${milestoneFlag}`,
       undefined, true,
@@ -517,6 +517,42 @@ export function closeIssue(repo: string, issueNum: number, reason?: 'completed' 
   if (result.exitCode !== 0) {
     log.warn(`Failed to close issue #${issueNum}: ${result.stderr}`);
   }
+}
+
+/**
+ * List all labels for a repository.
+ */
+export function listLabels(repo: string): string[] {
+  const result = ghExec(
+    `gh label list --repo "${repo}" --json name --limit 200`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to list labels: ${result.stderr}`);
+    return [];
+  }
+  try {
+    const raw = JSON.parse(result.stdout) as Array<{ name: string }>;
+    return raw.map((l) => l.name);
+  } catch {
+    log.warn('Failed to parse labels JSON');
+    return [];
+  }
+}
+
+/**
+ * Create a label on a repository. Returns true on success.
+ */
+export function createLabel(repo: string, name: string, color?: string): boolean {
+  const colorFlag = color ? ` --color "${color}"` : '';
+  const result = ghExec(
+    `gh label create ${JSON.stringify(name)} --repo "${repo}"${colorFlag} --force`,
+    undefined, true,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to create label "${name}": ${result.stderr}`);
+    return false;
+  }
+  return true;
 }
 
 /**
