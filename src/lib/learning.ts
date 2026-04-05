@@ -21,11 +21,66 @@ export type ExtractLearningsOptions = {
   verifyOutput: string;
   body: string;
   config: Config;
+  sessionLogsDir?: string;
+  sessionName?: string;
 };
+
+/** Expected sections in learning output. */
+const LEARNING_SECTIONS = [
+  '## What Worked',
+  '## What Failed',
+  '## Patterns',
+  '## Anti-Patterns',
+  '## Suggested Skill Updates',
+];
+
+/**
+ * Parse raw agent output and extract only the expected learning sections.
+ * Discards prompt echoes, session logs, tool calls, and other noise.
+ */
+export function parseLearningOutput(raw: string): { frontmatter: string | null; sections: string } {
+  // Extract frontmatter if present
+  let frontmatter: string | null = null;
+  const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+  if (fmMatch) {
+    frontmatter = fmMatch[1];
+  }
+
+  // Extract each expected section
+  const extracted: string[] = [];
+  for (const header of LEARNING_SECTIONS) {
+    const pattern = new RegExp(`${header.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n([\\s\\S]*?)(?=\\n## |$)`);
+    const match = raw.match(pattern);
+    if (match) {
+      const content = match[1].trim();
+      if (content) {
+        extracted.push(`${header}\n${content}`);
+      }
+    }
+  }
+
+  return { frontmatter, sections: extracted.join('\n\n') };
+}
+
+/**
+ * Build trace pointers for a learning file's frontmatter.
+ */
+function buildTracePointers(sessionName: string, issueNum: number): string {
+  const base = `.alpha-loop/sessions/${sessionName}`;
+  return [
+    'traces:',
+    `  plan: ${base}/traces/prompts/plan-issue-${issueNum}.md`,
+    `  implement: ${base}/logs/issue-${issueNum}-implement.log`,
+    `  review: ${base}/traces/outputs/review-issue-${issueNum}.log`,
+    `  diff: ${base}/diffs/issue-${issueNum}.diff`,
+  ].join('\n');
+}
 
 /**
  * Extract learnings from a completed run.
- * Invokes an agent with the learn prompt and saves the output.
+ * Invokes an agent with the learn prompt, parses the output to extract
+ * only expected sections, and saves a concise learning file with trace pointers.
+ * Raw agent output is saved separately to the traces directory.
  */
 export async function extractLearnings(options: ExtractLearningsOptions): Promise<void> {
   const { config } = options;
@@ -74,25 +129,43 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
     return;
   }
 
-  const output = result.output.trim();
+  const rawOutput = result.output.trim();
 
-  // Validate output has frontmatter, wrap if not
-  if (output.startsWith('---')) {
-    writeFileSync(learningFile, output + '\n');
-    log.success(`Learning saved to ${learningFile}`);
-  } else {
-    const today = new Date().toISOString().split('T')[0];
-    const wrapped = `---
-issue: ${options.issueNum}
-status: ${options.status}
-retries: ${options.retries}
-duration: ${options.duration}
-date: ${today}
----
-${output}`;
-    writeFileSync(learningFile, wrapped + '\n');
-    log.success(`Learning saved to ${learningFile} (added frontmatter)`);
+  // Save raw agent output to traces directory if session info is available
+  if (options.sessionLogsDir) {
+    const rawDir = join(options.sessionLogsDir, 'learnings');
+    mkdirSync(rawDir, { recursive: true });
+    writeFileSync(join(rawDir, `issue-${options.issueNum}-raw.md`), rawOutput + '\n');
+    log.info(`Raw learning output saved to traces`);
   }
+
+  // Parse the output to extract only expected sections
+  const { frontmatter: parsedFm, sections } = parseLearningOutput(rawOutput);
+  const today = new Date().toISOString().split('T')[0];
+
+  // Build frontmatter with trace pointers
+  const fmLines: string[] = [];
+  if (parsedFm) {
+    // Use parsed frontmatter but ensure key fields exist
+    fmLines.push(parsedFm);
+  } else {
+    fmLines.push(`issue: ${options.issueNum}`);
+    fmLines.push(`status: ${options.status}`);
+    fmLines.push(`retries: ${options.retries}`);
+    fmLines.push(`duration: ${options.duration}`);
+    fmLines.push(`date: ${today}`);
+  }
+
+  // Add trace pointers if session info available
+  if (options.sessionName) {
+    fmLines.push(buildTracePointers(options.sessionName, options.issueNum));
+  }
+
+  const conciseContent = sections || rawOutput;
+  const finalOutput = `---\n${fmLines.join('\n')}\n---\n\n${conciseContent}`;
+
+  writeFileSync(learningFile, finalOutput + '\n');
+  log.success(`Learning saved to ${learningFile}`);
 }
 
 /**
