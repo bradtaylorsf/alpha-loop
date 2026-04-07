@@ -16,7 +16,7 @@ function ask(rl: readline.Interface, question: string): Promise<string> {
 const USER_TYPES: Record<string, string> = {
   '1': 'Technical users (developers, engineers)',
   '2': 'Semi-technical (power users, admins)',
-  '3': 'Non-technical (general consumers, elderly, caregivers) \u2014 UI must be simple, accessible, and forgiving',
+  '3': 'Non-technical (general consumers) \u2014 UI must be simple, accessible, and forgiving',
   '4': 'Mixed audience \u2014 needs both simple and advanced interfaces',
 };
 
@@ -82,7 +82,7 @@ export async function visionCommand(): Promise<void> {
     console.log('\x1b[1mWho are the target users?\x1b[0m');
     console.log('  [1] Technical users (developers, engineers)');
     console.log('  [2] Semi-technical (power users, admins)');
-    console.log('  [3] Non-technical (general consumers, elderly, caregivers)');
+    console.log('  [3] Non-technical (general consumers)');
     console.log('  [4] Mixed audience');
     const userTypeChoice = await ask(rl, '> ');
     const userType = USER_TYPES[userTypeChoice] ?? userTypeChoice;
