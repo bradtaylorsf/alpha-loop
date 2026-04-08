@@ -26,6 +26,7 @@ export type CleanupWorktreeOptions = {
   issueNum: number;
   projectDir: string;
   autoCleanup?: boolean;
+  preserveIfCommits?: boolean;
   dryRun?: boolean;
 };
 
@@ -138,10 +139,30 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
 }
 
 /**
+ * Check if a worktree branch has commits ahead of its fork point.
+ * Uses git's merge-base to find where the branch diverged from any known remote branch.
+ * Returns the count of commits that would be lost if the worktree were removed.
+ */
+export function worktreeHasCommits(worktreePath: string): number {
+  if (!existsSync(worktreePath)) return 0;
+  // Find the fork point: where this branch diverged from its nearest remote ancestor
+  const forkPoint = exec('git merge-base --fork-point HEAD @{upstream} 2>/dev/null', { cwd: worktreePath });
+  const base = forkPoint.exitCode === 0 && forkPoint.stdout.trim()
+    ? forkPoint.stdout.trim()
+    // Fallback: find merge-base with origin/HEAD or origin/main
+    : exec('git merge-base HEAD origin/HEAD 2>/dev/null || git merge-base HEAD origin/main 2>/dev/null', { cwd: worktreePath }).stdout.trim();
+  if (!base) return 0;
+  const result = exec(`git rev-list --count "${base}..HEAD"`, { cwd: worktreePath });
+  return parseInt(result.stdout.trim(), 10) || 0;
+}
+
+/**
  * Remove a worktree. Keeps the branch (needed for PR).
+ * When preserveIfCommits is true and the worktree has commits, skip cleanup
+ * so the user can recover the work with `alpha-loop resume`.
  */
 export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<void> {
-  const { issueNum, projectDir, autoCleanup = true, dryRun } = options;
+  const { issueNum, projectDir, autoCleanup = true, preserveIfCommits = false, dryRun } = options;
   const worktreePath = resolve(projectDir, '.worktrees', `issue-${issueNum}`);
 
   if (!autoCleanup) {
@@ -152,6 +173,15 @@ export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<
   if (dryRun) {
     log.dry(`Would clean up worktree: ${worktreePath}`);
     return;
+  }
+
+  if (preserveIfCommits && existsSync(worktreePath)) {
+    const commitCount = worktreeHasCommits(worktreePath);
+    if (commitCount > 0) {
+      log.warn(`Preserving worktree with ${commitCount} commit(s) at: ${worktreePath}`);
+      log.warn('Recover with: alpha-loop resume');
+      return;
+    }
   }
 
   if (existsSync(worktreePath)) {

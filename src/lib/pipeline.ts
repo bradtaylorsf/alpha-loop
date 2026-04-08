@@ -476,16 +476,23 @@ Rules:
     stepCosts.push(buildStepCost('implement', issueNum, implResult, config));
 
     if (implResult.exitCode !== 0) {
+      // Auto-commit any uncommitted work before deciding on cleanup
+      const dirtyCheck = exec('git status --porcelain', { cwd: worktreePath });
+      if (dirtyCheck.stdout.trim()) {
+        exec('git add -A', { cwd: worktreePath });
+        exec(`git commit -m "wip: partial implementation of #${issueNum} (agent timed out or failed)"`, { cwd: worktreePath });
+      }
+
       if (isTransientError(implResult.output)) {
         log.warn(`Agent hit a transient error during implementation for #${issueNum} — re-queuing`);
         requeueIssue(config, issueNum);
-        await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+        await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
         return failureResult(issueNum, title, startTime, 'transient');
       }
       log.error(`Implementation failed for issue #${issueNum}`);
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, 'Agent loop failed during implementation. See logs for details.');
-      await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+      await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
       return failureResult(issueNum, title, startTime, 'permanent');
     }
 
@@ -1173,10 +1180,18 @@ export async function processBatch(
     stepCosts.push(buildStepCost('implement', issues[0].number, implResult, config));
 
     if (implResult.exitCode !== 0) {
+      // Auto-commit any uncommitted work before deciding on cleanup
+      const dirtyCheck = exec('git status --porcelain', { cwd: worktreePath });
+      if (dirtyCheck.stdout.trim()) {
+        exec('git add -A', { cwd: worktreePath });
+        const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
+        exec(`git commit -m "wip: partial batch implementation of ${issueRefs} (agent timed out or failed)"`, { cwd: worktreePath });
+      }
+
       if (isTransientError(implResult.output)) {
         log.warn('Agent hit a transient error during batch implementation — re-queuing');
         for (const issue of issues) requeueIssue(config, issue.number);
-        await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup });
+        await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
         return issues.map((i) => failureResult(i.number, i.title, startTime, 'transient'));
       }
       log.error('Batch implementation failed');
@@ -1184,7 +1199,7 @@ export async function processBatch(
         labelIssue(config.repo, issue.number, 'failed', 'in-progress');
         commentIssue(config.repo, issue.number, 'Agent loop failed during batch implementation. See logs.');
       }
-      await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup });
+      await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
       return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
     }
 
