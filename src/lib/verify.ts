@@ -119,16 +119,15 @@ export async function runVerify(options: {
 
   // Handle non-playwright verification methods
   const method = verifyMethod ?? 'playwright';
-  if (method === 'script' && verifyCommand) {
-    return runScriptVerify(verifyCommand, worktree);
-  }
-  if (method === 'boot' && verifyCommand) {
-    return runBootVerify(verifyCommand, worktree);
-  }
-  if (method === 'cli' && verifyCommand) {
-    return runScriptVerify(verifyCommand, worktree);
-  }
-  if (method === 'api' && verifyCommand) {
+  if (method !== 'playwright') {
+    if (!verifyCommand) {
+      log.warn(`Verification method "${method}" requires a command but none was provided — skipping`);
+      return { passed: true, skipped: true, output: `Verification skipped (${method} method has no command)` };
+    }
+    if (method === 'boot') {
+      return runBootVerify(verifyCommand, worktree);
+    }
+    // script, cli, and api all run as shell commands
     return runScriptVerify(verifyCommand, worktree);
   }
 

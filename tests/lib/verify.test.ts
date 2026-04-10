@@ -268,6 +268,24 @@ describe('runVerify', () => {
     expect(result.passed).toBe(false);
     expect(result.skipped).toBe(false);
   });
+
+  it('skips when non-playwright method has no command', async () => {
+    const result = await runVerify({
+      worktree: '/tmp/test',
+      logFile: '/tmp/test.log',
+      issueNum: 1,
+      title: 'test',
+      body: 'test body',
+      config: makeConfig(),
+      sessionDir: '/tmp/session',
+      verifyMethod: 'script',
+      // no verifyCommand provided
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(true);
+    expect(result.output).toContain('no command');
+  });
 });
 
 describe('runScriptVerify', () => {
