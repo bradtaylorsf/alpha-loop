@@ -506,6 +506,8 @@ export type SaveCapturedCaseOptions = {
   session: string;
   tags?: string[];
   projectDir?: string;
+  /** Source of capture: 'auto-captured' (default), 'quality-capture', etc. */
+  source?: string;
 };
 
 /**
@@ -544,6 +546,7 @@ export function saveCapturedCase(opts: SaveCapturedCaseOptions & { evalDir?: str
   const slug = slugify(opts.title);
   const caseDirName = `captured-${String(opts.issueNum).padStart(3, '0')}-${slug}`;
   const casePath = join(dir, 'cases', 'step', opts.step, caseDirName);
+  const source = opts.source ?? 'auto-captured';
 
   mkdirSync(casePath, { recursive: true });
 
@@ -552,7 +555,7 @@ export function saveCapturedCase(opts: SaveCapturedCaseOptions & { evalDir?: str
     id: caseDirName,
     description: opts.title,
     tags: opts.tags ?? [],
-    source: 'auto-captured',
+    source,
     captured_from: {
       issue: opts.issueNum,
       session: opts.session,
@@ -567,7 +570,7 @@ export function saveCapturedCase(opts: SaveCapturedCaseOptions & { evalDir?: str
     step: opts.step,
     eval_method: 'pending',
     status: 'needs-annotation',
-    source: 'auto-captured',
+    source,
     captured_from: {
       issue: opts.issueNum,
       session: opts.session,
@@ -644,6 +647,8 @@ export type CaseAnnotation = {
   whatWentWrong: string;
   whatShouldHaveHappened: string;
   tags?: string[];
+  /** LLM judge rubric for quality-capture cases. */
+  qualityRubric?: string;
 };
 
 /**
@@ -659,12 +664,23 @@ export function annotateCapturedCase(casePath: string, annotation: CaseAnnotatio
   const checksRaw = parseYaml(readFileSync(checksPath, 'utf-8')) as Record<string, unknown>;
 
   checksRaw.status = 'ready';
-  checksRaw.eval_method = 'annotated';
+  checksRaw.eval_method = annotation.qualityRubric ? 'llm-judge' : 'annotated';
   checksRaw.failure_description = annotation.whatWentWrong;
   checksRaw.expected_behavior = annotation.whatShouldHaveHappened;
 
-  // Add keyword checks based on the annotation
+  // Add checks based on the annotation
   const checks: Array<Record<string, unknown>> = [];
+
+  // If a quality rubric is provided, use LLM judge check
+  if (annotation.qualityRubric) {
+    checks.push({
+      type: 'llm_judge',
+      rubric: annotation.qualityRubric,
+      min_score: 4,
+    });
+  }
+
+  // Also add keyword checks
   if (annotation.whatShouldHaveHappened) {
     checks.push({
       type: 'keyword_present',
@@ -710,4 +726,25 @@ function extractKeywords(text: string): string[] {
     .map((w) => w.toLowerCase().replace(/[^a-z0-9_-]/g, ''))
     .filter((w) => w.length > 3 && !STOPWORDS.has(w))
     .slice(0, 5);
+}
+
+/**
+ * Build an LLM judge rubric from a quality failure description.
+ * Used by `eval capture --quality` to auto-generate rubrics for quality-capture cases.
+ */
+export function buildQualityRubric(whatWentWrong: string, whatShouldHaveHappened: string): string {
+  return `Score 1-5 based on whether the pipeline step catches this quality issue:
+
+## Quality Failure
+${whatWentWrong}
+
+## Expected Behavior
+${whatShouldHaveHappened}
+
+## Scoring
+5 = Explicitly identifies the quality issue and recommends the correct fix
+4 = Identifies the quality issue but fix recommendation is incomplete
+3 = Mentions related concerns but doesn't pinpoint the exact issue
+2 = Superficial review that misses the quality issue entirely
+1 = No relevant feedback about the quality issue`;
 }

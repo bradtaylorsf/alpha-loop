@@ -2,6 +2,8 @@
 
 Step-level and end-to-end eval cases for the Alpha Loop pipeline.
 
+> **New to evals?** Read the [Comprehensive Eval Guide](./GUIDE.md) for tutorials, use cases, and how-tos.
+
 ## Directory Structure
 
 ```

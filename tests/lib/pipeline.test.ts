@@ -151,6 +151,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipPostSessionSecurity: false,
     batch: false,
     batchSize: 5,
+    smokeTest: '',
     pricing: {
       'claude-opus-4-6': { input: 15.0, output: 75.0 },
       'claude-sonnet-4-6': { input: 3.0, output: 15.0 },

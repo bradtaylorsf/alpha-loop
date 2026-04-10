@@ -8,6 +8,7 @@ import {
   loadUnannotatedCases,
   annotateCapturedCase,
   loadEvalCases,
+  buildQualityRubric,
 } from '../src/lib/eval.js';
 import type { PipelineResult } from '../src/lib/pipeline.js';
 
@@ -375,5 +376,155 @@ describe('auto-capture integration', () => {
     expect(cases).toHaveLength(1);
     expect(cases[0].id).toContain('captured-058');
     expect(cases[0].step).toBe('verify');
+  });
+});
+
+describe('quality capture mode', () => {
+  describe('buildQualityRubric', () => {
+    it('generates a rubric from failure description', () => {
+      const rubric = buildQualityRubric(
+        'ArtifactRepo never injected into services',
+        'Review should flag missing DI wiring',
+      );
+
+      expect(rubric).toContain('Score 1-5');
+      expect(rubric).toContain('ArtifactRepo never injected');
+      expect(rubric).toContain('Review should flag missing DI wiring');
+      expect(rubric).toContain('5 =');
+      expect(rubric).toContain('1 =');
+    });
+  });
+
+  describe('saveCapturedCase with source', () => {
+    it('uses custom source when provided', () => {
+      const casePath = saveCapturedCase({
+        issueNum: 190,
+        title: 'Add artifact repository',
+        step: 'review',
+        session: 'layer-7-5-simulation-validation',
+        tags: ['quality-failure', 'wiring'],
+        source: 'quality-capture',
+        projectDir: tempDir,
+      });
+
+      const metadata = parseYaml(readFileSync(join(casePath, 'metadata.yaml'), 'utf-8')) as Record<string, unknown>;
+      expect(metadata.source).toBe('quality-capture');
+
+      const checks = parseYaml(readFileSync(join(casePath, 'checks.yaml'), 'utf-8')) as Record<string, unknown>;
+      expect(checks.source).toBe('quality-capture');
+    });
+
+    it('defaults source to auto-captured when not provided', () => {
+      const casePath = saveCapturedCase({
+        issueNum: 47,
+        title: 'Add health endpoint',
+        step: 'implement',
+        session: 'session/20260401-120000',
+        projectDir: tempDir,
+      });
+
+      const metadata = parseYaml(readFileSync(join(casePath, 'metadata.yaml'), 'utf-8')) as Record<string, unknown>;
+      expect(metadata.source).toBe('auto-captured');
+    });
+  });
+
+  describe('annotateCapturedCase with qualityRubric', () => {
+    it('uses llm-judge eval method when qualityRubric is provided', () => {
+      const casePath = saveCapturedCase({
+        issueNum: 190,
+        title: 'Add artifact repository',
+        step: 'review',
+        session: 'layer-7-5-simulation-validation',
+        source: 'quality-capture',
+        projectDir: tempDir,
+      });
+
+      const rubric = buildQualityRubric(
+        'ArtifactRepo never injected',
+        'Review should flag missing DI',
+      );
+
+      annotateCapturedCase(casePath, {
+        whatWentWrong: 'ArtifactRepo never injected',
+        whatShouldHaveHappened: 'Review should flag missing DI',
+        tags: ['quality-failure'],
+        qualityRubric: rubric,
+      });
+
+      const checks = parseYaml(readFileSync(join(casePath, 'checks.yaml'), 'utf-8')) as Record<string, unknown>;
+      expect(checks.status).toBe('ready');
+      expect(checks.eval_method).toBe('llm-judge');
+
+      const checksList = checks.checks as Array<Record<string, unknown>>;
+      expect(checksList.length).toBeGreaterThanOrEqual(1);
+
+      const llmJudge = checksList.find((c) => c.type === 'llm_judge');
+      expect(llmJudge).toBeDefined();
+      expect(llmJudge!.rubric).toContain('ArtifactRepo never injected');
+      expect(llmJudge!.min_score).toBe(4);
+    });
+
+    it('includes both llm_judge and keyword_present checks', () => {
+      const casePath = saveCapturedCase({
+        issueNum: 190,
+        title: 'Add artifact repository',
+        step: 'review',
+        session: 'session/test',
+        source: 'quality-capture',
+        projectDir: tempDir,
+      });
+
+      annotateCapturedCase(casePath, {
+        whatWentWrong: 'Service never wired',
+        whatShouldHaveHappened: 'Review should detect missing dependency injection wiring',
+        qualityRubric: buildQualityRubric('Service never wired', 'Review should detect missing dependency injection wiring'),
+      });
+
+      const checks = parseYaml(readFileSync(join(casePath, 'checks.yaml'), 'utf-8')) as Record<string, unknown>;
+      const checksList = checks.checks as Array<Record<string, unknown>>;
+
+      const types = checksList.map((c) => c.type);
+      expect(types).toContain('llm_judge');
+      expect(types).toContain('keyword_present');
+    });
+  });
+
+  describe('quality capture end-to-end', () => {
+    it('produces a runnable quality-capture case', () => {
+      const casePath = saveCapturedCase({
+        issueNum: 192,
+        title: 'Wire tool executor service',
+        step: 'review',
+        session: 'layer-7-5-simulation-validation',
+        tags: ['quality-failure', 'wiring'],
+        source: 'quality-capture',
+        projectDir: tempDir,
+      });
+
+      const rubric = buildQualityRubric(
+        'ToolExecutor created but never added to service container',
+        'Review should flag services created but not registered in bootstrap',
+      );
+
+      annotateCapturedCase(casePath, {
+        whatWentWrong: 'ToolExecutor created but never added to service container',
+        whatShouldHaveHappened: 'Review should flag services created but not registered in bootstrap',
+        tags: ['quality-failure', 'wiring'],
+        qualityRubric: rubric,
+      });
+
+      // Should appear in normal eval case loading
+      const cases = loadEvalCases({ projectDir: tempDir });
+      expect(cases).toHaveLength(1);
+      expect(cases[0].source).toBe('quality-capture');
+      expect(cases[0].tags).toContain('quality-failure');
+      expect(cases[0].step).toBe('review');
+      expect(cases[0].captureStatus).toBe('ready');
+
+      // Verify checks include LLM judge
+      expect(cases[0].checks).toBeDefined();
+      const llmCheck = cases[0].checks!.find((c) => c.type === 'llm_judge');
+      expect(llmCheck).toBeDefined();
+    });
   });
 });

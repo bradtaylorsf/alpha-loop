@@ -109,7 +109,7 @@ Without `--apply`, proposals are saved to `learnings/proposed-updates/` for revi
 
 ### Eval System (`alpha-loop eval`)
 
-Alpha Loop includes a self-improving eval system inspired by [Meta-Harness](https://arxiv.org/abs/2603.28052) (Lee et al., 2026). It captures real failures as eval cases and tracks composite scores over time to measure whether prompt/skill changes actually help.
+Alpha Loop includes a self-improving eval system inspired by [Meta-Harness](https://arxiv.org/abs/2603.28052) (Lee et al., 2026). It captures real failures as eval cases and tracks composite scores over time to measure whether prompt/skill changes actually help. See the [Comprehensive Eval Guide](.alpha-loop/evals/GUIDE.md) for tutorials, use cases, and how-tos.
 
 ```bash
 # Capture failures from recent sessions as eval cases

@@ -145,9 +145,11 @@ evalCmd
 evalCmd
   .command('capture [issue]')
   .description('Capture failures as eval cases (interactive)')
-  .action(async (issue) => {
+  .option('--quality', 'Capture quality failures from successful sessions (false positives)')
+  .option('--session <name>', 'Filter to a specific session')
+  .action(async (issue, options) => {
     const { evalCaptureCommand } = await import('./commands/eval.js');
-    await evalCaptureCommand({ issue });
+    await evalCaptureCommand({ issue, quality: options.quality, session: options.session });
   });
 
 evalCmd
