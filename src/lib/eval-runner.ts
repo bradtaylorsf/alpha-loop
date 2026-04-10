@@ -12,6 +12,7 @@ import { exec } from './shell.js';
 import { spawnAgent } from './agent.js';
 import { buildImplementPrompt, buildReviewPrompt, buildLearnPrompt } from './prompts.js';
 import { processIssue } from './pipeline.js';
+import { runScriptVerify } from './verify.js';
 import { runChecks } from './eval-checks.js';
 import { computeCompositeScore, appendScore, hashConfig } from './score.js';
 import {
@@ -36,6 +37,77 @@ import type { CaseResult, ScoreEntry } from './score.js';
 import type { SessionContext } from './session.js';
 import type { PipelineResult } from './pipeline.js';
 import type { AgentResult } from './agent.js';
+
+/** Map eval step names to agent template filenames (without .md extension). */
+const STEP_TO_AGENT_FILE: Record<string, string> = {
+  implement: 'implementer',
+  review: 'reviewer',
+  plan: 'planner',
+  learn: 'learner',
+  verify: 'verifier',
+  'test-fix': 'implementer',
+  skill: 'implementer',
+};
+
+/** Result of loading repo-specific prompt context. */
+export type RepoPromptContext = {
+  agentPrompt: string | null;
+  skillsContext: string | null;
+  usingRepoPrompts: boolean;
+};
+
+/**
+ * Load repo-specific agent prompts and skills for a given pipeline step.
+ * Checks .alpha-loop/templates/agents/{step}.md and parses skills from frontmatter.
+ */
+export function loadRepoPromptContext(
+  step: string,
+  projectDir: string,
+  config: Config,
+): RepoPromptContext {
+  if (!config.evalIncludeAgentPrompts && !config.evalIncludeSkills) {
+    return { agentPrompt: null, skillsContext: null, usingRepoPrompts: false };
+  }
+
+  let agentPrompt: string | null = null;
+  let skillsContext: string | null = null;
+  let usingRepoPrompts = false;
+
+  // Load agent prompt if enabled
+  if (config.evalIncludeAgentPrompts) {
+    const agentFileName = STEP_TO_AGENT_FILE[step] ?? step;
+    const agentFile = join(projectDir, '.alpha-loop', 'templates', 'agents', `${agentFileName}.md`);
+    if (existsSync(agentFile)) {
+      agentPrompt = readFileSync(agentFile, 'utf-8');
+      usingRepoPrompts = true;
+    }
+  }
+
+  // Load skills if enabled
+  if (config.evalIncludeSkills) {
+    const skillsDir = join(projectDir, '.alpha-loop', 'templates', 'skills');
+    if (existsSync(skillsDir)) {
+      const skillParts: string[] = [];
+      try {
+        const skillDirs = readdirSync(skillsDir, { withFileTypes: true })
+          .filter((d) => d.isDirectory());
+        for (const dir of skillDirs) {
+          const skillFile = join(skillsDir, dir.name, 'SKILL.md');
+          if (existsSync(skillFile)) {
+            const content = readFileSync(skillFile, 'utf-8');
+            skillParts.push(`## Skill: ${dir.name}\n${content}`);
+          }
+        }
+      } catch { /* non-fatal */ }
+      if (skillParts.length > 0) {
+        skillsContext = skillParts.join('\n\n');
+        usingRepoPrompts = true;
+      }
+    }
+  }
+
+  return { agentPrompt, skillsContext, usingRepoPrompts };
+}
 
 /** Options for running the eval suite. */
 export type EvalRunOptions = {
@@ -136,6 +208,9 @@ export async function runEvalSuite(
   // Accumulate real costs from agent token usage
   const totalCost = results.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
 
+  // Detect whether any case used repo-specific prompts
+  const usedRepoPrompts = results.some((r) => r.usingRepoPrompts);
+
   // Record to score history
   const configObj: Record<string, unknown> = {
     agent: config.agent,
@@ -145,6 +220,7 @@ export async function runEvalSuite(
     testCommand: config.testCommand,
     harnessHash,
     pipeline: config.pipeline,
+    usingRepoPrompts: usedRepoPrompts,
   };
 
   const entry: ScoreEntry = {
@@ -327,6 +403,22 @@ async function runStepEval(
     : { agent: config.agent as string, model: config.model };
   const resolvedAgent = resolved.agent as Config['agent'];
 
+  // Load repo-specific agent prompts and skills
+  const repoContext = loadRepoPromptContext(step, process.cwd(), config);
+
+  /** Augment a built prompt with repo-specific agent prompt and skills. */
+  const augmentPrompt = (builtPrompt: string): string => {
+    const parts: string[] = [];
+    if (repoContext.agentPrompt) {
+      parts.push(repoContext.agentPrompt, '\n---\n');
+    }
+    parts.push(builtPrompt);
+    if (repoContext.skillsContext) {
+      parts.push('\n---\n\n## Loaded Skills\n', repoContext.skillsContext);
+    }
+    return parts.join('\n');
+  };
+
   let output = '';
   // Accumulate cost/token data from agent invocations
   let caseCostUsd = 0;
@@ -343,10 +435,11 @@ async function runStepEval(
     // Run the targeted pipeline step
     switch (step) {
       case 'plan': {
+        const planPrompt = augmentPrompt(`Plan the implementation for the following issue:\n\n${input}`);
         const result = await spawnAgent({
           agent: resolvedAgent,
           model: resolved.model,
-          prompt: `Plan the implementation for the following issue:\n\n${input}`,
+          prompt: planPrompt,
           cwd: process.cwd(),
           timeout: (evalCase.timeout || 60) * 1000,
         });
@@ -355,11 +448,11 @@ async function runStepEval(
         break;
       }
       case 'implement': {
-        const prompt = buildImplementPrompt({
+        const prompt = augmentPrompt(buildImplementPrompt({
           issueNum: 0,
           title: evalCase.issueTitle,
           body: input,
-        });
+        }));
         const result = await spawnAgent({
           agent: resolvedAgent,
           model: resolved.model,
@@ -372,12 +465,12 @@ async function runStepEval(
         break;
       }
       case 'review': {
-        const prompt = buildReviewPrompt({
+        const prompt = augmentPrompt(buildReviewPrompt({
           issueNum: 0,
           title: evalCase.issueTitle,
           body: input,
           baseBranch: config.baseBranch,
-        });
+        }));
         const result = await spawnAgent({
           agent: resolvedAgent,
           model: resolved.model,
@@ -398,11 +491,49 @@ async function runStepEval(
         break;
       }
       case 'verify': {
-        output = 'Verify step eval not yet supported';
+        // Verify eval: check whether verification catches issues in the input.
+        // For script-type checks, run the command and capture output.
+        // For agent-based verification, spawn the agent with verify context.
+        if (evalCase.checks && evalCase.checks.length > 0) {
+          // Check if any checks define a script command to run
+          const scriptCheck = evalCase.checks.find((c) => c.type === 'script' as string);
+          if (scriptCheck && 'command' in scriptCheck) {
+            const verifyResult = runScriptVerify(
+              String((scriptCheck as Record<string, unknown>).command),
+              process.cwd(),
+              (evalCase.timeout || 60) * 1000,
+            );
+            output = verifyResult.output;
+          } else {
+            // Spawn an agent to do verification review of the input
+            const verifyPrompt = augmentPrompt(`You are verifying whether the following implementation has runtime issues.\nReview the code for wiring problems, missing dependencies, and broken integrations.\n\n${input}`);
+            const result = await spawnAgent({
+              agent: resolvedAgent,
+              model: resolved.model,
+              prompt: verifyPrompt,
+              cwd: process.cwd(),
+              timeout: (evalCase.timeout || 60) * 1000,
+            });
+            output = result.output;
+            trackCost(result);
+          }
+        } else {
+          // No checks defined — run agent-based verification
+          const verifyPrompt = augmentPrompt(`You are verifying whether the following implementation has runtime issues.\nReview the code for wiring problems, missing dependencies, and broken integrations.\n\n${input}`);
+          const result = await spawnAgent({
+            agent: resolvedAgent,
+            model: resolved.model,
+            prompt: verifyPrompt,
+            cwd: process.cwd(),
+            timeout: (evalCase.timeout || 60) * 1000,
+          });
+          output = result.output;
+          trackCost(result);
+        }
         break;
       }
       case 'learn': {
-        const prompt = buildLearnPrompt({
+        const prompt = augmentPrompt(buildLearnPrompt({
           issueNum: 0,
           title: evalCase.issueTitle || 'Eval learn case',
           status: 'failure',
@@ -413,7 +544,7 @@ async function runStepEval(
           reviewOutput: '',
           verifyOutput: '',
           body: input,
-        });
+        }));
         const result = await spawnAgent({
           agent: resolvedAgent,
           model: config.evalModel || resolved.model,
@@ -431,7 +562,7 @@ async function runStepEval(
         const result = await spawnAgent({
           agent: config.agent,
           model: config.evalModel || config.model,
-          prompt: input,
+          prompt: augmentPrompt(input),
           cwd: process.cwd(),
           timeout: (evalCase.timeout || 60) * 1000,
         });
@@ -441,7 +572,7 @@ async function runStepEval(
       }
       case 'test-fix': {
         // Test-fix evals: provide failing test output + code, ask agent to fix
-        const prompt = `The following test is failing. Diagnose the root cause and fix it.\n\n${input}`;
+        const prompt = augmentPrompt(`The following test is failing. Diagnose the root cause and fix it.\n\n${input}`);
         const result = await spawnAgent({
           agent: resolvedAgent,
           model: resolved.model,
@@ -477,6 +608,7 @@ async function runStepEval(
       costUsd: caseCostUsd || undefined,
       inputTokens: caseInputTokens || undefined,
       outputTokens: caseOutputTokens || undefined,
+      usingRepoPrompts: repoContext.usingRepoPrompts,
       details: {
         successMatch: true,
         filesMatch: true,
@@ -501,6 +633,7 @@ async function runStepEval(
     costUsd: caseCostUsd || undefined,
     inputTokens: caseInputTokens || undefined,
     outputTokens: caseOutputTokens || undefined,
+    usingRepoPrompts: repoContext.usingRepoPrompts,
     details: {
       successMatch: true,
       filesMatch: true,

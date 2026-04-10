@@ -81,10 +81,16 @@ export type Config = {
   batch: boolean;
   /** Number of issues per batch when batch mode is enabled (default: 5). */
   batchSize: number;
+  /** Shell command to run as a final smoke test after session review (default: ''). */
+  smokeTest: string;
   /** Per-model pricing table (cost per million tokens). */
   pricing: Record<string, ModelPricing>;
   /** Per-step agent/model overrides. */
   pipeline: PipelineConfig;
+  /** Include repo-specific agent prompts during eval runs (default: true). */
+  evalIncludeAgentPrompts: boolean;
+  /** Include repo-specific skills during eval runs (default: true). */
+  evalIncludeSkills: boolean;
 };
 
 const DEFAULTS: Config = {
@@ -128,6 +134,7 @@ const DEFAULTS: Config = {
   skipPostSessionSecurity: false,
   batch: false,
   batchSize: 5,
+  smokeTest: '',
   pricing: {
     'claude-opus-4-6': { input: 15.0, output: 75.0 },
     'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
@@ -139,6 +146,8 @@ const DEFAULTS: Config = {
     'gemini-2.5-flash': { input: 0.15, output: 0.60 },
   },
   pipeline: {},
+  evalIncludeAgentPrompts: true,
+  evalIncludeSkills: true,
 };
 
 /** Map from YAML key (snake_case) to Config key (camelCase). */
@@ -180,7 +189,10 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   auto_capture: 'autoCapture',
   batch: 'batch',
   batch_size: 'batchSize',
+  smoke_test: 'smokeTest',
   pipeline: 'pipeline',
+  eval_include_agent_prompts: 'evalIncludeAgentPrompts',
+  eval_include_skills: 'evalIncludeSkills',
 };
 
 /** Map from env var name to Config key. */
@@ -223,6 +235,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   SKIP_POST_SESSION_SECURITY: 'skipPostSessionSecurity',
   BATCH: 'batch',
   BATCH_SIZE: 'batchSize',
+  SMOKE_TEST: 'smokeTest',
 };
 
 function coerce(value: string, current: unknown): unknown {
@@ -299,6 +312,13 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     const ps = parsed.post_session as Record<string, unknown>;
     if (ps.review === false) result.skipPostSessionReview = true;
     if (ps.security_scan === false) result.skipPostSessionSecurity = true;
+  }
+
+  // Handle eval nested config (include_agent_prompts, include_skills)
+  if (parsed.eval && typeof parsed.eval === 'object') {
+    const ev = parsed.eval as Record<string, unknown>;
+    if (ev.include_agent_prompts === false) result.evalIncludeAgentPrompts = false;
+    if (ev.include_skills === false) result.evalIncludeSkills = false;
   }
 
   // Handle pricing table (nested object, not in YAML_KEY_MAP)

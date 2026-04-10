@@ -154,6 +154,10 @@ export type IssuePlan = {
     needed: boolean;
     instructions?: string;
     reason: string;
+    /** Verification method: playwright (default), cli, api, boot, or script. */
+    method?: 'playwright' | 'cli' | 'api' | 'boot' | 'script';
+    /** Shell command for script/cli/boot/api verification methods. */
+    command?: string;
   };
 };
 
@@ -199,6 +203,10 @@ function readPlan(planFile: string): IssuePlan {
     const raw = readFileSync(planFile, 'utf-8');
     const parsed = JSON.parse(raw) as Record<string, unknown>;
 
+    const verificationRaw = parsed.verification as any;
+    const validMethods = ['playwright', 'cli', 'api', 'boot', 'script'];
+    const verifyMethod = validMethods.includes(verificationRaw?.method) ? verificationRaw.method : undefined;
+
     return {
       summary: String(parsed.summary ?? ''),
       files: Array.isArray(parsed.files) ? parsed.files.map(String) : [],
@@ -208,9 +216,11 @@ function readPlan(planFile: string): IssuePlan {
         reason: String((parsed.testing as any)?.reason ?? 'No reason given'),
       },
       verification: {
-        needed: (parsed.verification as any)?.needed === true,
-        instructions: (parsed.verification as any)?.instructions || undefined,
-        reason: String((parsed.verification as any)?.reason ?? 'No reason given'),
+        needed: verificationRaw?.needed === true,
+        instructions: verificationRaw?.instructions || undefined,
+        reason: String(verificationRaw?.reason ?? 'No reason given'),
+        method: verifyMethod,
+        command: verificationRaw?.command ? String(verificationRaw.command) : undefined,
       },
     };
   } catch {
@@ -378,15 +388,19 @@ The file must contain ONLY valid JSON with this exact schema:
   },
   "verification": {
     "needed": false,
-    "instructions": "If needed: specific playwright-cli steps to verify the feature. If not needed: omit this field.",
-    "reason": "Why verification is or isn't needed (e.g. no UI changes, API-only, config change)"
+    "method": "playwright",
+    "command": "optional shell command for script/cli/boot/api methods",
+    "instructions": "If needed: specific steps to verify the feature. If not needed: omit this field.",
+    "reason": "Why verification is or isn't needed"
   }
 }
 
 Rules:
 - testing.needed: true if ANY code changes could affect behavior. false only for docs, config, or comments.
-- verification.needed: true ONLY if the issue changes user-visible UI that can be tested in a browser.
-- verification.instructions: if needed, list the exact playwright-cli commands to verify (open URL, click elements, check content).
+- verification.needed: true if the issue changes behavior that can be validated at runtime.
+- verification.method: "playwright" for UI changes, "script" for validation scripts, "boot" for service startup checks, "cli" for CLI testing, "api" for API endpoint testing.
+- verification.command: required for script/cli/boot/api methods — the shell command to run. Exit code 0 = pass.
+- verification.instructions: for playwright method, list the exact playwright-cli commands to verify.
 - implementation: be concise and actionable. List files to modify and what to change in each.
 - Write ONLY the JSON file. Do not create any other files or make any code changes.`;
 
@@ -727,6 +741,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         config,
         sessionDir: session.resultsDir,
         verifyInstructions: plan.verification.instructions,
+        verifyMethod: plan.verification.method,
+        verifyCommand: plan.verification.command,
       });
       verifyOutput = verifyResult.output;
 
@@ -807,6 +823,17 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     log.dry('Would run live verification');
     verifyPassing = true;
     verifySkipped = true;
+  }
+
+  // --- Step 7b: Smoke test (if configured) ---
+  if (config.smokeTest && !config.dryRun) {
+    log.step('Step 7b: Running smoke test');
+    const smokeResult = exec(config.smokeTest, { cwd: worktreePath, timeout: 60_000 });
+    if (smokeResult.exitCode === 0) {
+      log.success('Smoke test passed');
+    } else {
+      log.warn(`Smoke test failed (exit ${smokeResult.exitCode}): ${smokeResult.stderr || smokeResult.stdout}`);
+    }
   }
 
   // --- Step 8: Create PR ---

@@ -19,6 +19,9 @@ export type VerifyResult = {
   output: string;
 };
 
+/** Verification method — how to validate the implementation. */
+export type VerifyMethod = 'playwright' | 'cli' | 'api' | 'boot' | 'script';
+
 /** File extensions that never need UI verification. */
 const NON_UI_EXTENSIONS = new Set([
   '.md', '.yaml', '.yml', '.json', '.toml', '.cfg', '.ini', '.env',
@@ -49,6 +52,42 @@ export function isNonUiChange(diffStat: string): boolean {
 }
 
 /**
+ * Run a script-based verification — executes a shell command and checks the exit code.
+ * Useful for CLI verification, boot tests, and custom validation scripts.
+ */
+export function runScriptVerify(command: string, cwd: string, timeout = 60_000): VerifyResult {
+  log.info(`Running script verification: ${command}`);
+  const result = exec(command, { cwd, timeout });
+
+  if (result.exitCode === 0) {
+    log.success('Script verification PASSED');
+    return { passed: true, skipped: false, output: result.stdout + '\n' + result.stderr };
+  } else {
+    log.error('Script verification FAILED');
+    return { passed: false, skipped: false, output: result.stdout + '\n' + result.stderr };
+  }
+}
+
+/**
+ * Run a boot verification — tries to import/run the app entry point and checks for crashes.
+ * Useful for verifying that service containers resolve all dependencies.
+ */
+export function runBootVerify(entryPoint: string, cwd: string, timeout = 30_000): VerifyResult {
+  log.info(`Running boot verification: ${entryPoint}`);
+  // Use node to import the entry point and check for initialization errors
+  const command = `node -e "import('${entryPoint.replace(/'/g, "\\'")}')"`;
+  const result = exec(command, { cwd, timeout });
+
+  if (result.exitCode === 0) {
+    log.success('Boot verification PASSED');
+    return { passed: true, skipped: false, output: result.stdout + '\n' + result.stderr };
+  } else {
+    log.error('Boot verification FAILED');
+    return { passed: false, skipped: false, output: result.stdout + '\n' + result.stderr };
+  }
+}
+
+/**
  * Run live verification using playwright-cli.
  * The agent starts the dev server, tests the app, and reports results.
  */
@@ -61,8 +100,12 @@ export async function runVerify(options: {
   config: Config;
   sessionDir: string;
   verifyInstructions?: string;
+  /** Verification method. Defaults to 'playwright' for UI changes. */
+  verifyMethod?: VerifyMethod;
+  /** Shell command for 'script' method verification. */
+  verifyCommand?: string;
 }): Promise<VerifyResult> {
-  const { worktree, logFile, issueNum, title, body, config, sessionDir, verifyInstructions } = options;
+  const { worktree, logFile, issueNum, title, body, config, sessionDir, verifyInstructions, verifyMethod, verifyCommand } = options;
 
   if (config.skipVerify) {
     log.info('Verification skipped (skipVerify=true)');
@@ -74,6 +117,21 @@ export async function runVerify(options: {
     return { passed: true, skipped: true, output: 'Verification skipped (dry run)' };
   }
 
+  // Handle non-playwright verification methods
+  const method = verifyMethod ?? 'playwright';
+  if (method !== 'playwright') {
+    if (!verifyCommand) {
+      log.warn(`Verification method "${method}" requires a command but none was provided — skipping`);
+      return { passed: true, skipped: true, output: `Verification skipped (${method} method has no command)` };
+    }
+    if (method === 'boot') {
+      return runBootVerify(verifyCommand, worktree);
+    }
+    // script, cli, and api all run as shell commands
+    return runScriptVerify(verifyCommand, worktree);
+  }
+
+  // Playwright path — check prerequisites
   // Check if playwright-cli is available
   const whichResult = exec('which playwright-cli');
   if (whichResult.exitCode !== 0) {

@@ -1,0 +1,10 @@
+- type: llm_judge
+  prompt: |
+    The diff creates ArtifactRepository and adds it as an optional parameter to
+    BuildService. But in bootstrap.ts, artifactRepo is created and NEVER passed
+    to BuildService. The None guard (if this.artifactRepo) silently hides the
+    missing injection. The review MUST flag this as a critical wiring issue.
+  rubric: |
+    Score 1.0 if the review identifies that artifactRepo is not passed to BuildService in bootstrap.
+    Score 0.5 if the review mentions missing dependency injection but doesn't identify the specific location.
+    Score 0.0 if the review misses the wiring issue entirely.

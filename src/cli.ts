@@ -145,9 +145,11 @@ evalCmd
 evalCmd
   .command('capture [issue]')
   .description('Capture failures as eval cases (interactive)')
-  .action(async (issue) => {
+  .option('--quality', 'Capture quality failures from successful sessions (false positives)')
+  .option('--session <name>', 'Filter to a specific session')
+  .action(async (issue, options) => {
     const { evalCaptureCommand } = await import('./commands/eval.js');
-    await evalCaptureCommand({ issue });
+    await evalCaptureCommand({ issue, quality: options.quality, session: options.session });
   });
 
 evalCmd
@@ -226,6 +228,17 @@ evalCmd
   .action(async (options) => {
     const { evalImportSwebenchCommand } = await import('./commands/eval.js');
     await evalImportSwebenchCommand(options);
+  });
+
+evalCmd
+  .command('export <case>')
+  .description('Export an eval case for contributing back to alpha-loop')
+  .option('--no-anonymize', 'Skip anonymization of project-specific details')
+  .option('--output <dir>', 'Output directory (default: .alpha-loop-contrib/)')
+  .option('--pr', 'Show instructions for submitting a PR')
+  .action(async (caseId: string, options: { anonymize?: boolean; output?: string; pr?: boolean }) => {
+    const { evalExportCommand } = await import('./commands/eval.js');
+    evalExportCommand(caseId, options);
   });
 
 evalCmd

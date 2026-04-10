@@ -121,6 +121,25 @@ function copyDir(src: string, dest: string): void {
   exec(`cp -R "${src}/"* "${dest}/" 2>/dev/null || true`);
 }
 
+/** Recursively walk a source directory and call visitor(srcFile, destFile) for each file. */
+function seedDirRecursive(
+  srcDir: string,
+  destDir: string,
+  visitor: (src: string, dest: string) => void,
+): void {
+  if (!existsSync(srcDir)) return;
+  const entries = readdirSync(srcDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = join(srcDir, entry.name);
+    const destPath = join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      seedDirRecursive(srcPath, destPath, visitor);
+    } else if (entry.isFile()) {
+      visitor(srcPath, destPath);
+    }
+  }
+}
+
 const GITIGNORE_ENTRIES = [
   '# Alpha-loop ephemeral data (not shared)',
   '.alpha-loop/sessions/',
@@ -391,6 +410,22 @@ export async function initCommand(): Promise<void> {
       }
       if (installed > 0) {
         log.success(`Seeded ${installed} agent(s) to .alpha-loop/templates/agents/`);
+      }
+    }
+    // Seed distribution eval cases
+    const distEvals = join(distTemplatesDir, 'evals', 'cases');
+    const projectEvalsDir = join(projectDir, '.alpha-loop', 'evals', 'cases');
+    if (existsSync(distEvals)) {
+      let seededEvals = 0;
+      seedDirRecursive(distEvals, projectEvalsDir, (src, dest) => {
+        if (!existsSync(dest)) {
+          mkdirSync(join(dest, '..'), { recursive: true });
+          copyFileSync(src, dest);
+          seededEvals++;
+        }
+      });
+      if (seededEvals > 0) {
+        log.success(`Seeded ${seededEvals} eval file(s) to .alpha-loop/evals/cases/`);
       }
     }
   } else {

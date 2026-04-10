@@ -1,0 +1,10 @@
+id: 008-route-shadowing
+description: Review should flag static routes registered after parameterized routes causing shadowing
+type: step
+step: review
+tags:
+  - wiring
+  - routing
+  - quality-failure
+source: distribution
+timeout: 60
