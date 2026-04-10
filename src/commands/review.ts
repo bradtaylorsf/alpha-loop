@@ -11,7 +11,7 @@ import { formatTimestamp } from '../lib/shell.js';
 import { spawnAgent } from '../lib/agent.js';
 import { createPR } from '../lib/github.js';
 import { syncAgentAssets } from './sync.js';
-import { findDistributionTemplatesDir, diffSkills } from '../lib/templates.js';
+import { findDistributionTemplatesDir, diffSkills, diffAgents } from '../lib/templates.js';
 
 export type ReviewOptions = {
   apply?: boolean;
@@ -636,6 +636,42 @@ export async function reviewCommand(options: ReviewOptions): Promise<void> {
           mkdirSync(destDir, { recursive: true });
           writeFileSync(join(destDir, 'SKILL.md'), u.distContent);
           log.success(`Upgraded skill: ${u.name}`);
+        }
+      } else {
+        log.info('  Run with --apply to install these upgrades.');
+      }
+    }
+
+    // --- Check for agent prompt upgrades from distribution templates ---
+    const distAgentsDir = join(distTemplatesDir, 'agents');
+    const projectAgentsDir = join(projectDir, '.alpha-loop', 'templates', 'agents');
+    const agentUpgrades = diffAgents(distAgentsDir, projectAgentsDir);
+
+    if (agentUpgrades.length > 0) {
+      log.info('');
+      log.step(`Agent prompt upgrades available (${agentUpgrades.length}):`);
+      for (const u of agentUpgrades) {
+        log.info(`  ${u.status === 'new' ? '[NEW]' : '[UPDATE]'} ${u.name}`);
+        if (u.status === 'updated' && u.projectContent) {
+          // Show a simple summary of what changed
+          const distLines = u.distContent.split('\n').length;
+          const projLines = u.projectContent.split('\n').length;
+          log.info(`    dist: ${distLines} lines, project: ${projLines} lines`);
+        }
+      }
+
+      if (options.apply) {
+        mkdirSync(projectAgentsDir, { recursive: true });
+        for (const u of agentUpgrades) {
+          const destFile = join(projectAgentsDir, `${u.name}.md`);
+          if (u.status === 'new') {
+            writeFileSync(destFile, u.distContent);
+            log.success(`Installed agent prompt: ${u.name}`);
+          } else {
+            // Updated agents may have project customizations — save dist version as .dist for reference
+            writeFileSync(`${destFile}.dist`, u.distContent);
+            log.info(`Saved dist version: ${u.name}.md.dist (project copy preserved — review diff manually)`);
+          }
         }
       } else {
         log.info('  Run with --apply to install these upgrades.');

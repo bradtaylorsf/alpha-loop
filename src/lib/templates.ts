@@ -35,6 +35,13 @@ export type SkillDiff = {
   projectContent?: string;
 };
 
+export type AgentDiff = {
+  name: string;
+  status: 'new' | 'updated';
+  distContent: string;
+  projectContent?: string;
+};
+
 /**
  * Compare project skills against distribution templates.
  * Returns skills that are new or have changed content.
@@ -59,6 +66,36 @@ export function diffSkills(distSkillsDir: string, projectSkillsDir: string): Ski
       const projectContent = readFileSync(projectSkillFile, 'utf-8');
       if (projectContent !== distContent) {
         diffs.push({ name: entry.name, status: 'updated', distContent, projectContent });
+      }
+    }
+  }
+
+  return diffs;
+}
+
+/**
+ * Compare project agent prompts against distribution templates.
+ * Returns agents that are new or have changed content.
+ */
+export function diffAgents(distAgentsDir: string, projectAgentsDir: string): AgentDiff[] {
+  if (!existsSync(distAgentsDir)) return [];
+
+  const diffs: AgentDiff[] = [];
+  const distFiles = readdirSync(distAgentsDir, { withFileTypes: true })
+    .filter((d) => d.isFile() && d.name.endsWith('.md'));
+
+  for (const entry of distFiles) {
+    const distFile = join(distAgentsDir, entry.name);
+    const distContent = readFileSync(distFile, 'utf-8');
+    const name = entry.name.replace(/\.md$/, '');
+    const projectFile = join(projectAgentsDir, entry.name);
+
+    if (!existsSync(projectFile)) {
+      diffs.push({ name, status: 'new', distContent });
+    } else {
+      const projectContent = readFileSync(projectFile, 'utf-8');
+      if (projectContent !== distContent) {
+        diffs.push({ name, status: 'updated', distContent, projectContent });
       }
     }
   }
