@@ -208,6 +208,9 @@ export async function runEvalSuite(
   // Accumulate real costs from agent token usage
   const totalCost = results.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
 
+  // Detect whether any case used repo-specific prompts
+  const usedRepoPrompts = results.some((r) => r.usingRepoPrompts);
+
   // Record to score history
   const configObj: Record<string, unknown> = {
     agent: config.agent,
@@ -217,6 +220,7 @@ export async function runEvalSuite(
     testCommand: config.testCommand,
     harnessHash,
     pipeline: config.pipeline,
+    usingRepoPrompts: usedRepoPrompts,
   };
 
   const entry: ScoreEntry = {
