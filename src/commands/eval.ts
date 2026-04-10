@@ -48,6 +48,8 @@ import {
   hashConfig,
   deriveConfigLabel,
 } from '../lib/score.js';
+import { exportEvalCase } from '../lib/eval-export.js';
+import type { ExportOptions } from '../lib/eval-export.js';
 import type { ScoreEntry, ParetoEntry } from '../lib/score.js';
 import {
   listTraceSessions,
@@ -1281,4 +1283,47 @@ function loadYamlOverrides(path: string): Partial<Config> {
   }
 
   return result;
+}
+
+export type EvalExportOptions = {
+  anonymize?: boolean;
+  output?: string;
+  pr?: boolean;
+};
+
+/**
+ * Export an eval case for contributing back to alpha-loop.
+ * Creates a contribution-ready directory with anonymized case files
+ * and a PROMPT_CHANGES.md documenting local prompt modifications.
+ */
+export function evalExportCommand(caseId: string, options: EvalExportOptions): void {
+  const projectDir = process.cwd();
+
+  log.step(`Exporting eval case: ${caseId}`);
+
+  try {
+    const result = exportEvalCase(caseId, projectDir, {
+      anonymize: options.anonymize !== false,
+      outputDir: options.output,
+    });
+
+    log.success(`Exported to: ${result.outputDir}`);
+    if (result.anonymized) {
+      log.info('Project-specific details have been anonymized.');
+      log.info('Review the output before submitting.');
+    }
+    if (result.promptChangesPath) {
+      log.info(`Prompt changes documented: ${result.promptChangesPath}`);
+    }
+
+    if (options.pr) {
+      log.info('');
+      log.info('To submit a PR to alpha-loop:');
+      log.info('  1. Fork https://github.com/bradtaylorsf/alpha-loop');
+      log.info(`  2. Copy ${result.outputDir} to templates/evals/cases/ in your fork`);
+      log.info('  3. Open a PR with the eval case and any prompt improvements');
+    }
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+  }
 }

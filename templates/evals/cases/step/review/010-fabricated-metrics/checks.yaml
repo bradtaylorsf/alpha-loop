@@ -1,0 +1,12 @@
+- type: llm_judge
+  prompt: |
+    The diff estimates token counts from output string length (len/4) and
+    doubles it for input tokens. These are fabricated metrics displayed as
+    real data in the CostDashboard. The review MUST flag: (1) token counts
+    are estimated, not real API responses, (2) the cost calculation uses
+    stale hardcoded rates, and (3) the dashboard presents estimated data
+    as if it were actual usage metrics.
+  rubric: |
+    Score 1.0 if the review identifies that token counts are estimated (not from API responses) and flags this as misleading when displayed to users.
+    Score 0.5 if the review mentions estimation concerns but doesn't clearly flag it as fabricated metrics.
+    Score 0.0 if the review accepts the estimation approach without flagging data accuracy concerns.

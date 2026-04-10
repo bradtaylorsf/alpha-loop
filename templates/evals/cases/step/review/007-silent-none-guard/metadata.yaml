@@ -1,0 +1,10 @@
+id: 007-silent-none-guard
+description: Review should flag optional parameters with None guards that silently disable features
+type: step
+step: review
+tags:
+  - wiring
+  - none-guard
+  - quality-failure
+source: distribution
+timeout: 60

@@ -1,0 +1,10 @@
+id: 006-missing-di-injection
+description: Review should flag a service that is defined but never injected into its consumer
+type: step
+step: review
+tags:
+  - wiring
+  - di
+  - quality-failure
+source: distribution
+timeout: 60

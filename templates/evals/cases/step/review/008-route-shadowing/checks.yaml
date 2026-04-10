@@ -1,0 +1,11 @@
+- type: llm_judge
+  prompt: |
+    The diff registers /evals/compare and /evals/summary AFTER /evals/:id.
+    In Express (and most routers), the parameterized route /evals/:id will
+    match "compare" and "summary" as id values before the static routes
+    are reached. The review MUST flag that static routes need to be
+    registered BEFORE parameterized routes to avoid shadowing.
+  rubric: |
+    Score 1.0 if the review identifies route shadowing — that /evals/:id will catch /evals/compare and /evals/summary.
+    Score 0.5 if the review mentions route ordering concerns but doesn't identify the specific shadowing.
+    Score 0.0 if the review misses the route shadowing issue entirely.
