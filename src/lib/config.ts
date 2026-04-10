@@ -81,6 +81,8 @@ export type Config = {
   batch: boolean;
   /** Number of issues per batch when batch mode is enabled (default: 5). */
   batchSize: number;
+  /** Shell command to run as a final smoke test after session review (default: ''). */
+  smokeTest: string;
   /** Per-model pricing table (cost per million tokens). */
   pricing: Record<string, ModelPricing>;
   /** Per-step agent/model overrides. */
@@ -128,6 +130,7 @@ const DEFAULTS: Config = {
   skipPostSessionSecurity: false,
   batch: false,
   batchSize: 5,
+  smokeTest: '',
   pricing: {
     'claude-opus-4-6': { input: 15.0, output: 75.0 },
     'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
@@ -180,6 +183,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   auto_capture: 'autoCapture',
   batch: 'batch',
   batch_size: 'batchSize',
+  smoke_test: 'smokeTest',
   pipeline: 'pipeline',
 };
 
@@ -223,6 +227,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   SKIP_POST_SESSION_SECURITY: 'skipPostSessionSecurity',
   BATCH: 'batch',
   BATCH_SIZE: 'batchSize',
+  SMOKE_TEST: 'smokeTest',
 };
 
 function coerce(value: string, current: unknown): unknown {

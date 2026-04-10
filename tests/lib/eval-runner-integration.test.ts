@@ -78,6 +78,7 @@ const makeConfig = (overrides?: Partial<Config>): Config => ({
   skipPostSessionSecurity: false,
     batch: false,
     batchSize: 5,
+    smokeTest: '',
   pricing: {
     'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
   },

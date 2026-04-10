@@ -1,4 +1,4 @@
-import { runVerify, isNonUiChange, type VerifyResult } from '../../src/lib/verify.js';
+import { runVerify, isNonUiChange, runScriptVerify, runBootVerify, type VerifyResult } from '../../src/lib/verify.js';
 import type { Config } from '../../src/lib/config.js';
 
 // Mock agent and shell to avoid real process spawning
@@ -56,6 +56,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipPostSessionSecurity: false,
     batch: false,
     batchSize: 5,
+    smokeTest: '',
     pricing: {},
     pipeline: {},
     ...overrides,
@@ -208,5 +209,103 @@ describe('runVerify', () => {
     expect(result.passed).toBe(true);
     expect(result.skipped).toBe(true);
     expect(result.output).toContain('no start command');
+  });
+
+  it('runs script verification when verifyMethod is script', async () => {
+    exec.mockReturnValue({ exitCode: 0, stdout: 'All services OK', stderr: '' });
+
+    const result = await runVerify({
+      worktree: '/tmp/test',
+      logFile: '/tmp/test.log',
+      issueNum: 1,
+      title: 'test',
+      body: 'test body',
+      config: makeConfig(),
+      sessionDir: '/tmp/session',
+      verifyMethod: 'script',
+      verifyCommand: 'python -c "print(1)"',
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(false);
+    expect(exec).toHaveBeenCalledWith('python -c "print(1)"', expect.anything());
+  });
+
+  it('runs boot verification when verifyMethod is boot', async () => {
+    exec.mockReturnValue({ exitCode: 0, stdout: 'Boot OK', stderr: '' });
+
+    const result = await runVerify({
+      worktree: '/tmp/test',
+      logFile: '/tmp/test.log',
+      issueNum: 1,
+      title: 'test',
+      body: 'test body',
+      config: makeConfig(),
+      sessionDir: '/tmp/session',
+      verifyMethod: 'boot',
+      verifyCommand: './src/main.js',
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(false);
+  });
+
+  it('runs cli verification as script when verifyMethod is cli', async () => {
+    exec.mockReturnValue({ exitCode: 1, stdout: '', stderr: 'Command failed' });
+
+    const result = await runVerify({
+      worktree: '/tmp/test',
+      logFile: '/tmp/test.log',
+      issueNum: 1,
+      title: 'test',
+      body: 'test body',
+      config: makeConfig(),
+      sessionDir: '/tmp/session',
+      verifyMethod: 'cli',
+      verifyCommand: 'alpha-loop --help',
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.skipped).toBe(false);
+  });
+});
+
+describe('runScriptVerify', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('returns passed when command exits 0', () => {
+    exec.mockReturnValue({ exitCode: 0, stdout: 'OK', stderr: '' });
+    const result = runScriptVerify('echo OK', '/tmp');
+    expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(false);
+  });
+
+  it('returns failed when command exits non-zero', () => {
+    exec.mockReturnValue({ exitCode: 1, stdout: '', stderr: 'Error' });
+    const result = runScriptVerify('false', '/tmp');
+    expect(result.passed).toBe(false);
+    expect(result.skipped).toBe(false);
+  });
+});
+
+describe('runBootVerify', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('returns passed when boot succeeds', () => {
+    exec.mockReturnValue({ exitCode: 0, stdout: '', stderr: '' });
+    const result = runBootVerify('./entry.js', '/tmp');
+    expect(result.passed).toBe(true);
+    expect(result.skipped).toBe(false);
+  });
+
+  it('returns failed when boot crashes', () => {
+    exec.mockReturnValue({ exitCode: 1, stdout: '', stderr: 'Cannot find module' });
+    const result = runBootVerify('./entry.js', '/tmp');
+    expect(result.passed).toBe(false);
+    expect(result.skipped).toBe(false);
   });
 });

@@ -12,6 +12,7 @@ import { exec } from './shell.js';
 import { spawnAgent } from './agent.js';
 import { buildImplementPrompt, buildReviewPrompt, buildLearnPrompt } from './prompts.js';
 import { processIssue } from './pipeline.js';
+import { runScriptVerify } from './verify.js';
 import { runChecks } from './eval-checks.js';
 import { computeCompositeScore, appendScore, hashConfig } from './score.js';
 import {
@@ -398,7 +399,45 @@ async function runStepEval(
         break;
       }
       case 'verify': {
-        output = 'Verify step eval not yet supported';
+        // Verify eval: check whether verification catches issues in the input.
+        // For script-type checks, run the command and capture output.
+        // For agent-based verification, spawn the agent with verify context.
+        if (evalCase.checks && evalCase.checks.length > 0) {
+          // Check if any checks define a script command to run
+          const scriptCheck = evalCase.checks.find((c) => c.type === 'script' as string);
+          if (scriptCheck && 'command' in scriptCheck) {
+            const verifyResult = runScriptVerify(
+              String((scriptCheck as Record<string, unknown>).command),
+              process.cwd(),
+              (evalCase.timeout || 60) * 1000,
+            );
+            output = verifyResult.output;
+          } else {
+            // Spawn an agent to do verification review of the input
+            const verifyPrompt = `You are verifying whether the following implementation has runtime issues.\nReview the code for wiring problems, missing dependencies, and broken integrations.\n\n${input}`;
+            const result = await spawnAgent({
+              agent: resolvedAgent,
+              model: resolved.model,
+              prompt: verifyPrompt,
+              cwd: process.cwd(),
+              timeout: (evalCase.timeout || 60) * 1000,
+            });
+            output = result.output;
+            trackCost(result);
+          }
+        } else {
+          // No checks defined — run agent-based verification
+          const verifyPrompt = `You are verifying whether the following implementation has runtime issues.\nReview the code for wiring problems, missing dependencies, and broken integrations.\n\n${input}`;
+          const result = await spawnAgent({
+            agent: resolvedAgent,
+            model: resolved.model,
+            prompt: verifyPrompt,
+            cwd: process.cwd(),
+            timeout: (evalCase.timeout || 60) * 1000,
+          });
+          output = result.output;
+          trackCost(result);
+        }
         break;
       }
       case 'learn': {

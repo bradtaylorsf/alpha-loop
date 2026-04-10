@@ -121,6 +121,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     skipPostSessionSecurity: false,
     batch: false,
     batchSize: 5,
+    smokeTest: '',
     pricing: {},
     pipeline: {},
     ...overrides,
