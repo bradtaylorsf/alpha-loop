@@ -145,7 +145,8 @@ export async function evalRunCommand(options: EvalOptions): Promise<void> {
     const icon = caseResult.passed ? 'PASS' : 'FAIL';
     const credit = caseResult.partialCredit < 1 ? ` (credit=${caseResult.partialCredit.toFixed(2)})` : '';
     const error = caseResult.error ? ` — ${caseResult.error}` : '';
-    console.log(`  ${icon}  ${caseResult.caseId}  ${caseResult.duration}s${credit}${error}`);
+    const promptTag = caseResult.usingRepoPrompts ? ' [repo]' : '';
+    console.log(`  ${icon}  ${caseResult.caseId}  ${caseResult.duration}s${credit}${promptTag}${error}`);
   }
 
   console.log('');
