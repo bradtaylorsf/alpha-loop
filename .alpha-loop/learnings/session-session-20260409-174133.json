@@ -1,0 +1,67 @@
+{
+  "name": "session/20260409-174133",
+  "branch": "session/20260409-174133",
+  "completed": "2026-04-10T01:33:53.320Z",
+  "results": [
+    {
+      "issueNum": 131,
+      "title": "Eval: Add quality-failure capture mode (false positives)",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/145",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 414,
+      "filesChanged": 1
+    },
+    {
+      "issueNum": 132,
+      "title": "Eval: Implement verify step eval (currently stubbed)",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/145",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 414,
+      "filesChanged": 1
+    },
+    {
+      "issueNum": 133,
+      "title": "Eval: Comprehensive documentation with tutorials, use cases, and how-tos",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/145",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 414,
+      "filesChanged": 1
+    },
+    {
+      "issueNum": 135,
+      "title": "Eval: Community contribution workflow for eval cases and prompt fixes",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/146",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 505,
+      "filesChanged": 1
+    },
+    {
+      "issueNum": 136,
+      "title": "Upgrade mechanism for agent prompts (not just skills)",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/146",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 505,
+      "filesChanged": 1
+    },
+    {
+      "issueNum": 137,
+      "title": "Eval runner should load repo-specific agent prompts and skills",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/146",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 505,
+      "filesChanged": 1
+    }
+  ]
+}
