@@ -115,6 +115,10 @@ Alpha Loop includes a self-improving eval system inspired by [Meta-Harness](http
 # Capture failures from recent sessions as eval cases
 alpha-loop eval capture
 
+# Capture quality failures from successful sessions (false positives)
+alpha-loop eval capture --quality
+alpha-loop eval capture --quality 190 --session my-session
+
 # Run the eval suite and compute composite score
 alpha-loop eval run
 
@@ -239,6 +243,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop review --apply` | Apply proposed improvements and create a draft PR |
 | `alpha-loop eval` | Run the eval suite and compute composite score |
 | `alpha-loop eval capture` | Capture failures as eval cases (interactive) |
+| `alpha-loop eval capture --quality` | Capture quality failures from successful sessions (false positives) |
 | `alpha-loop eval list` | Show eval cases and recent scores |
 | `alpha-loop eval scores` | Show score history over time |
 | `alpha-loop eval pareto` | Show score/cost Pareto frontier |
@@ -248,6 +253,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop eval compare-configs <a> <b>` | Compare two YAML config files side-by-side |
 | `alpha-loop eval convert` | Convert between AlphaLoop and skill-creator eval formats |
 | `alpha-loop eval import-swebench` | Import eval cases from SWE-bench dataset |
+| `alpha-loop eval export <case>` | Export an eval case for contributing back (anonymized by default) |
 | `alpha-loop evolve` | Meta-Harness-style automated optimization loop |
 | `alpha-loop plan` | Generate a full project scope (milestones + issues) from seed inputs using AI |
 | `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
@@ -351,8 +357,11 @@ eval_dir: .alpha-loop/evals
 | `auto_capture` | `true` | Auto-capture failures as eval cases at end of session |
 | `batch` | `false` | Enable batch mode — process multiple issues per agent call |
 | `batch_size` | `5` | Number of issues per batch when batch mode is enabled |
+| `smoke_test` | (none) | Shell command to run as a final smoke test after session review |
 | `pipeline` | `{}` | Per-step agent/model overrides (see below) |
 | `pricing` | (built-in) | Custom token pricing per model for cost tracking |
+| `eval_include_agent_prompts` | `true` | Include repo-specific agent prompts during eval runs |
+| `eval_include_skills` | `true` | Include repo-specific skills during eval runs |
 | `post_session.review` | `true` | Run holistic code review on full session diff |
 | `post_session.security_scan` | `true` | Include security scanning in post-session review |
 

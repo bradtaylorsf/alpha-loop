@@ -278,10 +278,12 @@ export async function evalCaptureCommand(options: EvalCaptureOptions): Promise<v
       }
 
       // Prompt to capture each failure
+      let skipAllFailures = false;
       for (const [_session, failures] of grouped) {
+        if (skipAllFailures) break;
         for (const failure of failures) {
           const answer = await ask(rl, `Capture #${failure.issueNum}? (y/n/skip all): `);
-          if (answer === 'skip all') break;
+          if (answer === 'skip all') { skipAllFailures = true; break; }
           if (answer.toLowerCase() !== 'y') continue;
 
           const annotation = await promptAnnotation(rl);
@@ -694,10 +696,12 @@ async function evalCaptureQualityCommand(options: EvalCaptureOptions, config: Co
     }
 
     // Prompt to capture quality issues
+    let skipAllQuality = false;
     for (const [_session, results] of grouped) {
+      if (skipAllQuality) break;
       for (const result of results) {
         const answer = await ask(rl, `Quality issue in #${result.issueNum}? (y/n/skip all): `);
-        if (answer === 'skip all') break;
+        if (answer === 'skip all') { skipAllQuality = true; break; }
         if (answer.toLowerCase() !== 'y') continue;
 
         const annotation = await promptQualityAnnotation(rl);
