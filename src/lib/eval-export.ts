@@ -4,9 +4,8 @@
  * Supports anonymizing project-specific details, generating prompt change diffs,
  * and preparing contribution-ready directories.
  */
-import { existsSync, readFileSync, realpathSync, mkdirSync, writeFileSync, readdirSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { log } from './logger.js';
 import { detectRepo } from './config.js';
 import { findDistributionTemplatesDir } from './templates.js';
 
@@ -46,8 +45,9 @@ export function anonymizeContent(content: string, projectDir: string): string {
     const [owner, repoName] = repo.split('/');
     if (owner && repoName) {
       result = result.replace(new RegExp(escapeRegex(repo), 'g'), 'example-org/example-project');
-      result = result.replace(new RegExp(escapeRegex(owner), 'g'), 'example-org');
-      result = result.replace(new RegExp(escapeRegex(repoName), 'g'), 'example-project');
+      // Use word boundaries to avoid corrupting substrings (e.g., "app" inside "application")
+      result = result.replace(new RegExp(`\\b${escapeRegex(owner)}\\b`, 'g'), 'example-org');
+      result = result.replace(new RegExp(`\\b${escapeRegex(repoName)}\\b`, 'g'), 'example-project');
     }
   }
 
@@ -88,11 +88,12 @@ export function exportEvalCase(
   const destDir = join(outputDir, 'evals', 'cases', relPath);
   mkdirSync(destDir, { recursive: true });
 
-  // Copy and optionally anonymize case files
-  const files = readdirSync(casePath).filter((f) => !f.startsWith('.'));
-  for (const file of files) {
-    const srcFile = join(casePath, file);
-    const destFile = join(destDir, file);
+  // Copy and optionally anonymize case files (skip subdirectories and dot files)
+  const files = readdirSync(casePath, { withFileTypes: true })
+    .filter((d) => d.isFile() && !d.name.startsWith('.'));
+  for (const entry of files) {
+    const srcFile = join(casePath, entry.name);
+    const destFile = join(destDir, entry.name);
     const content = readFileSync(srcFile, 'utf-8');
     const processed = anonymize ? anonymizeContent(content, projectDir) : content;
     writeFileSync(destFile, processed);
