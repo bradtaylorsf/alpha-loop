@@ -27,6 +27,7 @@ import {
   detectFailureStep,
   formatEvalCase,
   evalsDir,
+  buildQualityRubric,
 } from '../lib/eval.js';
 import type { EvalCase, ExpectedOutcome, PipelineStep } from '../lib/eval.js';
 import {
@@ -69,6 +70,8 @@ export type EvalOptions = {
 
 export type EvalCaptureOptions = {
   issue?: string;
+  quality?: boolean;
+  session?: string;
 };
 
 export type EvalSearchOptions = {
@@ -205,6 +208,11 @@ export function evalCompareCommand(run1: string, run2: string): void {
  */
 export async function evalCaptureCommand(options: EvalCaptureOptions): Promise<void> {
   const config = loadConfig();
+
+  if (options.quality) {
+    await evalCaptureQualityCommand(options, config);
+    return;
+  }
 
   if (options.issue) {
     // Capture a specific issue
@@ -520,6 +528,210 @@ async function captureFailure(
 
   annotateCapturedCase(casePath, annotation);
   log.success(`Eval case saved: ${casePath}`);
+}
+
+/** Valid pipeline steps for quality failure attribution. */
+const QUALITY_STEPS = ['plan', 'implement', 'review', 'verify'] as const;
+
+type SessionSuccess = {
+  session: string;
+  issueNum: number;
+  title: string;
+  file: string;
+  result: Record<string, unknown>;
+};
+
+/** Collect successful results from recent sessions. */
+function collectSessionSuccesses(sessionFilter?: string): SessionSuccess[] {
+  const sessionsDir = join(process.cwd(), '.alpha-loop', 'sessions');
+  if (!existsSync(sessionsDir)) return [];
+
+  const sessionDirs = readdirSync(sessionsDir, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name)
+    .sort()
+    .reverse();
+
+  const successes: SessionSuccess[] = [];
+
+  const dirsToScan = sessionFilter
+    ? sessionDirs.filter((d) => d.includes(sessionFilter))
+    : sessionDirs.slice(0, 5);
+
+  for (const sessionDir of dirsToScan) {
+    const sessionPath = join(sessionsDir, sessionDir);
+    const resultFiles = readdirSync(sessionPath)
+      .filter((f) => f.startsWith('result-') && f.endsWith('.json'));
+
+    for (const file of resultFiles) {
+      try {
+        const result = JSON.parse(readFileSync(join(sessionPath, file), 'utf-8'));
+        if (result.status === 'success') {
+          successes.push({
+            session: sessionDir,
+            issueNum: result.issueNum,
+            title: result.title ?? `Issue #${result.issueNum}`,
+            file: join(sessionPath, file),
+            result,
+          });
+        }
+      } catch {
+        // Skip malformed result files
+      }
+    }
+  }
+
+  return successes;
+}
+
+/** Prompt user for quality failure annotation (extended with step attribution). */
+async function promptQualityAnnotation(rl: readline.Interface): Promise<{
+  whatWentWrong: string;
+  whichStep: string;
+  whatShouldHaveHappened: string;
+  tags: string[];
+}> {
+  console.log('');
+  const whatWentWrong = await ask(rl, '  What went wrong? (e.g., "ArtifactRepo never injected"): ');
+  const whichStep = await ask(rl, `  Which step should have caught it? (${QUALITY_STEPS.join('/')}): `);
+  const whatShouldHaveHappened = await ask(rl, '  What should the step have produced? (e.g., "Review should flag missing DI"): ');
+  const tagsInput = await ask(rl, '  Tags (comma-separated, optional): ');
+
+  const step = QUALITY_STEPS.includes(whichStep as typeof QUALITY_STEPS[number])
+    ? whichStep
+    : 'review';
+
+  return {
+    whatWentWrong,
+    whichStep: step,
+    whatShouldHaveHappened,
+    tags: tagsInput.split(',').map((t) => t.trim()).filter(Boolean),
+  };
+}
+
+/**
+ * Quality capture mode — walk through successful sessions and capture quality failures.
+ *
+ * Quality failures are sessions where the pipeline reported success but the output
+ * has critical wiring issues. These are the most dangerous failure mode because
+ * they give false confidence.
+ */
+async function evalCaptureQualityCommand(options: EvalCaptureOptions, config: Config): Promise<void> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let capturedCount = 0;
+
+  try {
+    // If a specific issue number is given with --quality, capture it directly
+    if (options.issue) {
+      const issueNum = parseInt(options.issue, 10);
+      const successes = collectSessionSuccesses(options.session);
+      const found = successes.find((s) => s.issueNum === issueNum);
+
+      if (!found) {
+        log.warn(`No successful session result found for issue #${issueNum}. Only "success" results can be quality-captured.`);
+        return;
+      }
+
+      log.step(`Quality capture for issue #${issueNum} from session ${found.session}`);
+      console.log(`  Issue: #${found.issueNum} — ${found.title}`);
+      console.log(`  Status: success (pipeline passed)`);
+      console.log('');
+
+      const annotation = await promptQualityAnnotation(rl);
+
+      const casePath = saveCapturedCase({
+        issueNum: found.issueNum,
+        title: found.title,
+        issueBody: typeof found.result.issueBody === 'string' ? found.result.issueBody : undefined,
+        step: annotation.whichStep,
+        session: found.session,
+        tags: [...(annotation.tags), 'quality-failure'],
+        source: 'quality-capture',
+      });
+
+      const rubric = buildQualityRubric(annotation.whatWentWrong, annotation.whatShouldHaveHappened);
+      annotateCapturedCase(casePath, {
+        whatWentWrong: annotation.whatWentWrong,
+        whatShouldHaveHappened: annotation.whatShouldHaveHappened,
+        tags: [...(annotation.tags), 'quality-failure'],
+        qualityRubric: rubric,
+      });
+
+      capturedCount++;
+      log.success(`Quality eval case saved: ${casePath}`);
+      return;
+    }
+
+    // Interactive mode — show successful sessions and let user select issues
+    const successes = collectSessionSuccesses(options.session);
+    if (successes.length === 0) {
+      log.info('No successful session results found. Quality capture requires sessions with status: success.');
+      return;
+    }
+
+    // Group by session
+    const grouped = new Map<string, SessionSuccess[]>();
+    for (const s of successes) {
+      const existing = grouped.get(s.session) ?? [];
+      existing.push(s);
+      grouped.set(s.session, existing);
+    }
+
+    log.step('Successful sessions (candidates for quality review):');
+    console.log('');
+
+    for (const [session, results] of grouped) {
+      console.log(`  ${session} — ${results.length} successful issue(s)`);
+      for (const r of results) {
+        const tests = r.result.testsPassing ? 'PASS' : 'FAIL';
+        const verify = r.result.verifySkipped ? 'SKIP' : (r.result.verifyPassing ? 'PASS' : 'FAIL');
+        console.log(`    #${r.issueNum} — ${r.title}`);
+        console.log(`      Tests: ${tests} | Verify: ${verify} | Duration: ${r.result.duration}s`);
+      }
+      console.log('');
+    }
+
+    // Prompt to capture quality issues
+    for (const [_session, results] of grouped) {
+      for (const result of results) {
+        const answer = await ask(rl, `Quality issue in #${result.issueNum}? (y/n/skip all): `);
+        if (answer === 'skip all') break;
+        if (answer.toLowerCase() !== 'y') continue;
+
+        const annotation = await promptQualityAnnotation(rl);
+
+        const casePath = saveCapturedCase({
+          issueNum: result.issueNum,
+          title: result.title,
+          issueBody: typeof result.result.issueBody === 'string' ? result.result.issueBody : undefined,
+          step: annotation.whichStep,
+          session: result.session,
+          tags: [...(annotation.tags), 'quality-failure'],
+          source: 'quality-capture',
+        });
+
+        const rubric = buildQualityRubric(annotation.whatWentWrong, annotation.whatShouldHaveHappened);
+        annotateCapturedCase(casePath, {
+          whatWentWrong: annotation.whatWentWrong,
+          whatShouldHaveHappened: annotation.whatShouldHaveHappened,
+          tags: [...(annotation.tags), 'quality-failure'],
+          qualityRubric: rubric,
+        });
+
+        capturedCount++;
+        log.success(`Quality eval case saved: ${casePath}`);
+      }
+    }
+
+    if (capturedCount > 0) {
+      console.log('');
+      log.info(`Done. ${capturedCount} quality eval case(s) created. Run 'alpha-loop eval --suite step' to test.`);
+    } else {
+      log.info('No quality issues captured.');
+    }
+  } finally {
+    rl.close();
+  }
 }
 
 /**
