@@ -9,6 +9,8 @@ import { log } from './logger.js';
 export type WorktreeResult = {
   path: string;
   branch: string;
+  /** True if the worktree was recovered from a previous session instead of created fresh. */
+  resumed: boolean;
 };
 
 export type SetupWorktreeOptions = {
@@ -36,6 +38,11 @@ const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.l
  * Create an isolated git worktree for processing an issue.
  * When autoMerge is enabled and a session branch exists,
  * branches from session branch so changes stack across issues.
+ *
+ * Handles three resume scenarios:
+ * 1. Worktree directory + branch exist → reuse as-is (resume previous work)
+ * 2. Branch exists but directory was removed → recreate worktree from existing branch
+ * 3. Neither exists → create fresh worktree and branch
  */
 export async function setupWorktree(options: SetupWorktreeOptions): Promise<WorktreeResult> {
   const { issueNum, projectDir, baseBranch, sessionBranch, autoMerge, skipInstall, setupCommand, dryRun } = options;
@@ -48,52 +55,87 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
 
   if (dryRun) {
     log.dry(`Would create worktree: ${worktreePath}`);
-    return { path: worktreePath, branch };
+    return { path: worktreePath, branch, resumed: false };
   }
 
-  // Clean up existing worktree if present
+  let resumed = false;
+
+  // --- Case 1: Worktree directory exists — check if we can reuse it ---
   if (existsSync(worktreePath)) {
-    log.warn(`Worktree already exists at ${worktreePath}, removing...`);
-    exec(`git worktree remove "${worktreePath}" --force`, { cwd: projectDir });
-  }
-
-  // Delete local branch from previous runs (may exist even without worktree)
-  exec(`git branch -D "${branch}"`, { cwd: projectDir });
-
-  // Delete remote branch from previous failed runs
-  exec(`git push origin --delete "${branch}"`, { cwd: projectDir });
-
-  // Determine source branch: use session branch when auto-merging and it exists
-  let fromBranch = baseBranch;
-  if (autoMerge && sessionBranch && sessionBranch !== baseBranch) {
-    const remoteCheck = exec(`git rev-parse --verify "origin/${sessionBranch}"`, { cwd: projectDir });
-    const localCheck = exec(`git rev-parse --verify "${sessionBranch}"`, { cwd: projectDir });
-    if (remoteCheck.exitCode === 0 || localCheck.exitCode === 0) {
-      fromBranch = sessionBranch;
+    const branchCheck = exec('git rev-parse --abbrev-ref HEAD', { cwd: worktreePath });
+    if (branchCheck.exitCode === 0 && branchCheck.stdout.trim() === branch) {
+      const commitCount = worktreeHasCommits(worktreePath);
+      log.info(`Reusing existing worktree at ${worktreePath} (${commitCount} commit(s) from previous session)`);
+      resumed = true;
+    } else {
+      // Worktree exists but on wrong branch or broken — remove and recreate
+      log.warn(`Worktree at ${worktreePath} is on wrong branch, removing...`);
+      exec(`git worktree remove "${worktreePath}" --force`, { cwd: projectDir });
+      exec('git worktree prune', { cwd: projectDir });
     }
   }
 
-  // Fetch latest
-  exec('git fetch origin', { cwd: projectDir });
+  // --- Case 2: No worktree dir but branch exists (e.g., dir was rm -rf'd but branch persists) ---
+  if (!resumed && !existsSync(worktreePath)) {
+    // Prune first so git doesn't think the branch is still checked out in a deleted worktree
+    exec('git worktree prune', { cwd: projectDir });
 
-  // Create worktree from the appropriate branch (try origin/ first, fall back to local)
-  log.info(`Branching worktree from: ${fromBranch}`);
-  const remoteResult = exec(
-    `git worktree add "${worktreePath}" -b "${branch}" "origin/${fromBranch}"`,
-    { cwd: projectDir },
-  );
-  if (remoteResult.exitCode !== 0) {
-    const localResult = exec(
-      `git worktree add "${worktreePath}" -b "${branch}" "${fromBranch}"`,
+    const localBranchCheck = exec(`git rev-parse --verify "${branch}"`, { cwd: projectDir });
+    if (localBranchCheck.exitCode === 0) {
+      log.info(`Found existing branch ${branch}, recreating worktree from it (resuming previous work)`);
+      const reuseResult = exec(`git worktree add "${worktreePath}" "${branch}"`, { cwd: projectDir });
+      if (reuseResult.exitCode === 0) {
+        const commitCount = worktreeHasCommits(worktreePath);
+        log.info(`Resumed worktree with ${commitCount} commit(s)`);
+        resumed = true;
+      } else {
+        // Can't reuse — force-delete branch and fall through to fresh creation
+        log.warn(`Could not reuse branch ${branch}: ${reuseResult.stderr}`);
+        exec(`git branch -D "${branch}"`, { cwd: projectDir });
+        exec('git worktree prune', { cwd: projectDir });
+      }
+    }
+  }
+
+  // --- Case 3: Fresh creation (no existing worktree or branch) ---
+  if (!resumed) {
+    // Delete remote branch from previous failed runs
+    exec(`git push origin --delete "${branch}"`, { cwd: projectDir });
+
+    // Determine source branch: use session branch when auto-merging and it exists
+    let fromBranch = baseBranch;
+    if (autoMerge && sessionBranch && sessionBranch !== baseBranch) {
+      const remoteCheck = exec(`git rev-parse --verify "origin/${sessionBranch}"`, { cwd: projectDir });
+      const localCheck = exec(`git rev-parse --verify "${sessionBranch}"`, { cwd: projectDir });
+      if (remoteCheck.exitCode === 0 || localCheck.exitCode === 0) {
+        fromBranch = sessionBranch;
+      }
+    }
+
+    // Fetch latest
+    exec('git fetch origin', { cwd: projectDir });
+
+    // Create worktree from the appropriate branch (try origin/ first, fall back to local)
+    log.info(`Branching worktree from: ${fromBranch}`);
+    const remoteResult = exec(
+      `git worktree add "${worktreePath}" -b "${branch}" "origin/${fromBranch}"`,
       { cwd: projectDir },
     );
-    if (localResult.exitCode !== 0) {
-      throw new Error(`Failed to create worktree from ${fromBranch}: ${localResult.stderr}`);
+    if (remoteResult.exitCode !== 0) {
+      const localResult = exec(
+        `git worktree add "${worktreePath}" -b "${branch}" "${fromBranch}"`,
+        { cwd: projectDir },
+      );
+      if (localResult.exitCode !== 0) {
+        throw new Error(`Failed to create worktree from ${fromBranch}: ${localResult.stderr}`);
+      }
+      log.info(`Created worktree from local ${fromBranch}`);
+    } else {
+      log.info(`Created worktree from origin/${fromBranch}`);
     }
-    log.info(`Created worktree from local ${fromBranch}`);
-  } else {
-    log.info(`Created worktree from origin/${fromBranch}`);
   }
+
+  // --- Post-creation setup (runs for both fresh and resumed worktrees) ---
 
   // Symlink env files from main repo to worktree (gitignored files don't exist in worktrees)
   for (const envFile of ENV_FILES) {
@@ -134,8 +176,8 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
     }
   }
 
-  log.info(`Worktree ready at ${worktreePath}`);
-  return { path: worktreePath, branch };
+  log.info(`Worktree ready at ${worktreePath}${resumed ? ' (resumed)' : ''}`);
+  return { path: worktreePath, branch, resumed };
 }
 
 /**

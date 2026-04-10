@@ -65,18 +65,30 @@ describe('setupWorktree', () => {
   });
 
   test('branches from base branch when autoMerge is false', async () => {
+    // No existing branch → fresh creation
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --verify "agent/issue-42"')) {
+        return { stdout: '', stderr: 'error', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
     await setupWorktree(baseOptions);
 
     // Should use origin/master
     const worktreeAddCall = mockExec.mock.calls.find(
-      (call) => typeof call[0] === 'string' && call[0].includes('git worktree add'),
+      (call) => typeof call[0] === 'string' && call[0].includes('git worktree add') && call[0].includes('-b'),
     );
     expect(worktreeAddCall?.[0]).toContain('origin/master');
   });
 
   test('branches from session branch when autoMerge is true and session branch exists', async () => {
-    // Session branch exists on remote
     mockExec.mockImplementation((cmd: string) => {
+      // No existing agent branch
+      if (cmd.includes('rev-parse --verify "agent/issue-42"')) {
+        return { stdout: '', stderr: 'error', exitCode: 1 };
+      }
+      // Session branch exists on remote
       if (cmd.includes('rev-parse --verify "origin/session/main"')) {
         return { stdout: 'abc123', stderr: '', exitCode: 0 };
       }
@@ -91,7 +103,7 @@ describe('setupWorktree', () => {
 
     // Should use session branch for worktree add
     const worktreeAddCall = mockExec.mock.calls.find(
-      (call) => typeof call[0] === 'string' && call[0].includes('git worktree add'),
+      (call) => typeof call[0] === 'string' && call[0].includes('git worktree add') && call[0].includes('-b'),
     );
     expect(worktreeAddCall?.[0]).toContain('session/main');
   });
@@ -111,31 +123,95 @@ describe('setupWorktree', () => {
     });
 
     const worktreeAddCall = mockExec.mock.calls.find(
-      (call) => typeof call[0] === 'string' && call[0].includes('git worktree add'),
+      (call) => typeof call[0] === 'string' && call[0].includes('git worktree add') && call[0].includes('-b'),
     );
     expect(worktreeAddCall?.[0]).toContain('origin/master');
   });
 
-  test('cleans up existing worktree before creating new one', async () => {
+  test('reuses existing worktree when branch matches (resume)', async () => {
+    // Worktree path exists
     mockExists.mockImplementation((p: any) => {
       if (typeof p === 'string' && p.includes('issue-42')) return true;
       return false;
     });
+    // HEAD is on the right branch; merge-base returns empty (no commits)
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --abbrev-ref HEAD')) {
+        return { stdout: 'agent/issue-42', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('merge-base')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await setupWorktree(baseOptions);
+
+    expect(result.resumed).toBe(true);
+    // Should NOT have called git worktree add (reused existing)
+    const addCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('git worktree add'),
+    );
+    expect(addCalls).toHaveLength(0);
+  });
+
+  test('removes stale worktree when branch does not match', async () => {
+    mockExists.mockImplementation((p: any) => {
+      if (typeof p === 'string' && p.includes('issue-42')) return true;
+      return false;
+    });
+    mockExec.mockImplementation((cmd: string) => {
+      // HEAD is on wrong branch
+      if (cmd.includes('rev-parse --abbrev-ref HEAD')) {
+        return { stdout: 'some-other-branch', stderr: '', exitCode: 0 };
+      }
+      // No existing agent branch after cleanup
+      if (cmd.includes('rev-parse --verify "agent/issue-42"')) {
+        return { stdout: '', stderr: 'error', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
 
     await setupWorktree(baseOptions);
 
-    // Should remove existing worktree and delete branch
     expect(mockExec).toHaveBeenCalledWith(
       expect.stringContaining('git worktree remove'),
       expect.anything(),
     );
-    expect(mockExec).toHaveBeenCalledWith(
-      expect.stringContaining('git branch -D'),
-      expect.anything(),
-    );
   });
 
-  test('deletes remote branch from previous failed runs', async () => {
+  test('reuses existing branch when worktree dir is missing (resume)', async () => {
+    // No worktree dir, but branch exists
+    mockExists.mockReturnValue(false);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --verify "agent/issue-42"')) {
+        return { stdout: 'abc123', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('merge-base')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await setupWorktree(baseOptions);
+
+    expect(result.resumed).toBe(true);
+    // Should create worktree from existing branch (no -b flag)
+    const addCall = mockExec.mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('git worktree add') && !call[0].includes('-b'),
+    );
+    expect(addCall).toBeDefined();
+  });
+
+  test('deletes remote branch on fresh creation', async () => {
+    // No existing branch
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --verify "agent/issue-42"')) {
+        return { stdout: '', stderr: 'error', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
     await setupWorktree(baseOptions);
 
     expect(mockExec).toHaveBeenCalledWith(

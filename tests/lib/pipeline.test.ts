@@ -1,4 +1,4 @@
-import { processIssue } from '../../src/lib/pipeline';
+import { processIssue, processBatch } from '../../src/lib/pipeline';
 import type { SessionContext } from '../../src/lib/session';
 
 // Mock all dependencies
@@ -55,9 +55,29 @@ jest.mock('../../src/lib/session', () => ({
   getPreviousResult: jest.fn(),
 }));
 
+jest.mock('../../src/lib/traces', () => ({
+  writeTrace: jest.fn(),
+  writeTraceMetadata: jest.fn(),
+  writeTraceToSubdir: jest.fn(),
+  writeRunManifest: jest.fn(),
+  writeConfigSnapshot: jest.fn(),
+  writeScores: jest.fn(),
+  writeCosts: jest.fn(),
+  computeScores: jest.fn().mockReturnValue({}),
+  computeCosts: jest.fn().mockReturnValue({}),
+}));
+
+jest.mock('../../src/lib/config', () => ({
+  estimateCost: jest.fn().mockReturnValue(0),
+}));
+
 jest.mock('../../src/lib/prompts', () => ({
   buildImplementPrompt: jest.fn().mockReturnValue('implement prompt'),
   buildReviewPrompt: jest.fn().mockReturnValue('review prompt'),
+  buildBatchPlanPrompt: jest.fn().mockReturnValue('batch plan prompt'),
+  buildBatchImplementPrompt: jest.fn().mockReturnValue('batch implement prompt'),
+  buildBatchReviewPrompt: jest.fn().mockReturnValue('batch review prompt'),
+  buildAssumptionsPrompt: jest.fn().mockReturnValue('assumptions prompt'),
 }));
 
 jest.mock('node:fs', () => ({
@@ -71,7 +91,7 @@ jest.mock('node:fs', () => ({
 import { exec } from '../../src/lib/shell';
 import { spawnAgent } from '../../src/lib/agent';
 import { setupWorktree, cleanupWorktree } from '../../src/lib/worktree';
-import { labelIssue, commentIssue, createPR, updateProjectStatus } from '../../src/lib/github';
+import { labelIssue, commentIssue, createPR, mergePR, updateProjectStatus } from '../../src/lib/github';
 import { runTests } from '../../src/lib/testing';
 import { extractLearnings, getLearningContext } from '../../src/lib/learning';
 import { saveResult, getPreviousResult } from '../../src/lib/session';
@@ -82,6 +102,7 @@ const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
+const mockMergePR = mergePR as jest.MockedFunction<typeof mergePR>;
 const mockRunTests = runTests as jest.MockedFunction<typeof runTests>;
 const mockExtractLearnings = extractLearnings as jest.MockedFunction<typeof extractLearnings>;
 const mockGetLearningContext = getLearningContext as jest.MockedFunction<typeof getLearningContext>;
@@ -155,11 +176,12 @@ beforeEach(() => {
 
   // Default: everything succeeds
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
-  mockSetupWorktree.mockResolvedValue({ path: '/tmp/worktree', branch: 'agent/issue-42' });
+  mockSetupWorktree.mockResolvedValue({ path: '/tmp/worktree', branch: 'agent/issue-42', resumed: false });
   mockCleanupWorktree.mockResolvedValue();
   mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: 'Agent output', duration: 5000 });
   mockRunTests.mockReturnValue({ passed: true, output: 'All tests passed' });
   mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/1');
+  mockMergePR.mockReturnValue(undefined as any);
   mockExtractLearnings.mockResolvedValue();
   mockGetLearningContext.mockReturnValue('');
   mockGetPreviousResult.mockReturnValue(null);
@@ -279,13 +301,15 @@ describe('processIssue', () => {
     expect(mockCreatePR).not.toHaveBeenCalled();
   });
 
-  test('returns failure when worktree setup fails', async () => {
+  test('returns failure and re-queues when worktree setup fails', async () => {
     mockSetupWorktree.mockRejectedValue(new Error('git lock'));
 
     const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
 
     expect(result.status).toBe('failure');
-    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'failed', 'in-progress');
+    // Should re-queue (label back to ready) instead of marking as failed
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
+    expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'Todo');
   });
 
   test('creates PR with review report and test output', async () => {
@@ -337,5 +361,80 @@ describe('processIssue', () => {
     );
     expect(fixCalls.length).toBeGreaterThanOrEqual(1);
     expect(fixCalls[0][0].resume).toBe(true);
+  });
+
+  test('skips auto-merge when tests are failing', async () => {
+    mockRunTests.mockReturnValue({ passed: false, output: 'Tests failed' });
+
+    await processIssue(42, 'Test issue', 'Body', makeConfig({ autoMerge: true }), makeSession());
+
+    // PR should still be created
+    expect(mockCreatePR).toHaveBeenCalled();
+    // But mergePR should NOT be called
+    expect(mockMergePR).not.toHaveBeenCalled();
+  });
+
+  test('preserves worktree when auto-merge fails', async () => {
+    mockMergePR.mockImplementation(() => { throw new Error('merge conflict'); });
+
+    await processIssue(42, 'Test issue', 'Body', makeConfig({ autoMerge: true }), makeSession());
+
+    // Cleanup should be called with preserveIfCommits: true
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveIfCommits: true }),
+    );
+  });
+
+  test('preserves worktree when tests fail and auto-merge is enabled', async () => {
+    mockRunTests.mockReturnValue({ passed: false, output: 'Tests failed' });
+
+    await processIssue(42, 'Test issue', 'Body', makeConfig({ autoMerge: true }), makeSession());
+
+    // Cleanup should preserve commits since merge didn't happen
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveIfCommits: true }),
+    );
+  });
+});
+
+describe('processBatch', () => {
+  const batchIssues = [
+    { number: 10, title: 'Issue 10', body: 'Body 10' },
+    { number: 11, title: 'Issue 11', body: 'Body 11' },
+  ];
+
+  test('skips auto-merge when tests are failing', async () => {
+    mockRunTests.mockReturnValue({ passed: false, output: 'Tests failed' });
+
+    const results = await processBatch(batchIssues, makeConfig({ autoMerge: true, batch: true }), makeSession());
+
+    // All results should be failures
+    expect(results.every((r) => r.status === 'failure')).toBe(true);
+    // PR should still be created
+    expect(mockCreatePR).toHaveBeenCalled();
+    // But mergePR should NOT be called
+    expect(mockMergePR).not.toHaveBeenCalled();
+  });
+
+  test('preserves worktree when auto-merge fails', async () => {
+    mockMergePR.mockImplementation(() => { throw new Error('DIRTY merge state'); });
+
+    await processBatch(batchIssues, makeConfig({ autoMerge: true, batch: true }), makeSession());
+
+    // Cleanup should preserve commits
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveIfCommits: true }),
+    );
+  });
+
+  test('cleans up worktree normally after successful merge', async () => {
+    await processBatch(batchIssues, makeConfig({ autoMerge: true, batch: true }), makeSession());
+
+    // Merge should have been called
+    expect(mockMergePR).toHaveBeenCalled();
+    // Cleanup should NOT have preserveIfCommits
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(
+      expect.not.objectContaining({ preserveIfCommits: true }),
+    );
   });
 });

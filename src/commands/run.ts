@@ -235,7 +235,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
     log.info('');
     log.info('Shutting down...');
 
-    // Clean up active worktree if any
+    // Clean up active worktree if any — preserve if it has commits so work isn't lost
     if (activeIssueNum !== null) {
       log.info(`Cleaning up worktree for issue #${activeIssueNum}...`);
       try {
@@ -243,6 +243,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
           issueNum: activeIssueNum,
           projectDir: process.cwd(),
           autoCleanup: true,
+          preserveIfCommits: true,
         });
       } catch {
         // Best effort cleanup

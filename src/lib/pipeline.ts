@@ -325,6 +325,7 @@ export async function processIssue(
   log.step('Step 2: Setting up worktree');
   let worktreePath: string;
   let worktreeBranch: string;
+  let worktreeResumed = false;
 
   try {
     const wt = await setupWorktree({
@@ -339,11 +340,12 @@ export async function processIssue(
     });
     worktreePath = wt.path;
     worktreeBranch = wt.branch;
+    worktreeResumed = wt.resumed;
   } catch (err) {
     log.error(`Failed to set up worktree for issue #${issueNum}: ${err}`);
     if (!config.dryRun) {
-      labelIssue(config.repo, issueNum, 'failed', 'in-progress');
-      commentIssue(config.repo, issueNum, 'Agent loop failed: could not create worktree. Check logs.');
+      // Re-queue instead of marking failed — this is a setup issue, not an implementation failure
+      requeueIssue(config, issueNum);
     }
     return failureResult(issueNum, title, startTime);
   }
@@ -439,6 +441,13 @@ Rules:
 
   // --- Step 4: Implement ---
   log.step('Step 4: Implementing');
+  // Build resume context if worktree was recovered from a previous session
+  const resumeNote = worktreeResumed
+    ? `**IMPORTANT: This worktree contains work from a previous session that was interrupted.**
+Run \`git log --oneline -10\` to see what has already been done.
+Do NOT redo work that is already committed. Build on top of existing progress.\n\n`
+    : '';
+
   if (!config.dryRun) {
     // Load vision and project context
     const visionContext = loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md'));
@@ -446,7 +455,7 @@ Rules:
     const previousResult = getPreviousResult(session);
     const learningContext = getLearningContext(join(projectDir, '.alpha-loop', 'learnings'));
 
-    const implementPrompt = buildImplementPrompt({
+    const implementPrompt = resumeNote + buildImplementPrompt({
       issueNum,
       title,
       body,
@@ -969,20 +978,26 @@ Rules:
   }
 
   // --- Step 11: Auto-merge ---
+  let mergeSucceeded = false;
   if (config.autoMerge && !config.dryRun && prUrl) {
-    log.step('Step 11: Auto-merging PR');
-    try {
-      mergePR(config.repo, worktreeBranch);
+    if (!testsPassing) {
+      log.warn('Skipping auto-merge: tests are not passing');
+    } else {
+      log.step('Step 11: Auto-merging PR');
+      try {
+        mergePR(config.repo, worktreeBranch);
+        mergeSucceeded = true;
 
-      // Update local repo to include merged changes
-      exec('git fetch origin', { cwd: projectDir });
-      const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
-      if (currentBranch !== session.branch) {
-        exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+        // Update local repo to include merged changes
+        exec('git fetch origin', { cwd: projectDir });
+        const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
+        if (currentBranch !== session.branch) {
+          exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+        }
+        exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+      } catch (err) {
+        log.warn(`Auto-merge failed: ${err}`);
       }
-      exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
-    } catch (err) {
-      log.warn(`Auto-merge failed: ${err}`);
     }
   } else if (config.dryRun) {
     log.dry('Would auto-merge PR');
@@ -990,12 +1005,23 @@ Rules:
 
   // --- Step 12: Cleanup ---
   log.step('Step 12: Cleanup');
-  await cleanupWorktree({
-    issueNum,
-    projectDir,
-    autoCleanup: config.autoCleanup,
-    dryRun: config.dryRun,
-  });
+  if (!mergeSucceeded && config.autoMerge && prUrl) {
+    // Merge was expected but didn't happen (tests failing or merge failed) — preserve worktree for recovery
+    await cleanupWorktree({
+      issueNum,
+      projectDir,
+      autoCleanup: config.autoCleanup,
+      preserveIfCommits: true,
+      dryRun: config.dryRun,
+    });
+  } else {
+    await cleanupWorktree({
+      issueNum,
+      projectDir,
+      autoCleanup: config.autoCleanup,
+      dryRun: config.dryRun,
+    });
+  }
 
   const result: PipelineResult = {
     issueNum,
@@ -1057,6 +1083,7 @@ export async function processBatch(
   let worktreePath: string;
   let worktreeBranch: string;
 
+  let worktreeResumed = false;
   try {
     const wt = await setupWorktree({
       issueNum: issues[0].number, // Use first issue number for branch naming
@@ -1070,8 +1097,11 @@ export async function processBatch(
     });
     worktreePath = wt.path;
     worktreeBranch = wt.branch;
+    worktreeResumed = wt.resumed;
   } catch (err) {
     log.error(`Failed to set up worktree for batch: ${err}`);
+    // Re-queue issues back to ready state so they aren't stuck as "In Progress"
+    for (const issue of issues) requeueIssue(config, issue.number);
     return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
   }
 
@@ -1103,9 +1133,16 @@ export async function processBatch(
   log.step('Batch Step 3: Planning all issues');
   const plans = new Map<number, IssuePlan>();
 
+  // Build resume context if worktree was recovered from a previous session
+  const resumeNote = worktreeResumed
+    ? `**IMPORTANT: This worktree contains work from a previous session that was interrupted.**
+Run \`git log --oneline -10\` to see what has already been done.
+Do NOT redo work that is already committed. Build on top of existing progress.\n\n`
+    : '';
+
   if (!config.dryRun) {
     try {
-      const planPrompt = buildBatchPlanPrompt({ issues: batchIssues });
+      const planPrompt = resumeNote + buildBatchPlanPrompt({ issues: batchIssues });
       tracePrompt(session.name, issues[0].number, 'batch-plan', planPrompt);
 
       const planResult = await spawnAgent({
@@ -1157,7 +1194,7 @@ export async function processBatch(
       return `### Plan for #${i.number}: ${i.title}\n${plan.implementation || '(no plan)'}`;
     }).join('\n\n');
 
-    const implementPrompt = buildBatchImplementPrompt({
+    const implementPrompt = resumeNote + buildBatchImplementPrompt({
       issues: batchIssues,
       planContent: allPlans,
       visionContext: visionContext ?? undefined,
@@ -1512,29 +1549,46 @@ export async function processBatch(
   }
 
   // --- Step 10: Auto-merge ---
+  let mergeSucceeded = false;
   if (config.autoMerge && !config.dryRun && prUrl) {
-    log.step('Batch Step 9: Auto-merging PR');
-    try {
-      mergePR(config.repo, worktreeBranch);
-      exec('git fetch origin', { cwd: projectDir });
-      const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
-      if (currentBranch !== session.branch) {
-        exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+    if (!testsPassing) {
+      log.warn('Skipping auto-merge: tests are not passing');
+    } else {
+      log.step('Batch Step 9: Auto-merging PR');
+      try {
+        mergePR(config.repo, worktreeBranch);
+        mergeSucceeded = true;
+        exec('git fetch origin', { cwd: projectDir });
+        const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
+        if (currentBranch !== session.branch) {
+          exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+        }
+        exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+      } catch (err) {
+        log.warn(`Auto-merge failed: ${err}`);
       }
-      exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
-    } catch (err) {
-      log.warn(`Auto-merge failed: ${err}`);
     }
   }
 
   // --- Step 11: Cleanup ---
   log.step('Batch Step 10: Cleanup');
-  await cleanupWorktree({
-    issueNum: issues[0].number,
-    projectDir,
-    autoCleanup: config.autoCleanup,
-    dryRun: config.dryRun,
-  });
+  if (!mergeSucceeded && config.autoMerge && prUrl) {
+    // Merge was expected but didn't happen (tests failing or merge failed) — preserve worktree for recovery
+    await cleanupWorktree({
+      issueNum: issues[0].number,
+      projectDir,
+      autoCleanup: config.autoCleanup,
+      preserveIfCommits: true,
+      dryRun: config.dryRun,
+    });
+  } else {
+    await cleanupWorktree({
+      issueNum: issues[0].number,
+      projectDir,
+      autoCleanup: config.autoCleanup,
+      dryRun: config.dryRun,
+    });
+  }
 
   const successCount = results.filter((r) => r.status === 'success').length;
   log.success(`Batch complete: ${successCount}/${issues.length} issues succeeded in ${duration}s`);
