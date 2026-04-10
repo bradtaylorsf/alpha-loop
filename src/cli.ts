@@ -231,6 +231,17 @@ evalCmd
   });
 
 evalCmd
+  .command('export <case>')
+  .description('Export an eval case for contributing back to alpha-loop')
+  .option('--no-anonymize', 'Skip anonymization of project-specific details')
+  .option('--output <dir>', 'Output directory (default: .alpha-loop-contrib/)')
+  .option('--pr', 'Show instructions for submitting a PR')
+  .action(async (caseId: string, options: { anonymize?: boolean; output?: string; pr?: boolean }) => {
+    const { evalExportCommand } = await import('./commands/eval.js');
+    evalExportCommand(caseId, options);
+  });
+
+evalCmd
   .command('convert')
   .description('Convert between AlphaLoop eval format and skill-creator format')
   .option('--direction <dir>', 'Conversion direction: to-skill or from-skill (default: to-skill)')

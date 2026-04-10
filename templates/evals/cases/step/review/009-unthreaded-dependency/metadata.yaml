@@ -1,0 +1,10 @@
+id: 009-unthreaded-dependency
+description: Review should flag a data consumer that reads from a source nothing writes to
+type: step
+step: review
+tags:
+  - wiring
+  - data-flow
+  - quality-failure
+source: distribution
+timeout: 60

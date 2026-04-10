@@ -403,5 +403,6 @@ export function formatScoreEntry(entry: ScoreEntry): string {
   const passing = entry.cases.filter((c) => c.passed).length;
   const total = entry.cases.length;
   const date = entry.timestamp.split('T')[0];
-  return `${date}  score=${entry.composite}  pass=${passing}/${total}  cost=$${entry.totalCost.toFixed(2)}  config=${entry.configHash}`;
+  const repoTag = entry.config?.usingRepoPrompts ? ' [repo]' : '';
+  return `${date}  score=${entry.composite}  pass=${passing}/${total}  cost=$${entry.totalCost.toFixed(2)}  config=${entry.configHash}${repoTag}`;
 }

@@ -51,6 +51,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalModel: '',
     skipEval: false,
     evalTimeout: 300,
+    evalIncludeAgentPrompts: true,
+    evalIncludeSkills: true,
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,

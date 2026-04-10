@@ -1,0 +1,10 @@
+id: 010-fabricated-metrics
+description: Review should flag hardcoded or estimated values displayed as real metrics
+type: step
+step: review
+tags:
+  - wiring
+  - metrics
+  - quality-failure
+source: distribution
+timeout: 60

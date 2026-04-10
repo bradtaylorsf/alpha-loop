@@ -1,0 +1,12 @@
+- type: llm_judge
+  prompt: |
+    The diff adds NotificationService but makes it nullable (| null = null) in
+    OrderService. The None guard means if notifications is never injected, the
+    feature silently does nothing. The test creates OrderService without
+    notifications and "passes" because it never asserts notification behavior.
+    The review MUST flag: (1) the null default hides missing injection, and
+    (2) the test doesn't actually test notification sending.
+  rubric: |
+    Score 1.0 if the review identifies both the null-default hiding missing injection AND the test not asserting notification behavior.
+    Score 0.5 if the review flags only one of the two issues.
+    Score 0.0 if the review misses both issues.
