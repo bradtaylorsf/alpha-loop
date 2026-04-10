@@ -49,7 +49,6 @@ import {
   deriveConfigLabel,
 } from '../lib/score.js';
 import { exportEvalCase } from '../lib/eval-export.js';
-import type { ExportOptions } from '../lib/eval-export.js';
 import type { ScoreEntry, ParetoEntry } from '../lib/score.js';
 import {
   listTraceSessions,
