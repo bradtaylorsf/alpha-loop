@@ -114,6 +114,16 @@ program
   });
 
 program
+  .command('learn')
+  .description('Backfill learnings from existing session traces')
+  .option('--session <name>', 'Only process a specific session (supports partial match)')
+  .option('--dry-run', 'Show what would be extracted without running agents')
+  .action(async (options) => {
+    const { learnCommand } = await import('./commands/learn.js');
+    await learnCommand(options);
+  });
+
+program
   .command('review')
   .description('Analyze accumulated learnings and propose self-improvements to agents, skills, and config')
   .option('--apply', 'Apply proposed changes and open a draft PR')

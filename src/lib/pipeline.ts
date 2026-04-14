@@ -1491,17 +1491,22 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     }
   }
 
-  // --- Step 9: Update each issue individually ---
+  // --- Step 9: Update each issue individually + extract learnings ---
   log.step('Batch Step 8: Updating individual issues');
   const duration = Math.round((Date.now() - startTime) / 1000);
   const perIssueDuration = Math.round(duration / issues.length);
 
-  // Get diff for traces
+  // Get diff for traces and learning analysis
   let runDiff = '';
   if (!config.dryRun) {
     const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
     runDiff = diffResult.stdout.slice(0, MAX_DIFF_CHARS);
   }
+
+  // Format review gate for learnings (same format as single-issue pipeline)
+  const reviewForLearnings = reviewGate.findings.length > 0
+    ? `Review: ${reviewGate.summary}\n${reviewGate.findings.map((f) => `- [${f.severity}] ${f.description} (${f.fixed ? 'fixed' : 'unfixed'})`).join('\n')}`
+    : `Review: ${reviewGate.summary || 'passed'}`;
 
   const filesChanged = runDiff ? (runDiff.match(/^diff --git/gm) ?? []).length : 0;
   const results: PipelineResult[] = [];
@@ -1530,6 +1535,23 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
     results.push(result);
     saveResult(session, result);
+
+    // Extract learnings per issue
+    await extractLearnings({
+      issueNum: issue.number,
+      title: issue.title,
+      status: testsPassing ? 'success' : 'failure',
+      retries: 0,
+      duration: perIssueDuration,
+      diff: runDiff,
+      testOutput,
+      reviewOutput: reviewForLearnings,
+      verifyOutput: '',
+      body: issue.body,
+      config,
+      sessionLogsDir: session.logsDir,
+      sessionName: session.name,
+    });
 
     // Write per-issue traces
     if (!config.dryRun) {
@@ -1570,6 +1592,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
     log.success(`Issue #${issue.number} updated`);
   }
+
+  stepsCompleted.push('learn');
 
   // Write aggregate scores and costs
   if (!config.dryRun) {
