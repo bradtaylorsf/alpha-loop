@@ -383,7 +383,7 @@ async function applyChanges(
   log.step(`Creating branch ${branch}...`);
   const branchResult = exec(`git checkout -b "${branch}"`, { cwd: projectDir });
   if (branchResult.exitCode !== 0) {
-    throw new Error(`Failed to create branch: ${branchResult.stderr}`);
+    throw new Error(`Failed to create branch: ${branchResult.stderr || branchResult.stdout || '(no output)'}`);
   }
 
   // Apply each change
@@ -414,19 +414,25 @@ async function applyChanges(
     log.success('Synced agent assets after applying changes');
   }
 
-  // Stage and commit changes (including synced copies)
+  // Stage applied files (these must exist — we just wrote them)
   const stageResult = exec(
-    `git add ${appliedPaths.map((p) => JSON.stringify(p)).join(' ')} .alpha-loop/templates/ .claude/ .agents/ .codex/ 2>/dev/null || true`,
+    `git add ${appliedPaths.map((p) => JSON.stringify(p)).join(' ')}`,
     { cwd: projectDir },
   );
   if (stageResult.exitCode !== 0) {
-    throw new Error(`Failed to stage changes: ${stageResult.stderr}`);
+    throw new Error(`Failed to stage changes: ${stageResult.stderr || stageResult.stdout || '(no output)'}`);
+  }
+
+  // Stage synced harness directories (may not all exist in every project)
+  for (const dir of ['.alpha-loop/templates/', '.claude/', '.agents/', '.codex/']) {
+    exec(`git add ${dir}`, { cwd: projectDir });
   }
 
   const commitMsg = `improve: apply ${appliedPaths.length} learning-driven improvement(s)`;
   const commitResult = exec(`git commit -m ${JSON.stringify(commitMsg)}`, { cwd: projectDir });
   if (commitResult.exitCode !== 0) {
-    throw new Error(`Failed to commit: ${commitResult.stderr}`);
+    const detail = commitResult.stderr || commitResult.stdout || '(no output)';
+    throw new Error(`Failed to commit: ${detail}`);
   }
 
   // Build PR body
