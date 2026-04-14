@@ -79,6 +79,7 @@ const makeConfig = (overrides?: Partial<Config>): Config => ({
     batch: false,
     batchSize: 5,
     smokeTest: '',
+    agentTimeout: 1800,
   pricing: {
     'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
   },

@@ -122,6 +122,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     batch: false,
     batchSize: 5,
     smokeTest: '',
+    agentTimeout: 1800,
     pricing: {},
     pipeline: {},
     ...overrides,

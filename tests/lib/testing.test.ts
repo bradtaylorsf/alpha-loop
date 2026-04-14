@@ -71,6 +71,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     batch: false,
     batchSize: 5,
     smokeTest: '',
+    agentTimeout: 1800,
     pricing: {},
     pipeline: {},
     ...overrides,

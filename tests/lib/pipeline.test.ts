@@ -154,6 +154,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     batch: false,
     batchSize: 5,
     smokeTest: '',
+    agentTimeout: 1800,
     pricing: {
       'claude-opus-4-6': { input: 15.0, output: 75.0 },
       'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
@@ -248,6 +249,41 @@ describe('processIssue', () => {
     expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'Todo');
     // Should NOT comment about failure
     expect(commentIssue).not.toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('failed during implementation'));
+  });
+
+  test('does NOT re-queue on timeout (timeout is not transient)', async () => {
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'implement prompt') {
+        return { exitCode: 1, output: 'some output\n[TIMEOUT] Agent killed after exceeding time limit.', duration: 1800000 };
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('failure');
+    expect(result.failureReason).toBe('permanent');
+    // Should label as failed, NOT re-queue
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'failed', 'in-progress');
+  });
+
+  test('does NOT re-queue when transient keywords appear only in code the agent wrote', async () => {
+    // Agent wrote an exceptions.py containing "rate limit" and "capacity" in docstrings,
+    // but the actual error was a timeout — not a transient API error.
+    const codeOutput = 'class TransientError(AgentError):\n    """Retryable error — network timeouts, rate limits, temporary DB failures."""\n';
+    const paddedOutput = codeOutput + 'x'.repeat(3000) + '\nError: implementation failed';
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'implement prompt') {
+        return { exitCode: 1, output: paddedOutput, duration: 1000 };
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('failure');
+    // The "rate limit" text is in the code, not the tail — should be permanent failure
+    expect(result.failureReason).toBe('permanent');
   });
 
   test('re-queues issue on transient error during planning', async () => {

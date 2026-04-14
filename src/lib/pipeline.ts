@@ -130,12 +130,25 @@ const TRANSIENT_ERROR_PATTERNS = [
   /try again/i,
 ];
 
+/** Sentinel appended by agent.ts when the process is killed for exceeding the timeout. */
+const TIMEOUT_SENTINEL = '[TIMEOUT]';
+
 /**
  * Check if agent output indicates a transient error (usage limits, rate limits).
  * These issues should be re-queued, not marked as permanently failed.
+ *
+ * Only scans the last portion of the output to avoid false positives from
+ * code the agent wrote (e.g. an exceptions.py containing "rate limit").
+ * Timeouts are never classified as transient — they indicate the task
+ * exceeded the configured time limit and should fail permanently.
  */
 function isTransientError(output: string): boolean {
-  return TRANSIENT_ERROR_PATTERNS.some((p) => p.test(output));
+  // Timeouts are not transient — the agent ran out of time, not a rate limit
+  if (output.includes(TIMEOUT_SENTINEL)) return false;
+
+  // Only scan the last 2000 chars to avoid matching code the agent wrote
+  const tail = output.slice(-2000);
+  return TRANSIENT_ERROR_PATTERNS.some((p) => p.test(tail));
 }
 
 /**
@@ -414,6 +427,7 @@ Rules:
         cwd: worktreePath,
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
         verbose: config.verbose,
+        timeout: config.agentTimeout * 1000,
       });
 
       // Trace the plan output and costs
@@ -492,6 +506,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
       logFile: join(session.logsDir, `issue-${issueNum}-implement.log`),
       verbose: config.verbose,
+      timeout: config.agentTimeout * 1000,
     });
 
     // Trace the implement output and costs
@@ -582,6 +597,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           resume: true,
           logFile: join(session.logsDir, `issue-${issueNum}-fix-${attempt}.log`),
           verbose: config.verbose,
+          timeout: config.agentTimeout * 1000,
         });
 
         // Trace fix output and costs
@@ -644,6 +660,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           cwd: worktreePath,
           logFile: join(session.logsDir, `issue-${issueNum}-review${attempt > 1 ? `-${attempt}` : ''}.log`),
           verbose: config.verbose,
+          timeout: config.agentTimeout * 1000,
         });
 
         // Trace review output and costs
@@ -686,6 +703,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           resume: true,
           logFile: join(session.logsDir, `issue-${issueNum}-review-fix-${attempt}.log`),
           verbose: config.verbose,
+          timeout: config.agentTimeout * 1000,
         });
 
         // Trace review-fix output and costs
@@ -794,6 +812,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
             resume: true,
             logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
             verbose: config.verbose,
+            timeout: config.agentTimeout * 1000,
           });
 
           // Trace verify-fix output and costs
@@ -888,6 +907,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         cwd: worktreePath,
         logFile: join(session.logsDir, `issue-${issueNum}-assumptions.log`),
         verbose: config.verbose,
+        timeout: config.agentTimeout * 1000,
       });
 
       traceOutput(session.name, issueNum, 'assumptions', assumptionsResult.output);
@@ -1179,6 +1199,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         cwd: worktreePath,
         logFile: join(session.logsDir, `batch-plan.log`),
         verbose: config.verbose,
+        timeout: config.agentTimeout * 1000,
       });
 
       traceOutput(session.name, issues[0].number, 'batch-plan', planResult.output);
@@ -1238,6 +1259,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       cwd: worktreePath,
       logFile: join(session.logsDir, `batch-implement.log`),
       verbose: config.verbose,
+      timeout: config.agentTimeout * 1000,
     });
 
     traceOutput(session.name, issues[0].number, 'batch-implement', implResult.output);
@@ -1327,6 +1349,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           resume: true,
           logFile: join(session.logsDir, `batch-fix-${attempt}.log`),
           verbose: config.verbose,
+          timeout: config.agentTimeout * 1000,
         });
 
         traceOutput(session.name, issues[0].number, `batch-fix-${attempt}`, fixResult.output);
@@ -1373,6 +1396,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           cwd: worktreePath,
           logFile: join(session.logsDir, `batch-review${attempt > 1 ? `-${attempt}` : ''}.log`),
           verbose: config.verbose,
+          timeout: config.agentTimeout * 1000,
         });
 
         traceOutput(session.name, issues[0].number, `batch-review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
@@ -1409,6 +1433,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           resume: true,
           logFile: join(session.logsDir, `batch-review-fix-${attempt}.log`),
           verbose: config.verbose,
+          timeout: config.agentTimeout * 1000,
         });
 
         traceOutput(session.name, issues[0].number, `batch-review-fix-${attempt}`, reviewFixResult.output);

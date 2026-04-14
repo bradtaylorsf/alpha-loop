@@ -83,6 +83,8 @@ export type Config = {
   batchSize: number;
   /** Shell command to run as a final smoke test after session review (default: ''). */
   smokeTest: string;
+  /** Agent timeout in seconds. Defaults to 1800 (30 minutes). */
+  agentTimeout: number;
   /** Per-model pricing table (cost per million tokens). */
   pricing: Record<string, ModelPricing>;
   /** Per-step agent/model overrides. */
@@ -135,6 +137,7 @@ const DEFAULTS: Config = {
   batch: false,
   batchSize: 5,
   smokeTest: '',
+  agentTimeout: 1800,
   pricing: {
     'claude-opus-4-6': { input: 15.0, output: 75.0 },
     'claude-sonnet-4-6': { input: 3.0, output: 15.0 },
@@ -190,6 +193,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   batch: 'batch',
   batch_size: 'batchSize',
   smoke_test: 'smokeTest',
+  agent_timeout: 'agentTimeout',
   pipeline: 'pipeline',
   eval_include_agent_prompts: 'evalIncludeAgentPrompts',
   eval_include_skills: 'evalIncludeSkills',
@@ -236,6 +240,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   BATCH: 'batch',
   BATCH_SIZE: 'batchSize',
   SMOKE_TEST: 'smokeTest',
+  AGENT_TIMEOUT: 'agentTimeout',
 };
 
 function coerce(value: string, current: unknown): unknown {

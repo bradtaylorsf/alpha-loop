@@ -43,12 +43,20 @@ const LOG_INTERVAL = 10;
  * Returns null if headers are not found.
  */
 export function parseRateLimitHeaders(stderr: string): RateLimitState | null {
-  const remaining = stderr.match(/X-Ratelimit-Remaining:\s*(\d+)/i);
-  const limit = stderr.match(/X-Ratelimit-Limit:\s*(\d+)/i);
-  const used = stderr.match(/X-Ratelimit-Used:\s*(\d+)/i);
-  const reset = stderr.match(/X-Ratelimit-Reset:\s*(\d+)/i);
+  // A single gh command can produce multiple sets of rate limit headers
+  // (e.g. REST + GraphQL, or paginated GraphQL). Take the last occurrence
+  // which reflects the most recent response and lowest remaining budget.
+  const allRemaining = [...stderr.matchAll(/X-Ratelimit-Remaining:\s*(\d+)/gi)];
+  const allLimit = [...stderr.matchAll(/X-Ratelimit-Limit:\s*(\d+)/gi)];
+  const allUsed = [...stderr.matchAll(/X-Ratelimit-Used:\s*(\d+)/gi)];
+  const allReset = [...stderr.matchAll(/X-Ratelimit-Reset:\s*(\d+)/gi)];
 
-  if (!remaining || !limit) return null;
+  if (allRemaining.length === 0 || allLimit.length === 0) return null;
+
+  const remaining = allRemaining[allRemaining.length - 1];
+  const limit = allLimit[allLimit.length - 1];
+  const used = allUsed.length > 0 ? allUsed[allUsed.length - 1] : null;
+  const reset = allReset.length > 0 ? allReset[allReset.length - 1] : null;
 
   return {
     remaining: parseInt(remaining[1], 10),

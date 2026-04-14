@@ -66,12 +66,14 @@ export function pollIssues(repo: string, label: string, limit = 10, options?: { 
   const repoOwner = options?.repoOwner ?? repo.split('/')[0];
   const milestone = options?.milestone;
 
-  // If project board is configured, use it for ordering
-  if (project && project > 0) {
-    return pollIssuesByProject(repoOwner, project, limit, { repo, milestone });
+  // If project board is configured and no milestone filter, use it for ordering.
+  // When a milestone is specified, skip the project board to avoid paginating
+  // through all items (which can hit GraphQL rate limits on large boards).
+  if (project && project > 0 && !milestone) {
+    return pollIssuesByProject(repoOwner, project, limit, { repo });
   }
 
-  // Fallback: poll by label
+  // Poll by label (optionally filtered by milestone)
   return pollIssuesByLabel(repo, label, limit, milestone);
 }
 
@@ -145,12 +147,14 @@ function getMilestoneIssueNumbers(repo: string, milestone: string): Set<number> 
 
 /**
  * Fallback: poll issues by label when no project board is configured.
- * Optionally filters by milestone.
+ * Optionally filters by milestone. When a milestone is specified, the
+ * milestone is the primary filter and the label is not required.
  */
 function pollIssuesByLabel(repo: string, label: string, limit: number, milestone?: string): Issue[] {
   const milestoneFlag = milestone ? ` --milestone "${milestone}"` : '';
+  const labelFlag = milestone ? '' : ` --label "${label}"`;
   const result = ghExec(
-    `gh issue list --repo "${repo}" --label "${label}" --state open${milestoneFlag} --json number,title,body,labels --limit ${limit}`,
+    `gh issue list --repo "${repo}"${labelFlag} --state open${milestoneFlag} --json number,title,body,labels --limit ${limit}`,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to poll issues: ${result.stderr}`);
@@ -413,24 +417,26 @@ export function updateProjectStatus(
     return;
   }
 
-  // ── Find the item ID for this issue (not cached — items change) ─────
-  const jqFilter = `{items: [.items[] | select(.content.number == ${issueNum})]}`;
+  // ── Find the item ID for this issue ─────────────────────────────────
+  // Use item-add which is idempotent: returns existing item ID if already
+  // on the board, or adds it. This avoids paginating through all items
+  // (which truncates on large boards with 200+ items).
+  const repoName = repo.includes('/') ? repo : `${owner}/${repo}`;
+  const issueUrl = `https://github.com/${repoName}/issues/${issueNum}`;
   const itemResult = ghExec(
-    `gh project item-list ${projectNum} --owner "${owner}" --format json --limit 200 --jq '${jqFilter}'`,
+    `gh project item-add ${projectNum} --owner "${owner}" --url "${issueUrl}" --format json`,
   );
   if (itemResult.exitCode !== 0) {
-    log.warn(`Could not list project items: ${itemResult.stderr}`);
+    log.warn(`Could not resolve project item for #${issueNum}: ${itemResult.stderr}`);
     return;
   }
 
   let itemId: string | undefined;
   try {
-    const data = JSON.parse(itemResult.stdout) as {
-      items: Array<{ id: string; content: { number: number } }>;
-    };
-    itemId = data.items[0]?.id;
+    const data = JSON.parse(itemResult.stdout) as { id: string };
+    itemId = data.id;
   } catch {
-    log.warn('Failed to parse project items');
+    log.warn('Failed to parse project item response');
     return;
   }
 

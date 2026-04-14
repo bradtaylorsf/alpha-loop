@@ -60,6 +60,29 @@ describe('parseRateLimitHeaders', () => {
     });
   });
 
+  it('takes the last occurrence when multiple header sets are present', () => {
+    // gh commands can produce multiple header sets (REST + GraphQL, or paginated GraphQL).
+    // The last set reflects the most recent response with the lowest remaining budget.
+    const stderr = [
+      '< X-Ratelimit-Limit: 5000',
+      '< X-Ratelimit-Remaining: 4995',
+      '< X-Ratelimit-Used: 5',
+      '< X-Ratelimit-Reset: 1700000000',
+      '< X-Ratelimit-Limit: 5000',
+      '< X-Ratelimit-Remaining: 1680',
+      '< X-Ratelimit-Used: 3320',
+      '< X-Ratelimit-Reset: 1700000100',
+    ].join('\n');
+
+    const result = parseRateLimitHeaders(stderr);
+    expect(result).toEqual({
+      limit: 5000,
+      remaining: 1680,
+      used: 3320,
+      resetAt: 1700000100,
+    });
+  });
+
   it('is case-insensitive for header names', () => {
     const stderr = [
       '< x-ratelimit-limit: 5000',
