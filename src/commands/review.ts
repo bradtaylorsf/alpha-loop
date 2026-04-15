@@ -415,18 +415,19 @@ async function applyChanges(
   }
 
   // Stage and commit changes (including synced copies)
-  const stageResult = exec(
-    `git add ${appliedPaths.map((p) => JSON.stringify(p)).join(' ')} .alpha-loop/templates/ .claude/ .agents/ .codex/ 2>/dev/null || true`,
-    { cwd: projectDir },
-  );
+  // Build git add paths: applied files + only sync dirs that actually exist
+  const syncDirs = ['.alpha-loop/templates/', '.claude/', '.agents/', '.codex/']
+    .filter((d) => existsSync(join(projectDir, d)));
+  const addPaths = [...appliedPaths.map((p) => JSON.stringify(p)), ...syncDirs.map((d) => JSON.stringify(d))];
+  const stageResult = exec(`git add ${addPaths.join(' ')}`, { cwd: projectDir });
   if (stageResult.exitCode !== 0) {
-    throw new Error(`Failed to stage changes: ${stageResult.stderr}`);
+    throw new Error(`Failed to stage changes: ${stageResult.stderr || stageResult.stdout}`);
   }
 
   const commitMsg = `improve: apply ${appliedPaths.length} learning-driven improvement(s)`;
   const commitResult = exec(`git commit -m ${JSON.stringify(commitMsg)}`, { cwd: projectDir });
   if (commitResult.exitCode !== 0) {
-    throw new Error(`Failed to commit: ${commitResult.stderr}`);
+    throw new Error(`Failed to commit: ${commitResult.stderr || commitResult.stdout}`);
   }
 
   // Build PR body
