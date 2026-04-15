@@ -1021,3 +1021,50 @@ export function buildPlanPrompt(options: PlanPromptOptions): string {
 
   return sections.join('\n');
 }
+
+export type AddPromptOptions = {
+  description: string;
+  milestones: Array<{ title: string; description: string; openIssues: number }>;
+  projectContext: string | null;
+  existingLabels: string[];
+};
+
+export function buildAddPrompt(options: AddPromptOptions): string {
+  const { description, milestones, projectContext, existingLabels } = options;
+
+  const milestoneList = milestones.length > 0
+    ? milestones.map((m) => `- **${m.title}**: ${m.description || '(no description)'} (${m.openIssues} open issues)`).join('\n')
+    : '(No milestones exist yet — you must propose a new one.)';
+
+  const labelList = existingLabels.length > 0
+    ? existingLabels.join(', ')
+    : '(none yet)';
+
+  const contextBlock = projectContext
+    ? `## Project Context\n${projectContext}`
+    : '## Project Context\nNo project context available.';
+
+  return `You are an issue writer for a software project. Given a user's description and project context, generate a single well-structured GitHub issue.
+
+${contextBlock}
+
+## Existing Milestones
+${milestoneList}
+
+## Existing Labels
+${labelList}
+
+## User Description
+${description}
+
+## Instructions
+- Write a clear, actionable issue title (imperative mood, under 80 chars)
+- Write a detailed body in Markdown with: Problem/Goal, Proposed Solution, Acceptance Criteria
+- Assign appropriate labels for type (bug/feature/chore/docs/refactor), priority (p0-p3), and complexity (trivial/small/medium/large)
+- Recommend the best-fit existing milestone, or propose a new one if none fit well
+- Return ONLY a JSON object with no markdown fences:
+
+{"title":"...","body":"...","labels":["type","priority","complexity"],"milestone":{"title":"...","description":"...","isNew":false}}
+
+Set isNew to true and provide a description only when proposing a new milestone. For existing milestones, set isNew to false.`;
+}
