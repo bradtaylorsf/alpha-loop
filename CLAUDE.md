@@ -24,6 +24,7 @@ alpha-loop run --once    # Process one issue and exit
 alpha-loop run --dry-run # Dry run (preview, no changes)
 alpha-loop scan          # Generate/refresh project context
 alpha-loop plan          # Generate project scope (milestones + issues) from seed inputs
+alpha-loop add           # Create a new issue from a free-form description using AI
 alpha-loop triage        # Analyze and improve existing issues
 alpha-loop roadmap       # Organize open issues into milestones
 alpha-loop vision        # (deprecated) Use "alpha-loop plan" instead
