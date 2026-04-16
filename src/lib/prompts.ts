@@ -882,7 +882,7 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     '{',
     '  "milestones": [',
     '    {',
-    '      "title": "Milestone Name",',
+    '      "title": "001 - Milestone Name",',
     '      "description": "What this milestone delivers",',
     '      "dueOn": "2026-05-01",',
     '      "order": 1',
@@ -892,7 +892,7 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     '    {',
     '      "issueNum": 3,',
     '      "title": "Issue title",',
-    '      "milestone": "Milestone Name",',
+    '      "milestone": "001 - Milestone Name",',
     '      "currentMilestone": "",',
     '      "selected": true',
     '    }',
@@ -910,6 +910,7 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     '- Set `selected: true` for all assignments (user will deselect if needed)',
     '- Order milestones by suggested execution order (order field)',
     '- Group related issues together (same feature area, same dependency chain)',
+    '- Milestone titles MUST be prefixed with a zero-padded 3-digit number matching their order, e.g. "001 - Foundation", "002 - Core Features", "010 - Polish"',
   );
 
   return sections.join('\n');
@@ -983,7 +984,7 @@ export function buildPlanPrompt(options: PlanPromptOptions): string {
     '  "vision": null,',
     '  "milestones": [',
     '    {',
-    '      "title": "Milestone Name",',
+    '      "title": "001 - Milestone Name",',
     '      "description": "What this milestone delivers",',
     '      "dueOn": "2026-05-01",',
     '      "order": 1',
@@ -995,7 +996,7 @@ export function buildPlanPrompt(options: PlanPromptOptions): string {
     '      "title": "Issue title",',
     '      "body": "## Summary\\n...\\n\\n## Acceptance Criteria\\n- [ ] Criterion 1\\n- [ ] Criterion 2",',
     '      "labels": ["enhancement"],',
-    '      "milestone": "Milestone Name",',
+    '      "milestone": "001 - Milestone Name",',
     '      "priority": "p1",',
     '      "complexity": "medium",',
     '      "dependsOn": [],',
@@ -1017,6 +1018,7 @@ export function buildPlanPrompt(options: PlanPromptOptions): string {
     '- Reuse existing milestones when the work fits; only create new milestones for genuinely new scope',
     '- Consider the codebase structure for realistic issue scoping',
     '- Issue `id` values are temporary local IDs (1, 2, 3...) used only for dependency references',
+    '- Milestone titles MUST be prefixed with a zero-padded 3-digit number matching their order, e.g. "001 - Foundation", "002 - Core Features", "010 - Polish"',
   );
 
   return sections.join('\n');

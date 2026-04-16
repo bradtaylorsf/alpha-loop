@@ -15,6 +15,7 @@ import { log } from '../lib/logger.js';
 import {
   extractJsonFromResponse,
   formatRoadmapTable,
+  normalizeRoadmapMilestones,
   buildPlanningContext,
   type PlannedMilestone,
   type RoadmapAssignment,
@@ -117,6 +118,11 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
     log.info('Agent returned no roadmap assignments.');
     return;
   }
+
+  // Normalize milestone titles to use 3-digit zero-padded prefixes
+  const normalizedRoadmap = normalizeRoadmapMilestones(parsed.milestones, parsed.assignments);
+  parsed.milestones = normalizedRoadmap.milestones;
+  parsed.assignments = normalizedRoadmap.assignments;
 
   // ── Display roadmap ────────────────────────────────────────────────────────
   const existingTitles = existingMilestones.map((m) => m.title);
