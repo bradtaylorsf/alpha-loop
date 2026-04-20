@@ -54,6 +54,7 @@ jest.mock('../../src/lib/rate-limit', () => ({
 jest.mock('../../src/lib/planning', () => ({
   extractJsonFromResponse: jest.fn(),
   formatRoadmapTable: jest.fn(() => 'FORMATTED ROADMAP'),
+  normalizeRoadmapMilestones: jest.requireActual('../../src/lib/planning').normalizeRoadmapMilestones,
   buildPlanningContext: jest.fn(() => ({
     visionContext: null,
     projectContext: null,
@@ -99,13 +100,13 @@ const SAMPLE_ISSUES = [
 
 const SAMPLE_AGENT_RESPONSE = {
   milestones: [
-    { title: 'v1.0 Core', description: 'Core infrastructure', dueOn: '2026-05-01', order: 1 },
-    { title: 'v1.1 Features', description: 'User-facing features', dueOn: '2026-06-15', order: 2 },
+    { title: '001 - v1.0 Core', description: 'Core infrastructure', dueOn: '2026-05-01', order: 1 },
+    { title: '002 - v1.1 Features', description: 'User-facing features', dueOn: '2026-06-15', order: 2 },
   ],
   assignments: [
-    { issueNum: 3, title: 'Set up database schema', milestone: 'v1.0 Core', currentMilestone: '', selected: true },
-    { issueNum: 7, title: 'Create API endpoints', milestone: 'v1.0 Core', currentMilestone: '', selected: true },
-    { issueNum: 15, title: 'User dashboard', milestone: 'v1.1 Features', currentMilestone: '', selected: true },
+    { issueNum: 3, title: 'Set up database schema', milestone: '001 - v1.0 Core', currentMilestone: '', selected: true },
+    { issueNum: 7, title: 'Create API endpoints', milestone: '001 - v1.0 Core', currentMilestone: '', selected: true },
+    { issueNum: 15, title: 'User dashboard', milestone: '002 - v1.1 Features', currentMilestone: '', selected: true },
   ],
 };
 
@@ -147,28 +148,28 @@ describe('roadmap command', () => {
 
     // Should create both milestones
     expect(mockCreateMilestone).toHaveBeenCalledTimes(2);
-    expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', 'v1.0 Core', 'Core infrastructure', '2026-05-01');
-    expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', 'v1.1 Features', 'User-facing features', '2026-06-15');
+    expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', '001 - v1.0 Core', 'Core infrastructure', '2026-05-01');
+    expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', '002 - v1.1 Features', 'User-facing features', '2026-06-15');
 
     // Should assign all 3 issues (now passes milestone title, not number)
     expect(mockSetIssueMilestone).toHaveBeenCalledTimes(3);
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 3, 'v1.0 Core');
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 7, 'v1.0 Core');
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, 'v1.1 Features');
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 3, '001 - v1.0 Core');
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 7, '001 - v1.0 Core');
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, '002 - v1.1 Features');
 
     expect(log.success).toHaveBeenCalledWith(expect.stringContaining('milestone'));
   });
 
   it('does not recreate existing milestones', async () => {
     const existingMilestones = [
-      { number: 5, title: 'v1.0 Core', description: 'Core infra', openIssues: 2, closedIssues: 0, dueOn: '2026-05-01', state: 'open' },
+      { number: 5, title: '001 - v1.0 Core', description: 'Core infra', openIssues: 2, closedIssues: 0, dueOn: '2026-05-01', state: 'open' },
     ];
 
     mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
     mockListMilestones.mockReturnValue(existingMilestones);
     mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
     mockExtractJson.mockReturnValue(SAMPLE_AGENT_RESPONSE);
-    // Only v1.1 Features is new
+    // Only 002 - v1.1 Features is new
     mockCreateMilestone.mockReturnValueOnce(6);
 
     mockCheckbox.mockResolvedValueOnce([3, 7, 15]);
@@ -176,15 +177,15 @@ describe('roadmap command', () => {
 
     await roadmapCommand({});
 
-    // Should only create v1.1 Features (v1.0 Core already exists)
+    // Should only create 002 - v1.1 Features (001 - v1.0 Core already exists)
     expect(mockCreateMilestone).toHaveBeenCalledTimes(1);
-    expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', 'v1.1 Features', 'User-facing features', '2026-06-15');
+    expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', '002 - v1.1 Features', 'User-facing features', '2026-06-15');
 
-    // Issues assigned to v1.0 Core should use milestone title (not number)
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 3, 'v1.0 Core');
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 7, 'v1.0 Core');
-    // Issue assigned to v1.1 Features should use milestone title
-    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, 'v1.1 Features');
+    // Issues assigned to 001 - v1.0 Core should use milestone title (not number)
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 3, '001 - v1.0 Core');
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 7, '001 - v1.0 Core');
+    // Issue assigned to 002 - v1.1 Features should use milestone title
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, '002 - v1.1 Features');
   });
 
   it('does not make GitHub calls in dry-run mode', async () => {

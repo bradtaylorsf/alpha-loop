@@ -56,6 +56,7 @@ jest.mock('../../src/lib/rate-limit', () => ({
 jest.mock('../../src/lib/planning', () => ({
   extractJsonFromResponse: jest.fn(),
   formatIssueTable: jest.fn(() => 'FORMATTED TABLE'),
+  normalizePlanMilestones: jest.requireActual('../../src/lib/planning').normalizePlanMilestones,
   readSeedFiles: jest.fn(() => []),
   savePlanDraft: jest.fn(),
   loadPlanDraft: jest.fn(() => null),
@@ -104,7 +105,7 @@ const mockCreateLabel = createLabel as jest.MockedFunction<typeof createLabel>;
 const VALID_PLAN_DRAFT = {
   vision: null,
   milestones: [
-    { title: 'MVP', description: 'Core features', dueOn: '2026-06-01', order: 1 },
+    { title: '001 - MVP', description: 'Core features', dueOn: '2026-06-01', order: 1 },
   ],
   issues: [
     {
@@ -112,7 +113,7 @@ const VALID_PLAN_DRAFT = {
       title: 'Add login page',
       body: '## Acceptance Criteria\n- [ ] User can log in',
       labels: ['enhancement'],
-      milestone: 'MVP',
+      milestone: '001 - MVP',
       priority: 'p1' as const,
       complexity: 'medium' as const,
       dependsOn: [],
@@ -123,7 +124,7 @@ const VALID_PLAN_DRAFT = {
       title: 'Add dashboard',
       body: '## Acceptance Criteria\n- [ ] Dashboard renders',
       labels: ['enhancement'],
-      milestone: 'MVP',
+      milestone: '001 - MVP',
       priority: 'p2' as const,
       complexity: 'small' as const,
       dependsOn: [1],
@@ -200,7 +201,7 @@ describe('plan command', () => {
 
     // Verify milestone created
     expect(mockCreateMilestone).toHaveBeenCalledWith(
-      'owner/repo', 'MVP', 'Core features', '2026-06-01',
+      'owner/repo', '001 - MVP', 'Core features', '2026-06-01',
     );
 
     // Verify issues created with ready label and milestone title
@@ -210,7 +211,7 @@ describe('plan command', () => {
       'Add login page',
       expect.any(String),
       expect.arrayContaining(['enhancement', 'ready']),
-      'MVP',
+      '001 - MVP',
     );
 
     expect(log.success).toHaveBeenCalledWith(
@@ -415,7 +416,7 @@ describe('plan command', () => {
     mockListMilestones.mockReturnValue([
       {
         number: 1,
-        title: 'MVP',
+        title: '001 - MVP',
         description: 'Core features',
         openIssues: 0,
         closedIssues: 0,
@@ -453,11 +454,11 @@ describe('plan command', () => {
   });
 
   it('reuses existing milestones instead of creating duplicates', async () => {
-    // Simulate an existing "MVP" milestone on GitHub
+    // Simulate an existing "001 - MVP" milestone on GitHub
     mockListMilestones.mockReturnValue([
       {
         number: 7,
-        title: 'MVP',
+        title: '001 - MVP',
         description: 'Core features',
         openIssues: 3,
         closedIssues: 0,
@@ -490,7 +491,7 @@ describe('plan command', () => {
       'Add login page',
       expect.any(String),
       expect.arrayContaining(['enhancement', 'ready']),
-      'MVP',
+      '001 - MVP',
     );
 
     expect(log.success).toHaveBeenCalledWith(

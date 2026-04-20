@@ -16,6 +16,7 @@ import { getRateLimitStatus } from '../lib/rate-limit.js';
 import {
   extractJsonFromResponse,
   formatIssueTable,
+  normalizePlanMilestones,
   readSeedFiles,
   savePlanDraft,
   loadPlanDraft,
@@ -263,6 +264,9 @@ export async function planCommand(options: PlanOptions): Promise<void> {
       log.error(`Agent response (first 500 chars): ${planResult.stdout.slice(0, 500)}`);
       return;
     }
+
+    // Normalize milestone titles to use 3-digit zero-padded prefixes
+    draft = normalizePlanMilestones(draft);
 
     // ── Display plan ─────────────────────────────────────────────────────────
     console.log('');

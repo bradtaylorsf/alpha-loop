@@ -28,6 +28,9 @@ import {
   extractJsonFromResponse,
   formatIssueTable,
   formatTriageFindings,
+  normalizeMilestoneTitles,
+  normalizePlanMilestones,
+  normalizeRoadmapMilestones,
   readSeedFiles,
   buildPlanningContext,
   savePlanDraft,
@@ -371,5 +374,75 @@ describe('savePlanDraft', () => {
         // Best effort cleanup
       }
     }
+  });
+});
+
+// ── normalizeMilestoneTitles ────────────────────────────────────────────────
+
+describe('normalizeMilestoneTitles', () => {
+  it('adds 3-digit prefix based on order', () => {
+    const milestones: PlannedMilestone[] = [
+      { title: 'Foundation', description: '', dueOn: null, order: 1 },
+      { title: 'Features', description: '', dueOn: null, order: 2 },
+      { title: 'Polish', description: '', dueOn: null, order: 10 },
+    ];
+
+    const result = normalizeMilestoneTitles(milestones);
+    expect(result[0].title).toBe('001 - Foundation');
+    expect(result[1].title).toBe('002 - Features');
+    expect(result[2].title).toBe('010 - Polish');
+  });
+
+  it('skips milestones that already have a 3-digit prefix', () => {
+    const milestones: PlannedMilestone[] = [
+      { title: '001 - Foundation', description: '', dueOn: null, order: 1 },
+      { title: 'New Scope', description: '', dueOn: null, order: 2 },
+    ];
+
+    const result = normalizeMilestoneTitles(milestones);
+    expect(result[0].title).toBe('001 - Foundation');
+    expect(result[1].title).toBe('002 - New Scope');
+  });
+});
+
+// ── normalizePlanMilestones ─────────────────────────────────────────────────
+
+describe('normalizePlanMilestones', () => {
+  it('normalizes milestone titles and updates issue references', () => {
+    const draft: PlanDraft = {
+      vision: null,
+      milestones: [
+        { title: 'MVP', description: 'Core', dueOn: null, order: 1 },
+        { title: 'Polish', description: 'Refinement', dueOn: null, order: 2 },
+      ],
+      issues: [
+        { id: 1, title: 'Login', body: '', labels: [], milestone: 'MVP', priority: 'p1', complexity: 'medium', dependsOn: [], selected: true },
+        { id: 2, title: 'Animations', body: '', labels: [], milestone: 'Polish', priority: 'p2', complexity: 'small', dependsOn: [], selected: true },
+      ],
+      projectBoard: null,
+    };
+
+    const result = normalizePlanMilestones(draft);
+    expect(result.milestones[0].title).toBe('001 - MVP');
+    expect(result.milestones[1].title).toBe('002 - Polish');
+    expect(result.issues[0].milestone).toBe('001 - MVP');
+    expect(result.issues[1].milestone).toBe('002 - Polish');
+  });
+});
+
+// ── normalizeRoadmapMilestones ──────────────────────────────────────────────
+
+describe('normalizeRoadmapMilestones', () => {
+  it('normalizes milestone titles and updates assignment references', () => {
+    const milestones: PlannedMilestone[] = [
+      { title: 'Core', description: '', dueOn: null, order: 1 },
+    ];
+    const assignments = [
+      { issueNum: 5, title: 'Issue', milestone: 'Core', currentMilestone: '', selected: true },
+    ];
+
+    const result = normalizeRoadmapMilestones(milestones, assignments);
+    expect(result.milestones[0].title).toBe('001 - Core');
+    expect(result.assignments[0].milestone).toBe('001 - Core');
   });
 });
