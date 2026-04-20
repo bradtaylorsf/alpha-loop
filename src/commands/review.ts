@@ -414,25 +414,19 @@ async function applyChanges(
     log.success('Synced agent assets after applying changes');
   }
 
-  // Stage applied files (these must exist — we just wrote them)
-  const stageResult = exec(
-    `git add ${appliedPaths.map((p) => JSON.stringify(p)).join(' ')}`,
-    { cwd: projectDir },
-  );
+  // Stage applied files (these must exist — we just wrote them) plus any sync dirs that exist
+  const syncDirs = ['.alpha-loop/templates/', '.claude/', '.agents/', '.codex/']
+    .filter((d) => existsSync(join(projectDir, d)));
+  const addPaths = [...appliedPaths.map((p) => JSON.stringify(p)), ...syncDirs.map((d) => JSON.stringify(d))];
+  const stageResult = exec(`git add ${addPaths.join(' ')}`, { cwd: projectDir });
   if (stageResult.exitCode !== 0) {
     throw new Error(`Failed to stage changes: ${stageResult.stderr || stageResult.stdout || '(no output)'}`);
-  }
-
-  // Stage synced harness directories (may not all exist in every project)
-  for (const dir of ['.alpha-loop/templates/', '.claude/', '.agents/', '.codex/']) {
-    exec(`git add ${dir}`, { cwd: projectDir });
   }
 
   const commitMsg = `improve: apply ${appliedPaths.length} learning-driven improvement(s)`;
   const commitResult = exec(`git commit -m ${JSON.stringify(commitMsg)}`, { cwd: projectDir });
   if (commitResult.exitCode !== 0) {
-    const detail = commitResult.stderr || commitResult.stdout || '(no output)';
-    throw new Error(`Failed to commit: ${detail}`);
+    throw new Error(`Failed to commit: ${commitResult.stderr || commitResult.stdout || '(no output)'}`);
   }
 
   // Build PR body

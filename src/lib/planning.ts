@@ -91,6 +91,65 @@ const COMPLEXITY_COLORS: Record<Complexity, string> = {
 // ── Functions ────────────────────────────────────────────────────────────────
 
 /**
+ * Ensure milestone titles are prefixed with a zero-padded 3-digit order number.
+ * e.g. "MVP" with order 1 → "001 - MVP", "Core Features" with order 10 → "010 - Core Features".
+ * If the title already has a valid prefix, it is left as-is.
+ */
+export function normalizeMilestoneTitles(milestones: PlannedMilestone[]): PlannedMilestone[] {
+  const prefixPattern = /^\d{3} - /;
+  return milestones.map((ms) => {
+    if (prefixPattern.test(ms.title)) return ms;
+    const prefix = String(ms.order).padStart(3, '0');
+    return { ...ms, title: `${prefix} - ${ms.title}` };
+  });
+}
+
+/**
+ * Normalize a full plan draft: prefix milestone titles and update issue references.
+ */
+export function normalizePlanMilestones(draft: PlanDraft): PlanDraft {
+  const originalTitles = draft.milestones.map((ms) => ms.title);
+  const normalized = normalizeMilestoneTitles(draft.milestones);
+  const titleMap = new Map<string, string>();
+  for (let i = 0; i < originalTitles.length; i++) {
+    if (originalTitles[i] !== normalized[i].title) {
+      titleMap.set(originalTitles[i], normalized[i].title);
+    }
+  }
+  const issues = titleMap.size > 0
+    ? draft.issues.map((issue) => {
+        const mapped = titleMap.get(issue.milestone);
+        return mapped ? { ...issue, milestone: mapped } : issue;
+      })
+    : draft.issues;
+  return { ...draft, milestones: normalized, issues };
+}
+
+/**
+ * Normalize roadmap milestones and update assignment references.
+ */
+export function normalizeRoadmapMilestones(
+  milestones: PlannedMilestone[],
+  assignments: RoadmapAssignment[],
+): { milestones: PlannedMilestone[]; assignments: RoadmapAssignment[] } {
+  const originalTitles = milestones.map((ms) => ms.title);
+  const normalized = normalizeMilestoneTitles(milestones);
+  const titleMap = new Map<string, string>();
+  for (let i = 0; i < originalTitles.length; i++) {
+    if (originalTitles[i] !== normalized[i].title) {
+      titleMap.set(originalTitles[i], normalized[i].title);
+    }
+  }
+  const updatedAssignments = titleMap.size > 0
+    ? assignments.map((a) => {
+        const mapped = titleMap.get(a.milestone);
+        return mapped ? { ...a, milestone: mapped } : a;
+      })
+    : assignments;
+  return { milestones: normalized, assignments: updatedAssignments };
+}
+
+/**
  * Extract JSON from an AI agent response that may include markdown fences,
  * explanatory text, or other noise around the JSON payload.
  */
