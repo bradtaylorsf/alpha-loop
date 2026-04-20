@@ -84,6 +84,18 @@ program
   });
 
 program
+  .command('add')
+  .description('Create a new issue from a free-form description using AI')
+  .option('--seed <file>', 'Read description from a file instead of prompting')
+  .option('--milestone <name>', 'Override milestone assignment')
+  .option('--dry-run', 'Preview the issue without creating it')
+  .option('-y, --yes', 'Skip interactive prompts, create directly')
+  .action(async (options) => {
+    const { addCommand } = await import('./commands/add.js');
+    await addCommand(options);
+  });
+
+program
   .command('triage')
   .description('Analyze and improve existing issues (staleness, clarity, size, duplicates)')
   .option('--dry-run', 'Display findings without making changes')
