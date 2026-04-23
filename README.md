@@ -466,6 +466,42 @@ pipeline:
 
 Use `alpha-loop eval search` to automatically find the best model assignment per step via greedy coordinate descent over your eval suite.
 
+### Per-Stage Routing
+
+For hybrid cloud/local setups, use `routing:` to target different models and endpoints for each Loop stage. This is how you offload token-heavy middle stages (Build, Test) to local open-weight models while keeping frontier models for Plan and Review:
+
+```yaml
+routing:
+  profile: hybrid-v1   # all-frontier | hybrid-v1 | all-local | <custom-name>
+  stages:
+    plan:       { model: claude-opus-4-7,      endpoint: anthropic }
+    build:      { model: qwen3-coder-30b-a3b,  endpoint: lmstudio_local }
+    test_write: { model: qwen3-coder-30b-a3b,  endpoint: lmstudio_local }
+    test_exec:  { model: qwen3-coder-30b-a3b,  endpoint: lmstudio_local }
+    review:     { model: claude-sonnet-4-6,    endpoint: anthropic }
+    summary:    { model: gemma-4-31b,          endpoint: lmstudio_local }
+  endpoints:
+    anthropic:      { type: anthropic,        base_url: "https://api.anthropic.com" }
+    lmstudio_local: { type: anthropic_compat, base_url: "http://localhost:1234" }
+    ollama_local:   { type: openai_compat,    base_url: "http://localhost:11434/v1" }
+  fallback:
+    on_tool_error: escalate          # escalate | retry | fail
+    escalate_to: { model: claude-sonnet-4-6, endpoint: anthropic }
+```
+
+**Stages:** `plan`, `build`, `test_write`, `test_exec`, `review`, `summary` — each takes `{ model, endpoint }` where `endpoint` references a name defined in `routing.endpoints`.
+
+**Endpoint types:** `anthropic` (native Anthropic API), `anthropic_compat` (Anthropic-compatible — e.g. LM Studio), or `openai_compat` (OpenAI-compatible — e.g. Ollama, vLLM).
+
+**Fallback modes:**
+- `escalate` — when a routed stage errors on a tool call, retry on `escalate_to` (typically a frontier model)
+- `retry` — retry on the same model/endpoint
+- `fail` — surface the error without retry
+
+**Profile as a list (A/B):** `profile` may also be an array of names (e.g. `[hybrid-v1, all-local]`). Alpha Loop picks one deterministically per-issue so reruns of the same issue select the same profile — this makes profile comparisons reproducible.
+
+**Backwards compatibility:** If you don't set `routing`, alpha-loop uses the top-level `agent:` / `model:` / `pipeline:` exactly as before — no behavior change.
+
 ## GitHub Setup
 
 ### Labels

@@ -20,6 +20,62 @@ export type StepConfig = {
 /** Per-step pipeline configuration. */
 export type PipelineConfig = Partial<Record<PipelineStepName, StepConfig>>;
 
+/** The Loop stages that support per-stage routing (model + endpoint). */
+export type RoutingStageName = 'plan' | 'build' | 'test_write' | 'test_exec' | 'review' | 'summary';
+
+/** Per-stage routing configuration — targets a model on a named endpoint. */
+export type RoutingStageConfig = {
+  model: string;
+  endpoint: string;
+};
+
+/** Endpoint protocol/API shape for a routing endpoint. */
+export type RoutingEndpointType = 'anthropic' | 'anthropic_compat' | 'openai_compat';
+
+/** A named endpoint that stages can route to. */
+export type RoutingEndpoint = {
+  type: RoutingEndpointType;
+  base_url: string;
+};
+
+/** How the loop should behave when a routed stage errors out. */
+export type RoutingFallbackMode = 'escalate' | 'retry' | 'fail';
+
+/** Fallback behavior for routed stages. */
+export type RoutingFallback = {
+  on_tool_error: RoutingFallbackMode;
+  escalate_to?: RoutingStageConfig;
+};
+
+/** Per-stage routing configuration for the Loop. */
+export type RoutingConfig = {
+  profile?: string | string[];
+  stages?: Partial<Record<RoutingStageName, RoutingStageConfig>>;
+  endpoints?: Record<string, RoutingEndpoint>;
+  fallback?: RoutingFallback;
+};
+
+const VALID_ROUTING_STAGES: readonly RoutingStageName[] = [
+  'plan',
+  'build',
+  'test_write',
+  'test_exec',
+  'review',
+  'summary',
+] as const;
+
+const VALID_ENDPOINT_TYPES: readonly RoutingEndpointType[] = [
+  'anthropic',
+  'anthropic_compat',
+  'openai_compat',
+] as const;
+
+const VALID_FALLBACK_MODES: readonly RoutingFallbackMode[] = [
+  'escalate',
+  'retry',
+  'fail',
+] as const;
+
 /**
  * Estimate cost in USD from token counts and a pricing table.
  * Returns 0 if the model is not in the pricing table.
@@ -89,6 +145,8 @@ export type Config = {
   pricing: Record<string, ModelPricing>;
   /** Per-step agent/model overrides. */
   pipeline: PipelineConfig;
+  /** Optional per-stage Loop routing (model + endpoint). Absent => no routing applied. */
+  routing?: RoutingConfig;
   /** Include repo-specific agent prompts during eval runs (default: true). */
   evalIncludeAgentPrompts: boolean;
   /** Include repo-specific skills during eval runs (default: true). */
@@ -152,6 +210,9 @@ const DEFAULTS: Config = {
     'gpt-4o-mini': { input: 0.15, output: 0.60 },
     'deepseek-v3': { input: 0.27, output: 1.10 },
     'gemini-2.5-flash': { input: 0.15, output: 0.60 },
+    'qwen3-coder-30b-a3b': { input: 0, output: 0 },
+    'gemma-4-31b': { input: 0, output: 0 },
+    'glm-4.6': { input: 0, output: 0 },
   },
   pipeline: {},
   evalIncludeAgentPrompts: true,
@@ -286,6 +347,103 @@ export function detectRepo(): string | null {
   return null;
 }
 
+function parseRoutingStage(raw: unknown): RoutingStageConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.model !== 'string' || typeof r.endpoint !== 'string') return undefined;
+  return { model: r.model, endpoint: r.endpoint };
+}
+
+function parseRoutingConfig(raw: unknown): RoutingConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const result: RoutingConfig = {};
+  let populated = false;
+
+  if (typeof r.profile === 'string') {
+    result.profile = r.profile;
+    populated = true;
+  } else if (Array.isArray(r.profile) && r.profile.every((p) => typeof p === 'string')) {
+    result.profile = r.profile as string[];
+    populated = true;
+  }
+
+  const endpoints: Record<string, RoutingEndpoint> = {};
+  if (r.endpoints && typeof r.endpoints === 'object') {
+    for (const [name, value] of Object.entries(r.endpoints as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object') continue;
+      const v = value as Record<string, unknown>;
+      if (typeof v.type !== 'string' || typeof v.base_url !== 'string') {
+        console.warn(`[config] routing.endpoints.${name}: expected { type, base_url }`);
+        continue;
+      }
+      if (!VALID_ENDPOINT_TYPES.includes(v.type as RoutingEndpointType)) {
+        console.warn(
+          `[config] routing.endpoints.${name}: invalid type "${v.type}" (expected one of ${VALID_ENDPOINT_TYPES.join(', ')})`,
+        );
+        continue;
+      }
+      endpoints[name] = { type: v.type as RoutingEndpointType, base_url: v.base_url };
+    }
+    if (Object.keys(endpoints).length > 0) {
+      result.endpoints = endpoints;
+      populated = true;
+    }
+  }
+
+  const stages: Partial<Record<RoutingStageName, RoutingStageConfig>> = {};
+  if (r.stages && typeof r.stages === 'object') {
+    const stagesRaw = r.stages as Record<string, unknown>;
+    for (const [key, value] of Object.entries(stagesRaw)) {
+      if (!VALID_ROUTING_STAGES.includes(key as RoutingStageName)) {
+        console.warn(`[config] routing.stages.${key}: unknown stage name (ignored)`);
+        continue;
+      }
+      const parsed = parseRoutingStage(value);
+      if (!parsed) {
+        console.warn(`[config] routing.stages.${key}: expected { model, endpoint }`);
+        continue;
+      }
+      if (result.endpoints && !(parsed.endpoint in result.endpoints)) {
+        console.warn(
+          `[config] routing.stages.${key}: endpoint "${parsed.endpoint}" is not defined in routing.endpoints (ignored)`,
+        );
+        continue;
+      }
+      stages[key as RoutingStageName] = parsed;
+    }
+    if (Object.keys(stages).length > 0) {
+      result.stages = stages;
+      populated = true;
+    }
+  }
+
+  if (r.fallback && typeof r.fallback === 'object') {
+    const f = r.fallback as Record<string, unknown>;
+    if (typeof f.on_tool_error === 'string' && VALID_FALLBACK_MODES.includes(f.on_tool_error as RoutingFallbackMode)) {
+      const fallback: RoutingFallback = { on_tool_error: f.on_tool_error as RoutingFallbackMode };
+      const escalate = parseRoutingStage(f.escalate_to);
+      if (escalate) {
+        if (result.endpoints && !(escalate.endpoint in result.endpoints)) {
+          console.warn(
+            `[config] routing.fallback.escalate_to: endpoint "${escalate.endpoint}" is not defined in routing.endpoints (ignored)`,
+          );
+        } else {
+          fallback.escalate_to = escalate;
+        }
+      }
+      result.fallback = fallback;
+      populated = true;
+    } else if (f.on_tool_error !== undefined) {
+      console.warn(
+        `[config] routing.fallback.on_tool_error: invalid value "${String(f.on_tool_error)}" (expected one of ${VALID_FALLBACK_MODES.join(', ')})`,
+      );
+    }
+  }
+
+  return populated ? result : undefined;
+}
+
 function loadYamlConfig(configPath: string): Partial<Config> {
   if (!existsSync(configPath)) return {};
 
@@ -332,6 +490,14 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     const ev = parsed.eval as Record<string, unknown>;
     if (ev.include_agent_prompts === false) result.evalIncludeAgentPrompts = false;
     if (ev.include_skills === false) result.evalIncludeSkills = false;
+  }
+
+  // Handle routing nested config (per-stage model + endpoint)
+  if (parsed.routing !== undefined) {
+    const routing = parseRoutingConfig(parsed.routing);
+    if (routing) {
+      result.routing = routing;
+    }
   }
 
   // Handle pricing table (nested object, not in YAML_KEY_MAP)
@@ -394,6 +560,9 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     };
   }
 
+  // Routing precedence is whole-object replacement (overrides > yaml > undefined).
+  const routing = overrides?.routing ?? yamlConfig.routing;
+
   const merged: Config = {
     ...DEFAULTS,
     ...autoDetect,
@@ -402,6 +571,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...overrides,
     pricing: mergedPricing,
     pipeline: mergedPipeline,
+    routing,
   };
 
   // Validate agent is a known value
@@ -434,4 +604,53 @@ export function resolveStepConfig(
     : config.model;
   const model = stepOverride?.model ?? fallbackModel;
   return { agent, model };
+}
+
+// FNV-1a 32-bit hash of a string. Stable across runs so A/B profile selection
+// is deterministic for a given issueId — needed for reproducible reruns.
+function fnv1a32(input: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Resolve the model and endpoint for a specific Loop routing stage.
+ *
+ * Returns undefined when `config.routing` is absent or the stage isn't
+ * configured — callers should fall back to the existing top-level
+ * `agent`/`model` behavior in that case.
+ */
+export function resolveRoutingStage(
+  config: Config,
+  stage: RoutingStageName,
+): { model: string; endpoint?: RoutingEndpoint } | undefined {
+  const routing = config.routing;
+  if (!routing) return undefined;
+  const stageCfg = routing.stages?.[stage];
+  if (!stageCfg) return undefined;
+  const endpoint = routing.endpoints?.[stageCfg.endpoint];
+  return { model: stageCfg.model, endpoint };
+}
+
+/**
+ * Deterministically pick a profile name when `routing.profile` is a list.
+ *
+ * Returns the string profile directly if `profile` is a single string, or a
+ * deterministic choice based on `issueId` when it's an array — so reruns of
+ * the same issue pick the same profile for reproducible A/B evaluation.
+ */
+export function selectRoutingProfile(
+  config: Config,
+  issueId?: number,
+): string | undefined {
+  const profile = config.routing?.profile;
+  if (!profile) return undefined;
+  if (typeof profile === 'string') return profile;
+  if (profile.length === 0) return undefined;
+  if (profile.length === 1 || issueId === undefined) return profile[0];
+  return profile[fnv1a32(String(issueId)) % profile.length];
 }
