@@ -56,6 +56,14 @@ jest.mock('../../src/lib/templates', () => ({
   findDistributionTemplatesDir: jest.fn().mockReturnValue(null),
 }));
 
+// Mock hardware detection — default to non-Apple-Silicon so the hardware prompt
+// doesn't fire in most tests. Specific tests override to exercise the prompt path.
+jest.mock('../../src/lib/hardware', () => ({
+  shouldOfferLocalMode: jest.fn().mockReturnValue(false),
+  getTotalMemoryGB: jest.fn().mockReturnValue(16),
+  detectAppleSilicon: jest.fn().mockReturnValue(false),
+}));
+
 // Mock readline so interactive prompts (label creation, project statuses) don't block tests
 // Default: answer 'y' so label/status creation tests work. Override in specific tests if needed.
 jest.mock('node:readline', () => ({
@@ -205,5 +213,123 @@ describe('init command', () => {
 
     const gitignore = readFileSync(join(tempDir, '.gitignore'), 'utf-8');
     expect(gitignore).not.toContain('.alpha-loop/learnings/');
+  });
+});
+
+describe('hardware-aware local mode prompt', () => {
+  const hardware = jest.requireMock('../../src/lib/hardware') as {
+    shouldOfferLocalMode: jest.Mock;
+    getTotalMemoryGB: jest.Mock;
+    detectAppleSilicon: jest.Mock;
+  };
+  const readline = jest.requireMock('node:readline') as {
+    createInterface: jest.Mock;
+  };
+
+  let originalIsTTY: boolean | undefined;
+
+  beforeEach(() => {
+    hardware.shouldOfferLocalMode.mockReturnValue(false);
+    hardware.getTotalMemoryGB.mockReturnValue(16);
+    originalIsTTY = process.stdin.isTTY;
+  });
+
+  afterEach(() => {
+    // Restore stdin.isTTY exactly as we found it
+    Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+  });
+
+  function setTTY(value: boolean): void {
+    Object.defineProperty(process.stdin, 'isTTY', { value, configurable: true });
+  }
+
+  it('does not prompt when hardware does not qualify', async () => {
+    hardware.shouldOfferLocalMode.mockReturnValue(false);
+    setTTY(true);
+
+    // Capture only questions asked from within maybeOfferLocalMode — other
+    // interactive prompts (label creation) use the same mock, so inspect prompts.
+    const questions: string[] = [];
+    readline.createInterface.mockReturnValue({
+      question: jest.fn((prompt: string, cb: (answer: string) => void) => {
+        questions.push(prompt);
+        cb('y');
+      }),
+      close: jest.fn(),
+    });
+
+    await initCommand();
+
+    expect(questions.every((q) => !q.includes('Apple Silicon'))).toBe(true);
+  });
+
+  it('does not prompt when not running in a TTY, even on qualifying hardware', async () => {
+    hardware.shouldOfferLocalMode.mockReturnValue(true);
+    hardware.getTotalMemoryGB.mockReturnValue(128);
+    setTTY(false);
+
+    const questions: string[] = [];
+    readline.createInterface.mockReturnValue({
+      question: jest.fn((prompt: string, cb: (answer: string) => void) => {
+        questions.push(prompt);
+        cb('y');
+      }),
+      close: jest.fn(),
+    });
+
+    await initCommand();
+
+    expect(questions.every((q) => !q.includes('Apple Silicon'))).toBe(true);
+  });
+
+  it('prompts on qualifying hardware + TTY and leaves YAML untouched on yes', async () => {
+    hardware.shouldOfferLocalMode.mockReturnValue(true);
+    hardware.getTotalMemoryGB.mockReturnValue(128);
+    setTTY(true);
+
+    const questions: string[] = [];
+    readline.createInterface.mockReturnValue({
+      question: jest.fn((prompt: string, cb: (answer: string) => void) => {
+        questions.push(prompt);
+        // First prompt (hardware) says yes; subsequent prompts (labels/statuses)
+        // also say yes via default.
+        cb('y');
+      }),
+      close: jest.fn(),
+    });
+
+    await initCommand();
+
+    // Hardware prompt was asked
+    expect(questions.some((q) => q.includes('Apple Silicon'))).toBe(true);
+
+    // YAML is the untouched default template — hardware prompt does not modify it
+    const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    expect(content).toContain('agent: claude');
+    expect(content).not.toContain('routing:');
+  });
+
+  it('prompts on qualifying hardware but also leaves YAML untouched on no', async () => {
+    hardware.shouldOfferLocalMode.mockReturnValue(true);
+    hardware.getTotalMemoryGB.mockReturnValue(64);
+    setTTY(true);
+
+    const questions: string[] = [];
+    readline.createInterface.mockReturnValue({
+      question: jest.fn((prompt: string, cb: (answer: string) => void) => {
+        questions.push(prompt);
+        // Decline the hardware prompt; other prompts (labels) get 'n' too but
+        // shell mock returns exitCode 1 for gh so they're skipped harmlessly.
+        cb('n');
+      }),
+      close: jest.fn(),
+    });
+
+    await initCommand();
+
+    expect(questions.some((q) => q.includes('Apple Silicon'))).toBe(true);
+    const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    expect(content).toContain('agent: claude');
+    expect(content).not.toContain('routing:');
   });
 });

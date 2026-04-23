@@ -1,0 +1,9 @@
+type: routing-regression
+timeout: 900
+scorers:
+  pipeline_success:
+    hard: true
+  test_pass_rate:
+    min_fraction: 1.0
+  diff_similarity:
+    informational: true

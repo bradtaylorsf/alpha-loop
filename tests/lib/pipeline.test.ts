@@ -20,6 +20,7 @@ jest.mock('../../src/lib/logger', () => ({
 
 jest.mock('../../src/lib/agent', () => ({
   spawnAgent: jest.fn(),
+  buildEndpointEnv: jest.fn().mockReturnValue({}),
 }));
 
 jest.mock('../../src/lib/worktree', () => ({
@@ -65,10 +66,19 @@ jest.mock('../../src/lib/traces', () => ({
   writeCosts: jest.fn(),
   computeScores: jest.fn().mockReturnValue({}),
   computeCosts: jest.fn().mockReturnValue({}),
+  runDir: jest.fn().mockReturnValue('/tmp/traces/run'),
+}));
+
+jest.mock('../../src/lib/telemetry', () => ({
+  buildStageTelemetry: jest.fn().mockReturnValue({}),
+  writeStageTelemetry: jest.fn(),
 }));
 
 jest.mock('../../src/lib/config', () => ({
   estimateCost: jest.fn().mockReturnValue(0),
+  getFallbackPolicy: jest.fn().mockReturnValue(null),
+  resolveRoutingStage: jest.fn().mockReturnValue(undefined),
+  selectRoutingProfile: jest.fn().mockReturnValue(undefined),
 }));
 
 jest.mock('../../src/lib/prompts', () => ({
@@ -434,6 +444,218 @@ describe('processIssue', () => {
     expect(mockCleanupWorktree).toHaveBeenCalledWith(
       expect.objectContaining({ preserveIfCommits: true }),
     );
+  });
+});
+
+describe('processIssue — retry-with-escalation', () => {
+  const mockedConfigModule = require('../../src/lib/config');
+  const routedConfig = () => makeConfig({
+    routing: {
+      profile: 'hybrid-v1',
+      endpoints: {
+        anthropic: { type: 'anthropic' as const, base_url: 'https://api.anthropic.com' },
+        lmstudio_local: { type: 'anthropic_compat' as const, base_url: 'http://localhost:1234' },
+      },
+      stages: {
+        plan: { model: 'claude-opus-4-7', endpoint: 'anthropic' },
+        build: { model: 'qwen3-coder-30b-a3b', endpoint: 'lmstudio_local' },
+      },
+      fallback: {
+        on_tool_error: 'escalate',
+        escalate_to: { model: 'claude-sonnet-4-6', endpoint: 'anthropic' },
+      },
+    },
+  });
+
+  const { EscalationTracker } = require('../../src/lib/escalation');
+
+  beforeEach(() => {
+    mockedConfigModule.getFallbackPolicy.mockReset();
+    mockedConfigModule.resolveRoutingStage.mockReset();
+    mockedConfigModule.getFallbackPolicy.mockReturnValue(null);
+    mockedConfigModule.resolveRoutingStage.mockReturnValue(undefined);
+  });
+
+  test('re-invokes the build stage with escalate_to after 2 tool errors in one turn', async () => {
+    mockedConfigModule.getFallbackPolicy.mockReturnValue({
+      on_tool_error: 'escalate',
+      escalate_to: { model: 'claude-sonnet-4-6', endpoint: 'anthropic' },
+      escalation_window_issues: 10,
+      escalation_error_threshold: 0.08,
+      escalation_revert_ms: 86_400_000,
+    });
+    mockedConfigModule.resolveRoutingStage.mockImplementation((_c: any, stage: string) => {
+      if (stage === 'build') return { model: 'qwen3-coder-30b-a3b', endpoint: { type: 'anthropic_compat', base_url: 'http://localhost:1234' } };
+      return undefined;
+    });
+
+    const errorOutput = 'SyntaxError: Unexpected token } in JSON\nunknown tool: frobnicate\n';
+    mockSpawnAgent.mockImplementation(async (options: any) => {
+      if (options.prompt === 'implement prompt' && options.model === 'qwen3-coder-30b-a3b') {
+        return { exitCode: 0, output: errorOutput, duration: 100 };
+      }
+      return { exitCode: 0, output: 'ok', duration: 100 };
+    });
+
+    const tracker = new EscalationTracker({ statePath: null, now: () => 1_000_000 });
+    const result = await (processIssue as any)(42, 'Test', 'Body', routedConfig(), makeSession(), tracker);
+
+    const buildCalls = (mockSpawnAgent as jest.Mock).mock.calls.filter(
+      (c: any[]) => c[0].prompt === 'implement prompt',
+    );
+    // First call with primary, second call with escalated model
+    expect(buildCalls.length).toBe(2);
+    expect(buildCalls[0][0].model).toBe('qwen3-coder-30b-a3b');
+    expect(buildCalls[1][0].model).toBe('claude-sonnet-4-6');
+
+    // Escalation event captured on the result
+    expect(result.escalationEvents).toBeDefined();
+    const esc = result.escalationEvents!.find((e: any) => e.type === 'escalation');
+    expect(esc).toBeDefined();
+    expect(esc!.stage).toBe('build');
+    expect(esc!.from_model).toBe('qwen3-coder-30b-a3b');
+    expect(esc!.to_model).toBe('claude-sonnet-4-6');
+  });
+
+  test('does not escalate when on_tool_error === "fail"', async () => {
+    mockedConfigModule.getFallbackPolicy.mockReturnValue({
+      on_tool_error: 'fail',
+      escalate_to: { model: 'claude-sonnet-4-6', endpoint: 'anthropic' },
+      escalation_window_issues: 10,
+      escalation_error_threshold: 0.08,
+      escalation_revert_ms: 86_400_000,
+    });
+    mockedConfigModule.resolveRoutingStage.mockImplementation((_c: any, stage: string) => {
+      if (stage === 'build') return { model: 'qwen3-coder-30b-a3b', endpoint: { type: 'anthropic_compat', base_url: 'http://localhost:1234' } };
+      return undefined;
+    });
+
+    const errorOutput = 'SyntaxError: Unexpected token\nunknown tool: foo\n';
+    mockSpawnAgent.mockImplementation(async (options: any) => {
+      if (options.prompt === 'implement prompt') {
+        return { exitCode: 0, output: errorOutput, duration: 100 };
+      }
+      return { exitCode: 0, output: 'ok', duration: 100 };
+    });
+
+    const tracker = new EscalationTracker({ statePath: null, now: () => 1_000_000 });
+    const result = await (processIssue as any)(42, 'Test', 'Body', routedConfig(), makeSession(), tracker);
+
+    const buildCalls = (mockSpawnAgent as jest.Mock).mock.calls.filter(
+      (c: any[]) => c[0].prompt === 'implement prompt',
+    );
+    // on_tool_error === 'fail' — no retry, single invocation
+    expect(buildCalls.length).toBe(1);
+    // No escalation event
+    const esc = (result.escalationEvents ?? []).find((e: any) => e.type === 'escalation');
+    expect(esc).toBeUndefined();
+  });
+
+  test('subsequent turn reverts to primary — escalation is single-turn scoped', async () => {
+    mockedConfigModule.getFallbackPolicy.mockReturnValue({
+      on_tool_error: 'escalate',
+      escalate_to: { model: 'claude-sonnet-4-6', endpoint: 'anthropic' },
+      escalation_window_issues: 10,
+      escalation_error_threshold: 0.08,
+      escalation_revert_ms: 86_400_000,
+    });
+    mockedConfigModule.resolveRoutingStage.mockImplementation((_c: any, stage: string) => {
+      if (stage === 'build') return { model: 'qwen3-coder-30b-a3b', endpoint: { type: 'anthropic_compat', base_url: 'http://localhost:1234' } };
+      return undefined;
+    });
+
+    // First build call emits errors (triggers escalation). Test retries cause additional turns.
+    let buildCallIdx = 0;
+    mockSpawnAgent.mockImplementation(async (options: any) => {
+      if (options.prompt === 'implement prompt') {
+        buildCallIdx++;
+        if (buildCallIdx === 1) {
+          // First turn: primary emits errors, will escalate
+          return { exitCode: 0, output: 'SyntaxError: x\nZodError: y', duration: 100 };
+        }
+        // Escalated retry — clean
+        return { exitCode: 0, output: 'ok', duration: 100 };
+      }
+      return { exitCode: 0, output: 'ok', duration: 100 };
+    });
+    // Tests pass immediately — no test_write stage needed
+    mockRunTests.mockReturnValue({ passed: true, output: 'ok' });
+
+    const tracker = new EscalationTracker({ statePath: null, now: () => 1_000_000 });
+    await (processIssue as any)(42, 'Test', 'Body', routedConfig(), makeSession(), tracker);
+
+    // After escalation, the tracker should have recorded one turn for 'build' stage
+    expect(tracker.errorRate('build')).toBeGreaterThan(0);
+  });
+
+  test('stage pinned to fallback emits stage_revert_active when >threshold', async () => {
+    mockedConfigModule.getFallbackPolicy.mockReturnValue({
+      on_tool_error: 'escalate',
+      escalate_to: { model: 'claude-sonnet-4-6', endpoint: 'anthropic' },
+      escalation_window_issues: 10,
+      escalation_error_threshold: 0.08,
+      escalation_revert_ms: 86_400_000,
+    });
+    mockedConfigModule.resolveRoutingStage.mockImplementation((_c: any, stage: string) => {
+      if (stage === 'build') return { model: 'qwen3-coder-30b-a3b', endpoint: { type: 'anthropic_compat', base_url: 'http://localhost:1234' } };
+      return undefined;
+    });
+
+    const tracker = new EscalationTracker({ statePath: null, now: () => 1_000_000 });
+    // Pre-fill the tracker so the build stage is already pinned
+    tracker.markRevert('build', 1_000_000 + 60 * 60 * 1000);
+
+    mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: 'ok', duration: 100 });
+
+    const result = await (processIssue as any)(42, 'Test', 'Body', routedConfig(), makeSession(), tracker);
+
+    // The build stage call should go directly to the fallback model
+    const buildCalls = (mockSpawnAgent as jest.Mock).mock.calls.filter(
+      (c: any[]) => c[0].prompt === 'implement prompt',
+    );
+    expect(buildCalls[0][0].model).toBe('claude-sonnet-4-6');
+
+    // stage_revert_active event recorded
+    const revertEvent = (result.escalationEvents ?? []).find((e: any) => e.type === 'stage_revert_active');
+    expect(revertEvent).toBeDefined();
+    expect(revertEvent!.stage).toBe('build');
+  });
+
+  test('crossing the rolling error threshold emits stage_revert + needs_human_input', async () => {
+    mockedConfigModule.getFallbackPolicy.mockReturnValue({
+      on_tool_error: 'escalate',
+      escalate_to: { model: 'claude-sonnet-4-6', endpoint: 'anthropic' },
+      escalation_window_issues: 4,
+      escalation_error_threshold: 0.08,
+      escalation_revert_ms: 86_400_000,
+    });
+    mockedConfigModule.resolveRoutingStage.mockImplementation((_c: any, stage: string) => {
+      if (stage === 'build') return { model: 'qwen3-coder-30b-a3b', endpoint: { type: 'anthropic_compat', base_url: 'http://localhost:1234' } };
+      return undefined;
+    });
+
+    const tracker = new EscalationTracker({ statePath: null, now: () => 1_000_000 });
+    // Pre-populate 3 errored turns for 'build' — next errored turn will push rate over 0.08
+    for (let i = 0; i < 3; i++) {
+      tracker.recordTurn({ stage: 'build', errored: true, escalated: false, windowSize: 4 });
+    }
+
+    mockSpawnAgent.mockImplementation(async (options: any) => {
+      if (options.prompt === 'implement prompt' && options.model === 'qwen3-coder-30b-a3b') {
+        return { exitCode: 0, output: 'SyntaxError: x\nunknown tool: y', duration: 100 };
+      }
+      return { exitCode: 0, output: 'ok', duration: 100 };
+    });
+
+    const result = await (processIssue as any)(42, 'Test', 'Body', routedConfig(), makeSession(), tracker);
+
+    const events = result.escalationEvents ?? [];
+    const hasRevert = events.some((e: any) => e.type === 'stage_revert');
+    const hasNeedsHuman = events.some((e: any) => e.type === 'needs_human_input');
+    expect(hasRevert).toBe(true);
+    expect(hasNeedsHuman).toBe(true);
+    // Guardrail pin established
+    expect(tracker.isStageReverted('build')).toBe(true);
   });
 });
 

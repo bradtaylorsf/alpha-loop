@@ -1,0 +1,90 @@
+name: Eval Matrix (nightly)
+
+# Nightly routing-regression matrix run. For each case under
+# .alpha-loop/evals/cases/routing-regression/, executes the loop under every
+# canonical profile and writes a comparison report to eval/reports/, then
+# posts it as a comment on the tracking epic.
+#
+# NOTE: the `all-local` profile requires LM Studio / Ollama reachable on
+# localhost and is only feasible on a self-hosted runner. Hosted runners
+# skip that profile via the ALPHA_LOOP_EVAL_PROFILES variable.
+
+on:
+  schedule:
+    - cron: '0 7 * * *'  # 07:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      epic_number:
+        description: 'Epic issue number to comment on (leave blank to skip posting)'
+        required: false
+        default: '165'
+      profiles:
+        description: 'Comma-separated profile names (default: all-frontier,hybrid-v1)'
+        required: false
+        default: 'all-frontier,hybrid-v1'
+
+jobs:
+  matrix:
+    name: Eval matrix — routing-regression
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # On hosted runners we can only reach frontier endpoints, so exclude
+      # all-local here. Self-hosted runners with a local LM Studio instance
+      # should override this variable or use a separate workflow.
+      ALPHA_LOOP_EVAL_PROFILES: ${{ github.event.inputs.profiles || 'all-frontier,hybrid-v1' }}
+      ALPHA_LOOP_EPIC_NUMBER: ${{ github.event.inputs.epic_number || '165' }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Run matrix eval
+        # Runs dry-run by default: validates every case file and profile YAML,
+        # emits a structural comparison report. Add `--execute` once fixture
+        # isolation lands (clean clone at source_pr's base_sha with no live
+        # GitHub mutation) — without isolation, --execute would update real
+        # issues on this repo because case IDs parse to live issue numbers.
+        run: |
+          node dist/cli.js eval \
+            --matrix \
+            --tags routing-regression \
+            --profiles "$ALPHA_LOOP_EVAL_PROFILES" \
+            --out eval/reports
+
+      - name: Locate report
+        id: report
+        run: |
+          DATE=$(date -u +%F)
+          MD_PATH="eval/reports/routing-${DATE}.md"
+          CSV_PATH="eval/reports/routing-${DATE}.csv"
+          if [ ! -f "$MD_PATH" ]; then
+            echo "No report file at $MD_PATH"
+            exit 1
+          fi
+          echo "md_path=$MD_PATH" >> "$GITHUB_OUTPUT"
+          echo "csv_path=$CSV_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: routing-regression-report
+          path: |
+            ${{ steps.report.outputs.md_path }}
+            ${{ steps.report.outputs.csv_path }}
+
+      - name: Post report to tracking epic
+        if: env.ALPHA_LOOP_EPIC_NUMBER != ''
+        run: |
+          gh issue comment "$ALPHA_LOOP_EPIC_NUMBER" -F "${{ steps.report.outputs.md_path }}"

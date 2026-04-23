@@ -1,0 +1,10 @@
+id: 006-3-digit-milestone-prefixes
+source_pr: 157
+ci_status: success
+base_sha: e92f8793551c73a5dc249f03b3dee947ca2424ca
+description: 3-digit zero-padded milestone prefixes
+tags:
+  - routing-regression
+  - milestones
+  - formatting
+source: routing-regression

@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { historyList, historyDetail, historyQa, historyClean } from '../../src/commands/history';
+import { historyList, historyDetail, historyQa, historyClean, historyTelemetry } from '../../src/commands/history';
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'history-test-'));
@@ -152,6 +152,70 @@ describe('history', () => {
       const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
       expect(errorOutput).toContain('QA checklist not found');
       errorSpy.mockRestore();
+    });
+  });
+
+  describe('historyTelemetry', () => {
+    it('prints a table of stage telemetry entries from stages.jsonl', () => {
+      const tracesDir = path.join(tmpDir, '.alpha-loop', 'traces', 'session-20260423-120000');
+      fs.mkdirSync(tracesDir, { recursive: true });
+      const entries = [
+        {
+          stage: 'plan', model: 'sonnet', endpoint: 'anthropic-prod',
+          tokens_in: 1000, tokens_out: 500, cost_usd: 0.015,
+          wall_time_s: 5.5, tool_calls: 3, tool_errors: 0,
+          stage_success: true, started_at: '2026-04-23T12:00:00.000Z',
+        },
+        {
+          stage: 'implement', model: 'qwen', endpoint: 'lmstudio',
+          tokens_in: 5000, tokens_out: 1500, cost_usd: 0,
+          wall_time_s: 40, tool_calls: 12, tool_errors: 2,
+          stage_success: true, started_at: '2026-04-23T12:05:00.000Z',
+        },
+      ];
+      fs.writeFileSync(
+        path.join(tracesDir, 'stages.jsonl'),
+        entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
+      );
+
+      historyTelemetry('session/20260423-120000', tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Stage telemetry');
+      expect(output).toContain('plan');
+      expect(output).toContain('implement');
+      expect(output).toContain('sonnet');
+      expect(output).toContain('qwen');
+      expect(output).toContain('lmstudio');
+      expect(output).toContain('Totals: 2 stage(s)');
+    });
+
+    it('prints graceful message when no telemetry exists (legacy session)', () => {
+      historyTelemetry('session/missing', tmpDir);
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('No per-stage telemetry recorded for this session.');
+    });
+
+    it('falls back to manifest.stages when stages.jsonl is missing', () => {
+      const learningsDir = path.join(tmpDir, '.alpha-loop', 'learnings');
+      fs.mkdirSync(learningsDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(learningsDir, 'session-session-20260423-000000.json'),
+        JSON.stringify({
+          name: 'session/20260423-000000',
+          results: [],
+          stages: [{
+            stage: 'plan', model: 'sonnet', endpoint: 'anthropic',
+            tokens_in: 10, tokens_out: 5, cost_usd: 0.001,
+            wall_time_s: 1, tool_calls: 0, tool_errors: 0,
+            stage_success: true, started_at: '2026-04-23T00:00:00.000Z',
+          }],
+        }),
+      );
+      historyTelemetry('session/20260423-000000', tmpDir);
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('plan');
+      expect(output).toContain('sonnet');
     });
   });
 

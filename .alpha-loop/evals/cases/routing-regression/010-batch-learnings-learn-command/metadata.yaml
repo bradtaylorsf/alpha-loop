@@ -1,0 +1,10 @@
+id: 010-batch-learnings-learn-command
+source_pr: 153
+ci_status: success
+base_sha: 186dff8d048f33441e07e867c2b1a4a9d13ae291
+description: Batch learnings + alpha-loop learn command
+tags:
+  - routing-regression
+  - learnings
+  - cli
+source: routing-regression

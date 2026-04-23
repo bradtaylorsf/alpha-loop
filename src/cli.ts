@@ -50,7 +50,24 @@ program
   .description('View session history')
   .option('--qa', 'Show QA checklist for session')
   .option('--clean', 'Remove old session data')
+  .option('--telemetry', 'Show per-stage telemetry for a session')
   .action(historyCommand);
+
+// Report subcommands — routing A/B analysis, cost-per-issue rollups.
+const reportCmd = program
+  .command('report')
+  .description('Generate cross-session reports (routing, cost, telemetry)');
+
+reportCmd
+  .command('routing')
+  .description('Aggregate per-stage telemetry and cost-per-issue across sessions')
+  .option('--profile <name>', 'Filter to entries with this routing profile')
+  .option('--since <duration>', 'Limit window (e.g. 30d, 12h, 45m)')
+  .option('--json', 'Emit machine-readable JSON instead of a table')
+  .action(async (options) => {
+    const { reportRoutingCommand } = await import('./commands/report.js');
+    reportRoutingCommand(options);
+  });
 
 program
   .command('scan')
@@ -162,6 +179,12 @@ evalCmd
   .option('--type <type>', 'Filter by type: full or step')
   .option('--step <step>', 'Filter by pipeline step (plan, implement, test, test-fix, review, verify, learn, skill)')
   .option('--verbose', 'Show detailed output')
+  .option('--profile <name>', 'Apply a routing profile (name or path) before running')
+  .option('--matrix', 'Run every case under each profile and emit an A/B comparison report (dry-run by default)')
+  .option('--profiles <list>', 'Comma-separated profile names/paths for --matrix (default: all-frontier,hybrid-v1,all-local)')
+  .option('--baseline <name>', 'Baseline profile for delta computation (default: all-frontier)')
+  .option('--out <dir>', 'Output directory for matrix reports (default: eval/reports)')
+  .option('--execute', 'Actually run pipelines for --matrix (otherwise validates structure only; see CASE_FORMAT.md for why this is gated)')
   .action(async (options) => {
     const { evalRunCommand } = await import('./commands/eval.js');
     await evalRunCommand(options);
@@ -277,8 +300,14 @@ evalCmd
     evalConvertCommand(options);
   });
 
-program
+// Evolve subcommands — `run` (default, Meta-Harness optimization) and
+// `routing` (promotion/demotion automation, issue #163).
+const evolveCmd = program
   .command('evolve')
+  .description('Automated optimization (prompts, skills, config, routing)');
+
+evolveCmd
+  .command('run', { isDefault: true })
   .description('Meta-Harness-style automated optimization loop')
   .option('--max-iterations <n>', 'Maximum optimization iterations (default: 5)')
   .option('--continuous', 'Run until manually stopped (SIGINT)')
@@ -289,6 +318,16 @@ program
   .action(async (options) => {
     const { evolveCommand } = await import('./commands/evolve.js');
     await evolveCommand(options);
+  });
+
+evolveCmd
+  .command('routing')
+  .description('Propose routing promotions/demotions as draft PRs based on eval metrics')
+  .option('--demote <stage>', 'Manually demote a stage to routing.fallback.escalate_to')
+  .option('--dry-run', 'Preview without writing config or opening a PR')
+  .action(async (options) => {
+    const { evolveRoutingCommand } = await import('./commands/evolve-routing.js');
+    await evolveRoutingCommand(options);
   });
 
 program.parse();
