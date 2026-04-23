@@ -1,0 +1,2 @@
+# TODO: backfill — run `gh pr diff 177 > golden.patch` when rate limit resets
+# Until backfilled, diff_similarity is skipped for this case (informational only).

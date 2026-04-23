@@ -1,0 +1,11 @@
+id: 017-triage-command
+source_pr: 125
+source_issue: 116
+base_sha: 4ea1ee3356f61ff4fd6c5ce0d885459bd3ce7313
+ci_status: success
+description: Implement triage command — analyze and improve existing issues
+tags:
+  - routing-regression
+  - cli
+  - triage
+source: routing-regression

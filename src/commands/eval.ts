@@ -59,6 +59,17 @@ import {
 import { runEvalSuite, estimateRunCost } from '../lib/eval-runner.js';
 import { resolveStepConfig } from '../lib/config.js';
 import type { PipelineStepName, PipelineConfig, StepConfig } from '../lib/config.js';
+import {
+  runMatrix,
+  loadProfileOverrides,
+  applyProfileToConfig,
+  profileDisplayName,
+} from '../lib/eval-matrix.js';
+import { renderMatrixMarkdown, renderMatrixCsv } from '../lib/eval-report.js';
+import { scanCaseDir, formatFindings } from '../lib/eval-secret-scan.js';
+
+/** Canonical profiles the matrix run uses when --profiles isn't supplied. */
+const DEFAULT_MATRIX_PROFILES = ['all-frontier', 'hybrid-v1', 'all-local'];
 
 export type EvalOptions = {
   tags?: string;
@@ -67,6 +78,16 @@ export type EvalOptions = {
   type?: 'full' | 'step';
   step?: string;
   verbose?: boolean;
+  /** Single-profile run: apply this profile's overrides before the suite. */
+  profile?: string;
+  /** Multi-profile matrix run. */
+  matrix?: boolean;
+  /** Comma-separated profile names/paths for --matrix. Defaults to canonical three. */
+  profiles?: string;
+  /** Output directory for matrix reports. */
+  out?: string;
+  /** Baseline profile for delta computation (defaults to all-frontier). */
+  baseline?: string;
 };
 
 export type EvalCaptureOptions = {
@@ -100,7 +121,20 @@ function ask(rl: readline.Interface, question: string): Promise<string> {
  * Run the eval suite.
  */
 export async function evalRunCommand(options: EvalOptions): Promise<void> {
-  const config = loadConfig();
+  let config = loadConfig();
+
+  // Matrix mode: branch to the matrix runner.
+  if (options.matrix) {
+    await evalMatrixCommand(options, config);
+    return;
+  }
+
+  // Single-profile mode: merge the profile's overrides before loading cases.
+  if (options.profile) {
+    const overrides = loadProfileOverrides(options.profile);
+    config = applyProfileToConfig(config, overrides);
+    log.info(`Using routing profile: ${profileDisplayName(options.profile)}`);
+  }
 
   // Map --suite to type filter
   let type = options.type;
@@ -119,6 +153,9 @@ export async function evalRunCommand(options: EvalOptions): Promise<void> {
     log.info(`Eval cases directory: ${evalsDir(undefined, config.evalDir)}`);
     return;
   }
+
+  // Secret scan — refuse to run if any case ships credentials.
+  if (!assertCasesSecretClean(config.evalDir)) return;
 
   log.step(`Running ${cases.length} eval case(s)...`);
   console.log('');
@@ -161,6 +198,79 @@ export async function evalRunCommand(options: EvalOptions): Promise<void> {
     const arrow = delta > 0 ? '+' : '';
     console.log(`  Delta: ${arrow}${delta.toFixed(2)} (prev: ${previousScore.composite})`);
   }
+}
+
+/**
+ * Scan all eval case directories for secrets. Returns true when the suite
+ * is clean and safe to run; false and prints findings when dirty.
+ */
+function assertCasesSecretClean(evalDir: string): boolean {
+  const casesDir = join(process.cwd(), evalDir, 'cases');
+  if (!existsSync(casesDir)) return true;
+  const findings = scanCaseDir(casesDir);
+  if (findings.length === 0) return true;
+  log.error('Secret scan blocked the eval run:');
+  console.error(formatFindings(findings));
+  console.error('');
+  console.error('Redact the offending cases before re-running.');
+  return false;
+}
+
+/**
+ * Run the matrix: every loaded case under every configured profile, then
+ * write markdown+CSV reports and print a summary.
+ */
+export async function evalMatrixCommand(options: EvalOptions, baseConfig: Config): Promise<void> {
+  const tags = options.tags?.split(',').map((t) => t.trim()).filter(Boolean) ?? ['routing-regression'];
+  const cases = loadEvalCases({ tags, caseId: options.case });
+
+  if (cases.length === 0) {
+    log.warn(`No eval cases found for tags: ${tags.join(', ')}.`);
+    log.info(`Cases directory: ${evalsDir(undefined, baseConfig.evalDir)}/cases/routing-regression/`);
+    return;
+  }
+
+  if (!assertCasesSecretClean(baseConfig.evalDir)) return;
+
+  const profiles = options.profiles
+    ? options.profiles.split(',').map((p) => p.trim()).filter(Boolean)
+    : DEFAULT_MATRIX_PROFILES;
+  const baseline = options.baseline ?? 'all-frontier';
+
+  log.step(`Matrix run: ${cases.length} case(s) × ${profiles.length} profile(s) [baseline=${baseline}]`);
+  for (const p of profiles) console.log(`  profile: ${profileDisplayName(p)}`);
+  console.log('');
+
+  const result = await runMatrix(
+    cases.map((c) => c),
+    { profiles, baseline, outDir: options.out, verbose: options.verbose },
+    baseConfig,
+  );
+
+  // Write outputs
+  const outDir = options.out ?? join(process.cwd(), 'eval', 'reports');
+  const { mkdirSync: mkdir, writeFileSync: write } = await import('node:fs');
+  mkdir(outDir, { recursive: true });
+  const date = new Date().toISOString().slice(0, 10);
+  const mdPath = join(outDir, `routing-${date}.md`);
+  const csvPath = join(outDir, `routing-${date}.csv`);
+  write(mdPath, renderMatrixMarkdown(result));
+  write(csvPath, renderMatrixCsv(result));
+
+  // Print summary
+  console.log('');
+  log.step('Matrix summary:');
+  for (const t of result.totals) {
+    const delta = result.deltas[t.profile];
+    const deltaStr = delta
+      ? ` (Δpass=${(delta.pipelineSuccessDelta * 100).toFixed(1)}pp, Δcost=$${delta.costPerIssueDelta.toFixed(3)})`
+      : '';
+    console.log(`  ${t.profile}: ${t.passCount}/${t.caseCount} pass · $${t.totalCostUsd.toFixed(2)} total${deltaStr}`);
+  }
+  console.log('');
+  log.success(`Reports written:`);
+  log.info(`  ${mdPath}`);
+  log.info(`  ${csvPath}`);
 }
 
 /**

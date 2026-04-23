@@ -1,0 +1,10 @@
+id: 009-apply-changes-error-messaging
+source_pr: 154
+ci_status: success
+base_sha: d5938a193d75011960e376ca1cfd9643b6ce8a8a
+description: Enhance error handling and staging in applyChanges
+tags:
+  - routing-regression
+  - review
+  - error-handling
+source: routing-regression

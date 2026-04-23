@@ -1,0 +1,11 @@
+id: 005-epic-aware-run
+source_pr: 172
+source_issue: 171
+base_sha: 209ad0081113cd1b295cae1369766afef941cefa
+ci_status: success
+description: Epic-aware run — discover, select, and close epic-driven sessions
+tags:
+  - routing-regression
+  - epics
+  - run-command
+source: routing-regression

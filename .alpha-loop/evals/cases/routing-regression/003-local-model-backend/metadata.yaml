@@ -1,0 +1,11 @@
+id: 003-local-model-backend
+source_pr: 175
+source_issue: 159
+base_sha: 279b228d2ab02d7d4b757bebc04cbe683859eca8
+ci_status: success
+description: Local-model backend — LM Studio / Ollama via Anthropic-compatible endpoint
+tags:
+  - routing-regression
+  - local-model
+  - integration
+source: routing-regression

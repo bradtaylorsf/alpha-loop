@@ -135,6 +135,13 @@ alpha-loop eval estimate
 
 # Compare two config files side-by-side
 alpha-loop eval compare-configs config-a.yaml config-b.yaml
+
+# Apply a single routing profile before running
+alpha-loop eval run --profile hybrid-v1
+
+# Matrix run: replay the routing-regression set under every profile and emit a side-by-side report
+alpha-loop eval run --matrix --tags routing-regression
+alpha-loop eval run --matrix --profiles "all-frontier,hybrid-v1" --out eval/reports
 ```
 
 Eval cases live in `.alpha-loop/evals/` and scores are appended to `scores.jsonl` (Git-friendly, append-only). The composite score formula is pass-rate primary with lightweight penalties for retries and duration. Real API costs (tokens, USD) are tracked per case from agent output and used for the Pareto frontier.
