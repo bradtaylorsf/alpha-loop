@@ -593,7 +593,7 @@ describe('resolveRoutingStage', () => {
   it('returns undefined when routing is absent', () => {
     const config = loadConfig();
     expect(resolveRoutingStage(config, 'plan')).toBeUndefined();
-    expect(resolveRoutingStage(config, 'build', 42)).toBeUndefined();
+    expect(resolveRoutingStage(config, 'build')).toBeUndefined();
   });
 
   it('returns undefined for stages not declared in routing.stages', () => {

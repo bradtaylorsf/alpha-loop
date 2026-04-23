@@ -620,17 +620,13 @@ function fnv1a32(input: string): number {
 /**
  * Resolve the model and endpoint for a specific Loop routing stage.
  *
- * Returns undefined when `config.routing` is absent — callers should fall back
- * to the existing top-level `agent`/`model` behavior in that case.
- *
- * When `routing.profile` is an array, the profile is chosen deterministically
- * from `issueId` so reruns of the same issue pick the same profile (required
- * for reproducible A/B evaluation).
+ * Returns undefined when `config.routing` is absent or the stage isn't
+ * configured — callers should fall back to the existing top-level
+ * `agent`/`model` behavior in that case.
  */
 export function resolveRoutingStage(
   config: Config,
   stage: RoutingStageName,
-  _issueId?: number,
 ): { model: string; endpoint?: RoutingEndpoint } | undefined {
   const routing = config.routing;
   if (!routing) return undefined;
