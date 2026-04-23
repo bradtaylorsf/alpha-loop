@@ -183,6 +183,8 @@ const REQUIRED_LABELS = [
   { name: 'in-progress', color: '1D76DB', description: 'Agent is working on this' },
   { name: 'in-review', color: 'FBCA04', description: 'PR created, awaiting review' },
   { name: 'failed', color: 'D93F0B', description: 'Agent processing failed' },
+  { name: 'epic', color: '8B5CF6', description: 'Tracker issue with sub-issue checklist' },
+  { name: 'needs-human-input', color: 'E99695', description: 'Requires human review or decision' },
 ];
 
 /**

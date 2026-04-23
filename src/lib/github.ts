@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { exec } from './shell.js';
 import { ghExec, getProjectCache, setProjectCache } from './rate-limit.js';
 import { log } from './logger.js';
+import { flipChecklistItem, parseSubIssues, type SubIssueRef } from './epics.js';
 
 /** Max PR body length. GitHub supports 65536 but we leave room for metadata. */
 const MAX_PR_BODY_CHARS = 60_000;
@@ -748,4 +749,89 @@ export function addIssueToProject(owner: string, projectNum: number, repo: strin
 function truncateBody(body: string): string {
   if (body.length <= MAX_PR_BODY_CHARS) return body;
   return body.slice(0, MAX_PR_BODY_CHARS) + '\n\n... (body truncated, see full log)';
+}
+
+/**
+ * List open issues labeled `epic`.
+ */
+export function listEpics(repo: string): Issue[] {
+  const result = ghExec(
+    `gh issue list --repo "${repo}" --label "epic" --state open --json number,title,body,labels --limit 100`,
+  );
+  if (result.exitCode !== 0) {
+    log.warn(`Failed to list epics: ${result.stderr}`);
+    return [];
+  }
+  try {
+    const raw = JSON.parse(result.stdout) as Array<{
+      number: number;
+      title: string;
+      body: string;
+      labels: Array<{ name: string }>;
+    }>;
+    return raw.map((issue) => ({
+      number: issue.number,
+      title: issue.title,
+      body: issue.body ?? '',
+      labels: (issue.labels ?? []).map((l) => l.name),
+    }));
+  } catch {
+    log.warn('Failed to parse epics JSON');
+    return [];
+  }
+}
+
+/**
+ * Fetch an epic and return its parsed sub-issue refs in checklist order.
+ * Returns empty array if the epic cannot be fetched.
+ */
+export function getEpicSubIssues(repo: string, epicNum: number): SubIssueRef[] {
+  const epic = getIssueWithComments(repo, epicNum);
+  if (!epic) return [];
+  return parseSubIssues(epic.body);
+}
+
+/**
+ * Flip the checklist box for `subIssueNum` in the epic's body.
+ *
+ * Throws if the expected `- [?] #<subIssueNum>` line is not present in the
+ * fetched body. One-agent-per-epic is the contract; a missing line means
+ * either external mutation since this session started or a bug — either way,
+ * loud failure, not silent drift.
+ */
+export function updateEpicChecklist(repo: string, epicNum: number, subIssueNum: number, checked: boolean): void {
+  const epic = getIssueWithComments(repo, epicNum);
+  if (!epic) {
+    throw new Error(`updateEpicChecklist: could not fetch epic #${epicNum}`);
+  }
+  const refs = parseSubIssues(epic.body);
+  if (!refs.some((r) => r.number === subIssueNum)) {
+    throw new Error(
+      `updateEpicChecklist: epic #${epicNum} body no longer contains a checklist line for sub-issue #${subIssueNum}`,
+    );
+  }
+  const newBody = flipChecklistItem(epic.body, subIssueNum, checked);
+  if (newBody === epic.body) {
+    // Already in the requested state — no-op.
+    return;
+  }
+  updateIssue(repo, epicNum, { body: newBody });
+}
+
+/**
+ * Find the merged PR URL that closed `issueNum`, or null if none.
+ * Uses GitHub's search for `closes:#N` — matches the convention used by
+ * `buildPRBody()` in pipeline.ts.
+ */
+export function getMergedPRForIssue(repo: string, issueNum: number): string | null {
+  const result = ghExec(
+    `gh pr list --repo "${repo}" --search "closes:#${issueNum}" --state merged --json url --limit 1`,
+  );
+  if (result.exitCode !== 0) return null;
+  try {
+    const prs = JSON.parse(result.stdout) as Array<{ url: string }>;
+    return prs[0]?.url ?? null;
+  } catch {
+    return null;
+  }
 }

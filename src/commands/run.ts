@@ -219,7 +219,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
   }
 
   // Create session (named after milestone if selected)
-  const session = createSession(config, activeMilestone || undefined);
+  const session = createSession(config, { milestone: activeMilestone || undefined });
 
   // Print startup banner
   printBanner(config, session);

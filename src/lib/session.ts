@@ -17,18 +17,42 @@ export type SessionContext = {
   logsDir: string;
   results: PipelineResult[];
   sessionReviewFindings?: GateResult;
+  /** When set, this session processes sub-issues of the given epic. */
+  epic?: number;
 };
+
+export type CreateSessionOptions = {
+  milestone?: string;
+  /** When set, session is scoped to an epic — drives the name slug and PR title. */
+  epicNum?: number;
+  /** Title of the epic, used to form a human-readable session slug. */
+  epicTitle?: string;
+};
+
+function slugify(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
 
 /**
  * Create a new session context with timestamp-based name.
  * Optionally creates a session branch when autoMerge is enabled.
  */
-export function createSession(config: Config, milestone?: string): SessionContext {
+export function createSession(config: Config, options?: CreateSessionOptions): SessionContext {
   const now = new Date();
   const timestamp = formatTimestamp(now);
-  const slug = milestone
-    ? milestone.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-    : timestamp;
+  const milestone = options?.milestone;
+  const epicNum = options?.epicNum;
+  const epicTitle = options?.epicTitle;
+
+  let slug: string;
+  if (epicNum !== undefined) {
+    const titleSlug = epicTitle ? slugify(epicTitle) : '';
+    slug = titleSlug ? `epic-${epicNum}-${titleSlug}` : `epic-${epicNum}`;
+  } else if (milestone) {
+    slug = slugify(milestone);
+  } else {
+    slug = timestamp;
+  }
   const name = `session/${slug}`;
   const branch = config.mergeTo || name;
 
@@ -68,8 +92,14 @@ export function createSession(config: Config, milestone?: string): SessionContex
           repo: config.repo,
           base: config.baseBranch,
           head: branch,
-          title: milestone ? `Milestone: ${milestone}` : `Session: ${name}`,
-          body: `## Session In Progress\n\n${milestone ? `**Milestone:** ${milestone}\n` : ''}**Branch:** ${branch}\n**Started:** ${new Date().toISOString()}\n\nThis PR will be updated as issues are processed.\n\n---\n*Automated by alpha-loop*`,
+          title: epicNum !== undefined
+            ? `Epic #${epicNum}${epicTitle ? `: ${epicTitle}` : ''}`
+            : milestone ? `Milestone: ${milestone}` : `Session: ${name}`,
+          body: `## Session In Progress\n\n${
+            epicNum !== undefined
+              ? `**Epic:** #${epicNum}${epicTitle ? ` — ${epicTitle}` : ''}\n`
+              : milestone ? `**Milestone:** ${milestone}\n` : ''
+          }**Branch:** ${branch}\n**Started:** ${new Date().toISOString()}\n\nThis PR will be updated as issues are processed.\n\n---\n*Automated by alpha-loop*`,
           cwd: projectDir,
         });
         log.success(`Session PR (draft): ${draftPR}`);
@@ -121,7 +151,7 @@ export function createSession(config: Config, milestone?: string): SessionContex
     }
   }
 
-  return { name, branch, resultsDir, logsDir, results: [] };
+  return { name, branch, resultsDir, logsDir, results: [], epic: epicNum };
 }
 
 /**

@@ -861,7 +861,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   if (!config.dryRun) {
     const prBase = config.autoMerge ? session.branch : config.baseBranch;
-    const prBody = buildPRBody(issueNum, title, reviewGate, testOutput, testsPassing, verifyPassing, verifySkipped, body);
+    const prBody = buildPRBody(issueNum, title, reviewGate, testOutput, testsPassing, verifyPassing, verifySkipped, body, session.epic);
 
     try {
       prUrl = createPR({
@@ -1816,14 +1816,18 @@ function buildPRBody(
   verifyPassing: boolean,
   verifySkipped: boolean,
   body: string,
+  epicNum?: number,
 ): string {
   const testSummary = extractTestSummary(testOutput);
 
   const verifyStatus = verifySkipped ? 'SKIPPED' : verifyPassing ? 'PASS' : 'FAIL';
   const reviewStatus = reviewGate.passed ? 'PASS' : 'FAIL';
 
+  const refs = [`Closes #${issueNum}`];
+  if (epicNum !== undefined) refs.push(`Part of #${epicNum}`);
+
   const lines: string[] = [
-    `Closes #${issueNum}`,
+    ...refs,
     '',
     `## Summary`,
     '',

@@ -93,6 +93,11 @@ export type Config = {
   evalIncludeAgentPrompts: boolean;
   /** Include repo-specific skills during eval runs (default: true). */
   evalIncludeSkills: boolean;
+  /**
+   * When the picker shows a milestone that contains exactly one open epic,
+   * auto-promote the selection to that epic. Default: false.
+   */
+  preferEpics: boolean;
 };
 
 const DEFAULTS: Config = {
@@ -151,6 +156,7 @@ const DEFAULTS: Config = {
   pipeline: {},
   evalIncludeAgentPrompts: true,
   evalIncludeSkills: true,
+  preferEpics: false,
 };
 
 /** Map from YAML key (snake_case) to Config key (camelCase). */
@@ -197,6 +203,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   pipeline: 'pipeline',
   eval_include_agent_prompts: 'evalIncludeAgentPrompts',
   eval_include_skills: 'evalIncludeSkills',
+  prefer_epics: 'preferEpics',
 };
 
 /** Map from env var name to Config key. */
@@ -241,6 +248,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   BATCH_SIZE: 'batchSize',
   SMOKE_TEST: 'smokeTest',
   AGENT_TIMEOUT: 'agentTimeout',
+  PREFER_EPICS: 'preferEpics',
 };
 
 function coerce(value: string, current: unknown): unknown {
