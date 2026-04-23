@@ -300,8 +300,14 @@ evalCmd
     evalConvertCommand(options);
   });
 
-program
+// Evolve subcommands — `run` (default, Meta-Harness optimization) and
+// `routing` (promotion/demotion automation, issue #163).
+const evolveCmd = program
   .command('evolve')
+  .description('Automated optimization (prompts, skills, config, routing)');
+
+evolveCmd
+  .command('run', { isDefault: true })
   .description('Meta-Harness-style automated optimization loop')
   .option('--max-iterations <n>', 'Maximum optimization iterations (default: 5)')
   .option('--continuous', 'Run until manually stopped (SIGINT)')
@@ -312,6 +318,16 @@ program
   .action(async (options) => {
     const { evolveCommand } = await import('./commands/evolve.js');
     await evolveCommand(options);
+  });
+
+evolveCmd
+  .command('routing')
+  .description('Propose routing promotions/demotions as draft PRs based on eval metrics')
+  .option('--demote <stage>', 'Manually demote a stage to routing.fallback.escalate_to')
+  .option('--dry-run', 'Preview without writing config or opening a PR')
+  .action(async (options) => {
+    const { evolveRoutingCommand } = await import('./commands/evolve-routing.js');
+    await evolveRoutingCommand(options);
   });
 
 program.parse();

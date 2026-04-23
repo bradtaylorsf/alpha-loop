@@ -179,6 +179,20 @@ alpha-loop evolve --resume                # Resume from a previous evolve sessio
 alpha-loop evolve --dry-run               # Preview without changes
 ```
 
+#### Routing promotion/demotion (`alpha-loop evolve routing`)
+
+Propose per-stage routing changes (frontier → local, or revert to fallback) as draft PRs, based on the metrics aggregated by `alpha-loop report routing` plus the matrix eval.
+
+A stage is promoted to its local candidate when (over ≥30 runs): cost-per-issue savings ≥ 40%, pipeline success delta ≥ −3%, and tool-error rate < 2%. Promotions require a matrix eval run within the last 7 days (`alpha-loop eval --matrix --execute`).
+
+```bash
+alpha-loop evolve routing                   # Propose promotions as a draft PR
+alpha-loop evolve routing --dry-run         # Preview without writing config
+alpha-loop evolve routing --demote build    # Manually revert a stage to fallback
+```
+
+Every promotion/demotion is appended to `.alpha-loop/learnings/routing-history.md`. PR bodies include a `git revert` rollback snippet plus the previous YAML fragment.
+
 ### Batch Mode
 
 By default, Alpha Loop processes issues one at a time — each issue gets its own plan, implement, test, and review agent calls. Batch mode combines multiple issues into single agent calls, dramatically reducing overhead:
@@ -268,6 +282,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop eval import-swebench` | Import eval cases from SWE-bench dataset |
 | `alpha-loop eval export <case>` | Export an eval case for contributing back (anonymized by default) |
 | `alpha-loop evolve` | Meta-Harness-style automated optimization loop |
+| `alpha-loop evolve routing` | Propose routing promotions/demotions as draft PRs based on eval metrics |
+| `alpha-loop evolve routing --demote <stage>` | Manually demote a stage to routing.fallback.escalate_to |
 | `alpha-loop plan` | Generate a full project scope (milestones + issues) from seed inputs using AI |
 | `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
 | `alpha-loop plan --dry-run` | Display the plan without creating any GitHub resources |

@@ -8,7 +8,7 @@
  * computed against a designated baseline profile (defaults to
  * `all-frontier`).
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, basename, extname } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { Config, PipelineConfig, PipelineStepName, StepConfig, RoutingConfig } from './config.js';
@@ -357,6 +357,43 @@ export async function runMatrix(
     deltas: computeDeltas(perProfileTotals, baselineName),
     ...(opts.dryRun ? { dryRun: true } : {}),
   };
+}
+
+/**
+ * Locate the most recent matrix report, returning its mtime (epoch ms) and
+ * path. Used by `alpha-loop evolve routing` to enforce a freshness gate on
+ * promotion proposals — promotion must not fire without a recent matrix run.
+ *
+ * Checks the default `eval/reports/` directory first, then
+ * `.alpha-loop/evals/reports/` (where older runs land). Returns null when
+ * neither directory contains a `routing-*.{md,csv}` file.
+ */
+export function latestMatrixRun(
+  projectDir: string = process.cwd(),
+): { timestampMs: number; summaryPath: string } | null {
+  const candidates = [
+    join(projectDir, 'eval', 'reports'),
+    join(projectDir, '.alpha-loop', 'evals', 'reports'),
+  ];
+  let best: { timestampMs: number; summaryPath: string } | null = null;
+  for (const dir of candidates) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith('routing-')) continue;
+      if (!name.endsWith('.md') && !name.endsWith('.csv')) continue;
+      try {
+        const full = join(dir, name);
+        const stat = statSync(full);
+        const ms = stat.mtimeMs;
+        if (!best || ms > best.timestampMs) {
+          best = { timestampMs: ms, summaryPath: full };
+        }
+      } catch {
+        /* ignore unreadable entry */
+      }
+    }
+  }
+  return best;
 }
 
 /** Stub entries for a dry-run: every case marked skipped under every profile. */
