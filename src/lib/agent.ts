@@ -4,6 +4,14 @@
 import { spawn } from 'node:child_process';
 import { createWriteStream, type WriteStream } from 'node:fs';
 import { log } from './logger.js';
+import type { RoutingEndpoint } from './config.js';
+
+/**
+ * Supported agent CLI shapes. `lmstudio` piggy-backs on the `claude` CLI (since
+ * LM Studio exposes an Anthropic-compatible endpoint); `ollama` piggy-backs on
+ * the `codex` CLI (OpenAI-compatible).
+ */
+export type AgentType = 'claude' | 'codex' | 'opencode' | 'lmstudio' | 'ollama';
 
 export type AgentResult = {
   exitCode: number;
@@ -79,7 +87,7 @@ function formatStreamJsonLine(line: string): string | null {
 const DEFAULT_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 
 export type AgentOptions = {
-  agent: 'claude' | 'codex' | 'opencode';
+  agent: AgentType;
   model: string;
   prompt: string;
   cwd: string;
@@ -91,14 +99,25 @@ export type AgentOptions = {
   maxTurns?: number;
   /** Resume the most recent agent session in the CWD instead of starting fresh. */
   resume?: boolean;
+  /**
+   * Env-var overrides merged over `process.env` when spawning the child.
+   * Callers MUST compute this per stage (see `buildEndpointEnv`) so that a
+   * frontier stage does not inherit a local-endpoint env from a prior stage.
+   */
+  env?: Record<string, string>;
 };
 
 /**
  * Build CLI command and args for a given agent type.
+ *
+ * `lmstudio` delegates to the claude CLI shape (Anthropic-compatible); `ollama`
+ * delegates to the codex CLI shape (OpenAI-compatible). Endpoint selection is
+ * wired via env vars (see `buildEndpointEnv`), not CLI flags.
  */
 export function buildAgentArgs(options: AgentOptions): { command: string; args: string[] } {
   switch (options.agent) {
-    case 'claude': {
+    case 'claude':
+    case 'lmstudio': {
       const args: string[] = [];
       if (options.resume) args.push('--continue');
       args.push('-p');
@@ -113,7 +132,8 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
       }
       return { command: 'claude', args };
     }
-    case 'codex': {
+    case 'codex':
+    case 'ollama': {
       const args: string[] = [];
       if (options.resume) {
         args.push('exec', 'resume', '--last');
@@ -138,15 +158,17 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
  * Build a shell command string for one-shot agent prompts (scan, vision).
  * Reads prompt from stdin. Returns the command to pipe into.
  */
-export function buildOneShotCommand(agent: 'claude' | 'codex' | 'opencode', model: string): string {
+export function buildOneShotCommand(agent: AgentType, model: string): string {
   switch (agent) {
-    case 'claude': {
+    case 'claude':
+    case 'lmstudio': {
       const parts = ['claude', '-p'];
       if (model) parts.push('--model', model);
       parts.push('--dangerously-skip-permissions', '--output-format', 'text');
       return parts.join(' ');
     }
-    case 'codex': {
+    case 'codex':
+    case 'ollama': {
       const parts = ['codex', 'exec'];
       if (model) parts.push('--model', model);
       parts.push('--full-auto');
@@ -160,6 +182,60 @@ export function buildOneShotCommand(agent: 'claude' | 'codex' | 'opencode', mode
     default:
       throw new Error(`Unknown agent type: ${agent}`);
   }
+}
+
+/**
+ * Build the env-var overrides needed to point a child CLI at a specific
+ * routing endpoint. Anthropic-shaped endpoints set ANTHROPIC_BASE_URL /
+ * ANTHROPIC_MODEL; OpenAI-compatible endpoints set OPENAI_BASE_URL /
+ * OPENAI_MODEL.
+ *
+ * Callers MUST compute this per stage and not share envs across stages, so
+ * that a frontier stage does not inherit a local endpoint from a prior stage.
+ */
+export function buildEndpointEnv(endpoint: RoutingEndpoint, model: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (!endpoint || !endpoint.base_url) return env;
+  switch (endpoint.type) {
+    case 'anthropic':
+    case 'anthropic_compat':
+      env.ANTHROPIC_BASE_URL = endpoint.base_url;
+      if (model) env.ANTHROPIC_MODEL = model;
+      break;
+    case 'openai_compat':
+      env.OPENAI_BASE_URL = endpoint.base_url;
+      if (model) env.OPENAI_MODEL = model;
+      break;
+  }
+  return env;
+}
+
+/**
+ * Default local-server base URLs for single-agent `lmstudio` / `ollama` mode.
+ * Exported so tests and callers can reference the same constants.
+ */
+export const DEFAULT_LMSTUDIO_BASE_URL = 'http://localhost:1234';
+export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434/v1';
+
+/**
+ * Auto-injected env vars for single-agent `lmstudio` / `ollama` mode.
+ *
+ * Without this, `agent: lmstudio` would spawn the claude CLI with no base URL
+ * override and silently hit the real Anthropic API. We only inject defaults
+ * when the corresponding env var isn't already set in the parent process, so
+ * users who export `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` to point at a
+ * non-default port keep full control.
+ */
+function defaultLocalEnv(agent: AgentType, model: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (agent === 'lmstudio') {
+    if (!process.env.ANTHROPIC_BASE_URL) env.ANTHROPIC_BASE_URL = DEFAULT_LMSTUDIO_BASE_URL;
+    if (model && !process.env.ANTHROPIC_MODEL) env.ANTHROPIC_MODEL = model;
+  } else if (agent === 'ollama') {
+    if (!process.env.OPENAI_BASE_URL) env.OPENAI_BASE_URL = DEFAULT_OLLAMA_BASE_URL;
+    if (model && !process.env.OPENAI_MODEL) env.OPENAI_MODEL = model;
+  }
+  return env;
 }
 
 /**
@@ -185,10 +261,19 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
 
   const timeoutMs = options.timeout ?? DEFAULT_AGENT_TIMEOUT_MS;
 
+  // Compose env: caller overrides win > agent-default local base URLs > process.env
+  const localDefaults = defaultLocalEnv(options.agent, options.model);
+  const hasOverrides = options.env && Object.keys(options.env).length > 0;
+  const hasLocalDefaults = Object.keys(localDefaults).length > 0;
+  const spawnEnv = hasOverrides || hasLocalDefaults
+    ? { ...process.env, ...localDefaults, ...(options.env ?? {}) }
+    : process.env;
+
   return new Promise<AgentResult>((resolve) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: spawnEnv,
     });
 
     let resolved = false;

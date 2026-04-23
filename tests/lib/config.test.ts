@@ -144,6 +144,46 @@ model: gpt-5.4
     expect(config.model).toBe('gpt-5.4');
   });
 
+  it('accepts agent: lmstudio (single-agent local mode)', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+agent: lmstudio
+model: qwen3-coder-30b-a3b
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.agent).toBe('lmstudio');
+    expect(config.model).toBe('qwen3-coder-30b-a3b');
+  });
+
+  it('accepts agent: ollama (single-agent local mode)', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+agent: ollama
+model: llama3.1:70b
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.agent).toBe('ollama');
+    expect(config.model).toBe('llama3.1:70b');
+  });
+
+  it('rejects unknown agent values with a descriptive error', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+agent: bogus-agent
+`,
+    );
+
+    expect(() => loadConfig()).toThrow(/Invalid agent: "bogus-agent"/);
+    expect(() => loadConfig()).toThrow(/lmstudio, ollama/);
+  });
+
   it('loads agent from AGENT env var', () => {
     process.env.AGENT = 'codex';
     const config = loadConfig();

@@ -95,7 +95,7 @@ export type Config = {
   repo: string;
   repoOwner: string;
   project: number;
-  agent: 'claude' | 'codex' | 'opencode';
+  agent: 'claude' | 'codex' | 'opencode' | 'lmstudio' | 'ollama';
   model: string;
   reviewModel: string;
   pollInterval: number;
@@ -575,7 +575,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
   };
 
   // Validate agent is a known value
-  const VALID_AGENTS = ['claude', 'codex', 'opencode'] as const;
+  const VALID_AGENTS = ['claude', 'codex', 'opencode', 'lmstudio', 'ollama'] as const;
   if (!VALID_AGENTS.includes(merged.agent as typeof VALID_AGENTS[number])) {
     throw new Error(`Invalid agent: "${merged.agent}". Supported agents: ${VALID_AGENTS.join(', ')}`);
   }
