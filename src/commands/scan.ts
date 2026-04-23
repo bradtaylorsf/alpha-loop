@@ -124,7 +124,7 @@ export function scanCommand(): void {
  * Generate or update the instructions file at .alpha-loop/templates/instructions.md.
  * If no existing file, generates from scratch. If existing, merges with fresh scan.
  */
-export function generateInstructions(projectDir: string, agent: 'claude' | 'codex' | 'opencode', model: string): void {
+export function generateInstructions(projectDir: string, agent: 'claude' | 'codex' | 'opencode' | 'lmstudio' | 'ollama', model: string): void {
   const templatesDir = path.join(projectDir, '.alpha-loop', 'templates');
   fs.mkdirSync(templatesDir, { recursive: true });
 

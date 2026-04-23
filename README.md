@@ -298,7 +298,7 @@ Running `alpha-loop init` creates a `.alpha-loop.yaml` file:
 # Alpha Loop configuration
 repo: owner/repo-name
 project: 0  # GitHub Project number (find it in your project URL)
-agent: claude  # AI agent CLI: claude, codex, opencode
+agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
 # model:       # omit to use agent's default (e.g., opus, gpt-5.4)
 label: ready
 base_branch: main
@@ -491,7 +491,7 @@ routing:
 
 **Stages:** `plan`, `build`, `test_write`, `test_exec`, `review`, `summary` — each takes `{ model, endpoint }` where `endpoint` references a name defined in `routing.endpoints`.
 
-**Endpoint types:** `anthropic` (native Anthropic API), `anthropic_compat` (Anthropic-compatible — e.g. LM Studio), or `openai_compat` (OpenAI-compatible — e.g. Ollama, vLLM).
+**Endpoint types:** `anthropic` (native Anthropic API), `anthropic_compat` (Anthropic-compatible — e.g. LM Studio), or `openai_compat` (OpenAI-compatible — e.g. Ollama, vLLM). See [docs/local-models.md](docs/local-models.md) for LM Studio and Ollama setup, including the `agent: lmstudio` / `agent: ollama` short form for single-agent local mode.
 
 **Fallback modes:**
 - `escalate` — when a routed stage errors on a tool call, retry on `escalate_to` (typically a frontier model)

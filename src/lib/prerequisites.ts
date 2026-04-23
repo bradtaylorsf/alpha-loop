@@ -8,6 +8,10 @@ const AGENT_INSTALL_URLS: Record<string, string> = {
   claude: 'https://claude.ai/code',
   codex: 'https://github.com/openai/codex',
   opencode: 'https://github.com/sst/opencode',
+  // lmstudio/ollama re-use the claude/codex CLIs at runtime; install URLs
+  // point users at the local model server setup.
+  lmstudio: 'https://lmstudio.ai/',
+  ollama: 'https://ollama.com/',
 };
 
 export class PrerequisiteError extends Error {
@@ -46,12 +50,16 @@ export async function checkPrerequisites(config: PrerequisiteConfig): Promise<vo
     }
   }
 
-  // Check agent CLI
+  // Check agent CLI. lmstudio/ollama piggy-back on the claude/codex CLIs, so
+  // check those instead of looking for a literal "lmstudio" binary.
   const agent = config.agent;
-  if (!commandExists(agent)) {
+  const cliCommand = agent === 'lmstudio' ? 'claude'
+    : agent === 'ollama' ? 'codex'
+    : agent;
+  if (!commandExists(cliCommand)) {
     const installUrl = AGENT_INSTALL_URLS[agent] ?? '';
     const installHint = installUrl ? ` Install: ${installUrl}` : '';
-    errors.push(`${agent} CLI not found.${installHint}`);
+    errors.push(`${cliCommand} CLI not found (required by agent "${agent}").${installHint}`);
   }
 
   if (errors.length > 0) {

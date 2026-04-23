@@ -98,7 +98,7 @@ function configTemplate(repo: string): string {
   return `# Alpha Loop configuration
 repo: ${repo}
 project: 0  # GitHub Project number (find it in your project URL)
-agent: claude  # AI agent CLI: claude, codex, opencode
+agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
 # model:       # AI model (omit to use agent's default, e.g., opus, gpt-5.4)
 label: ready
 base_branch: main
