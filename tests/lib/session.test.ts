@@ -79,6 +79,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalTimeout: 300,
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
+    preferEpics: false,
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,
@@ -144,6 +145,46 @@ describe('createSession', () => {
       (call: string[]) => call[0]?.includes('git checkout -b'),
     );
     expect(checkoutCalls).toHaveLength(0);
+  });
+
+  test('generates epic-scoped session name when epicNum and epicTitle are provided', () => {
+    const session = createSession(makeConfig(), { epicNum: 165, epicTitle: 'Hybrid Routing' });
+
+    expect(session.name).toBe('session/epic-165-hybrid-routing');
+    expect(session.branch).toBe('session/epic-165-hybrid-routing');
+  });
+
+  test('sets session.epic to the epicNum', () => {
+    const session = createSession(makeConfig(), { epicNum: 165, epicTitle: 'Hybrid Routing' });
+    expect(session.epic).toBe(165);
+  });
+
+  test('generates epic-scoped session name with only epicNum when epicTitle is absent', () => {
+    const session = createSession(makeConfig(), { epicNum: 42 });
+    expect(session.name).toBe('session/epic-42');
+  });
+
+  test('slugifies epicTitle correctly (lowercase, hyphens)', () => {
+    const session = createSession(makeConfig(), { epicNum: 7, epicTitle: 'Multi-Word Title With Spaces!' });
+    expect(session.name).toBe('session/epic-7-multi-word-title-with-spaces');
+  });
+
+  test('draft PR title uses Epic #<N>: <title> format when autoMerge is enabled', () => {
+    // autoMerge triggers draft PR creation
+    mockExec.mockImplementation((cmd: string) => {
+      // branch doesn't exist so it gets created
+      if (cmd.includes('rev-parse --verify')) return { stdout: '', stderr: '', exitCode: 1 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+
+    createSession(makeConfig({ autoMerge: true }), { epicNum: 165, epicTitle: 'Hybrid Routing' });
+
+    expect(mockCreatePR).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Epic #165: Hybrid Routing',
+      }),
+    );
   });
 });
 

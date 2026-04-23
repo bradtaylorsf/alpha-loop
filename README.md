@@ -229,6 +229,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop init` | Full onboarding: config, templates, vision, scan, sync, commit |
 | `alpha-loop run` | Fetch matching issues, process them all, then exit |
 | `alpha-loop run --dry-run` | Preview without making changes |
+| `alpha-loop run --epic <N>` | Process an epic — its sub-issues in checklist order, auto-verify on completion (see [docs/epics.md](docs/epics.md)) |
+| `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
 | `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
 | `alpha-loop auth` | Save authenticated browser state for verification |
@@ -283,6 +285,9 @@ Options:
   --merge-to <branch> Use an existing branch instead of creating a new session branch
   --batch             Batch mode: process multiple issues per agent call (faster, fewer tokens)
   --batch-size <n>    Issues per batch (default: 5)
+  --epic <n>          Process a specific epic by issue number (skips the picker)
+  --skip-epic         Skip the epic picker, use flat/milestone flow
+  --verify-only <n>   Run only the verification pass on an existing epic
 ```
 
 ## Configuration
@@ -479,6 +484,27 @@ The loop uses these labels. Run `alpha-loop init` to create any that are missing
 Use GitHub milestones to group issues into planned releases or sprints. When you start the loop, you'll be prompted to pick a milestone — only issues in that milestone will be processed.
 
 Create milestones at `github.com/<owner>/<repo>/milestones/new`. Set due dates to keep yourself on track.
+
+### Epics
+
+An epic is a GitHub issue with the `epic` label and a task-list body that references sub-issues by number:
+
+```markdown
+## Sub-issues
+- [ ] #158 Add tenant column to users table
+- [ ] #159 Add tenant middleware
+- [ ] #160 Scope queries by tenant
+```
+
+When you start the loop, open epics appear above milestones in the picker. You can also target one directly:
+
+```bash
+alpha-loop run --epic 165
+```
+
+Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
+
+See [docs/epics.md](docs/epics.md) for the full feature reference, including `--verify-only`, the `prefer_epics` config option, skip rules, and safety rails.
 
 ### GitHub Project Board
 

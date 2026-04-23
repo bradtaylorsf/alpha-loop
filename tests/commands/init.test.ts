@@ -105,6 +105,8 @@ describe('ensureLabels', () => {
             { name: 'in-progress' },
             { name: 'in-review' },
             { name: 'failed' },
+            { name: 'epic' },
+            { name: 'needs-human-input' },
           ]),
           stderr: '',
         };
