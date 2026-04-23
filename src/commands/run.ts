@@ -46,7 +46,7 @@ export type RunOptions = {
   /** Force a specific epic by number, skip picker. */
   epic?: number;
   /** Skip the epic picker entirely, use flat/milestone flow. */
-  noEpic?: boolean;
+  skipEpic?: boolean;
   /** Run only the verification pass on an existing epic. */
   verifyOnly?: number;
 };
@@ -166,7 +166,7 @@ export type PickTargetResult =
  * When `preferEpics` is true and there's exactly one open epic, the picker
  * auto-selects it without prompting.
  *
- * When `hideEpics` is true, epics are not shown or auto-selected (the `--no-epic`
+ * When `hideEpics` is true, epics are not shown or auto-selected (the `--skip-epic`
  * flag path).
  */
 async function pickTarget(
@@ -330,6 +330,10 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
   // --- Verify-only path: bypass the normal loop entirely ---
   if (options.verifyOnly !== undefined) {
+    if (!Number.isFinite(options.verifyOnly) || options.verifyOnly <= 0) {
+      log.error('--verify-only requires a positive integer issue number (e.g. --verify-only 165)');
+      process.exit(1);
+    }
     log.step(`Running verify-only pass for epic #${options.verifyOnly}`);
     await runEpicVerificationFlow(options.verifyOnly, config, null);
     return;
@@ -342,6 +346,10 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
   // --epic <N> overrides everything except --verify-only
   if (options.epic !== undefined) {
+    if (typeof options.epic !== 'number' || !Number.isFinite(options.epic) || options.epic <= 0) {
+      log.error('--epic requires a positive integer issue number (e.g. --epic 165)');
+      process.exit(1);
+    }
     const epic = getIssueWithComments(config.repo, options.epic);
     if (!epic) {
       log.error(`Could not fetch epic #${options.epic}`);
@@ -356,7 +364,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
   if (activeEpic === undefined && !activeMilestone && !config.dryRun && process.stdin.isTTY) {
     const target = await pickTarget(config.repo, {
       preferEpics: config.preferEpics,
-      hideEpics: options.noEpic === true,
+      hideEpics: options.skipEpic === true,
     });
     if (target.type === 'epic') {
       activeEpic = target.epicNum;
@@ -602,8 +610,10 @@ export async function runCommand(options: RunOptions): Promise<void> {
           const results = await processBatch(batchIssues, config, session);
           session.results.push(...results);
 
-          // Flip epic checklist for each successful sub-issue
-          if (activeEpic !== undefined) {
+          // Flip epic checklist for each successful sub-issue.
+          // Skipped in dry-run: `processIssue` returns status='success' when tests are
+          // stubbed in dry-run, which would otherwise mutate the live epic body.
+          if (activeEpic !== undefined && !config.dryRun) {
             let checklistError = false;
             for (const r of results) {
               if (r.status !== 'success') continue;
@@ -620,6 +630,12 @@ export async function runCommand(options: RunOptions): Promise<void> {
             if (checklistError) {
               activeIssueNum = null;
               break;
+            }
+          } else if (activeEpic !== undefined && config.dryRun) {
+            for (const r of results) {
+              if (r.status === 'success') {
+                log.dry(`Would flip epic #${activeEpic} checklist for sub-issue #${r.issueNum}`);
+              }
             }
           }
 
@@ -662,8 +678,10 @@ export async function runCommand(options: RunOptions): Promise<void> {
           );
           session.results.push(result);
 
-          // Flip the epic checklist box when this sub-issue succeeded
-          if (activeEpic !== undefined && result.status === 'success') {
+          // Flip the epic checklist box when this sub-issue succeeded.
+          // Skipped in dry-run: `processIssue` stubs tests in dry-run and returns success,
+          // which would otherwise mutate the live epic body.
+          if (activeEpic !== undefined && result.status === 'success' && !config.dryRun) {
             try {
               updateEpicChecklist(config.repo, activeEpic, issue.number, true);
             } catch (err) {
@@ -673,6 +691,8 @@ export async function runCommand(options: RunOptions): Promise<void> {
               activeIssueNum = null;
               break;
             }
+          } else if (activeEpic !== undefined && result.status === 'success' && config.dryRun) {
+            log.dry(`Would flip epic #${activeEpic} checklist for sub-issue #${issue.number}`);
           }
 
           // Stop processing if agent hit a transient error (usage/rate limit)

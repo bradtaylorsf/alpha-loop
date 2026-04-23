@@ -68,7 +68,7 @@ Processes epic `#165` directly, skipping the picker.
 ### Excluded
 
 ```bash
-alpha-loop run --no-epic
+alpha-loop run --skip-epic
 ```
 
 Skips the epic picker entirely and goes straight to milestones. Useful when you want to work on standalone issues in a repo that has open epics.

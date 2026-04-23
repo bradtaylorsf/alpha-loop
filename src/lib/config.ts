@@ -94,8 +94,8 @@ export type Config = {
   /** Include repo-specific skills during eval runs (default: true). */
   evalIncludeSkills: boolean;
   /**
-   * When the picker shows a milestone that contains exactly one open epic,
-   * auto-promote the selection to that epic. Default: false.
+   * When there is exactly one open epic in the repo, the picker auto-selects
+   * it instead of prompting. Default: false.
    */
   preferEpics: boolean;
 };

@@ -37,7 +37,7 @@ program
   .option('--fix', 'Auto-fix validation issues (reorder deps, comment on incomplete issues)')
   .option('--verbose', 'Stream live agent output to terminal')
   .option('--epic <n>', 'Process a specific epic by issue number (skips the picker)', parseInt)
-  .option('--no-epic', 'Skip the epic picker, use flat/milestone flow')
+  .option('--skip-epic', 'Skip the epic picker, use flat/milestone flow')
   .option('--verify-only <n>', 'Run only the verification pass on an existing epic', parseInt)
   .action(async (options) => {
     const { runCommand } = await import('./commands/run.js');
