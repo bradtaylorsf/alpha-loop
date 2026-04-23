@@ -5,6 +5,7 @@ sessions/
 .alpha-loop/sessions/
 .alpha-loop/traces/
 .alpha-loop/auth/
+.alpha-loop/escalation-state.json
 logs/*
 !logs/.gitkeep
 .env
