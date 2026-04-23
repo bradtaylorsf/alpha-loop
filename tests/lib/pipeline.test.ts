@@ -1,4 +1,4 @@
-import { processIssue, processBatch } from '../../src/lib/pipeline';
+import { processIssue, processBatch, buildPRBody } from '../../src/lib/pipeline';
 import type { SessionContext } from '../../src/lib/session';
 
 // Mock all dependencies
@@ -476,5 +476,45 @@ describe('processBatch', () => {
     expect(mockCleanupWorktree).toHaveBeenCalledWith(
       expect.not.objectContaining({ preserveIfCommits: true }),
     );
+  });
+});
+
+describe('buildPRBody', () => {
+  const defaultReviewGate = {
+    passed: true,
+    summary: 'Looks good',
+    findings: [],
+  };
+
+  test('contains Closes #<issueNum> reference', () => {
+    const body = buildPRBody(42, 'My feature', defaultReviewGate, '', true, true, false, '');
+    expect(body).toContain('Closes #42');
+  });
+
+  test('contains Part of #<epicNum> when epicNum is provided', () => {
+    const body = buildPRBody(42, 'My feature', defaultReviewGate, '', true, true, false, '', 165);
+    expect(body).toContain('Closes #42');
+    expect(body).toContain('Part of #165');
+  });
+
+  test('does NOT contain Part of when epicNum is not provided', () => {
+    const body = buildPRBody(42, 'My feature', defaultReviewGate, '', true, true, false, '');
+    expect(body).not.toContain('Part of');
+  });
+
+  test('includes test results section with pass/fail status', () => {
+    const body = buildPRBody(42, 'My feature', defaultReviewGate, 'Tests: 10 passed', true, true, false, '');
+    expect(body).toContain('Test Results');
+    expect(body).toContain('PASS');
+  });
+
+  test('shows SKIPPED for verification when verifySkipped is true', () => {
+    const body = buildPRBody(42, 'My feature', defaultReviewGate, '', true, false, true, '');
+    expect(body).toContain('SKIPPED');
+  });
+
+  test('shows FAIL for verification when verifyPassing is false and not skipped', () => {
+    const body = buildPRBody(42, 'My feature', defaultReviewGate, '', true, false, false, '');
+    expect(body).toContain('FAIL');
   });
 });

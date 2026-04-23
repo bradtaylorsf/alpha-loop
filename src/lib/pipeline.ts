@@ -1807,7 +1807,7 @@ function buildBatchPRBody(
   return lines.join('\n');
 }
 
-function buildPRBody(
+export function buildPRBody(
   issueNum: number,
   title: string,
   reviewGate: GateResult,
