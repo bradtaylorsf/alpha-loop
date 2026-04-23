@@ -93,6 +93,10 @@ describe('renderMatrixMarkdown', () => {
     const md = renderMatrixMarkdown(dryFixture);
     expect(md).toContain('Dry-run');
     expect(md).toContain('SKIP');
+    // Dry-run reports should use a validation summary, not 0/1 pass rate.
+    expect(md).toContain('Cases loaded');
+    expect(md).not.toContain('Pass rate');
+    expect(md).not.toContain('Deltas vs');
   });
 });
 

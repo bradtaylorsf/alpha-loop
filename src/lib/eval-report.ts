@@ -20,15 +20,25 @@ export function renderMatrixMarkdown(result: MatrixResult, title?: string): stri
     lines.push('');
   }
 
-  // Per-profile summary table
+  // Per-profile summary table. In dry-run every numeric column is zero by
+  // construction (no pipelines ran), so we show a validation table instead
+  // to avoid misreading "0/N" as real regressions.
   lines.push('## Per-profile summary');
   lines.push('');
-  lines.push('| Profile | Pass | Pass rate | Total cost | Mean wall time | Mean tool-error rate |');
-  lines.push('| --- | --- | --- | --- | --- | --- |');
-  for (const t of result.totals) {
-    lines.push(
-      `| \`${t.profile}\` | ${t.passCount}/${t.caseCount} | ${percent(t.passRate)} | ${usd(t.totalCostUsd)} | ${seconds(t.meanWallTimeS)} | ${percent(t.meanToolErrorRate)} |`,
-    );
+  if (result.dryRun) {
+    lines.push('| Profile | Cases loaded | Profile applied | Executed |');
+    lines.push('| --- | --- | --- | --- |');
+    for (const t of result.totals) {
+      lines.push(`| \`${t.profile}\` | ${t.caseCount} | yes | no (dry-run) |`);
+    }
+  } else {
+    lines.push('| Profile | Pass | Pass rate | Total cost | Mean wall time | Mean tool-error rate |');
+    lines.push('| --- | --- | --- | --- | --- | --- |');
+    for (const t of result.totals) {
+      lines.push(
+        `| \`${t.profile}\` | ${t.passCount}/${t.caseCount} | ${percent(t.passRate)} | ${usd(t.totalCostUsd)} | ${seconds(t.meanWallTimeS)} | ${percent(t.meanToolErrorRate)} |`,
+      );
+    }
   }
   lines.push('');
 
@@ -48,17 +58,19 @@ export function renderMatrixMarkdown(result: MatrixResult, title?: string): stri
   }
   lines.push('');
 
-  // Deltas vs baseline
-  lines.push(`## Deltas vs \`${result.baseline}\``);
-  lines.push('');
-  lines.push('| Profile | Δ pipeline_success | Δ cost_per_issue |');
-  lines.push('| --- | --- | --- |');
-  for (const t of result.totals) {
-    const d = result.deltas[t.profile];
-    if (!d) continue;
-    lines.push(`| \`${t.profile}\` | ${deltaPct(d.pipelineSuccessDelta)} | ${deltaUsd(d.costPerIssueDelta)} |`);
+  // Deltas vs baseline — only meaningful when pipelines actually ran.
+  if (!result.dryRun) {
+    lines.push(`## Deltas vs \`${result.baseline}\``);
+    lines.push('');
+    lines.push('| Profile | Δ pipeline_success | Δ cost_per_issue |');
+    lines.push('| --- | --- | --- |');
+    for (const t of result.totals) {
+      const d = result.deltas[t.profile];
+      if (!d) continue;
+      lines.push(`| \`${t.profile}\` | ${deltaPct(d.pipelineSuccessDelta)} | ${deltaUsd(d.costPerIssueDelta)} |`);
+    }
+    lines.push('');
   }
-  lines.push('');
 
   return lines.join('\n');
 }

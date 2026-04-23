@@ -276,15 +276,23 @@ export async function evalMatrixCommand(options: EvalOptions, baseConfig: Config
   write(mdPath, renderMatrixMarkdown(result));
   write(csvPath, renderMatrixCsv(result));
 
-  // Print summary
+  // Print summary. In dry-run we deliberately avoid a "0/N pass" line so
+  // automated verifiers and humans don't read it as 17 real failures — the
+  // runner was never invoked.
   console.log('');
   log.step('Matrix summary:');
-  for (const t of result.totals) {
-    const delta = result.deltas[t.profile];
-    const deltaStr = delta
-      ? ` (Δpass=${(delta.pipelineSuccessDelta * 100).toFixed(1)}pp, Δcost=$${delta.costPerIssueDelta.toFixed(3)})`
-      : '';
-    console.log(`  ${t.profile}: ${t.passCount}/${t.caseCount} pass · $${t.totalCostUsd.toFixed(2)} total${deltaStr}`);
+  if (dryRun) {
+    for (const t of result.totals) {
+      console.log(`  ${t.profile}: validated — ${t.caseCount} case(s) loaded, profile applied cleanly (no execution)`);
+    }
+  } else {
+    for (const t of result.totals) {
+      const delta = result.deltas[t.profile];
+      const deltaStr = delta
+        ? ` (Δpass=${(delta.pipelineSuccessDelta * 100).toFixed(1)}pp, Δcost=$${delta.costPerIssueDelta.toFixed(3)})`
+        : '';
+      console.log(`  ${t.profile}: ${t.passCount}/${t.caseCount} pass · $${t.totalCostUsd.toFixed(2)} total${deltaStr}`);
+    }
   }
   console.log('');
   log.success(`Reports written:`);
