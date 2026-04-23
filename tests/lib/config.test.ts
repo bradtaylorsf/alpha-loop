@@ -10,7 +10,14 @@ jest.mock('node:child_process', () => ({
 
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
 
-import { loadConfig, detectRepo, estimateCost, resolveStepConfig } from '../../src/lib/config.js';
+import {
+  loadConfig,
+  detectRepo,
+  estimateCost,
+  resolveStepConfig,
+  resolveRoutingStage,
+  selectRoutingProfile,
+} from '../../src/lib/config.js';
 import type { Config, PipelineConfig } from '../../src/lib/config.js';
 
 let originalCwd: string;
@@ -391,5 +398,291 @@ describe('estimateCost', () => {
     // 3K output tokens at $75/M = $0.225
     const cost = estimateCost('claude-opus-4-6', 10000, 3000, pricing);
     expect(cost).toBeCloseTo(0.375, 3);
+  });
+});
+
+describe('routing config', () => {
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('is undefined when no routing key is present', () => {
+    writeFileSync(join(tempDir, '.alpha-loop.yaml'), `repo: owner/repo\nagent: claude\nmodel: claude-sonnet-4-6\n`);
+    const config = loadConfig();
+    expect(config.routing).toBeUndefined();
+    // Existing behavior unchanged
+    expect(config.agent).toBe('claude');
+    expect(resolveStepConfig(config, 'implement').model).toBe('claude-sonnet-4-6');
+  });
+
+  it('loads the full hybrid-v1 example shape', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  profile: hybrid-v1
+  stages:
+    plan:       { model: claude-opus-4-7,      endpoint: anthropic }
+    build:      { model: qwen3-coder-30b-a3b,  endpoint: lmstudio_local }
+    test_write: { model: qwen3-coder-30b-a3b,  endpoint: lmstudio_local }
+    test_exec:  { model: qwen3-coder-30b-a3b,  endpoint: lmstudio_local }
+    review:     { model: claude-sonnet-4-6,    endpoint: anthropic }
+    summary:    { model: gemma-4-31b,          endpoint: lmstudio_local }
+  endpoints:
+    anthropic:      { type: anthropic,        base_url: "https://api.anthropic.com" }
+    lmstudio_local: { type: anthropic_compat, base_url: "http://localhost:1234" }
+    ollama_local:   { type: openai_compat,    base_url: "http://localhost:11434/v1" }
+  fallback:
+    on_tool_error: escalate
+    escalate_to: { model: claude-sonnet-4-6, endpoint: anthropic }
+`,
+    );
+    const config = loadConfig();
+    expect(config.routing).toBeDefined();
+    expect(config.routing?.profile).toBe('hybrid-v1');
+    expect(config.routing?.stages?.plan).toEqual({ model: 'claude-opus-4-7', endpoint: 'anthropic' });
+    expect(config.routing?.stages?.build).toEqual({ model: 'qwen3-coder-30b-a3b', endpoint: 'lmstudio_local' });
+    expect(config.routing?.stages?.test_write).toEqual({ model: 'qwen3-coder-30b-a3b', endpoint: 'lmstudio_local' });
+    expect(config.routing?.stages?.test_exec).toEqual({ model: 'qwen3-coder-30b-a3b', endpoint: 'lmstudio_local' });
+    expect(config.routing?.stages?.review).toEqual({ model: 'claude-sonnet-4-6', endpoint: 'anthropic' });
+    expect(config.routing?.stages?.summary).toEqual({ model: 'gemma-4-31b', endpoint: 'lmstudio_local' });
+    expect(config.routing?.endpoints?.anthropic).toEqual({ type: 'anthropic', base_url: 'https://api.anthropic.com' });
+    expect(config.routing?.endpoints?.lmstudio_local).toEqual({ type: 'anthropic_compat', base_url: 'http://localhost:1234' });
+    expect(config.routing?.endpoints?.ollama_local).toEqual({ type: 'openai_compat', base_url: 'http://localhost:11434/v1' });
+    expect(config.routing?.fallback).toEqual({
+      on_tool_error: 'escalate',
+      escalate_to: { model: 'claude-sonnet-4-6', endpoint: 'anthropic' },
+    });
+  });
+
+  it('preserves profile as a list of strings', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  profile:
+    - hybrid-v1
+    - all-local
+    - all-frontier
+  endpoints:
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+  stages:
+    plan: { model: claude-opus-4-7, endpoint: anthropic }
+`,
+    );
+    const config = loadConfig();
+    expect(config.routing?.profile).toEqual(['hybrid-v1', 'all-local', 'all-frontier']);
+  });
+
+  it('drops unknown stage names without throwing', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  endpoints:
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+  stages:
+    foobar: { model: claude-opus-4-7, endpoint: anthropic }
+    plan:   { model: claude-opus-4-7, endpoint: anthropic }
+`,
+    );
+    const config = loadConfig();
+    expect(config.routing?.stages?.plan).toEqual({ model: 'claude-opus-4-7', endpoint: 'anthropic' });
+    expect((config.routing?.stages as Record<string, unknown>).foobar).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('foobar'));
+  });
+
+  it('drops stages that reference an unknown endpoint', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  endpoints:
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+  stages:
+    plan:  { model: claude-opus-4-7, endpoint: anthropic }
+    build: { model: mystery-model,   endpoint: nonexistent }
+`,
+    );
+    const config = loadConfig();
+    expect(config.routing?.stages?.plan).toBeDefined();
+    expect(config.routing?.stages?.build).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('nonexistent'));
+  });
+
+  it('rejects endpoints with invalid type', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  endpoints:
+    bogus: { type: not_a_real_type, base_url: "http://localhost:1234" }
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+`,
+    );
+    const config = loadConfig();
+    expect(config.routing?.endpoints?.bogus).toBeUndefined();
+    expect(config.routing?.endpoints?.anthropic).toBeDefined();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not_a_real_type'));
+  });
+
+  it('throws on malformed YAML', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  stages: [ { { this is invalid
+`,
+    );
+    expect(() => loadConfig()).toThrow();
+  });
+
+  it('includes zero-cost local model entries in default pricing', () => {
+    const config = loadConfig();
+    expect(config.pricing['qwen3-coder-30b-a3b']).toEqual({ input: 0, output: 0 });
+    expect(config.pricing['gemma-4-31b']).toEqual({ input: 0, output: 0 });
+    expect(config.pricing['glm-4.6']).toEqual({ input: 0, output: 0 });
+  });
+
+  it('rejects fallback.on_tool_error with invalid value', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  endpoints:
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+  fallback:
+    on_tool_error: bogus_mode
+`,
+    );
+    const config = loadConfig();
+    expect(config.routing?.fallback).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('bogus_mode'));
+  });
+
+  it('routing overrides from CLI replace YAML routing wholesale', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  profile: hybrid-v1
+  endpoints:
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+  stages:
+    plan: { model: claude-opus-4-7, endpoint: anthropic }
+`,
+    );
+    const config = loadConfig({
+      routing: {
+        profile: 'all-frontier',
+        stages: { plan: { model: 'claude-opus-4-7', endpoint: 'anthropic' } },
+        endpoints: { anthropic: { type: 'anthropic', base_url: 'https://api.anthropic.com' } },
+      },
+    });
+    expect(config.routing?.profile).toBe('all-frontier');
+  });
+});
+
+describe('resolveRoutingStage', () => {
+  it('returns undefined when routing is absent', () => {
+    const config = loadConfig();
+    expect(resolveRoutingStage(config, 'plan')).toBeUndefined();
+    expect(resolveRoutingStage(config, 'build', 42)).toBeUndefined();
+  });
+
+  it('returns undefined for stages not declared in routing.stages', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  endpoints:
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+  stages:
+    plan: { model: claude-opus-4-7, endpoint: anthropic }
+`,
+    );
+    const config = loadConfig();
+    expect(resolveRoutingStage(config, 'plan')).toEqual({
+      model: 'claude-opus-4-7',
+      endpoint: { type: 'anthropic', base_url: 'https://api.anthropic.com' },
+    });
+    expect(resolveRoutingStage(config, 'build')).toBeUndefined();
+  });
+
+  it('returns model and resolved endpoint for each configured stage', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  endpoints:
+    anthropic:      { type: anthropic,        base_url: "https://api.anthropic.com" }
+    lmstudio_local: { type: anthropic_compat, base_url: "http://localhost:1234" }
+  stages:
+    plan:  { model: claude-opus-4-7,     endpoint: anthropic }
+    build: { model: qwen3-coder-30b-a3b, endpoint: lmstudio_local }
+`,
+    );
+    const config = loadConfig();
+    expect(resolveRoutingStage(config, 'plan')).toEqual({
+      model: 'claude-opus-4-7',
+      endpoint: { type: 'anthropic', base_url: 'https://api.anthropic.com' },
+    });
+    expect(resolveRoutingStage(config, 'build')).toEqual({
+      model: 'qwen3-coder-30b-a3b',
+      endpoint: { type: 'anthropic_compat', base_url: 'http://localhost:1234' },
+    });
+  });
+});
+
+describe('selectRoutingProfile', () => {
+  it('returns undefined when routing or profile is unset', () => {
+    const noRouting = loadConfig();
+    expect(selectRoutingProfile(noRouting, 1)).toBeUndefined();
+  });
+
+  it('returns the single string profile unchanged', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  profile: hybrid-v1
+  endpoints: { anthropic: { type: anthropic, base_url: "https://api.anthropic.com" } }
+  stages: { plan: { model: claude-opus-4-7, endpoint: anthropic } }
+`,
+    );
+    const config = loadConfig();
+    expect(selectRoutingProfile(config, 42)).toBe('hybrid-v1');
+    expect(selectRoutingProfile(config)).toBe('hybrid-v1');
+  });
+
+  it('deterministically picks the same profile from an array for a given issueId', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  profile:
+    - hybrid-v1
+    - all-local
+    - all-frontier
+  endpoints: { anthropic: { type: anthropic, base_url: "https://api.anthropic.com" } }
+  stages: { plan: { model: claude-opus-4-7, endpoint: anthropic } }
+`,
+    );
+    const config = loadConfig();
+    const a = selectRoutingProfile(config, 158);
+    const b = selectRoutingProfile(config, 158);
+    expect(a).toBe(b);
+    expect(['hybrid-v1', 'all-local', 'all-frontier']).toContain(a);
+    // Different issueIds can land on different profiles — at least two of the
+    // three sampled ids should map to different profiles.
+    const picks = [100, 200, 300, 400, 500, 600, 700].map((id) => selectRoutingProfile(config, id));
+    const unique = new Set(picks);
+    expect(unique.size).toBeGreaterThan(1);
   });
 });
