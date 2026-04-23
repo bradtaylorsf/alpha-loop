@@ -1,0 +1,11 @@
+id: 002-retry-with-escalation
+source_pr: 176
+source_issue: 160
+base_sha: 168f39abee51a854461528843a72da65d9124fb2
+ci_status: success
+description: Retry-with-escalation — local tool-call failure falls back to frontier
+tags:
+  - routing-regression
+  - fallback
+  - reliability
+source: routing-regression

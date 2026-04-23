@@ -266,12 +266,17 @@ export function loadEvalCases(options?: {
     if (evalCase) cases.push(evalCase);
   }
 
-  // Load directory-based cases under cases/{e2e,step}/
+  // Load directory-based cases under cases/<suite>/ where <suite> is any
+  // subdirectory (e2e, step, routing-regression, swe-bench, …). 'step' has an
+  // extra level for step name (review, plan, …).
   const casesDir = join(dir, 'cases');
   if (existsSync(casesDir)) {
-    for (const suiteType of ['e2e', 'step']) {
+    const suiteDirs = readdirSync(casesDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+
+    for (const suiteType of suiteDirs) {
       const suiteDir = join(casesDir, suiteType);
-      if (!existsSync(suiteDir)) continue;
 
       // Step cases may have an extra level: step/{review,plan,...}/001-name/
       if (suiteType === 'step') {

@@ -1,0 +1,10 @@
+id: 011-idempotent-plan-resume
+source_pr: 143
+ci_status: success
+base_sha: decfa7f03c74e1e27d03e720cf60ff2c582b575f
+description: Idempotent plan with milestone reuse, label auto-creation, and --resume
+tags:
+  - routing-regression
+  - planning
+  - idempotency
+source: routing-regression

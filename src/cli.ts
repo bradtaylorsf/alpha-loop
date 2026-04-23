@@ -179,6 +179,12 @@ evalCmd
   .option('--type <type>', 'Filter by type: full or step')
   .option('--step <step>', 'Filter by pipeline step (plan, implement, test, test-fix, review, verify, learn, skill)')
   .option('--verbose', 'Show detailed output')
+  .option('--profile <name>', 'Apply a routing profile (name or path) before running')
+  .option('--matrix', 'Run every case under each profile and emit an A/B comparison report (dry-run by default)')
+  .option('--profiles <list>', 'Comma-separated profile names/paths for --matrix (default: all-frontier,hybrid-v1,all-local)')
+  .option('--baseline <name>', 'Baseline profile for delta computation (default: all-frontier)')
+  .option('--out <dir>', 'Output directory for matrix reports (default: eval/reports)')
+  .option('--execute', 'Actually run pipelines for --matrix (otherwise validates structure only; see CASE_FORMAT.md for why this is gated)')
   .action(async (options) => {
     const { evalRunCommand } = await import('./commands/eval.js');
     await evalRunCommand(options);

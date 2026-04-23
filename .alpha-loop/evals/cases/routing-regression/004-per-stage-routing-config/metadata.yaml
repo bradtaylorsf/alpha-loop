@@ -1,0 +1,11 @@
+id: 004-per-stage-routing-config
+source_pr: 174
+source_issue: 158
+base_sha: e9c58d77f7bb520522249365f75507e49b2cb1c9
+ci_status: success
+description: Per-stage model routing config schema in .alpha-loop.yaml
+tags:
+  - routing-regression
+  - config
+  - schema
+source: routing-regression
