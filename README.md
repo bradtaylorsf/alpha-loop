@@ -237,7 +237,9 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop history` | View session history |
 | `alpha-loop history <name>` | View a specific session |
 | `alpha-loop history <name> --qa` | Show QA checklist for session |
+| `alpha-loop history <name> --telemetry` | Show per-stage telemetry table (see [docs/telemetry.md](docs/telemetry.md)) |
 | `alpha-loop history --clean` | Remove old session data |
+| `alpha-loop report routing` | Aggregate per-stage telemetry + cost-per-issue across sessions |
 | `alpha-loop sync` | Sync templates to configured harnesses (Claude, Codex, Cursor, etc.) |
 | `alpha-loop resume` | Resume stranded work — push branches, review, open PRs |
 | `alpha-loop resume --issue <N>` | Resume a specific issue |

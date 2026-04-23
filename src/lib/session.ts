@@ -7,6 +7,8 @@ import { log } from './logger.js';
 import { exec, formatTimestamp } from './shell.js';
 import { ghExec } from './rate-limit.js';
 import { createPR, updateProjectStatus } from './github.js';
+import { readStageTelemetry } from './telemetry.js';
+import { runDir } from './traces.js';
 import type { Config } from './config.js';
 import type { PipelineResult, GateResult } from './pipeline.js';
 
@@ -223,7 +225,14 @@ export async function finalizeSession(
   mkdirSync(learningsDir, { recursive: true });
 
   const manifestName = `session-${session.name.replace(/\//g, '-')}.json`;
-  const manifest = {
+  const stageEntries = (() => {
+    try {
+      return readStageTelemetry(runDir(session.name, projectDir));
+    } catch {
+      return [];
+    }
+  })();
+  const manifest: Record<string, unknown> = {
     name: session.name,
     branch: session.branch,
     completed: new Date().toISOString(),
@@ -238,6 +247,9 @@ export async function finalizeSession(
       filesChanged: r.filesChanged,
     })),
   };
+  if (stageEntries.length > 0) {
+    manifest.stages = stageEntries;
+  }
   writeFileSync(join(learningsDir, manifestName), JSON.stringify(manifest, null, 2) + '\n');
   log.info(`Session manifest saved: ${manifestName}`);
 
