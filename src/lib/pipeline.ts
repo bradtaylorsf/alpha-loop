@@ -5,7 +5,16 @@ import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from '
 import { join } from 'node:path';
 import { log } from './logger.js';
 import { exec } from './shell.js';
-import { spawnAgent } from './agent.js';
+import { spawnAgent, buildEndpointEnv } from './agent.js';
+import type { AgentOptions } from './agent.js';
+import {
+  classifyToolError,
+  classifyToolErrors,
+  EscalationTracker,
+  defaultEscalationStatePath,
+  appendEscalationEventToTrace,
+} from './escalation.js';
+import type { EscalationEvent } from './escalation.js';
 import { setupWorktree, cleanupWorktree } from './worktree.js';
 import {
   assignIssue,
@@ -40,10 +49,11 @@ import {
   writeCosts,
   computeScores,
   computeCosts,
+  runDir,
 } from './traces.js';
 import type { StepCost, PipelineResultForScores } from './traces.js';
-import { estimateCost } from './config.js';
-import type { Config } from './config.js';
+import { estimateCost, getFallbackPolicy, resolveRoutingStage } from './config.js';
+import type { Config, RoutingStageName } from './config.js';
 import type { AgentResult } from './agent.js';
 import type { SessionContext } from './session.js';
 
@@ -309,7 +319,161 @@ export type PipelineResult = {
   verifySkipped: boolean;
   duration: number;
   filesChanged: number;
+  /** Structured escalation events recorded while processing this issue. */
+  escalationEvents?: EscalationEvent[];
 };
+
+/** Per-issue context for the escalation wrapper. */
+type StageContext = {
+  stage: RoutingStageName;
+  issueNum: number;
+  turnIndex: number;
+  session: SessionContext;
+  tracker: EscalationTracker;
+  events: EscalationEvent[];
+};
+
+/**
+ * Invoke an agent with retry-with-escalation and the rolling-rate guardrail.
+ *
+ * Resolves the stage's routing (model + endpoint), runs the agent once, and
+ * if the output contains two or more classified tool-call errors escalates
+ * the turn to the configured fallback model. Escalation is scoped to the
+ * current turn: the caller's next invocation reverts to the primary model.
+ *
+ * Also honors the guardrail — when the stage is pinned to fallback because
+ * the recent error rate exceeded the threshold, the primary is skipped
+ * entirely and the fallback runs up-front.
+ */
+async function spawnStageAgent(
+  options: AgentOptions,
+  config: Config,
+  ctx: StageContext,
+): Promise<AgentResult> {
+  const policy = getFallbackPolicy(config);
+  const primary = resolveRoutingStage(config, ctx.stage);
+  const primaryModel = primary?.model ?? options.model;
+  const primaryEndpoint = primary?.endpoint;
+  const primaryEnv = primaryEndpoint ? buildEndpointEnv(primaryEndpoint, primaryModel) : undefined;
+
+  const hasEscalateTarget = policy?.escalate_to !== undefined;
+  const escalateTo = policy?.escalate_to;
+  const escalateEndpoint = escalateTo
+    ? config.routing?.endpoints?.[escalateTo.endpoint]
+    : undefined;
+  const escalateEnv = escalateTo && escalateEndpoint
+    ? buildEndpointEnv(escalateEndpoint, escalateTo.model)
+    : undefined;
+
+  const nowIso = () => new Date().toISOString();
+  const recordEvent = (event: EscalationEvent) => {
+    ctx.events.push(event);
+    try {
+      appendEscalationEventToTrace(runDir(ctx.session.name), event);
+    } catch { /* non-fatal */ }
+  };
+
+  // Guardrail: stage pinned to fallback — use fallback up-front.
+  const reverted = policy?.on_tool_error === 'escalate'
+    && hasEscalateTarget
+    && ctx.tracker.isStageReverted(ctx.stage);
+
+  if (reverted && escalateTo) {
+    recordEvent({
+      type: 'stage_revert_active',
+      stage: ctx.stage,
+      from_model: primaryModel,
+      to_model: escalateTo.model,
+      reason: 'rolling_error_rate_above_threshold',
+      turn_index: ctx.turnIndex,
+      issue: ctx.issueNum,
+      ts: nowIso(),
+    });
+    const result = await spawnAgent({
+      ...options,
+      model: escalateTo.model,
+      env: escalateEnv,
+    });
+    ctx.tracker.recordTurn({
+      stage: ctx.stage,
+      errored: classifyToolError(result.output) !== null,
+      escalated: true,
+      windowSize: policy.escalation_window_issues,
+    });
+    return result;
+  }
+
+  // Normal primary invocation.
+  const firstResult = await spawnAgent({
+    ...options,
+    model: primaryModel,
+    env: primaryEnv,
+  });
+
+  const classified = classifyToolErrors(firstResult.output);
+  const errored = classified.length > 0;
+  let escalated = false;
+  let finalResult = firstResult;
+
+  if (
+    policy?.on_tool_error === 'escalate'
+    && hasEscalateTarget
+    && escalateTo
+    && classified.length >= 2
+  ) {
+    const last = classified[classified.length - 1];
+    recordEvent({
+      type: 'escalation',
+      stage: ctx.stage,
+      from_model: primaryModel,
+      to_model: escalateTo.model,
+      reason: last.kind,
+      turn_index: ctx.turnIndex,
+      issue: ctx.issueNum,
+      ts: nowIso(),
+    });
+    finalResult = await spawnAgent({
+      ...options,
+      model: escalateTo.model,
+      env: escalateEnv,
+    });
+    escalated = true;
+  }
+
+  if (policy) {
+    ctx.tracker.recordTurn({
+      stage: ctx.stage,
+      errored,
+      escalated,
+      windowSize: policy.escalation_window_issues,
+    });
+    if (ctx.tracker.maybeTriggerRevert(ctx.stage, policy)) {
+      const untilMs = ctx.tracker.revertUntil(ctx.stage) ?? 0;
+      recordEvent({
+        type: 'stage_revert',
+        stage: ctx.stage,
+        from_model: primaryModel,
+        to_model: escalateTo?.model ?? primaryModel,
+        reason: `rolling_error_rate_above_${policy.escalation_error_threshold}`,
+        turn_index: ctx.turnIndex,
+        issue: ctx.issueNum,
+        ts: nowIso(),
+      });
+      recordEvent({
+        type: 'needs_human_input',
+        stage: ctx.stage,
+        from_model: primaryModel,
+        to_model: escalateTo?.model ?? primaryModel,
+        reason: `stage_pinned_to_fallback_until_${new Date(untilMs).toISOString()}`,
+        turn_index: ctx.turnIndex,
+        issue: ctx.issueNum,
+        ts: nowIso(),
+      });
+    }
+  }
+
+  return finalResult;
+}
 
 /**
  * Process a single issue through the full pipeline.
@@ -322,11 +486,25 @@ export async function processIssue(
   body: string,
   config: Config,
   session: SessionContext,
+  trackerOverride?: EscalationTracker,
 ): Promise<PipelineResult> {
   const startTime = Date.now();
   const projectDir = process.cwd();
   const stepCosts: StepCost[] = [];
   const stepsCompleted: string[] = [];
+  const escalationEvents: EscalationEvent[] = [];
+  const tracker = trackerOverride ?? new EscalationTracker({
+    statePath: defaultEscalationStatePath(projectDir),
+  });
+  let turnCounter = 0;
+  const stageCtx = (stage: RoutingStageName): StageContext => ({
+    stage,
+    issueNum,
+    turnIndex: ++turnCounter,
+    session,
+    tracker,
+    events: escalationEvents,
+  });
 
   // Setup logging
   mkdirSync(session.logsDir, { recursive: true });
@@ -420,7 +598,7 @@ Rules:
       // Trace the plan prompt
       tracePrompt(session.name, issueNum, 'plan', planPrompt);
 
-      const planResult = await spawnAgent({
+      const planResult = await spawnStageAgent({
         agent: config.agent,
         model: config.model,
         prompt: planPrompt,
@@ -428,7 +606,7 @@ Rules:
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
         verbose: config.verbose,
         timeout: config.agentTimeout * 1000,
-      });
+      }, config, stageCtx('plan'));
 
       // Trace the plan output and costs
       traceOutput(session.name, issueNum, 'plan', planResult.output);
@@ -498,7 +676,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     // Trace the implement prompt
     tracePrompt(session.name, issueNum, 'implement', implementPrompt);
 
-    const implResult = await spawnAgent({
+    const implResult = await spawnStageAgent({
       agent: config.agent,
       model: config.model,
       prompt: implementPrompt,
@@ -507,7 +685,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       logFile: join(session.logsDir, `issue-${issueNum}-implement.log`),
       verbose: config.verbose,
       timeout: config.agentTimeout * 1000,
-    });
+    }, config, stageCtx('build'));
 
     // Trace the implement output and costs
     traceOutput(session.name, issueNum, 'implement', implResult.output);
@@ -589,7 +767,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         // Trace fix prompt
         tracePrompt(session.name, issueNum, `fix-${attempt}`, fixPrompt);
 
-        const fixResult = await spawnAgent({
+        const fixResult = await spawnStageAgent({
           agent: config.agent,
           model: config.model,
           prompt: fixPrompt,
@@ -598,7 +776,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           logFile: join(session.logsDir, `issue-${issueNum}-fix-${attempt}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
-        });
+        }, config, stageCtx('test_write'));
 
         // Trace fix output and costs
         traceOutput(session.name, issueNum, `fix-${attempt}`, fixResult.output);
@@ -653,7 +831,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         // Trace review prompt
         tracePrompt(session.name, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewPrompt);
 
-        const reviewResult = await spawnAgent({
+        const reviewResult = await spawnStageAgent({
           agent: config.agent,
           model: config.reviewModel,
           prompt: reviewPrompt,
@@ -661,7 +839,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           logFile: join(session.logsDir, `issue-${issueNum}-review${attempt > 1 ? `-${attempt}` : ''}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
-        });
+        }, config, stageCtx('review'));
 
         // Trace review output and costs
         traceOutput(session.name, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
@@ -695,7 +873,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         // Trace review-fix prompt
         tracePrompt(session.name, issueNum, `review-fix-${attempt}`, fixPrompt);
 
-        const reviewFixResult = await spawnAgent({
+        const reviewFixResult = await spawnStageAgent({
           agent: config.agent,
           model: config.model,
           prompt: fixPrompt,
@@ -704,7 +882,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           logFile: join(session.logsDir, `issue-${issueNum}-review-fix-${attempt}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
-        });
+        }, config, stageCtx('build'));
 
         // Trace review-fix output and costs
         traceOutput(session.name, issueNum, `review-fix-${attempt}`, reviewFixResult.output);
@@ -804,7 +982,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           // Trace verify-fix prompt
           tracePrompt(session.name, issueNum, `verify-fix-${attempt}`, fixPrompt);
 
-          const verifyFixResult = await spawnAgent({
+          const verifyFixResult = await spawnStageAgent({
             agent: config.agent,
             model: config.model,
             prompt: fixPrompt,
@@ -813,7 +991,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
             logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
             verbose: config.verbose,
             timeout: config.agentTimeout * 1000,
-          });
+          }, config, stageCtx('test_exec'));
 
           // Trace verify-fix output and costs
           traceOutput(session.name, issueNum, `verify-fix-${attempt}`, verifyFixResult.output);
@@ -1080,6 +1258,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     verifySkipped,
     duration,
     filesChanged,
+    escalationEvents: escalationEvents.length > 0 ? escalationEvents : undefined,
   };
 
   // Save result to session
