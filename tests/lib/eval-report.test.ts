@@ -70,6 +70,30 @@ describe('renderMatrixMarkdown', () => {
     const md = renderMatrixMarkdown(fixture);
     expect(md).toMatch(/^# Routing regression — \d{4}-\d{2}-\d{2}/);
   });
+
+  it('renders a dry-run banner and SKIP cells when result.dryRun is set', () => {
+    const dryFixture: MatrixResult = {
+      profiles: ['all-frontier'],
+      baseline: 'all-frontier',
+      dryRun: true,
+      cases: [
+        {
+          caseId: '001-foo',
+          description: 'First',
+          perProfile: {
+            'all-frontier': { passed: false, partialCredit: 0, costUsd: 0, wallTimeS: 0, toolErrorRate: 0, diffSimilarity: null, errored: false, skipped: true },
+          },
+        },
+      ],
+      totals: [
+        { profile: 'all-frontier', caseCount: 1, passCount: 0, passRate: 0, totalCostUsd: 0, meanWallTimeS: 0, meanToolErrorRate: 0 },
+      ],
+      deltas: { 'all-frontier': { pipelineSuccessDelta: 0, costPerIssueDelta: 0 } },
+    };
+    const md = renderMatrixMarkdown(dryFixture);
+    expect(md).toContain('Dry-run');
+    expect(md).toContain('SKIP');
+  });
 });
 
 describe('renderMatrixCsv', () => {

@@ -88,6 +88,12 @@ export type EvalOptions = {
   out?: string;
   /** Baseline profile for delta computation (defaults to all-frontier). */
   baseline?: string;
+  /**
+   * Opt in to actually running pipelines during a matrix run. Without this
+   * flag, --matrix validates profiles + case structure only. See
+   * evalMatrixCommand for why this is gated.
+   */
+  execute?: boolean;
 };
 
 export type EvalCaptureOptions = {
@@ -237,13 +243,26 @@ export async function evalMatrixCommand(options: EvalOptions, baseConfig: Config
     : DEFAULT_MATRIX_PROFILES;
   const baseline = options.baseline ?? 'all-frontier';
 
-  log.step(`Matrix run: ${cases.length} case(s) × ${profiles.length} profile(s) [baseline=${baseline}]`);
+  // Gate real execution behind --execute. The eval pipeline currently calls
+  // processIssue(), which mutates live GitHub state (project board, labels,
+  // branches). Routing-regression case IDs like "001-…" parse back to real
+  // issue numbers on the active repo — running the matrix without isolation
+  // would update issue #1, #2, … and assign them to the current user.
+  // Fixture isolation (clean clone at source_pr's base_sha, no GH mutations)
+  // is follow-up work; until then dry-run is the safe default.
+  const dryRun = !options.execute;
+
+  log.step(`Matrix run: ${cases.length} case(s) × ${profiles.length} profile(s) [baseline=${baseline}]${dryRun ? ' (dry-run)' : ''}`);
   for (const p of profiles) console.log(`  profile: ${profileDisplayName(p)}`);
+  if (dryRun) {
+    log.warn('Dry-run mode: profiles and cases are validated but no pipelines execute.');
+    log.warn('Pass --execute to run for real (requires fixture isolation; see CASE_FORMAT.md).');
+  }
   console.log('');
 
   const result = await runMatrix(
     cases.map((c) => c),
-    { profiles, baseline, outDir: options.out, verbose: options.verbose },
+    { profiles, baseline, outDir: options.out, verbose: options.verbose, dryRun },
     baseConfig,
   );
 

@@ -284,7 +284,7 @@ describe('runMatrix', () => {
     const baseConfig = makeConfig();
     const result = await runMatrix(
       cases,
-      { profiles: ['all-frontier', 'hybrid-v1'], baseline: 'all-frontier' },
+      { profiles: ['all-frontier', 'hybrid-v1'], baseline: 'all-frontier', dryRun: false },
       baseConfig,
       stubRunner,
     );
@@ -311,5 +311,33 @@ describe('runMatrix', () => {
     await expect(
       runMatrix([makeCase('001')], { profiles: [] }, makeConfig(), jest.fn()),
     ).rejects.toThrow(/at least one profile/);
+  });
+
+  it('dry-run skips the runner and marks every entry as skipped', async () => {
+    process.chdir(tempDir);
+    const cases = [makeCase('001'), makeCase('002')];
+    const runner = jest.fn();
+
+    const result = await runMatrix(
+      cases,
+      { profiles: ['all-frontier', 'hybrid-v1'], baseline: 'all-frontier', dryRun: true },
+      makeConfig(),
+      runner,
+    );
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(result.dryRun).toBe(true);
+    for (const caseRow of result.cases) {
+      for (const profile of result.profiles) {
+        expect(caseRow.perProfile[profile].skipped).toBe(true);
+        expect(caseRow.perProfile[profile].passed).toBe(false);
+        expect(caseRow.perProfile[profile].costUsd).toBe(0);
+      }
+    }
+    for (const t of result.totals) {
+      expect(t.passCount).toBe(0);
+      expect(t.totalCostUsd).toBe(0);
+      expect(t.caseCount).toBe(2);
+    }
   });
 });

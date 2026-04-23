@@ -51,6 +51,11 @@ jobs:
       - run: pnpm build
 
       - name: Run matrix eval
+        # Runs dry-run by default: validates every case file and profile YAML,
+        # emits a structural comparison report. Add `--execute` once fixture
+        # isolation lands (clean clone at source_pr's base_sha with no live
+        # GitHub mutation) — without isolation, --execute would update real
+        # issues on this repo because case IDs parse to live issue numbers.
         run: |
           node dist/cli.js eval \
             --matrix \

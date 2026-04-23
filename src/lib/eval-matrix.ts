@@ -27,6 +27,17 @@ export type MatrixOptions = {
   outDir?: string;
   /** Passed through to runEvalSuite (e.g. --verbose). */
   verbose?: boolean;
+  /**
+   * Skip actual pipeline execution; emit a structural report only.
+   *
+   * Why this exists: the current eval pipeline calls processIssue(), which
+   * hits live GitHub (project board, labels, branches). A matrix run across
+   * routing-regression cases would mutate real issues because the case IDs
+   * ("001-…", "002-…") parse back to real issue numbers on the active repo.
+   * Until proper fixture isolation lands (clean clone at source_pr's
+   * base_sha, no GH mutations), dry-run is the safe default.
+   */
+  dryRun?: boolean;
 };
 
 /** Per-profile metrics for a single case. */
@@ -42,6 +53,8 @@ export type MatrixCaseEntry = {
   /** True when the run errored outright (crash, timeout). */
   errored: boolean;
   error?: string;
+  /** True when the case was skipped because the matrix ran in dry-run mode. */
+  skipped?: boolean;
 };
 
 /** Aggregated totals for one profile. */
@@ -70,6 +83,8 @@ export type MatrixResult = {
     pipelineSuccessDelta: number;
     costPerIssueDelta: number;
   }>;
+  /** True when this report reflects a dry-run (no pipelines executed). */
+  dryRun?: boolean;
 };
 
 /** Narrow Partial<Config> — only fields supported by profile YAMLs. */
@@ -293,18 +308,24 @@ export async function runMatrix(
     const profilePathOrName = opts.profiles[i];
     const displayName = profileNames[i];
     const overrides = loadProfileOverrides(profilePathOrName);
+    // Resolve the merged config so validation surfaces bad profile YAML even
+    // in dry-run mode. In execute mode the same merged config is what the
+    // runner receives.
     const mergedConfig = applyProfileToConfig(baseConfig, overrides);
 
-    const result = await runner(cases, mergedConfig, { verbose: opts.verbose });
-
-    const diffLookup = new Map<string, number | null>();
-    // Placeholder diff similarities: real diff comes from the run's worktree
-    // output, which lives inside runEvalSuite. For now we mark all as null
-    // unless a golden stub tells us to skip — downstream reports treat null
-    // as "informational, not scored".
-    for (const c of cases) diffLookup.set(c.id, null);
-
-    const entries = toMatrixEntries(result, diffLookup);
+    let entries: Record<string, MatrixCaseEntry>;
+    if (opts.dryRun) {
+      entries = buildSkippedEntries(cases);
+    } else {
+      const result = await runner(cases, mergedConfig, { verbose: opts.verbose });
+      const diffLookup = new Map<string, number | null>();
+      // Placeholder diff similarities: real diff comes from the run's worktree
+      // output, which lives inside runEvalSuite. For now we mark all as null
+      // unless a golden stub tells us to skip — downstream reports treat null
+      // as "informational, not scored".
+      for (const c of cases) diffLookup.set(c.id, null);
+      entries = toMatrixEntries(result, diffLookup);
+    }
     perProfileEntries.set(displayName, entries);
     perProfileTotals.push(aggregateTotals(displayName, entries));
   }
@@ -334,5 +355,24 @@ export async function runMatrix(
     cases: flatCases,
     totals: perProfileTotals,
     deltas: computeDeltas(perProfileTotals, baselineName),
+    ...(opts.dryRun ? { dryRun: true } : {}),
   };
+}
+
+/** Stub entries for a dry-run: every case marked skipped under every profile. */
+function buildSkippedEntries(cases: EvalCaseWithChecks[]): Record<string, MatrixCaseEntry> {
+  const entries: Record<string, MatrixCaseEntry> = {};
+  for (const c of cases) {
+    entries[c.id] = {
+      passed: false,
+      partialCredit: 0,
+      costUsd: 0,
+      wallTimeS: 0,
+      toolErrorRate: 0,
+      diffSimilarity: null,
+      errored: false,
+      skipped: true,
+    };
+  }
+  return entries;
 }

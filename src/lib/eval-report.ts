@@ -15,6 +15,10 @@ export function renderMatrixMarkdown(result: MatrixResult, title?: string): stri
   lines.push('');
   lines.push(`Baseline: \`${result.baseline}\` · ${result.cases.length} case(s) · ${result.profiles.length} profile(s)`);
   lines.push('');
+  if (result.dryRun) {
+    lines.push('> **Dry-run** — no pipelines executed. This report validates profile loading and case structure only. Pass `--execute` to run for real (requires fixture isolation; see CASE_FORMAT.md).');
+    lines.push('');
+  }
 
   // Per-profile summary table
   lines.push('## Per-profile summary');
@@ -93,8 +97,9 @@ export function renderMatrixCsv(result: MatrixResult): string {
 }
 
 /** Format a single per-case cell in the markdown grid. */
-function formatCaseCell(entry: { passed: boolean; errored: boolean; costUsd: number } | undefined): string {
+function formatCaseCell(entry: { passed: boolean; errored: boolean; costUsd: number; skipped?: boolean } | undefined): string {
   if (!entry) return '—';
+  if (entry.skipped) return 'SKIP';
   if (entry.errored) return 'ERR';
   const tag = entry.passed ? 'PASS' : 'FAIL';
   return `${tag} (${usd(entry.costUsd)})`;

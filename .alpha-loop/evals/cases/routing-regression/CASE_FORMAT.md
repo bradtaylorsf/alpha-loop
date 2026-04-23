@@ -94,8 +94,20 @@ scorers:
 
 ```
 alpha-loop eval --tags routing-regression
-alpha-loop eval --matrix --tags routing-regression
+alpha-loop eval --matrix --tags routing-regression           # dry-run (safe default)
+alpha-loop eval --matrix --tags routing-regression --execute # real pipeline runs
 ```
 
 The matrix form runs every case under all three canonical profiles and
 writes a Markdown + CSV comparison to `eval/reports/routing-<date>.{md,csv}`.
+
+**Why `--execute` is opt-in:** the current eval pipeline calls
+`processIssue()`, which mutates live GitHub state (project board, labels,
+branches). Case IDs like `001-…` parse back to real issue numbers on the
+active repo, so running a matrix without isolation would update issues
+#1, #2, … and assign them to the current user. Until fixture isolation
+lands (clean clone at `source_pr`'s `base_sha` with no GitHub mutation),
+the default `--matrix` run is a dry-run that validates profile YAML and
+case structure and emits a SKIP-marked report. Pass `--execute` only on a
+self-hosted runner or scratch repo where GitHub side-effects are
+acceptable.
