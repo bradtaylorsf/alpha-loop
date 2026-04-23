@@ -3,6 +3,8 @@ import {
   buildEndpointEnv,
   buildOneShotCommand,
   spawnAgent,
+  DEFAULT_LMSTUDIO_BASE_URL,
+  DEFAULT_OLLAMA_BASE_URL,
   type AgentOptions,
 } from '../../src/lib/agent';
 import type { RoutingEndpoint } from '../../src/lib/config';
@@ -465,5 +467,90 @@ describe('buildAgentArgs (lmstudio/ollama)', () => {
     expect(result.args).toContain('--full-auto');
     expect(result.args).toContain('--model');
     expect(result.args).toContain('llama3.1:70b');
+  });
+});
+
+describe('spawnAgent default local env injection', () => {
+  // Save/restore ambient env so we control what process.env contains.
+  const savedAnthropicBase = process.env.ANTHROPIC_BASE_URL;
+  const savedAnthropicModel = process.env.ANTHROPIC_MODEL;
+  const savedOpenaiBase = process.env.OPENAI_BASE_URL;
+  const savedOpenaiModel = process.env.OPENAI_MODEL;
+
+  beforeEach(() => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_MODEL;
+    delete process.env.OPENAI_BASE_URL;
+    delete process.env.OPENAI_MODEL;
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'close') setTimeout(() => cb(0), 10);
+    });
+  });
+
+  afterAll(() => {
+    if (savedAnthropicBase !== undefined) process.env.ANTHROPIC_BASE_URL = savedAnthropicBase;
+    if (savedAnthropicModel !== undefined) process.env.ANTHROPIC_MODEL = savedAnthropicModel;
+    if (savedOpenaiBase !== undefined) process.env.OPENAI_BASE_URL = savedOpenaiBase;
+    if (savedOpenaiModel !== undefined) process.env.OPENAI_MODEL = savedOpenaiModel;
+  });
+
+  test('agent: lmstudio auto-injects ANTHROPIC_BASE_URL and ANTHROPIC_MODEL', async () => {
+    await spawnAgent({
+      agent: 'lmstudio',
+      model: 'qwen3-coder-30b-a3b',
+      prompt: 'go',
+      cwd: '/project',
+    });
+    const spawnOpts = (spawn as jest.Mock).mock.calls.at(-1)?.[2];
+    expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBe(DEFAULT_LMSTUDIO_BASE_URL);
+    expect(spawnOpts.env.ANTHROPIC_MODEL).toBe('qwen3-coder-30b-a3b');
+  });
+
+  test('agent: ollama auto-injects OPENAI_BASE_URL and OPENAI_MODEL', async () => {
+    await spawnAgent({
+      agent: 'ollama',
+      model: 'llama3.1:70b',
+      prompt: 'go',
+      cwd: '/project',
+    });
+    const spawnOpts = (spawn as jest.Mock).mock.calls.at(-1)?.[2];
+    expect(spawnOpts.env.OPENAI_BASE_URL).toBe(DEFAULT_OLLAMA_BASE_URL);
+    expect(spawnOpts.env.OPENAI_MODEL).toBe('llama3.1:70b');
+  });
+
+  test('agent: claude does not auto-inject local env vars', async () => {
+    await spawnAgent({
+      agent: 'claude',
+      model: 'opus',
+      prompt: 'go',
+      cwd: '/project',
+    });
+    const spawnOpts = (spawn as jest.Mock).mock.calls.at(-1)?.[2];
+    expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(spawnOpts.env.ANTHROPIC_MODEL).toBeUndefined();
+  });
+
+  test('respects pre-set ANTHROPIC_BASE_URL (user override wins)', async () => {
+    process.env.ANTHROPIC_BASE_URL = 'http://localhost:5555';
+    await spawnAgent({
+      agent: 'lmstudio',
+      model: 'qwen3-coder-30b-a3b',
+      prompt: 'go',
+      cwd: '/project',
+    });
+    const spawnOpts = (spawn as jest.Mock).mock.calls.at(-1)?.[2];
+    expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBe('http://localhost:5555');
+  });
+
+  test('options.env overrides take precedence over local defaults', async () => {
+    await spawnAgent({
+      agent: 'lmstudio',
+      model: 'qwen3-coder-30b-a3b',
+      prompt: 'go',
+      cwd: '/project',
+      env: { ANTHROPIC_BASE_URL: 'http://localhost:9999' },
+    });
+    const spawnOpts = (spawn as jest.Mock).mock.calls.at(-1)?.[2];
+    expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBe('http://localhost:9999');
   });
 });

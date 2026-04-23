@@ -60,8 +60,16 @@ model: llama3.1:70b
 
 This is backwards compatible — everything else in the Loop behaves exactly as
 if you'd set `agent: claude`, except spawned child processes have
-`ANTHROPIC_BASE_URL` (lmstudio) or `OPENAI_BASE_URL` (ollama) set to the local
-server.
+`ANTHROPIC_BASE_URL` (lmstudio) or `OPENAI_BASE_URL` (ollama) auto-injected
+and pointed at the default local server:
+
+| Agent       | Env var              | Default value                  |
+|-------------|----------------------|--------------------------------|
+| `lmstudio`  | `ANTHROPIC_BASE_URL` | `http://localhost:1234`        |
+| `ollama`    | `OPENAI_BASE_URL`    | `http://localhost:11434/v1`    |
+
+If you've already exported one of those env vars in your shell (e.g. to point
+at a non-default port), alpha-loop respects it — your export wins.
 
 ## Per-stage routing (hybrid)
 

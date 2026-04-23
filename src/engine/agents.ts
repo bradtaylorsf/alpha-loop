@@ -174,6 +174,28 @@ export function buildEndpointEnv(endpoint: RoutingEndpoint, model: string): Reco
   return env;
 }
 
+/** Default base URLs for single-agent lmstudio/ollama mode. */
+export const DEFAULT_LMSTUDIO_BASE_URL = 'http://localhost:1234';
+export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434/v1';
+
+/**
+ * Auto-injected env vars for single-agent `lmstudio` / `ollama` mode, so
+ * `agent: lmstudio` actually targets the local server instead of silently
+ * hitting the real Anthropic API. Respects pre-existing env vars — users who
+ * export `ANTHROPIC_BASE_URL` themselves keep full control.
+ */
+function defaultLocalEnv(agent: string, model: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (agent === 'lmstudio') {
+    if (!process.env.ANTHROPIC_BASE_URL) env.ANTHROPIC_BASE_URL = DEFAULT_LMSTUDIO_BASE_URL;
+    if (model && !process.env.ANTHROPIC_MODEL) env.ANTHROPIC_MODEL = model;
+  } else if (agent === 'ollama') {
+    if (!process.env.OPENAI_BASE_URL) env.OPENAI_BASE_URL = DEFAULT_OLLAMA_BASE_URL;
+    if (model && !process.env.OPENAI_MODEL) env.OPENAI_MODEL = model;
+  }
+  return env;
+}
+
 // ============================================================================
 // Spawn Agent
 // ============================================================================
@@ -190,9 +212,12 @@ export function spawnAgent(
 ): ChildProcess {
   const { command, args } = buildAgentArgs(config, prompt);
 
+  // Caller overrides win > agent-default local base URLs > process.env
+  const localDefaults = defaultLocalEnv(config.agent, config.model);
+
   return spawn(command, args, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ...envOverrides },
+    env: { ...process.env, ...localDefaults, ...envOverrides },
   });
 }

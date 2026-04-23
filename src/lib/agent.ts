@@ -211,6 +211,34 @@ export function buildEndpointEnv(endpoint: RoutingEndpoint, model: string): Reco
 }
 
 /**
+ * Default local-server base URLs for single-agent `lmstudio` / `ollama` mode.
+ * Exported so tests and callers can reference the same constants.
+ */
+export const DEFAULT_LMSTUDIO_BASE_URL = 'http://localhost:1234';
+export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434/v1';
+
+/**
+ * Auto-injected env vars for single-agent `lmstudio` / `ollama` mode.
+ *
+ * Without this, `agent: lmstudio` would spawn the claude CLI with no base URL
+ * override and silently hit the real Anthropic API. We only inject defaults
+ * when the corresponding env var isn't already set in the parent process, so
+ * users who export `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` to point at a
+ * non-default port keep full control.
+ */
+function defaultLocalEnv(agent: AgentType, model: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (agent === 'lmstudio') {
+    if (!process.env.ANTHROPIC_BASE_URL) env.ANTHROPIC_BASE_URL = DEFAULT_LMSTUDIO_BASE_URL;
+    if (model && !process.env.ANTHROPIC_MODEL) env.ANTHROPIC_MODEL = model;
+  } else if (agent === 'ollama') {
+    if (!process.env.OPENAI_BASE_URL) env.OPENAI_BASE_URL = DEFAULT_OLLAMA_BASE_URL;
+    if (model && !process.env.OPENAI_MODEL) env.OPENAI_MODEL = model;
+  }
+  return env;
+}
+
+/**
  * Spawn an AI agent with a prompt.
  * Streams output to terminal in real-time while capturing it.
  *
@@ -233,11 +261,19 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
 
   const timeoutMs = options.timeout ?? DEFAULT_AGENT_TIMEOUT_MS;
 
+  // Compose env: caller overrides win > agent-default local base URLs > process.env
+  const localDefaults = defaultLocalEnv(options.agent, options.model);
+  const hasOverrides = options.env && Object.keys(options.env).length > 0;
+  const hasLocalDefaults = Object.keys(localDefaults).length > 0;
+  const spawnEnv = hasOverrides || hasLocalDefaults
+    ? { ...process.env, ...localDefaults, ...(options.env ?? {}) }
+    : process.env;
+
   return new Promise<AgentResult>((resolve) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: options.env ? { ...process.env, ...options.env } : process.env,
+      env: spawnEnv,
     });
 
     let resolved = false;
