@@ -480,6 +480,27 @@ Use GitHub milestones to group issues into planned releases or sprints. When you
 
 Create milestones at `github.com/<owner>/<repo>/milestones/new`. Set due dates to keep yourself on track.
 
+### Epics
+
+An epic is a GitHub issue with the `epic` label and a task-list body that references sub-issues by number:
+
+```markdown
+## Sub-issues
+- [ ] #158 Add tenant column to users table
+- [ ] #159 Add tenant middleware
+- [ ] #160 Scope queries by tenant
+```
+
+When you start the loop, open epics appear above milestones in the picker. You can also target one directly:
+
+```bash
+alpha-loop run --epic 165
+```
+
+Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
+
+See [docs/epics.md](docs/epics.md) for the full feature reference, including `--verify-only`, the `prefer_epics` config option, skip rules, and safety rails.
+
 ### GitHub Project Board
 
 Alpha Loop reads issues from a GitHub Project board (v2). Issues are processed in board order, so you control priority by reordering. When combined with milestones, only "Todo" items in the selected milestone are processed.
