@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { log } from '../lib/logger.js';
 import type { PipelineResult } from '../lib/pipeline.js';
+import type { EscalationEvent } from '../lib/escalation.js';
 
 type SessionManifest = {
   name: string;
@@ -201,6 +202,21 @@ export function historyDetail(sessionsDir: string, sessionName: string): void {
   console.log(`Duration: ${formatDuration(totalDuration)}`);
   console.log('');
 
+  // Stage-revert banner: if any issue in this session has an active revert event, flag it.
+  const activeReverts = new Set<string>();
+  for (const r of results) {
+    for (const ev of r.escalationEvents ?? []) {
+      if (ev.type === 'stage_revert' || ev.type === 'stage_revert_active') {
+        activeReverts.add(`${ev.stage}: ${ev.from_model} -> ${ev.to_model}`);
+      }
+    }
+  }
+  if (activeReverts.size > 0) {
+    console.log('Stage reverts active (pinned to fallback):');
+    for (const line of activeReverts) console.log(`  ! ${line}`);
+    console.log('');
+  }
+
   console.log('Issues:');
   for (const result of results) {
     const symbol = result.status === 'success' ? '\u2713' : '\u2717';
@@ -225,6 +241,25 @@ export function historyDetail(sessionsDir: string, sessionName: string): void {
     console.log(
       `           ${statusText.padEnd(12)} ${durStr.padEnd(10)} ${tests}  ${verify}`
     );
+
+    // Escalation events, grouped by stage, printed inline under the stage row.
+    const events = result.escalationEvents ?? [];
+    if (events.length > 0) {
+      const byStage = new Map<string, EscalationEvent[]>();
+      for (const ev of events) {
+        const list = byStage.get(ev.stage) ?? [];
+        list.push(ev);
+        byStage.set(ev.stage, list);
+      }
+      for (const [stage, stageEvents] of byStage) {
+        for (const ev of stageEvents) {
+          const symbol = ev.type === 'escalation' ? '\u21b3' : '!';
+          console.log(
+            `           ${symbol} ${ev.type}: ${stage} [${ev.from_model} \u2192 ${ev.to_model}] reason=${ev.reason} (turn ${ev.turn_index})`
+          );
+        }
+      }
+    }
   }
 
   console.log('');

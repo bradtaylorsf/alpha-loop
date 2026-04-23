@@ -17,6 +17,10 @@ import {
   resolveStepConfig,
   resolveRoutingStage,
   selectRoutingProfile,
+  getFallbackPolicy,
+  DEFAULT_ESCALATION_WINDOW,
+  DEFAULT_ESCALATION_ERROR_THRESHOLD,
+  DEFAULT_ESCALATION_REVERT_MS,
 } from '../../src/lib/config.js';
 import type { Config, PipelineConfig } from '../../src/lib/config.js';
 
@@ -626,6 +630,101 @@ routing:
       },
     });
     expect(config.routing?.profile).toBe('all-frontier');
+  });
+
+  it('parses guardrail fields under fallback', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  endpoints:
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+  fallback:
+    on_tool_error: escalate
+    escalate_to: { model: claude-sonnet-4-6, endpoint: anthropic }
+    escalation_window_issues: 20
+    escalation_error_threshold: 0.05
+    escalation_revert_ms: 3600000
+`,
+    );
+    const config = loadConfig();
+    expect(config.routing?.fallback?.escalation_window_issues).toBe(20);
+    expect(config.routing?.fallback?.escalation_error_threshold).toBe(0.05);
+    expect(config.routing?.fallback?.escalation_revert_ms).toBe(3_600_000);
+  });
+
+  it('drops invalid guardrail values and warns', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  endpoints:
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+  fallback:
+    on_tool_error: escalate
+    escalate_to: { model: claude-sonnet-4-6, endpoint: anthropic }
+    escalation_window_issues: -3
+    escalation_error_threshold: 1.5
+    escalation_revert_ms: "not a number"
+`,
+    );
+    const config = loadConfig();
+    expect(config.routing?.fallback?.escalation_window_issues).toBeUndefined();
+    expect(config.routing?.fallback?.escalation_error_threshold).toBeUndefined();
+    expect(config.routing?.fallback?.escalation_revert_ms).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalled();
+  });
+});
+
+describe('getFallbackPolicy', () => {
+  let warnSpy: jest.SpyInstance;
+  beforeEach(() => { warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => { warnSpy.mockRestore(); });
+
+  it('returns null when routing has no fallback', () => {
+    const config = loadConfig();
+    expect(getFallbackPolicy(config)).toBeNull();
+  });
+
+  it('fills defaults when only on_tool_error is configured', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  endpoints:
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+  fallback:
+    on_tool_error: escalate
+    escalate_to: { model: claude-sonnet-4-6, endpoint: anthropic }
+`,
+    );
+    const policy = getFallbackPolicy(loadConfig());
+    expect(policy).not.toBeNull();
+    expect(policy!.on_tool_error).toBe('escalate');
+    expect(policy!.escalation_window_issues).toBe(DEFAULT_ESCALATION_WINDOW);
+    expect(policy!.escalation_error_threshold).toBe(DEFAULT_ESCALATION_ERROR_THRESHOLD);
+    expect(policy!.escalation_revert_ms).toBe(DEFAULT_ESCALATION_REVERT_MS);
+  });
+
+  it('respects explicit overrides from config', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+routing:
+  endpoints:
+    anthropic: { type: anthropic, base_url: "https://api.anthropic.com" }
+  fallback:
+    on_tool_error: escalate
+    escalate_to: { model: claude-sonnet-4-6, endpoint: anthropic }
+    escalation_window_issues: 5
+    escalation_error_threshold: 0.2
+    escalation_revert_ms: 1000
+`,
+    );
+    const policy = getFallbackPolicy(loadConfig());
+    expect(policy!.escalation_window_issues).toBe(5);
+    expect(policy!.escalation_error_threshold).toBe(0.2);
+    expect(policy!.escalation_revert_ms).toBe(1000);
   });
 });
 

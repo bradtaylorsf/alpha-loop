@@ -45,7 +45,27 @@ export type RoutingFallbackMode = 'escalate' | 'retry' | 'fail';
 export type RoutingFallback = {
   on_tool_error: RoutingFallbackMode;
   escalate_to?: RoutingStageConfig;
+  /** Number of recent turns to track per stage for the rolling-error guardrail (default 10). */
+  escalation_window_issues?: number;
+  /** Rolling-error-rate threshold that triggers a stage revert (default 0.08 = 8%). */
+  escalation_error_threshold?: number;
+  /** How long a stage stays pinned to the fallback after the threshold fires (default 24h). */
+  escalation_revert_ms?: number;
 };
+
+/** Normalized fallback policy returned by getFallbackPolicy. */
+export type FallbackPolicy = {
+  on_tool_error: RoutingFallbackMode;
+  escalate_to?: RoutingStageConfig;
+  escalation_window_issues: number;
+  escalation_error_threshold: number;
+  escalation_revert_ms: number;
+};
+
+/** Default guardrail values — 10-issue rolling window, 8% error threshold, 24-hour revert. */
+export const DEFAULT_ESCALATION_WINDOW = 10;
+export const DEFAULT_ESCALATION_ERROR_THRESHOLD = 0.08;
+export const DEFAULT_ESCALATION_REVERT_MS = 24 * 60 * 60 * 1000;
 
 /** Per-stage routing configuration for the Loop. */
 export type RoutingConfig = {
@@ -432,6 +452,38 @@ function parseRoutingConfig(raw: unknown): RoutingConfig | undefined {
           fallback.escalate_to = escalate;
         }
       }
+      if (f.escalation_window_issues !== undefined) {
+        if (typeof f.escalation_window_issues === 'number' && Number.isFinite(f.escalation_window_issues) && f.escalation_window_issues > 0) {
+          fallback.escalation_window_issues = Math.floor(f.escalation_window_issues);
+        } else {
+          console.warn(
+            `[config] routing.fallback.escalation_window_issues: expected a positive number (got ${String(f.escalation_window_issues)})`,
+          );
+        }
+      }
+      if (f.escalation_error_threshold !== undefined) {
+        if (
+          typeof f.escalation_error_threshold === 'number' &&
+          Number.isFinite(f.escalation_error_threshold) &&
+          f.escalation_error_threshold >= 0 &&
+          f.escalation_error_threshold <= 1
+        ) {
+          fallback.escalation_error_threshold = f.escalation_error_threshold;
+        } else {
+          console.warn(
+            `[config] routing.fallback.escalation_error_threshold: expected a number between 0 and 1 (got ${String(f.escalation_error_threshold)})`,
+          );
+        }
+      }
+      if (f.escalation_revert_ms !== undefined) {
+        if (typeof f.escalation_revert_ms === 'number' && Number.isFinite(f.escalation_revert_ms) && f.escalation_revert_ms > 0) {
+          fallback.escalation_revert_ms = Math.floor(f.escalation_revert_ms);
+        } else {
+          console.warn(
+            `[config] routing.fallback.escalation_revert_ms: expected a positive number of milliseconds (got ${String(f.escalation_revert_ms)})`,
+          );
+        }
+      }
       result.fallback = fallback;
       populated = true;
     } else if (f.on_tool_error !== undefined) {
@@ -634,6 +686,22 @@ export function resolveRoutingStage(
   if (!stageCfg) return undefined;
   const endpoint = routing.endpoints?.[stageCfg.endpoint];
   return { model: stageCfg.model, endpoint };
+}
+
+/**
+ * Return the normalized fallback policy for a config, or null when routing has
+ * no fallback configured. Fills guardrail fields with defaults.
+ */
+export function getFallbackPolicy(config: Config): FallbackPolicy | null {
+  const fallback = config.routing?.fallback;
+  if (!fallback) return null;
+  return {
+    on_tool_error: fallback.on_tool_error,
+    escalate_to: fallback.escalate_to,
+    escalation_window_issues: fallback.escalation_window_issues ?? DEFAULT_ESCALATION_WINDOW,
+    escalation_error_threshold: fallback.escalation_error_threshold ?? DEFAULT_ESCALATION_ERROR_THRESHOLD,
+    escalation_revert_ms: fallback.escalation_revert_ms ?? DEFAULT_ESCALATION_REVERT_MS,
+  };
 }
 
 /**
