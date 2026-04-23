@@ -69,10 +69,16 @@ jest.mock('../../src/lib/traces', () => ({
   runDir: jest.fn().mockReturnValue('/tmp/traces/run'),
 }));
 
+jest.mock('../../src/lib/telemetry', () => ({
+  buildStageTelemetry: jest.fn().mockReturnValue({}),
+  writeStageTelemetry: jest.fn(),
+}));
+
 jest.mock('../../src/lib/config', () => ({
   estimateCost: jest.fn().mockReturnValue(0),
   getFallbackPolicy: jest.fn().mockReturnValue(null),
   resolveRoutingStage: jest.fn().mockReturnValue(undefined),
+  selectRoutingProfile: jest.fn().mockReturnValue(undefined),
 }));
 
 jest.mock('../../src/lib/prompts', () => ({

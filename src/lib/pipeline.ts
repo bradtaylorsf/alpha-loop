@@ -52,10 +52,11 @@ import {
   runDir,
 } from './traces.js';
 import type { StepCost, PipelineResultForScores } from './traces.js';
-import { estimateCost, getFallbackPolicy, resolveRoutingStage } from './config.js';
-import type { Config, RoutingStageName } from './config.js';
+import { estimateCost, getFallbackPolicy, resolveRoutingStage, selectRoutingProfile } from './config.js';
+import type { Config, RoutingStageName, RoutingEndpointType } from './config.js';
 import type { AgentResult } from './agent.js';
 import type { SessionContext } from './session.js';
+import { buildStageTelemetry, writeStageTelemetry } from './telemetry.js';
 
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
@@ -331,7 +332,37 @@ type StageContext = {
   session: SessionContext;
   tracker: EscalationTracker;
   events: EscalationEvent[];
+  /** Populated by spawnStageAgent so callers can record telemetry with endpoint info. */
+  endpointName?: string;
+  endpointType?: RoutingEndpointType;
+  profile?: string;
 };
+
+/**
+ * Build a StageTelemetry entry from the agent result and append it to the
+ * run's stages.jsonl file. Called alongside each stepCosts.push site so that
+ * every stage invocation — not just the top-level session — emits telemetry.
+ */
+function recordStageTelemetry(
+  session: SessionContext,
+  issueNum: number,
+  stage: string,
+  agentResult: AgentResult,
+  config: Config,
+  ctx?: Pick<StageContext, 'endpointName' | 'endpointType' | 'profile'>,
+): void {
+  try {
+    const entry = buildStageTelemetry(agentResult, stage, config, {
+      endpoint: ctx?.endpointName,
+      endpointType: ctx?.endpointType,
+      profile: ctx?.profile,
+      issueNum,
+    });
+    writeStageTelemetry(runDir(session.name), entry);
+  } catch {
+    /* telemetry is best-effort */
+  }
+}
 
 /**
  * Invoke an agent with retry-with-escalation and the rolling-rate guardrail.
@@ -355,6 +386,12 @@ async function spawnStageAgent(
   const primaryModel = primary?.model ?? options.model;
   const primaryEndpoint = primary?.endpoint;
   const primaryEnv = primaryEndpoint ? buildEndpointEnv(primaryEndpoint, primaryModel) : undefined;
+
+  // Expose endpoint info back to the caller so it can tag telemetry.
+  const primaryEndpointName = config.routing?.stages?.[ctx.stage]?.endpoint;
+  ctx.endpointName = primaryEndpointName ?? 'default';
+  ctx.endpointType = primaryEndpoint?.type;
+  ctx.profile = selectRoutingProfile(config, ctx.issueNum);
 
   const hasEscalateTarget = policy?.escalate_to !== undefined;
   const escalateTo = policy?.escalate_to;
@@ -389,6 +426,8 @@ async function spawnStageAgent(
       issue: ctx.issueNum,
       ts: nowIso(),
     });
+    ctx.endpointName = escalateTo.endpoint;
+    ctx.endpointType = escalateEndpoint?.type;
     const result = await spawnAgent({
       ...options,
       model: escalateTo.model,
@@ -432,6 +471,8 @@ async function spawnStageAgent(
       issue: ctx.issueNum,
       ts: nowIso(),
     });
+    ctx.endpointName = escalateTo.endpoint;
+    ctx.endpointType = escalateEndpoint?.type;
     finalResult = await spawnAgent({
       ...options,
       model: escalateTo.model,
@@ -598,6 +639,7 @@ Rules:
       // Trace the plan prompt
       tracePrompt(session.name, issueNum, 'plan', planPrompt);
 
+      const planCtx = stageCtx('plan');
       const planResult = await spawnStageAgent({
         agent: config.agent,
         model: config.model,
@@ -606,11 +648,12 @@ Rules:
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
         verbose: config.verbose,
         timeout: config.agentTimeout * 1000,
-      }, config, stageCtx('plan'));
+      }, config, planCtx);
 
       // Trace the plan output and costs
       traceOutput(session.name, issueNum, 'plan', planResult.output);
       stepCosts.push(buildStepCost('plan', issueNum, planResult, config));
+      recordStageTelemetry(session, issueNum, 'plan', planResult, config, planCtx);
 
       // Detect transient errors (usage limits) during planning
       if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
@@ -676,6 +719,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     // Trace the implement prompt
     tracePrompt(session.name, issueNum, 'implement', implementPrompt);
 
+    const implCtx = stageCtx('build');
     const implResult = await spawnStageAgent({
       agent: config.agent,
       model: config.model,
@@ -685,11 +729,12 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       logFile: join(session.logsDir, `issue-${issueNum}-implement.log`),
       verbose: config.verbose,
       timeout: config.agentTimeout * 1000,
-    }, config, stageCtx('build'));
+    }, config, implCtx);
 
     // Trace the implement output and costs
     traceOutput(session.name, issueNum, 'implement', implResult.output);
     stepCosts.push(buildStepCost('implement', issueNum, implResult, config));
+    recordStageTelemetry(session, issueNum, 'implement', implResult, config, implCtx);
 
     if (implResult.exitCode !== 0) {
       // Auto-commit any uncommitted work before deciding on cleanup
@@ -767,6 +812,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         // Trace fix prompt
         tracePrompt(session.name, issueNum, `fix-${attempt}`, fixPrompt);
 
+        const fixCtx = stageCtx('test_write');
         const fixResult = await spawnStageAgent({
           agent: config.agent,
           model: config.model,
@@ -776,11 +822,12 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           logFile: join(session.logsDir, `issue-${issueNum}-fix-${attempt}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
-        }, config, stageCtx('test_write'));
+        }, config, fixCtx);
 
         // Trace fix output and costs
         traceOutput(session.name, issueNum, `fix-${attempt}`, fixResult.output);
         stepCosts.push(buildStepCost('test_fix', issueNum, fixResult, config));
+        recordStageTelemetry(session, issueNum, 'test_fix', fixResult, config, fixCtx);
         stepsCompleted.push(`fix-${attempt}`);
 
         // Auto-commit fixes
@@ -831,6 +878,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         // Trace review prompt
         tracePrompt(session.name, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewPrompt);
 
+        const reviewCtx = stageCtx('review');
         const reviewResult = await spawnStageAgent({
           agent: config.agent,
           model: config.reviewModel,
@@ -839,11 +887,12 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           logFile: join(session.logsDir, `issue-${issueNum}-review${attempt > 1 ? `-${attempt}` : ''}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
-        }, config, stageCtx('review'));
+        }, config, reviewCtx);
 
         // Trace review output and costs
         traceOutput(session.name, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
         stepCosts.push(buildStepCost('review', issueNum, reviewResult, config));
+        recordStageTelemetry(session, issueNum, 'review', reviewResult, config, reviewCtx);
 
         reviewOutput = reviewResult.output;
       } catch {
@@ -873,6 +922,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         // Trace review-fix prompt
         tracePrompt(session.name, issueNum, `review-fix-${attempt}`, fixPrompt);
 
+        const reviewFixCtx = stageCtx('build');
         const reviewFixResult = await spawnStageAgent({
           agent: config.agent,
           model: config.model,
@@ -882,11 +932,12 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           logFile: join(session.logsDir, `issue-${issueNum}-review-fix-${attempt}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
-        }, config, stageCtx('build'));
+        }, config, reviewFixCtx);
 
         // Trace review-fix output and costs
         traceOutput(session.name, issueNum, `review-fix-${attempt}`, reviewFixResult.output);
         stepCosts.push(buildStepCost('review', issueNum, reviewFixResult, config));
+        recordStageTelemetry(session, issueNum, 'review_fix', reviewFixResult, config, reviewFixCtx);
 
         // Auto-commit if agent didn't
         const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
@@ -982,6 +1033,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           // Trace verify-fix prompt
           tracePrompt(session.name, issueNum, `verify-fix-${attempt}`, fixPrompt);
 
+          const verifyFixCtx = stageCtx('test_exec');
           const verifyFixResult = await spawnStageAgent({
             agent: config.agent,
             model: config.model,
@@ -991,11 +1043,12 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
             logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
             verbose: config.verbose,
             timeout: config.agentTimeout * 1000,
-          }, config, stageCtx('test_exec'));
+          }, config, verifyFixCtx);
 
           // Trace verify-fix output and costs
           traceOutput(session.name, issueNum, `verify-fix-${attempt}`, verifyFixResult.output);
           stepCosts.push(buildStepCost('verify', issueNum, verifyFixResult, config));
+          recordStageTelemetry(session, issueNum, 'verify_fix', verifyFixResult, config, verifyFixCtx);
 
           // Auto-commit if agent didn't
           const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
@@ -1090,6 +1143,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
       traceOutput(session.name, issueNum, 'assumptions', assumptionsResult.output);
       stepCosts.push(buildStepCost('assumptions', issueNum, assumptionsResult, config));
+      recordStageTelemetry(session, issueNum, 'assumptions', assumptionsResult, config, {
+        profile: selectRoutingProfile(config, issueNum),
+      });
 
       if (assumptionsResult.exitCode === 0 && assumptionsResult.output.trim()) {
         commentIssue(config.repo, issueNum,
@@ -1383,6 +1439,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
       traceOutput(session.name, issues[0].number, 'batch-plan', planResult.output);
       stepCosts.push(buildStepCost('plan', issues[0].number, planResult, config));
+      recordStageTelemetry(session, issues[0].number, 'batch-plan', planResult, config, {
+        profile: selectRoutingProfile(config, issues[0].number),
+      });
 
       if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
         log.warn('Agent hit a transient error during batch planning — re-queuing all issues');
@@ -1443,6 +1502,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
     traceOutput(session.name, issues[0].number, 'batch-implement', implResult.output);
     stepCosts.push(buildStepCost('implement', issues[0].number, implResult, config));
+    recordStageTelemetry(session, issues[0].number, 'batch-implement', implResult, config, {
+      profile: selectRoutingProfile(config, issues[0].number),
+    });
 
     if (implResult.exitCode !== 0) {
       // Auto-commit any uncommitted work before deciding on cleanup
@@ -1533,6 +1595,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
         traceOutput(session.name, issues[0].number, `batch-fix-${attempt}`, fixResult.output);
         stepCosts.push(buildStepCost('test_fix', issues[0].number, fixResult, config));
+        recordStageTelemetry(session, issues[0].number, 'batch-test_fix', fixResult, config, {
+          profile: selectRoutingProfile(config, issues[0].number),
+        });
 
         const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
         if (fixStatus.stdout.trim()) {
@@ -1580,6 +1645,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
         traceOutput(session.name, issues[0].number, `batch-review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
         stepCosts.push(buildStepCost('review', issues[0].number, reviewResult, config));
+        recordStageTelemetry(session, issues[0].number, 'batch-review', reviewResult, config, {
+          profile: selectRoutingProfile(config, issues[0].number),
+        });
         reviewOutput = reviewResult.output;
       } catch {
         log.warn('Batch review failed, continuing without review');
@@ -1617,6 +1685,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
         traceOutput(session.name, issues[0].number, `batch-review-fix-${attempt}`, reviewFixResult.output);
         stepCosts.push(buildStepCost('review', issues[0].number, reviewFixResult, config));
+        recordStageTelemetry(session, issues[0].number, 'batch-review_fix', reviewFixResult, config, {
+          profile: selectRoutingProfile(config, issues[0].number),
+        });
 
         const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
         if (fixStatus.stdout.trim()) {

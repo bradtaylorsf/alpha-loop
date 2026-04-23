@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { log } from '../lib/logger.js';
+import { readStageTelemetry } from '../lib/telemetry.js';
+import type { StageTelemetry } from '../lib/telemetry.js';
 import type { PipelineResult } from '../lib/pipeline.js';
 import type { EscalationEvent } from '../lib/escalation.js';
 
@@ -9,6 +11,7 @@ type SessionManifest = {
   branch: string;
   completed: string;
   results: PipelineResult[];
+  stages?: StageTelemetry[];
 };
 
 function formatDuration(seconds: number | undefined): string {
@@ -308,6 +311,73 @@ export function historyQa(sessionsDir: string, sessionName: string): void {
   console.log(fs.readFileSync(qaPath, 'utf-8'));
 }
 
+/**
+ * Load per-stage telemetry for a session. Looks first in the traces dir
+ * (stages.jsonl written during the run), then falls back to the session
+ * manifest's embedded `stages` field for sessions pushed by teammates.
+ */
+function loadStageTelemetry(sessionName: string, projectDir?: string): StageTelemetry[] {
+  const root = projectDir ?? process.cwd();
+  // Trace dirs mirror traces.ts: session/<ts> -> session-<ts>.
+  const traceName = sessionName.replace(/\//g, '-');
+  const traceDir = path.join(root, '.alpha-loop', 'traces', traceName);
+  if (fs.existsSync(path.join(traceDir, 'stages.jsonl'))) {
+    return readStageTelemetry(traceDir);
+  }
+  const manifests = loadManifests(projectDir);
+  const manifest = manifests.get(sessionName);
+  return manifest?.stages ?? [];
+}
+
+function fmtNumber(n: number, digits = 0): string {
+  return n.toLocaleString('en-US', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+}
+
+export function historyTelemetry(sessionName: string, projectDir?: string): void {
+  const entries = loadStageTelemetry(sessionName, projectDir);
+  if (entries.length === 0) {
+    console.log(`No per-stage telemetry recorded for this session.`);
+    return;
+  }
+
+  console.log(`Stage telemetry for ${sessionName}:`);
+  console.log('');
+
+  const header = ['stage', 'model', 'endpoint', 'tok_in', 'tok_out', 'cost_usd', 'wall_s', 'tool_err', 'ok'];
+  console.log(header.join('\t'));
+
+  let totalCost = 0;
+  let totalTokensIn = 0;
+  let totalTokensOut = 0;
+  let totalWall = 0;
+  let totalErrs = 0;
+
+  for (const e of entries) {
+    totalCost += e.cost_usd;
+    totalTokensIn += e.tokens_in;
+    totalTokensOut += e.tokens_out;
+    totalWall += e.wall_time_s;
+    totalErrs += e.tool_errors;
+    console.log([
+      e.stage,
+      e.model,
+      e.endpoint,
+      fmtNumber(e.tokens_in),
+      fmtNumber(e.tokens_out),
+      `$${e.cost_usd.toFixed(4)}`,
+      e.wall_time_s.toFixed(2),
+      String(e.tool_errors),
+      e.stage_success ? 'ok' : 'fail',
+    ].join('\t'));
+  }
+
+  console.log('');
+  console.log(`Totals: ${entries.length} stage(s), ${fmtNumber(totalTokensIn)} in / ${fmtNumber(totalTokensOut)} out, $${totalCost.toFixed(4)}, ${totalWall.toFixed(1)}s wall, ${totalErrs} tool error(s)`);
+}
+
 export function historyClean(sessionsDir: string): void {
   const sessions = findSessionDirs(sessionsDir);
 
@@ -344,7 +414,7 @@ export function historyClean(sessionsDir: string): void {
 
 export function historyCommand(
   session: string | undefined,
-  options: { qa?: boolean; clean?: boolean },
+  options: { qa?: boolean; clean?: boolean; telemetry?: boolean },
 ): void {
   const sessionsDir = path.join(process.cwd(), '.alpha-loop', 'sessions');
 
@@ -354,7 +424,9 @@ export function historyCommand(
   }
 
   if (session) {
-    if (options.qa) {
+    if (options.telemetry) {
+      historyTelemetry(session);
+    } else if (options.qa) {
       historyQa(sessionsDir, session);
     } else {
       historyDetail(sessionsDir, session);

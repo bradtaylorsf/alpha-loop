@@ -4,6 +4,7 @@
 import { spawn } from 'node:child_process';
 import { createWriteStream, type WriteStream } from 'node:fs';
 import { log } from './logger.js';
+import { classifyToolErrors } from './escalation.js';
 import type { RoutingEndpoint } from './config.js';
 
 /**
@@ -25,6 +26,10 @@ export type AgentResult = {
   outputTokens?: number;
   /** Model used for the invocation. */
   model?: string;
+  /** Number of tool_use blocks emitted during the run. */
+  toolCalls?: number;
+  /** Number of tool_result blocks with is_error === true. */
+  toolErrors?: number;
 };
 
 /**
@@ -284,6 +289,9 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
     let parsedCostUsd: number | undefined;
     let parsedInputTokens: number | undefined;
     let parsedOutputTokens: number | undefined;
+    // Tool-use telemetry (per-stage metrics aggregation).
+    let toolUseCount = 0;
+    let toolErrorCount = 0;
 
     // Pipe prompt via stdin (like: echo "$prompt" | claude -p)
     child.stdin.write(options.prompt);
@@ -344,6 +352,18 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
               if (typeof usage.input_tokens === 'number') parsedInputTokens = usage.input_tokens;
               if (typeof usage.output_tokens === 'number') parsedOutputTokens = usage.output_tokens;
             }
+          } else if (obj.type === 'assistant') {
+            const msg = obj.message as Record<string, unknown> | undefined;
+            const content = (msg?.content ?? []) as Array<Record<string, unknown>>;
+            for (const block of content) {
+              if (block.type === 'tool_use') toolUseCount++;
+            }
+          } else if (obj.type === 'user') {
+            const msg = obj.message as Record<string, unknown> | undefined;
+            const content = (msg?.content ?? []) as Array<Record<string, unknown>>;
+            for (const block of content) {
+              if (block.type === 'tool_result' && block.is_error === true) toolErrorCount++;
+            }
           }
         } catch { /* not valid JSON, ignore */ }
 
@@ -382,6 +402,11 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       resolved = true;
       clearTimeout(timer);
       const duration = Date.now() - startTime;
+      // Fall back to output-string classification when we didn't see structured
+      // tool_result error blocks (e.g. non-stream-json agents like codex).
+      const toolErrorsFinal = toolErrorCount > 0
+        ? toolErrorCount
+        : classifyToolErrors(output).length;
       const result: AgentResult = {
         exitCode,
         output,
@@ -390,6 +415,8 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
         costUsd: parsedCostUsd,
         inputTokens: parsedInputTokens,
         outputTokens: parsedOutputTokens,
+        toolCalls: toolUseCount,
+        toolErrors: toolErrorsFinal,
       };
       if (logStream) {
         logStream.end(() => {

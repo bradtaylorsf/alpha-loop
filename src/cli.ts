@@ -50,7 +50,24 @@ program
   .description('View session history')
   .option('--qa', 'Show QA checklist for session')
   .option('--clean', 'Remove old session data')
+  .option('--telemetry', 'Show per-stage telemetry for a session')
   .action(historyCommand);
+
+// Report subcommands — routing A/B analysis, cost-per-issue rollups.
+const reportCmd = program
+  .command('report')
+  .description('Generate cross-session reports (routing, cost, telemetry)');
+
+reportCmd
+  .command('routing')
+  .description('Aggregate per-stage telemetry and cost-per-issue across sessions')
+  .option('--profile <name>', 'Filter to entries with this routing profile')
+  .option('--since <duration>', 'Limit window (e.g. 30d, 12h, 45m)')
+  .option('--json', 'Emit machine-readable JSON instead of a table')
+  .action(async (options) => {
+    const { reportRoutingCommand } = await import('./commands/report.js');
+    reportRoutingCommand(options);
+  });
 
 program
   .command('scan')
