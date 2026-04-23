@@ -6,7 +6,13 @@ import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
 import { exec } from '../lib/shell.js';
 import { loadConfig, assertSafeShellArg, type Config } from '../lib/config.js';
-import { pollIssues, listMilestones, type Milestone } from '../lib/github.js';
+import {
+  pollIssues, listMilestones, listEpics, getEpicSubIssues, getIssueWithComments,
+  getMergedPRForIssue, updateEpicChecklist, commentIssue, closeIssue, labelIssue,
+  type Milestone, type Issue,
+} from '../lib/github.js';
+import { buildEpicSummary } from '../lib/epics.js';
+import { verifyEpic } from '../lib/verify-epic.js';
 import { processIssue, processBatch } from '../lib/pipeline.js';
 import { createSession, finalizeSession, type SessionContext } from '../lib/session.js';
 import { cleanupWorktree } from '../lib/worktree.js';
@@ -37,6 +43,12 @@ export type RunOptions = {
   verbose?: boolean;
   validate?: boolean;
   fix?: boolean;
+  /** Force a specific epic by number, skip picker. */
+  epic?: number;
+  /** Skip the epic picker entirely, use flat/milestone flow. */
+  noEpic?: boolean;
+  /** Run only the verification pass on an existing epic. */
+  verifyOnly?: number;
 };
 
 /**
@@ -142,16 +154,39 @@ function askChoice(prompt: string, max: number): Promise<number> {
   });
 }
 
+export type PickTargetResult =
+  | { type: 'epic'; epicNum: number; epicTitle: string }
+  | { type: 'milestone'; title: string }
+  | { type: 'all' };
+
 /**
- * Show open milestones and let the user pick one, or choose "all in order".
- * Returns the milestone title to filter by, or empty string for all issues.
+ * Show open epics + milestones and let the user pick one, or choose "all in order".
+ * Epics are listed first (they're typically what the user actually wants).
+ *
+ * When `preferEpics` is true and there's exactly one open epic, the picker
+ * auto-selects it without prompting.
+ *
+ * When `hideEpics` is true, epics are not shown or auto-selected (the `--no-epic`
+ * flag path).
  */
-async function pickMilestone(repo: string): Promise<string> {
+async function pickTarget(
+  repo: string,
+  opts: { preferEpics: boolean; hideEpics: boolean },
+): Promise<PickTargetResult> {
+  const epics = opts.hideEpics ? [] : listEpics(repo);
   const milestones = listMilestones(repo);
 
-  if (milestones.length === 0) {
-    log.info('No open milestones found — processing all ready issues');
-    return '';
+  if (epics.length === 0 && milestones.length === 0) {
+    log.info('No open epics or milestones found — processing all ready issues');
+    return { type: 'all' };
+  }
+
+  // preferEpics: when there's exactly one open epic and the user has opted in,
+  // skip the picker and use it. This is the common case for a single-initiative repo.
+  if (opts.preferEpics && epics.length === 1) {
+    const only = epics[0];
+    log.info(`preferEpics: auto-selecting sole open epic #${only.number}`);
+    return { type: 'epic', epicNum: only.number, epicTitle: only.title };
   }
 
   const BOLD = '\x1b[1m';
@@ -159,29 +194,113 @@ async function pickMilestone(repo: string): Promise<string> {
   const NC = '\x1b[0m';
 
   console.error('');
-  console.error(`${BOLD}  Open Milestones${NC}`);
-  console.error('');
-  console.error(`  ${BOLD}0${NC}  All issues (no milestone filter)`);
-  for (let i = 0; i < milestones.length; i++) {
-    const m = milestones[i];
-    const progress = m.openIssues + m.closedIssues > 0
-      ? `${m.closedIssues}/${m.openIssues + m.closedIssues} done`
-      : 'empty';
-    const due = m.dueOn ? ` · due ${m.dueOn.split('T')[0]}` : '';
-    console.error(`  ${BOLD}${i + 1}${NC}  ${m.title} ${DIM}(${m.openIssues} open, ${progress}${due})${NC}`);
+  if (epics.length > 0) {
+    console.error(`${BOLD}  Open Epics${NC}`);
+    console.error('');
+    for (let i = 0; i < epics.length; i++) {
+      const e = epics[i];
+      const summary = buildEpicSummary(e);
+      const progress = summary.totalCount > 0
+        ? `${summary.doneCount}/${summary.totalCount} done`
+        : 'no sub-issues';
+      console.error(`  ${BOLD}${i + 1}${NC}  ${e.title} #${e.number} ${DIM}(${progress})${NC}`);
+    }
+    console.error('');
   }
+
+  if (milestones.length > 0) {
+    console.error(`${BOLD}  Open Milestones${NC}`);
+    console.error('');
+    for (let i = 0; i < milestones.length; i++) {
+      const m = milestones[i];
+      const progress = m.openIssues + m.closedIssues > 0
+        ? `${m.closedIssues}/${m.openIssues + m.closedIssues} done`
+        : 'empty';
+      const due = m.dueOn ? ` · due ${m.dueOn.split('T')[0]}` : '';
+      console.error(`  ${BOLD}${epics.length + i + 1}${NC}  ${m.title} ${DIM}(${m.openIssues} open, ${progress}${due})${NC}`);
+    }
+    console.error('');
+  }
+
+  const total = epics.length + milestones.length;
+  console.error(`  ${BOLD}0${NC}  All ready issues (no filter)`);
   console.error('');
 
-  const choice = await askChoice(`  Select milestone [0-${milestones.length}]: `, milestones.length);
+  const choice = await askChoice(`  Select [0-${total}]: `, total);
 
   if (choice <= 0) {
-    log.info('Processing all ready issues (no milestone filter)');
-    return '';
+    log.info('Processing all ready issues (no filter)');
+    return { type: 'all' };
   }
 
-  const selected = milestones[choice - 1];
+  if (choice <= epics.length) {
+    const selected = epics[choice - 1];
+    log.success(`Epic selected: ${selected.title} (#${selected.number})`);
+    return { type: 'epic', epicNum: selected.number, epicTitle: selected.title };
+  }
+
+  const milestoneIdx = choice - epics.length - 1;
+  const selected = milestones[milestoneIdx];
   log.success(`Milestone selected: ${selected.title} (${selected.openIssues} open issues)`);
-  return selected.title;
+  return { type: 'milestone', title: selected.title };
+}
+
+/**
+ * Run the verification pass on an epic: fetch sub-issues + merged PRs, evaluate
+ * AC via the review model, post a summary comment, and close the epic on pass
+ * (or add `needs-human-input` on partial/fail).
+ *
+ * Shared between the post-loop trigger and the `--verify-only` entry point.
+ */
+async function runEpicVerificationFlow(
+  epicNum: number,
+  config: Config,
+  session: SessionContext | null,
+): Promise<void> {
+  const epic = getIssueWithComments(config.repo, epicNum);
+  if (!epic) {
+    log.error(`Could not fetch epic #${epicNum}`);
+    return;
+  }
+  const refs = getEpicSubIssues(config.repo, epicNum);
+  if (refs.length === 0) {
+    log.warn(`Epic #${epicNum} has no sub-issues in its checklist — nothing to verify`);
+    return;
+  }
+
+  const subIssues: Issue[] = [];
+  const mergedPRUrls: Array<string | null> = [];
+  for (const ref of refs) {
+    const sub = getIssueWithComments(config.repo, ref.number);
+    if (!sub) continue;
+    subIssues.push(sub);
+    mergedPRUrls.push(getMergedPRForIssue(config.repo, ref.number));
+  }
+
+  const logsDir = session?.logsDir
+    ?? join(process.cwd(), '.alpha-loop', 'sessions', `verify-${epicNum}-${Date.now()}`, 'logs');
+
+  if (!session) {
+    const { mkdirSync } = await import('node:fs');
+    mkdirSync(logsDir, { recursive: true });
+  }
+
+  const result = await verifyEpic({ epic, subIssues, mergedPRUrls }, config, logsDir);
+
+  if (config.dryRun) {
+    log.dry(`[verify-only] Would post comment on #${epicNum} (verdict=${result.verdict})`);
+    console.error(result.comment);
+    return;
+  }
+
+  commentIssue(config.repo, epicNum, result.comment);
+  if (result.verdict === 'pass') {
+    closeIssue(config.repo, epicNum, 'completed');
+    log.success(`Epic #${epicNum} verified and closed`);
+  } else {
+    labelIssue(config.repo, epicNum, 'needs-human-input');
+    log.warn(`Epic #${epicNum} needs human review: verdict=${result.verdict}`);
+  }
 }
 
 /**
@@ -209,17 +328,56 @@ export async function runCommand(options: RunOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Milestone selection (interactive or from config/CLI flag) — must happen before session creation
-  let activeMilestone = config.milestone;
-  if (!activeMilestone && !config.dryRun && process.stdin.isTTY) {
-    activeMilestone = await pickMilestone(config.repo);
+  // --- Verify-only path: bypass the normal loop entirely ---
+  if (options.verifyOnly !== undefined) {
+    log.step(`Running verify-only pass for epic #${options.verifyOnly}`);
+    await runEpicVerificationFlow(options.verifyOnly, config, null);
+    return;
   }
-  if (activeMilestone) {
+
+  // --- Target selection (epic or milestone) — must happen before session creation ---
+  let activeEpic: number | undefined;
+  let activeEpicTitle: string | undefined;
+  let activeMilestone = config.milestone;
+
+  // --epic <N> overrides everything except --verify-only
+  if (options.epic !== undefined) {
+    const epic = getIssueWithComments(config.repo, options.epic);
+    if (!epic) {
+      log.error(`Could not fetch epic #${options.epic}`);
+      process.exit(1);
+    }
+    activeEpic = epic.number;
+    activeEpicTitle = epic.title;
+    activeMilestone = '';
+  }
+
+  // Interactive picker when TTY and nothing preset
+  if (activeEpic === undefined && !activeMilestone && !config.dryRun && process.stdin.isTTY) {
+    const target = await pickTarget(config.repo, {
+      preferEpics: config.preferEpics,
+      hideEpics: options.noEpic === true,
+    });
+    if (target.type === 'epic') {
+      activeEpic = target.epicNum;
+      activeEpicTitle = target.epicTitle;
+    } else if (target.type === 'milestone') {
+      activeMilestone = target.title;
+    }
+  }
+
+  if (activeEpic !== undefined) {
+    log.info(`Processing epic #${activeEpic}${activeEpicTitle ? ': ' + activeEpicTitle : ''}`);
+  } else if (activeMilestone) {
     log.info(`Filtering issues by milestone: ${activeMilestone}`);
   }
 
-  // Create session (named after milestone if selected)
-  const session = createSession(config, { milestone: activeMilestone || undefined });
+  // Create session (named after epic or milestone if selected)
+  const session = createSession(config, {
+    milestone: activeMilestone || undefined,
+    epicNum: activeEpic,
+    epicTitle: activeEpicTitle,
+  });
 
   // Print startup banner
   printBanner(config, session);
@@ -325,15 +483,44 @@ export async function runCommand(options: RunOptions): Promise<void> {
     }
   }
 
-  // Fetch all matching issues
-  const milestoneMsg = activeMilestone ? ` in milestone '${activeMilestone}'` : '';
-  log.info(`Fetching issues${milestoneMsg}...`);
+  // --- Fetch issue queue ---
+  // When an epic is selected, the queue is its sub-issues in checklist order.
+  // Otherwise, fetch via the usual project/label/milestone path and exclude
+  // epic-labeled issues (AC #2: epics never picked up by the normal `ready` flow).
+  let issues: Issue[];
+  if (activeEpic !== undefined) {
+    log.info(`Fetching sub-issues of epic #${activeEpic} in checklist order...`);
+    const refs = getEpicSubIssues(config.repo, activeEpic);
+    issues = [];
+    for (const ref of refs) {
+      if (ref.checked) continue; // already done
+      const sub = getIssueWithComments(config.repo, ref.number);
+      if (!sub) {
+        log.warn(`Sub-issue #${ref.number} skipped: could not fetch`);
+        continue;
+      }
+      if (sub.labels.includes('epic')) {
+        log.warn(`Sub-issue #${sub.number} skipped: is itself an epic (nested epics unsupported in v1)`);
+        continue;
+      }
+      if (!sub.labels.includes(config.labelReady)) {
+        log.warn(`Sub-issue #${sub.number} skipped: not labeled '${config.labelReady}'`);
+        continue;
+      }
+      issues.push(sub);
+    }
+  } else {
+    const milestoneMsg = activeMilestone ? ` in milestone '${activeMilestone}'` : '';
+    log.info(`Fetching issues${milestoneMsg}...`);
+    issues = pollIssues(config.repo, config.labelReady, 100, {
+      project: config.project,
+      repoOwner: config.repoOwner,
+      milestone: activeMilestone || undefined,
+    }).filter((iss) => !iss.labels.includes('epic'));
+  }
 
-  const issues = pollIssues(config.repo, config.labelReady, 100, {
-    project: config.project,
-    repoOwner: config.repoOwner,
-    milestone: activeMilestone || undefined,
-  });
+  // When set mid-loop, skip post-loop epic verification (e.g. checklist body inconsistency).
+  let epicAbort = false;
 
   if (issues.length === 0) {
     log.info('No issues found. Nothing to do.');
@@ -415,6 +602,27 @@ export async function runCommand(options: RunOptions): Promise<void> {
           const results = await processBatch(batchIssues, config, session);
           session.results.push(...results);
 
+          // Flip epic checklist for each successful sub-issue
+          if (activeEpic !== undefined) {
+            let checklistError = false;
+            for (const r of results) {
+              if (r.status !== 'success') continue;
+              try {
+                updateEpicChecklist(config.repo, activeEpic, r.issueNum, true);
+              } catch (err) {
+                log.error(`Epic #${activeEpic} checklist update failed for sub-issue #${r.issueNum}: ${err instanceof Error ? err.message : err}`);
+                // One-agent-per-epic contract — halt further processing on body inconsistency
+                epicAbort = true;
+                checklistError = true;
+                break;
+              }
+            }
+            if (checklistError) {
+              activeIssueNum = null;
+              break;
+            }
+          }
+
           // Stop if any issue hit a transient error
           if (results.some((r) => r.failureReason === 'transient')) {
             log.warn('Agent hit a rate/usage limit — stopping session to avoid wasting cycles');
@@ -454,6 +662,19 @@ export async function runCommand(options: RunOptions): Promise<void> {
           );
           session.results.push(result);
 
+          // Flip the epic checklist box when this sub-issue succeeded
+          if (activeEpic !== undefined && result.status === 'success') {
+            try {
+              updateEpicChecklist(config.repo, activeEpic, issue.number, true);
+            } catch (err) {
+              log.error(`Epic #${activeEpic} checklist update failed for sub-issue #${issue.number}: ${err instanceof Error ? err.message : err}`);
+              // One-agent-per-epic contract — halt further processing on body inconsistency
+              epicAbort = true;
+              activeIssueNum = null;
+              break;
+            }
+          }
+
           // Stop processing if agent hit a transient error (usage/rate limit)
           if (result.failureReason === 'transient') {
             log.warn('Agent hit a rate/usage limit — stopping session to avoid wasting cycles');
@@ -465,6 +686,21 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
         activeIssueNum = null;
       }
+    }
+  }
+
+  // --- Epic completion check: verify and close if all sub-issues are now done ---
+  if (activeEpic !== undefined && !epicAbort && !config.dryRun) {
+    try {
+      const remaining = getEpicSubIssues(config.repo, activeEpic).filter((r) => !r.checked);
+      if (remaining.length === 0) {
+        log.step(`All sub-issues of epic #${activeEpic} are complete — running verification pass`);
+        await runEpicVerificationFlow(activeEpic, config, session);
+      } else {
+        log.info(`Epic #${activeEpic}: ${remaining.length} sub-issue(s) still open — verification deferred`);
+      }
+    } catch (err) {
+      log.warn(`Epic completion check failed: ${err instanceof Error ? err.message : err}`);
     }
   }
 

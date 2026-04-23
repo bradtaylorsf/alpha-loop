@@ -44,6 +44,7 @@ const makeConfig = (overrides?: Partial<Config>): Config => ({
   pipeline: {},
   evalIncludeAgentPrompts: true,
   evalIncludeSkills: true,
+    preferEpics: false,
   ...overrides,
 } as Config);
 
