@@ -229,6 +229,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop init` | Full onboarding: config, templates, vision, scan, sync, commit |
 | `alpha-loop run` | Fetch matching issues, process them all, then exit |
 | `alpha-loop run --dry-run` | Preview without making changes |
+| `alpha-loop run --epic <N>` | Process an epic — its sub-issues in checklist order, auto-verify on completion (see [docs/epics.md](docs/epics.md)) |
+| `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
 | `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
 | `alpha-loop auth` | Save authenticated browser state for verification |
@@ -283,6 +285,9 @@ Options:
   --merge-to <branch> Use an existing branch instead of creating a new session branch
   --batch             Batch mode: process multiple issues per agent call (faster, fewer tokens)
   --batch-size <n>    Issues per batch (default: 5)
+  --epic <n>          Process a specific epic by issue number (skips the picker)
+  --skip-epic         Skip the epic picker, use flat/milestone flow
+  --verify-only <n>   Run only the verification pass on an existing epic
 ```
 
 ## Configuration

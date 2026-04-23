@@ -22,6 +22,8 @@ alpha-loop init          # Full onboarding: config, templates, vision, scan, syn
 alpha-loop run           # Run the loop continuously
 alpha-loop run --once    # Process one issue and exit
 alpha-loop run --dry-run # Dry run (preview, no changes)
+alpha-loop run --epic <N>        # Process an epic (sub-issues in checklist order, auto-verify on completion)
+alpha-loop run --verify-only <N> # Run just the epic verification pass
 alpha-loop scan          # Generate/refresh project context
 alpha-loop plan          # Generate project scope (milestones + issues) from seed inputs
 alpha-loop add           # Create a new issue from a free-form description using AI
