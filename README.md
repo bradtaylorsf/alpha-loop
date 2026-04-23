@@ -529,6 +529,15 @@ routing:
 
 **Backwards compatibility:** If you don't set `routing`, alpha-loop uses the top-level `agent:` / `model:` / `pipeline:` exactly as before — no behavior change.
 
+### Local Model Support
+
+Alpha Loop can run the token-heavy middle of the Loop (Build, Test) against an open-weight coding model on your own machine — typically a 30B-class model in LM Studio or Ollama — while keeping frontier models for Plan and Review. On a 64GB+ Apple Silicon Mac this typically cuts cost-per-issue by 60–80% without sacrificing Plan/Review quality.
+
+- [docs/local-models.md](docs/local-models.md) — hardware prerequisites, install steps for LM Studio 0.4.1+ / Ollama, recommended models (Qwen3-Coder-Next 30B-A3B, Gemma 4 31B, GLM-4.6), Apple Silicon tuning, and troubleshooting.
+- [docs/routing-profiles.md](docs/routing-profiles.md) — copy-pasteable profiles: `all-frontier` (baseline), `hybrid-v1` (recommended default), `all-local` (offline / zero-cost), `budget-hawk` (Haiku cloud + local coder).
+
+Quickest path: install LM Studio 0.4.1+, load `qwen3-coder-30b-a3b`, then drop the `hybrid-v1` block from [docs/routing-profiles.md](docs/routing-profiles.md) into your `.alpha-loop.yaml`. `alpha-loop init` detects Apple Silicon + 64GB+ RAM and points you at these docs automatically.
+
 ## GitHub Setup
 
 ### Labels
