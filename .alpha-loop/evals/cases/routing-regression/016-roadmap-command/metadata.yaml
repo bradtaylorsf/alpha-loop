@@ -1,0 +1,11 @@
+id: 016-roadmap-command
+source_pr: 126
+source_issue: 117
+base_sha: 7f10822fc52d89f51e8f9fa9764ed03b70f5058a
+ci_status: success
+description: Implement roadmap command — organize issues into milestones
+tags:
+  - routing-regression
+  - cli
+  - milestones
+source: routing-regression

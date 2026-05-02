@@ -1,0 +1,57 @@
+# Routing profile: all-local
+# Every Loop stage runs on a local LM Studio / Ollama endpoint. Only
+# intended for offline evaluation on a self-hosted runner; hosted GitHub
+# runners should skip this profile.
+
+agent: lmstudio
+model: qwen3-coder-30b
+review_model: qwen3-coder-30b
+
+pipeline:
+  plan:
+    agent: lmstudio
+    model: qwen3-coder-30b
+  implement:
+    agent: lmstudio
+    model: qwen3-coder-30b
+  test_fix:
+    agent: lmstudio
+    model: qwen3-coder-30b
+  review:
+    agent: lmstudio
+    model: qwen3-coder-30b
+  verify:
+    agent: lmstudio
+    model: qwen3-coder-30b
+  learn:
+    agent: ollama
+    model: gemma3-12b
+
+routing:
+  profile: all-local
+  endpoints:
+    lmstudio:
+      type: anthropic_compat
+      base_url: http://localhost:1234
+    ollama:
+      type: openai_compat
+      base_url: http://localhost:11434
+  stages:
+    plan:
+      model: qwen3-coder-30b
+      endpoint: lmstudio
+    build:
+      model: qwen3-coder-30b
+      endpoint: lmstudio
+    test_write:
+      model: qwen3-coder-30b
+      endpoint: lmstudio
+    test_exec:
+      model: qwen3-coder-30b
+      endpoint: lmstudio
+    review:
+      model: qwen3-coder-30b
+      endpoint: lmstudio
+    summary:
+      model: gemma3-12b
+      endpoint: ollama

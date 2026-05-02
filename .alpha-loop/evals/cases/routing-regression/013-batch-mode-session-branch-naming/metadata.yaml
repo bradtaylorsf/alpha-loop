@@ -1,0 +1,10 @@
+id: 013-batch-mode-session-branch-naming
+source_pr: 130
+ci_status: success
+base_sha: 35fd497d592f20ee11099bcbb98dd4c9a59e3211
+description: Batch mode + session branch naming fixes
+tags:
+  - routing-regression
+  - batch
+  - session
+source: routing-regression

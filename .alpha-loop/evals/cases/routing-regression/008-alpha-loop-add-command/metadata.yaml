@@ -1,0 +1,10 @@
+id: 008-alpha-loop-add-command
+source_pr: 155
+ci_status: success
+base_sha: 328451e97bb257ff720f0d1f6e0ba8d112575991
+description: alpha-loop add command for quick issue creation
+tags:
+  - routing-regression
+  - cli
+  - command
+source: routing-regression

@@ -1,0 +1,11 @@
+id: 014-yes-flag-non-interactive-planning
+source_pr: 128
+source_issue: 119
+base_sha: 765d11a1bd1fb7db474b646c0fef10dd17430f4b
+ci_status: success
+description: --yes flag for non-interactive batch mode in planning commands
+tags:
+  - routing-regression
+  - cli
+  - planning
+source: routing-regression

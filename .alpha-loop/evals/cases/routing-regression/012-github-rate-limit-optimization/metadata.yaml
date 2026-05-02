@@ -1,0 +1,10 @@
+id: 012-github-rate-limit-optimization
+source_pr: 142
+ci_status: success
+base_sha: 6e675eb1f83f44f4f67273e1494e7d105cca9614
+description: GitHub API rate limit optimization
+tags:
+  - routing-regression
+  - github
+  - performance
+source: routing-regression

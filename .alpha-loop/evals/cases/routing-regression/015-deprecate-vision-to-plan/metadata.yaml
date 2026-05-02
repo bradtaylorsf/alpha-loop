@@ -1,0 +1,11 @@
+id: 015-deprecate-vision-to-plan
+source_pr: 127
+source_issue: 118
+base_sha: b7a0d750dbe3d2d478061b160afd418ec451765c
+ci_status: success
+description: Deprecate vision command in favor of plan
+tags:
+  - routing-regression
+  - deprecation
+  - cli
+source: routing-regression

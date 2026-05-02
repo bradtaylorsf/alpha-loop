@@ -22,6 +22,7 @@ import { ghExec } from '../lib/rate-limit.js';
 import { log } from '../lib/logger.js';
 import { syncAgentAssets, migrateToTemplates, resolveHarnesses } from './sync.js';
 import { findDistributionTemplatesDir } from '../lib/templates.js';
+import { shouldOfferLocalMode, getTotalMemoryGB } from '../lib/hardware.js';
 
 const CONFIG_FILE = '.alpha-loop.yaml';
 
@@ -98,7 +99,7 @@ function configTemplate(repo: string): string {
   return `# Alpha Loop configuration
 repo: ${repo}
 project: 0  # GitHub Project number (find it in your project URL)
-agent: claude  # AI agent CLI: claude, codex, opencode
+agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
 # model:       # AI model (omit to use agent's default, e.g., opus, gpt-5.4)
 label: ready
 base_branch: main
@@ -186,6 +187,33 @@ const REQUIRED_LABELS = [
   { name: 'epic', color: '8B5CF6', description: 'Tracker issue with sub-issue checklist' },
   { name: 'needs-human-input', color: 'E99695', description: 'Requires human review or decision' },
 ];
+
+/**
+ * On Apple Silicon + 64GB+ RAM, point users at the local-model docs.
+ * Does not modify the YAML — the docs walk the user through the full setup.
+ * Silent on non-matching hardware and non-TTY environments.
+ */
+export async function maybeOfferLocalMode(): Promise<void> {
+  if (!shouldOfferLocalMode()) return;
+  if (!process.stdin.isTTY) return;
+
+  const memGB = Math.round(getTotalMemoryGB());
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>((resolve) => {
+    rl.question(
+      `Detected Apple Silicon + ${memGB}GB RAM. Use hybrid (local build/test + cloud plan/review) mode? [y/N]: `,
+      resolve,
+    );
+  });
+  rl.close();
+
+  if (answer.trim().toLowerCase() === 'y' || answer.trim().toLowerCase() === 'yes') {
+    log.info('Hybrid mode setup is documented in:');
+    log.info('  - docs/local-models.md     (LM Studio / Ollama install, hardware tuning)');
+    log.info('  - docs/routing-profiles.md (copy-pasteable hybrid-v1 routing config)');
+    log.info('Alpha-loop did not modify .alpha-loop.yaml — follow the docs when ready.');
+  }
+}
 
 /**
  * Check for required GitHub labels and interactively create missing ones.
@@ -362,6 +390,7 @@ export async function initCommand(): Promise<void> {
     writeFileSync(CONFIG_FILE, configTemplate(repo));
     log.success(`Created ${CONFIG_FILE}`);
   }
+  await maybeOfferLocalMode();
 
   // --- Step 2: Set up .gitignore ---
   log.step('Step 2: Git ignore');

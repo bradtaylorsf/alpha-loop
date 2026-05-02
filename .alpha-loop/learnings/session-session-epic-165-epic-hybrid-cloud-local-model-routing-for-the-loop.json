@@ -1,0 +1,77 @@
+{
+  "name": "session/epic-165-epic-hybrid-cloud-local-model-routing-for-the-loop",
+  "branch": "session/epic-165-epic-hybrid-cloud-local-model-routing-for-the-loop",
+  "completed": "2026-04-23T09:21:12.904Z",
+  "results": [
+    {
+      "issueNum": 158,
+      "title": "Add per-stage model routing config schema to .alpha-loop.yaml",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/174",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 563,
+      "filesChanged": 2
+    },
+    {
+      "issueNum": 159,
+      "title": "Local-model backend: LM Studio / Ollama with Anthropic-compatible endpoint",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/175",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1087,
+      "filesChanged": 4
+    },
+    {
+      "issueNum": 160,
+      "title": "Retry-with-escalation: local tool-call failure falls back to frontier",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/176",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1165,
+      "filesChanged": 4
+    },
+    {
+      "issueNum": 161,
+      "title": "Per-stage telemetry + cost-per-issue aggregation (alpha-loop report routing)",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/177",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1138,
+      "filesChanged": 3
+    },
+    {
+      "issueNum": 162,
+      "title": "routing-regression eval set + alpha-loop eval --matrix for A/B profile comparison",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/178",
+      "testsPassing": true,
+      "verifyPassing": false,
+      "duration": 1733,
+      "filesChanged": 15
+    },
+    {
+      "issueNum": 163,
+      "title": "Routing promotion/demotion automation (alpha-loop evolve routing)",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/179",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1085,
+      "filesChanged": 15
+    },
+    {
+      "issueNum": 164,
+      "title": "Docs: local-model setup guide + example routing profiles",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/180",
+      "testsPassing": true,
+      "verifyPassing": false,
+      "duration": 969,
+      "filesChanged": 15
+    }
+  ]
+}

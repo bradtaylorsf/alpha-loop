@@ -135,6 +135,15 @@ alpha-loop eval estimate
 
 # Compare two config files side-by-side
 alpha-loop eval compare-configs config-a.yaml config-b.yaml
+
+# Apply a single routing profile before running
+alpha-loop eval run --profile hybrid-v1
+
+# Matrix run: replay the routing-regression set under every profile and emit a side-by-side report
+# Defaults to a dry-run (validates profiles and case structure). Pass --execute to run pipelines for real.
+alpha-loop eval run --matrix --tags routing-regression
+alpha-loop eval run --matrix --profiles "all-frontier,hybrid-v1" --out eval/reports
+alpha-loop eval run --matrix --tags routing-regression --execute  # real runs (see CASE_FORMAT.md)
 ```
 
 Eval cases live in `.alpha-loop/evals/` and scores are appended to `scores.jsonl` (Git-friendly, append-only). The composite score formula is pass-rate primary with lightweight penalties for retries and duration. Real API costs (tokens, USD) are tracked per case from agent output and used for the Pareto frontier.
@@ -169,6 +178,20 @@ alpha-loop evolve --surface all           # Modify prompts + pipeline code (risk
 alpha-loop evolve --resume                # Resume from a previous evolve session
 alpha-loop evolve --dry-run               # Preview without changes
 ```
+
+#### Routing promotion/demotion (`alpha-loop evolve routing`)
+
+Propose per-stage routing changes (frontier → local, or revert to fallback) as draft PRs, based on the metrics aggregated by `alpha-loop report routing` plus the matrix eval.
+
+A stage is promoted to its local candidate when (over ≥30 runs): cost-per-issue savings ≥ 40%, pipeline success delta ≥ −3%, and tool-error rate < 2%. Promotions require a matrix eval run within the last 7 days (`alpha-loop eval --matrix --execute`).
+
+```bash
+alpha-loop evolve routing                   # Propose promotions as a draft PR
+alpha-loop evolve routing --dry-run         # Preview without writing config
+alpha-loop evolve routing --demote build    # Manually revert a stage to fallback
+```
+
+Every promotion/demotion is appended to `.alpha-loop/learnings/routing-history.md`. PR bodies include a `git revert` rollback snippet plus the previous YAML fragment.
 
 ### Batch Mode
 
@@ -237,7 +260,9 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop history` | View session history |
 | `alpha-loop history <name>` | View a specific session |
 | `alpha-loop history <name> --qa` | Show QA checklist for session |
+| `alpha-loop history <name> --telemetry` | Show per-stage telemetry table (see [docs/telemetry.md](docs/telemetry.md)) |
 | `alpha-loop history --clean` | Remove old session data |
+| `alpha-loop report routing` | Aggregate per-stage telemetry + cost-per-issue across sessions |
 | `alpha-loop sync` | Sync templates to configured harnesses (Claude, Codex, Cursor, etc.) |
 | `alpha-loop resume` | Resume stranded work — push branches, review, open PRs |
 | `alpha-loop resume --issue <N>` | Resume a specific issue |
@@ -257,6 +282,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop eval import-swebench` | Import eval cases from SWE-bench dataset |
 | `alpha-loop eval export <case>` | Export an eval case for contributing back (anonymized by default) |
 | `alpha-loop evolve` | Meta-Harness-style automated optimization loop |
+| `alpha-loop evolve routing` | Propose routing promotions/demotions as draft PRs based on eval metrics |
+| `alpha-loop evolve routing --demote <stage>` | Manually demote a stage to routing.fallback.escalate_to |
 | `alpha-loop plan` | Generate a full project scope (milestones + issues) from seed inputs using AI |
 | `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
 | `alpha-loop plan --dry-run` | Display the plan without creating any GitHub resources |
@@ -298,7 +325,7 @@ Running `alpha-loop init` creates a `.alpha-loop.yaml` file:
 # Alpha Loop configuration
 repo: owner/repo-name
 project: 0  # GitHub Project number (find it in your project URL)
-agent: claude  # AI agent CLI: claude, codex, opencode
+agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
 # model:       # omit to use agent's default (e.g., opus, gpt-5.4)
 label: ready
 base_branch: main
@@ -465,6 +492,51 @@ pipeline:
 ```
 
 Use `alpha-loop eval search` to automatically find the best model assignment per step via greedy coordinate descent over your eval suite.
+
+### Per-Stage Routing
+
+For hybrid cloud/local setups, use `routing:` to target different models and endpoints for each Loop stage. This is how you offload token-heavy middle stages (Build, Test) to local open-weight models while keeping frontier models for Plan and Review:
+
+```yaml
+routing:
+  profile: hybrid-v1   # all-frontier | hybrid-v1 | all-local | <custom-name>
+  stages:
+    plan:       { model: claude-opus-4-7,      endpoint: anthropic }
+    build:      { model: qwen3-coder-30b-a3b,  endpoint: lmstudio_local }
+    test_write: { model: qwen3-coder-30b-a3b,  endpoint: lmstudio_local }
+    test_exec:  { model: qwen3-coder-30b-a3b,  endpoint: lmstudio_local }
+    review:     { model: claude-sonnet-4-6,    endpoint: anthropic }
+    summary:    { model: gemma-4-31b,          endpoint: lmstudio_local }
+  endpoints:
+    anthropic:      { type: anthropic,        base_url: "https://api.anthropic.com" }
+    lmstudio_local: { type: anthropic_compat, base_url: "http://localhost:1234" }
+    ollama_local:   { type: openai_compat,    base_url: "http://localhost:11434/v1" }
+  fallback:
+    on_tool_error: escalate          # escalate | retry | fail
+    escalate_to: { model: claude-sonnet-4-6, endpoint: anthropic }
+```
+
+**Stages:** `plan`, `build`, `test_write`, `test_exec`, `review`, `summary` — each takes `{ model, endpoint }` where `endpoint` references a name defined in `routing.endpoints`.
+
+**Endpoint types:** `anthropic` (native Anthropic API), `anthropic_compat` (Anthropic-compatible — e.g. LM Studio), or `openai_compat` (OpenAI-compatible — e.g. Ollama, vLLM). See [docs/local-models.md](docs/local-models.md) for LM Studio and Ollama setup, including the `agent: lmstudio` / `agent: ollama` short form for single-agent local mode.
+
+**Fallback modes:**
+- `escalate` — when a routed stage errors on a tool call, retry on `escalate_to` (typically a frontier model)
+- `retry` — retry on the same model/endpoint
+- `fail` — surface the error without retry
+
+**Profile as a list (A/B):** `profile` may also be an array of names (e.g. `[hybrid-v1, all-local]`). Alpha Loop picks one deterministically per-issue so reruns of the same issue select the same profile — this makes profile comparisons reproducible.
+
+**Backwards compatibility:** If you don't set `routing`, alpha-loop uses the top-level `agent:` / `model:` / `pipeline:` exactly as before — no behavior change.
+
+### Local Model Support
+
+Alpha Loop can run the token-heavy middle of the Loop (Build, Test) against an open-weight coding model on your own machine — typically a 30B-class model in LM Studio or Ollama — while keeping frontier models for Plan and Review. On a 64GB+ Apple Silicon Mac this typically cuts cost-per-issue by 60–80% without sacrificing Plan/Review quality.
+
+- [docs/local-models.md](docs/local-models.md) — hardware prerequisites, install steps for LM Studio 0.4.1+ / Ollama, recommended models (Qwen3-Coder-Next 30B-A3B, Gemma 4 31B, GLM-4.6), Apple Silicon tuning, and troubleshooting.
+- [docs/routing-profiles.md](docs/routing-profiles.md) — copy-pasteable profiles: `all-frontier` (baseline), `hybrid-v1` (recommended default), `all-local` (offline / zero-cost), `budget-hawk` (Haiku cloud + local coder).
+
+Quickest path: install LM Studio 0.4.1+, load `qwen3-coder-30b-a3b`, then drop the `hybrid-v1` block from [docs/routing-profiles.md](docs/routing-profiles.md) into your `.alpha-loop.yaml`. `alpha-loop init` detects Apple Silicon + 64GB+ RAM and points you at these docs automatically.
 
 ## GitHub Setup
 

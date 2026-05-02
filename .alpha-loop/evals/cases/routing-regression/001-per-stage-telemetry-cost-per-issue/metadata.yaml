@@ -1,0 +1,11 @@
+id: 001-per-stage-telemetry-cost-per-issue
+source_pr: 177
+source_issue: 161
+base_sha: c9132a170d2d14247d957ee1e5dbdd4f7331a2be
+ci_status: success
+description: Per-stage telemetry + cost-per-issue aggregation (alpha-loop report routing)
+tags:
+  - routing-regression
+  - telemetry
+  - reporting
+source: routing-regression

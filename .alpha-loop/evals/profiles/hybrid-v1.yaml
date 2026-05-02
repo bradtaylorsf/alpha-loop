@@ -1,0 +1,60 @@
+# Routing profile: hybrid-v1
+# Plan and review stay on frontier (high-judgment work), build and test
+# execution run on a local LM Studio endpoint. Tuned to cut cost per issue
+# while keeping plan/review quality where model choice matters most.
+
+agent: claude
+model: claude-sonnet-4-6
+review_model: claude-opus-4-6
+
+pipeline:
+  plan:
+    model: claude-sonnet-4-6
+  implement:
+    agent: lmstudio
+    model: qwen3-coder-30b
+  test_fix:
+    agent: lmstudio
+    model: qwen3-coder-30b
+  review:
+    model: claude-opus-4-6
+  verify:
+    model: claude-sonnet-4-6
+  learn:
+    model: claude-haiku-4-5
+
+routing:
+  profile: hybrid-v1
+  endpoints:
+    anthropic:
+      type: anthropic
+      base_url: https://api.anthropic.com
+    lmstudio:
+      type: anthropic_compat
+      base_url: http://localhost:1234
+  stages:
+    plan:
+      model: claude-sonnet-4-6
+      endpoint: anthropic
+    build:
+      model: qwen3-coder-30b
+      endpoint: lmstudio
+    test_write:
+      model: qwen3-coder-30b
+      endpoint: lmstudio
+    test_exec:
+      model: qwen3-coder-30b
+      endpoint: lmstudio
+    review:
+      model: claude-opus-4-6
+      endpoint: anthropic
+    summary:
+      model: claude-haiku-4-5
+      endpoint: anthropic
+  fallback:
+    on_tool_error: escalate
+    escalate_to:
+      model: claude-sonnet-4-6
+      endpoint: anthropic
+    escalation_window_issues: 10
+    escalation_error_threshold: 0.08

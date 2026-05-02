@@ -1,0 +1,47 @@
+# Routing profile: all-frontier
+# All Loop stages run on Anthropic frontier models. This is the reference
+# baseline that --matrix reports compare against.
+
+agent: claude
+model: claude-sonnet-4-6
+review_model: claude-opus-4-6
+
+pipeline:
+  plan:
+    model: claude-sonnet-4-6
+  implement:
+    model: claude-sonnet-4-6
+  test_fix:
+    model: claude-sonnet-4-6
+  review:
+    model: claude-opus-4-6
+  verify:
+    model: claude-sonnet-4-6
+  learn:
+    model: claude-haiku-4-5
+
+routing:
+  profile: all-frontier
+  endpoints:
+    anthropic:
+      type: anthropic
+      base_url: https://api.anthropic.com
+  stages:
+    plan:
+      model: claude-sonnet-4-6
+      endpoint: anthropic
+    build:
+      model: claude-sonnet-4-6
+      endpoint: anthropic
+    test_write:
+      model: claude-sonnet-4-6
+      endpoint: anthropic
+    test_exec:
+      model: claude-sonnet-4-6
+      endpoint: anthropic
+    review:
+      model: claude-opus-4-6
+      endpoint: anthropic
+    summary:
+      model: claude-haiku-4-5
+      endpoint: anthropic
