@@ -10,8 +10,12 @@ name: Eval Matrix (nightly)
 # skip that profile via the ALPHA_LOOP_EVAL_PROFILES variable.
 
 on:
-  schedule:
-    - cron: '0 7 * * *'  # 07:00 UTC daily
+  # Nightly schedule disabled until fixture isolation lands — see tracking issue.
+  # Without isolation the matrix only runs in dry-run mode (validates YAML, posts
+  # SKIP-only reports), so the daily comment is pure noise. Re-enable by
+  # uncommenting the schedule block below once `--execute` is safe.
+  # schedule:
+  #   - cron: '0 7 * * *'  # 07:00 UTC daily
   workflow_dispatch:
     inputs:
       epic_number:
