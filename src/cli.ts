@@ -14,9 +14,10 @@ program
 program
   .command('init')
   .description('Full project onboarding: config, templates, vision, scan, sync')
-  .action(async () => {
+  .option('-y, --yes', 'Accept all defaults without prompting (for CI/scripted use)')
+  .action(async (options: { yes?: boolean }) => {
     const { initCommand } = await import('./commands/init.js');
-    await initCommand();
+    await initCommand({ yes: options.yes });
   });
 
 program

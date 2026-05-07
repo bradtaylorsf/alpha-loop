@@ -176,7 +176,8 @@ describe('init command', () => {
     const content = readFileSync(configPath, 'utf-8');
     expect(content).toContain('repo: myorg/myrepo');
     expect(content).toContain('agent: claude');
-    expect(content).toContain('test_command: pnpm test');
+    // No package.json in tempDir, so package manager is 'unknown' -> 'npm run test'
+    expect(content).toMatch(/^test_command: npm run test$/m);
     expect(content).toContain('harnesses:');
   });
 
@@ -306,7 +307,8 @@ describe('hardware-aware local mode prompt', () => {
     // YAML is the untouched default template — hardware prompt does not modify it
     const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
     expect(content).toContain('agent: claude');
-    expect(content).not.toContain('routing:');
+    // Commented hint is fine; assert no *active* (uncommented) routing line
+    expect(content.split('\n').some((line) => /^routing:/.test(line))).toBe(false);
   });
 
   it('prompts on qualifying hardware but also leaves YAML untouched on no', async () => {
@@ -330,6 +332,187 @@ describe('hardware-aware local mode prompt', () => {
     expect(questions.some((q) => q.includes('Apple Silicon'))).toBe(true);
     const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
     expect(content).toContain('agent: claude');
-    expect(content).not.toContain('routing:');
+    // Commented hint is fine; assert no *active* (uncommented) routing line
+    expect(content.split('\n').some((line) => /^routing:/.test(line))).toBe(false);
+  });
+});
+
+describe('init wizard', () => {
+  const readline = jest.requireMock('node:readline') as { createInterface: jest.Mock };
+
+  let originalIsTTY: boolean | undefined;
+
+  beforeEach(() => {
+    originalIsTTY = process.stdin.isTTY;
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+  });
+
+  function setTTY(value: boolean): void {
+    Object.defineProperty(process.stdin, 'isTTY', { value, configurable: true });
+  }
+
+  it('skips prompts and uses scan defaults when --yes is set', async () => {
+    setTTY(true);
+    // Lay down a pnpm project so the scan picks up sensible defaults
+    writeFileSync(join(tempDir, 'pnpm-lock.yaml'), '');
+    writeFileSync(join(tempDir, 'package.json'), JSON.stringify({
+      scripts: { test: 'jest', dev: 'tsx watch' },
+    }));
+
+    const askedPrompts: string[] = [];
+    readline.createInterface.mockReturnValue({
+      question: jest.fn((prompt: string, cb: (answer: string) => void) => {
+        askedPrompts.push(prompt);
+        cb('y');
+      }),
+      close: jest.fn(),
+    });
+
+    await initCommand({ yes: true });
+
+    // Wizard should not have asked anything (label/status creation may still prompt)
+    expect(askedPrompts.every((p) => !p.includes('Test command'))).toBe(true);
+    expect(askedPrompts.every((p) => !p.includes('AI agent'))).toBe(true);
+
+    const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    expect(content).toMatch(/^test_command: pnpm test$/m);
+    expect(content).toMatch(/^dev_command: pnpm dev$/m);
+    expect(content).toMatch(/^agent: claude$/m);
+  });
+
+  it('skips prompts silently when not in a TTY', async () => {
+    setTTY(false);
+
+    const askedPrompts: string[] = [];
+    readline.createInterface.mockReturnValue({
+      question: jest.fn((prompt: string, cb: (answer: string) => void) => {
+        askedPrompts.push(prompt);
+        cb('');
+      }),
+      close: jest.fn(),
+    });
+
+    await initCommand();
+
+    expect(askedPrompts.every((p) => !p.includes('AI agent'))).toBe(true);
+    expect(askedPrompts.every((p) => !p.includes('Base branch'))).toBe(true);
+  });
+
+  it('honors empty answers (Enter) by falling back to scan defaults', async () => {
+    setTTY(true);
+    writeFileSync(join(tempDir, 'package-lock.json'), '');
+    writeFileSync(join(tempDir, 'package.json'), JSON.stringify({
+      scripts: { test: 'mocha', dev: 'node server.js' },
+    }));
+
+    readline.createInterface.mockReturnValue({
+      // Press Enter for every prompt -> defaults
+      question: jest.fn((_prompt: string, cb: (answer: string) => void) => cb('')),
+      close: jest.fn(),
+    });
+
+    await initCommand();
+
+    const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    // npm-detected lockfile -> "npm run test"
+    expect(content).toMatch(/^test_command: npm run test$/m);
+    // Defaults retained (lines may have trailing comments)
+    expect(content).toMatch(/^agent: claude\b/m);
+    expect(content).toMatch(/^auto_merge: true\b/m);
+    expect(content).toMatch(/^max_issues: 20\b/m);
+  });
+
+  it('falls back to "claude" when wizard receives an unknown agent name', async () => {
+    setTTY(true);
+    const answers = ['totallynotanagent', '', '', '', '', ''];
+    let i = 0;
+    readline.createInterface.mockReturnValue({
+      question: jest.fn((_prompt: string, cb: (answer: string) => void) => {
+        cb(answers[i++] ?? '');
+      }),
+      close: jest.fn(),
+    });
+
+    await initCommand();
+
+    const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    expect(content).toMatch(/^agent: claude$/m);
+  });
+
+  it('uses configured agent to pick a matching harness', async () => {
+    setTTY(true);
+    const answers = ['codex', '', '', '', '', ''];
+    let i = 0;
+    readline.createInterface.mockReturnValue({
+      question: jest.fn((_prompt: string, cb: (answer: string) => void) => {
+        cb(answers[i++] ?? '');
+      }),
+      close: jest.fn(),
+    });
+
+    await initCommand();
+
+    const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    expect(content).toMatch(/^agent: codex$/m);
+    expect(content).toMatch(/^ {2}- codex$/m);
+  });
+});
+
+describe('init merge logic for existing config', () => {
+  it('does not overwrite user values', async () => {
+    const userConfig = `repo: my/repo\nagent: codex\nlabel: todo\nmax_issues: 5\n`;
+    writeFileSync(join(tempDir, '.alpha-loop.yaml'), userConfig);
+
+    await initCommand({ yes: true });
+
+    const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    expect(content).toContain('repo: my/repo');
+    expect(content).toContain('agent: codex');
+    expect(content).toContain('label: todo');
+    expect(content).toContain('max_issues: 5');
+  });
+
+  it('appends commented-out blocks for newly available settings', async () => {
+    // User has only the bare minimum. Many keys (test_command, dev_command,
+    // base_branch, etc.) are missing — merge should expose them as commented
+    // hints at the bottom of the file.
+    const userConfig = `repo: my/repo\nagent: claude\n`;
+    writeFileSync(join(tempDir, '.alpha-loop.yaml'), userConfig);
+
+    await initCommand({ yes: true });
+
+    const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    expect(content).toContain('# === Added by alpha-loop init (new settings) ===');
+    // The commented appendix should mention some missing keys
+    expect(content).toMatch(/# test_command:/);
+    expect(content).toMatch(/# base_branch:/);
+  });
+
+  it('is a no-op when all top-level keys are already present', async () => {
+    // Config already covers every key the fresh template produces — merge
+    // should leave the file alone.
+    const fullConfig = [
+      'repo: my/repo',
+      'agent: claude',
+      'base_branch: main',
+      'label: ready',
+      'auto_merge: true',
+      'test_command: pnpm test',
+      'dev_command: pnpm dev',
+      'max_issues: 20',
+      'max_session_duration: 7200',
+      'harnesses:',
+      '  - claude-code',
+      '',
+    ].join('\n');
+    writeFileSync(join(tempDir, '.alpha-loop.yaml'), fullConfig);
+
+    await initCommand({ yes: true });
+
+    const content = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    expect(content).not.toContain('# === Added by alpha-loop init');
   });
 });
