@@ -2,7 +2,7 @@
  * Init Command — full project onboarding for alpha-loop.
  *
  * Steps:
- * 1. Create config (.alpha-loop.yaml)
+ * 1. Scan codebase + run setup wizard, then write config (.alpha-loop.yaml)
  * 2. Set up .gitignore
  * 3. Detect and migrate legacy layout (skills/ at root, .claude/agents/)
  * 4. Seed .alpha-loop/templates/ from distribution (fills gaps only)
@@ -23,8 +23,24 @@ import { log } from '../lib/logger.js';
 import { syncAgentAssets, migrateToTemplates, resolveHarnesses } from './sync.js';
 import { findDistributionTemplatesDir } from '../lib/templates.js';
 import { shouldOfferLocalMode, getTotalMemoryGB } from '../lib/hardware.js';
+import { scanProject, type ProjectScan } from '../lib/init-scan.js';
 
 const CONFIG_FILE = '.alpha-loop.yaml';
+
+export type InitOptions = {
+  /** Skip all interactive prompts and accept smart defaults. */
+  yes?: boolean;
+};
+
+/** Answers collected from the setup wizard, used to populate the YAML. */
+type WizardAnswers = {
+  agent: 'claude' | 'codex' | 'opencode';
+  baseBranch: string;
+  testCommand: string;
+  devCommand: string;
+  autoMerge: boolean;
+  maxIssues: number;
+};
 
 const ISSUE_TEMPLATE = `name: Agent-Ready Task
 description: A well-structured task for the automated agent loop to implement
@@ -95,26 +111,301 @@ body:
       description: Any background, constraints, or references the agent should know
 `;
 
-function configTemplate(repo: string): string {
+/**
+ * Build the full annotated `.alpha-loop.yaml` for a fresh project. Active
+ * settings get values from the wizard/scan; everything else is commented out
+ * so users can see all available options at a glance.
+ */
+function configTemplate(repo: string, scan: ProjectScan, answers: WizardAnswers): string {
+  const stackHint = scan.framework
+    ? `${scan.language} / ${scan.framework}`
+    : scan.language;
+  const harness = harnessForAgent(answers.agent);
+
   return `# Alpha Loop configuration
+# ----------------------------------------------------------------------------
+# Detected stack: ${stackHint || 'unknown'} (package manager: ${scan.packageManager})
+# Docs: https://github.com/bradtaylorsf/alpha-loop#configuration
+#
+# Most settings have sensible defaults. Uncomment and edit anything you want
+# to override. Settings are grouped by section — read top-to-bottom on first
+# setup, then come back to tune the advanced sections later.
+# ----------------------------------------------------------------------------
+
+# === Project ================================================================
+# Identifies the GitHub repo + project board the loop reads from.
 repo: ${repo}
-project: 0  # GitHub Project number (find it in your project URL)
-agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
-# model:       # AI model (omit to use agent's default, e.g., opus, gpt-5.4)
-label: ready
-base_branch: main
-test_command: pnpm test
-dev_command: pnpm dev
-auto_merge: true
+# project: 0           # GitHub Project number (from project URL: /projects/N)
+# milestone: ""        # Only process issues in this milestone (empty = all)
 
-# Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
+# === Agent ==================================================================
+# The CLI agent that drives Plan/Build/Test/Review. Supported values:
+#   claude     — Anthropic Claude Code (recommended, best tool-use support)
+#   codex      — OpenAI Codex CLI
+#   opencode   — Open-source coding harness
+#   lmstudio   — LM Studio (local models, requires running server)
+#   ollama     — Ollama (local models, requires running daemon)
+agent: ${answers.agent}
+# model: ""            # Override default model (e.g., opus, sonnet, gpt-5.4)
+# review_model: ""     # Different model for review step (defaults to model)
+# agent_timeout: 1800  # Agent call timeout in seconds (default: 30 min)
+
+# === Workflow ===============================================================
+# Branch and label conventions for the loop.
+base_branch: ${answers.baseBranch}
+label: ready                  # Issues with this label are queued for the loop
+auto_merge: ${answers.autoMerge}            # Auto-merge PRs to session branch when checks pass
+# merge_to: ""                # Reuse an existing session branch instead of creating one
+# auto_cleanup: true          # Delete worktrees and branches after success
+# prefer_epics: false         # Auto-pick a single open epic instead of prompting
+
+# === Testing ================================================================
+# Commands the loop runs to verify changes.
+test_command: ${answers.testCommand}
+dev_command: ${answers.devCommand}
+# setup_command: ""           # Run once before the session (e.g., "pnpm install")
+# smoke_test: ""              # Final smoke command after review (e.g., "curl localhost:3000/health")
+# max_test_retries: 3         # How many times to let the agent fix failing tests
+# skip_tests: false           # Skip test execution entirely (not recommended)
+# skip_review: false          # Skip the code review step
+# skip_e2e: false             # Skip end-to-end tests (Playwright, etc.)
+# skip_preflight: false       # Skip pre-session validation
+# skip_verify: false          # Skip the verify step (epic mode)
+# skip_learn: false           # Skip learning extraction
+# skip_install: false         # Skip auto-running setup_command on session start
+
+# === Safety limits ==========================================================
+# Caps to keep an unattended loop from running away. 0 = unlimited.
+max_issues: ${answers.maxIssues}
+max_session_duration: 7200    # Total session wall-clock budget, in seconds (2h)
+# poll_interval: 60           # Seconds between issue queue polls when running continuously
+
+# === Harnesses ==============================================================
+# Coding harnesses to sync skills/agents to. When empty, alpha-loop picks one
+# based on \`agent\` above. Set explicitly if you use multiple harnesses.
 harnesses:
-  - claude
+  - ${harness}
 
-# Safety limits (0 = unlimited)
-max_issues: 20
-max_session_duration: 7200  # 2 hours in seconds
+# === Pipeline overrides (advanced) ==========================================
+# Use a different agent or model for specific pipeline steps. Useful for
+# routing cheap models to grunt work and reserving the expensive ones for
+# planning and review. Each step accepts { agent?, model? }.
+# pipeline:
+#   plan:
+#     agent: claude
+#     model: opus
+#   implement:
+#     agent: claude
+#     model: sonnet
+#   test_fix:
+#     model: haiku
+#   review:
+#     model: opus
+#   verify:
+#     model: sonnet
+#   learn:
+#     model: haiku
+
+# === Routing (advanced, hybrid local/cloud) =================================
+# Route Loop stages to specific models on specific endpoints. Powerful for
+# hybrid setups (e.g., local 30B coder for build/test, cloud Opus for plan/
+# review). See docs/routing-profiles.md for ready-to-paste profiles.
+# routing:
+#   profile: hybrid-v1                # Or list for A/B: [hybrid-v1, cloud-only]
+#   endpoints:
+#     local:
+#       type: openai_compat
+#       base_url: http://localhost:1234/v1
+#     cloud:
+#       type: anthropic
+#       base_url: https://api.anthropic.com
+#   stages:
+#     plan:       { model: claude-opus-4-6,    endpoint: cloud }
+#     build:      { model: qwen3-coder-30b-a3b, endpoint: local }
+#     test_write: { model: qwen3-coder-30b-a3b, endpoint: local }
+#     test_exec:  { model: qwen3-coder-30b-a3b, endpoint: local }
+#     review:     { model: claude-opus-4-6,    endpoint: cloud }
+#     summary:    { model: claude-haiku-4-5,   endpoint: cloud }
+#   fallback:
+#     on_tool_error: escalate         # escalate | retry | fail
+#     escalate_to: { model: claude-sonnet-4-6, endpoint: cloud }
+#     escalation_window_issues: 10    # Rolling window for error-rate guardrail
+#     escalation_error_threshold: 0.08
+#     escalation_revert_ms: 86400000  # 24h
+
+# === Batch mode (advanced) ==================================================
+# Process multiple issues in a single agent call. Faster + fewer tokens, but
+# less isolation between issues — best for small, mechanical tasks.
+# batch: false
+# batch_size: 5
+
+# === Evaluation =============================================================
+# Settings for the eval harness used by \`alpha-loop review\` and CI eval runs.
+# eval_dir: .alpha-loop/evals
+# eval_model: ""              # Defaults to the top-level model
+# eval_timeout: 300           # Per-case timeout in seconds
+# skip_eval: false
+# auto_capture: true          # Capture session failures as eval cases automatically
+# eval:
+#   include_agent_prompts: true   # Mirror this repo's agent prompts during eval
+#   include_skills: true          # Mirror this repo's skills during eval
+
+# === Post-session review ====================================================
+# Holistic code review and security scan after the session completes.
+# post_session:
+#   review: true
+#   security_scan: true
+
+# === Logging ================================================================
+# log_dir: logs
+# verbose: false
+# dry_run: false              # Preview without making changes (overridable via --dry-run)
+
+# === Pricing (cost tracking) ================================================
+# Per-million-token pricing for cost reports. Defaults cover Anthropic + OpenAI
+# common models; add your own here.
+# pricing:
+#   claude-opus-4-6:   { input: 15.0, output: 75.0 }
+#   claude-sonnet-4-6: { input: 3.0,  output: 15.0 }
+#   claude-haiku-4-5:  { input: 0.80, output: 4.0 }
+#   gpt-4o:            { input: 2.50, output: 10.0 }
+#   gpt-4o-mini:       { input: 0.15, output: 0.60 }
 `;
+}
+
+/** Map an agent CLI to its default harness directory name. */
+function harnessForAgent(agent: string): string {
+  switch (agent) {
+    case 'codex':
+      return 'codex';
+    case 'opencode':
+      return 'opencode';
+    case 'lmstudio':
+    case 'ollama':
+    case 'claude':
+    default:
+      return 'claude-code';
+  }
+}
+
+/**
+ * Read a YAML file as text and return the set of top-level keys present.
+ * Comment-aware (skips `#` lines) but doesn't try to parse — we just want to
+ * know which keys the user has already touched so we don't trample them.
+ */
+function existingTopLevelKeys(yamlPath: string): Set<string> {
+  if (!existsSync(yamlPath)) return new Set();
+  const keys = new Set<string>();
+  const text = readFileSync(yamlPath, 'utf-8');
+  for (const line of text.split('\n')) {
+    if (line.startsWith(' ') || line.startsWith('\t') || line.startsWith('#')) continue;
+    const match = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:/);
+    if (match) keys.add(match[1]!);
+  }
+  return keys;
+}
+
+/**
+ * Append commented-out hints for top-level keys missing from an existing
+ * config. Preserves all user content and writes only at end-of-file.
+ *
+ * The hints come from the same fresh template, so users see the same
+ * documentation comments they'd see on a fresh init.
+ */
+function mergeMissingKeys(yamlPath: string, freshTemplate: string): string[] {
+  const existing = readFileSync(yamlPath, 'utf-8');
+  const existingKeys = existingTopLevelKeys(yamlPath);
+
+  // Pull each top-level setting block out of the fresh template
+  const blocks: Array<{ key: string; lines: string[] }> = [];
+  const freshLines = freshTemplate.split('\n');
+  let current: { key: string; lines: string[] } | null = null;
+  for (const line of freshLines) {
+    const match = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:/);
+    if (match) {
+      if (current) blocks.push(current);
+      current = { key: match[1]!, lines: [line] };
+    } else if (current && (line.startsWith(' ') || line.startsWith('\t') || line === '')) {
+      current.lines.push(line);
+    } else if (current) {
+      blocks.push(current);
+      current = null;
+    }
+  }
+  if (current) blocks.push(current);
+
+  const missing = blocks.filter((b) => !existingKeys.has(b.key));
+  if (missing.length === 0) return [];
+
+  const addedKeys: string[] = [];
+  let appendix = '\n# === Added by alpha-loop init (new settings) ===\n';
+  appendix += '# These options were added in a newer alpha-loop release. They\'re commented out\n';
+  appendix += '# so your current behavior is unchanged — uncomment to opt in.\n\n';
+  for (const block of missing) {
+    addedKeys.push(block.key);
+    // Re-emit each line as a comment so the merge is non-destructive
+    for (const line of block.lines) {
+      appendix += line === '' ? '#\n' : `# ${line}\n`;
+    }
+    appendix += '\n';
+  }
+
+  const suffix = existing.endsWith('\n') ? '' : '\n';
+  writeFileSync(yamlPath, existing + suffix + appendix);
+  return addedKeys;
+}
+
+/**
+ * Smart-defaults setup wizard. Asks 4-6 short questions, accepts any blank
+ * answer to fall through to the auto-detected default. Skips silently when
+ * --yes is set or stdin is not a TTY.
+ */
+async function runWizard(scan: ProjectScan, opts: InitOptions): Promise<WizardAnswers> {
+  const defaults: WizardAnswers = {
+    agent: 'claude',
+    baseBranch: scan.baseBranch,
+    testCommand: scan.testCommand,
+    devCommand: scan.devCommand,
+    autoMerge: true,
+    maxIssues: 20,
+  };
+
+  if (opts.yes || !process.stdin.isTTY) return defaults;
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (prompt: string): Promise<string> =>
+    new Promise((resolve) => rl.question(prompt, (a) => resolve(a.trim())));
+
+  log.info('Setup wizard — press Enter to accept the default in [brackets].');
+
+  const agentAns = (await ask(`  AI agent (claude/codex/opencode) [${defaults.agent}]: `)) || defaults.agent;
+  const baseAns = (await ask(`  Base branch [${defaults.baseBranch}]: `)) || defaults.baseBranch;
+  const testAns = (await ask(`  Test command [${defaults.testCommand}]: `)) || defaults.testCommand;
+  const devAns = (await ask(`  Dev command [${defaults.devCommand}]: `)) || defaults.devCommand;
+  const mergeAns = (await ask(`  Auto-merge PRs to session branch? (y/n) [${defaults.autoMerge ? 'y' : 'n'}]: `)).toLowerCase();
+  const maxAns = (await ask(`  Max issues per session (0 = unlimited) [${defaults.maxIssues}]: `)) || String(defaults.maxIssues);
+
+  rl.close();
+
+  const validAgents = ['claude', 'codex', 'opencode'] as const;
+  const agent = validAgents.includes(agentAns as typeof validAgents[number])
+    ? (agentAns as 'claude' | 'codex' | 'opencode')
+    : defaults.agent;
+  if (agent !== agentAns) {
+    log.warn(`Unknown agent "${agentAns}" — falling back to ${defaults.agent}`);
+  }
+
+  const maxParsed = Number.parseInt(maxAns, 10);
+  const maxIssues = Number.isFinite(maxParsed) && maxParsed >= 0 ? maxParsed : defaults.maxIssues;
+
+  return {
+    agent,
+    baseBranch: baseAns,
+    testCommand: testAns,
+    devCommand: devAns,
+    autoMerge: mergeAns === '' ? defaults.autoMerge : mergeAns === 'y' || mergeAns === 'yes',
+    maxIssues,
+  };
 }
 
 function copyDir(src: string, dest: string): void {
@@ -372,13 +663,36 @@ export async function ensureProjectStatuses(repoOwner: string, project: number):
   }
 }
 
-export async function initCommand(): Promise<void> {
+export async function initCommand(options: InitOptions = {}): Promise<void> {
   const projectDir = process.cwd();
 
-  // --- Step 1: Create config ---
+  // --- Step 1: Scan + wizard + create/merge config ---
   log.step('Step 1: Configuration');
+  const scan = scanProject(projectDir);
+  log.info(
+    `Detected ${scan.language || 'unknown stack'}${scan.framework ? ` / ${scan.framework}` : ''}, ` +
+    `package manager: ${scan.packageManager}, base branch: ${scan.baseBranch}`,
+  );
+
   if (existsSync(CONFIG_FILE)) {
-    log.info(`${CONFIG_FILE} already exists — skipping`);
+    // Existing config: don't trample user values, just expose any new options
+    // they don't have yet by appending commented-out blocks at the end.
+    let repo = detectRepo() ?? 'owner/repo';
+    const placeholder: WizardAnswers = {
+      agent: 'claude',
+      baseBranch: scan.baseBranch,
+      testCommand: scan.testCommand,
+      devCommand: scan.devCommand,
+      autoMerge: true,
+      maxIssues: 20,
+    };
+    const fresh = configTemplate(repo, scan, placeholder);
+    const added = mergeMissingKeys(CONFIG_FILE, fresh);
+    if (added.length > 0) {
+      log.success(`Added ${added.length} new commented option(s) to ${CONFIG_FILE}: ${added.join(', ')}`);
+    } else {
+      log.info(`${CONFIG_FILE} is already up to date`);
+    }
   } else {
     let repo = detectRepo();
     if (repo) {
@@ -387,7 +701,8 @@ export async function initCommand(): Promise<void> {
       repo = 'owner/repo';
       log.warn('Could not auto-detect repo from git remote. Using placeholder.');
     }
-    writeFileSync(CONFIG_FILE, configTemplate(repo));
+    const answers = await runWizard(scan, options);
+    writeFileSync(CONFIG_FILE, configTemplate(repo, scan, answers));
     log.success(`Created ${CONFIG_FILE}`);
   }
   await maybeOfferLocalMode();
