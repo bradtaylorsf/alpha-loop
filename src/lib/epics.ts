@@ -10,13 +10,23 @@
  */
 import type { Issue } from './github.js';
 
-const SUB_ISSUE_LINE_RE = /^(\s*)- \[([ xX])\] #(\d+)\b/;
+const SUB_ISSUE_LINE_RE = /^(\s*)- \[([ xX])\]\s+[*_~`\[]*#(\d+)(?=$|[^A-Za-z0-9])/;
+const CHECKLIST_ITEM_RE = /^\s*- \[[ xX]\]/;
+const CHECKLIST_BOX_RE = /^(\s*)- \[[ xX]\]/;
+const LOCAL_ISSUE_REF_RE = /(^|[^A-Za-z0-9_./-])#\d+(?=$|[^A-Za-z0-9])/;
 const EPIC_HEURISTIC_MIN_ITEMS = 3;
 
 export type SubIssueRef = {
   number: number;
   checked: boolean;
   /** Zero-indexed line position in the split body — used for surgical replacement. */
+  lineIndex: number;
+};
+
+export type UnparsedSubIssueChecklistLine = {
+  /** Original line text from the epic body. */
+  line: string;
+  /** Zero-indexed line position in the split body. */
   lineIndex: number;
 };
 
@@ -51,8 +61,9 @@ function formatChildChecklist(issueNumbers: number[]): string[] {
 /**
  * Parse task-list sub-issue references from an issue body.
  *
- * Matches lines like `- [ ] #42` or `- [x] #42` (with optional leading
- * whitespace to allow nested markdown lists). Cross-repo refs like
+ * Matches lines like `- [ ] #42`, `- [x] **#42**`, or
+ * `- [ ] [#42](https://...)` (with optional leading whitespace to allow
+ * nested markdown lists). Cross-repo refs like
  * `- [ ] owner/repo#42` are silently skipped — see the v1 non-goals.
  *
  * Returns refs in document order.
@@ -71,6 +82,24 @@ export function parseSubIssues(body: string): SubIssueRef[] {
     });
   }
   return refs;
+}
+
+/**
+ * Find checklist lines that contain a local-looking issue ref but do not match
+ * the supported sub-issue syntax. Cross-repo refs like `owner/repo#42` and
+ * numeric-only refs are intentionally ignored.
+ */
+export function findUnparsedSubIssueChecklistLines(body: string): UnparsedSubIssueChecklistLine[] {
+  const lines = body.split('\n');
+  const unparsed: UnparsedSubIssueChecklistLine[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!CHECKLIST_ITEM_RE.test(line)) continue;
+    if (SUB_ISSUE_LINE_RE.test(line)) continue;
+    if (!LOCAL_ISSUE_REF_RE.test(line)) continue;
+    unparsed.push({ line, lineIndex: i });
+  }
+  return unparsed;
 }
 
 /**
@@ -139,7 +168,7 @@ export function flipChecklistItem(body: string, subIssueNum: number, checked: bo
     if (!m) continue;
     if (parseInt(m[3], 10) !== subIssueNum) continue;
     const newBox = checked ? 'x' : ' ';
-    lines[i] = lines[i].replace(SUB_ISSUE_LINE_RE, `${m[1]}- [${newBox}] #${m[3]}`);
+    lines[i] = lines[i].replace(CHECKLIST_BOX_RE, `${m[1]}- [${newBox}]`);
     return lines.join('\n');
   }
   return body;
