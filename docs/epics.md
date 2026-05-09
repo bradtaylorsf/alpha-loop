@@ -9,6 +9,8 @@ An epic is a GitHub issue with:
 1. The `epic` label applied.
 2. A GitHub task-list in the body that references sub-issues by number.
 
+Run `alpha-loop init` to install the epic issue template at `.github/ISSUE_TEMPLATE/epic.yml`. The template applies the `epic` label and includes fields for the goal, ordered sub-issues, acceptance criteria, dependencies, sequencing notes, and verification expectations.
+
 Example epic body:
 
 ```markdown
@@ -25,6 +27,16 @@ Add multi-tenant support to the API layer.
 ## Acceptance Criteria
 - [ ] All endpoints scoped by tenant
 - [ ] Backward-compatible for single-tenant deployments
+
+## Dependencies
+- None
+
+## Sequencing Notes
+- Run data model changes before API middleware changes.
+
+## Verification Expectations
+- Confirm each merged sub-issue satisfies its acceptance criteria.
+- Confirm the integrated tenant workflow works end to end.
 ```
 
 The task-list lines are the source of truth for both ordering and completion tracking.
@@ -176,7 +188,7 @@ This is useful for teams that keep one active epic at a time and want `alpha-loo
 
 A walk-through of epic `#165` "Multi-tenant support" with 7 sub-issues.
 
-**1. Create the epic.** You open issue `#165`, add the `epic` label, and populate the body:
+**1. Create the epic.** You open issue `#165` with the installed epic template, confirm the `epic` label is applied, and populate the body:
 
 ```markdown
 ## Sub-issues

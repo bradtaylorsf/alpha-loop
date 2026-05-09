@@ -550,6 +550,7 @@ The loop uses these labels. Run `alpha-loop init` to create any that are missing
 | `in-progress` | Loop is actively working on it |
 | `in-review` | PR created, awaiting review |
 | `failed` | Loop failed after retries |
+| `epic` | Parent issue with an ordered sub-issue checklist |
 
 ### Milestones
 
@@ -567,6 +568,8 @@ An epic is a GitHub issue with the `epic` label and a task-list body that refere
 - [ ] #159 Add tenant middleware
 - [ ] #160 Scope queries by tenant
 ```
+
+Run `alpha-loop init` to install the epic issue template at `.github/ISSUE_TEMPLATE/epic.yml`. It applies the `epic` label and prompts for the goal, ordered sub-issues, acceptance criteria, dependencies, sequencing notes, and verification expectations.
 
 When you start the loop, open epics appear above milestones in the picker. You can also target one directly:
 
@@ -586,7 +589,10 @@ Set the `project` number in your config (find it in your project URL: `github.co
 
 ### Issue Format
 
-Issues work best with structured acceptance criteria. Run `alpha-loop init` to install an issue template:
+Issues work best with structured acceptance criteria. Run `alpha-loop init` to install two GitHub issue templates:
+
+- `Agent-Ready Task` (`.github/ISSUE_TEMPLATE/agent-ready.yml`) for standalone or sub-issues the loop can implement.
+- `Epic` (`.github/ISSUE_TEMPLATE/epic.yml`) for parent issues that group ordered sub-issues and drive final verification.
 
 ```markdown
 ## Description
