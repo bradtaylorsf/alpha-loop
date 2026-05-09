@@ -1,11 +1,12 @@
 id: 005-epic-aware-run
 source_pr: 172
-source_issue: 171
+source_issue: 194
 base_sha: 209ad0081113cd1b295cae1369766afef941cefa
 ci_status: success
-description: Epic-aware run — discover, select, and close epic-driven sessions
+description: Epic-first planning workflow — triage, roadmap, run, verify
 tags:
   - routing-regression
   - epics
+  - planning
   - run-command
 source: routing-regression

@@ -1,14 +1,21 @@
-# Epic-aware run — discover, select, and close epic-driven sessions
+# Epic-first planning workflow — triage, roadmap, run, verify
 
 ## Summary
 
-`alpha-loop run` should detect epics, process their sub-issues in
-checklist order, and auto-close the epic when all sub-issues are done.
+Alpha Loop should support the full epic-first workflow: `triage`
+groups related issues into a parent epic, `roadmap` schedules that
+parent epic into a milestone, and `run --epic` or milestone-targeted
+run processes child issues in checklist order with parent context.
 
 ## Acceptance Criteria
 
-- [ ] `run --epic <N>` processes sub-issues from the epic's checklist
-- [ ] `run --skip-epic` falls back to the flat/milestone flow
-- [ ] `run --verify-only <N>` runs only the epic verification pass
-- [ ] Interactive picker auto-selects a single open epic when
-      `prefer_epics: true` is configured
+- [ ] README documents the recommended flow: triage groups, roadmap
+      schedules parent epics, and run ships child issues.
+- [ ] `docs/epics.md` explains that milestones schedule parent epic
+      issues while the epic checklist controls child issue order.
+- [ ] CLI help text for `triage` and `roadmap` mentions epic grouping
+      and epic-aware milestone scheduling.
+- [ ] Command-level tests mock GitHub calls across triage, roadmap,
+      scheduled epic run, checklist updates, and verify-only verification.
+- [ ] Child issue agent prompts include parent epic context: goal,
+      acceptance criteria, and ordered sibling checklist.

@@ -48,6 +48,26 @@ The task-list lines are the source of truth for both ordering and completion tra
 
 This keeps epic detection explicit. You opt in by labeling.
 
+## Milestones + Epics
+
+Alpha Loop's recommended planning flow is epic-first:
+
+1. `alpha-loop triage` groups related open issues into parent epics. It can create a new parent epic or update an existing open issue labeled `epic`, then comments on child issues with a backlink to the parent.
+2. `alpha-loop roadmap` schedules the parent epic issue into a milestone. It uses the ordered child checklist as planning context, but does not assign those child issues separately as standalone roadmap items.
+3. `alpha-loop run --epic <N>` ships the child issues from the epic checklist in order. You can also run `alpha-loop run --milestone "<name>"`; when that milestone has exactly one open parent epic, the loop processes that epic.
+4. The verification pass evaluates the completed child issues against the parent epic's acceptance criteria.
+
+Milestones and epics answer different questions:
+
+| Concept | Source of truth | What it controls |
+|---------|-----------------|------------------|
+| Milestone | GitHub milestone on the parent epic issue | Which delivery window or release the epic belongs to |
+| Epic | Parent issue labeled `epic` | Goal, acceptance criteria, ordered child issue checklist, completion verification |
+| Child issue | Task-list item inside the epic body | The concrete implementation unit processed by agents |
+| Standalone issue | Open issue not listed in any open epic | Can be scheduled directly into a milestone by `roadmap` |
+
+When a child issue is processed from an epic, the implementation, planning, review, batch, and session-review prompts include parent epic context: the parent goal/body summary, parent acceptance criteria, and the full ordered sibling checklist. This keeps each child narrowly scoped while preserving the integration expectations of the whole epic.
+
 ## Running the Loop Against an Epic
 
 ### Interactive
@@ -197,7 +217,7 @@ This is useful for teams that keep one active epic at a time and want `alpha-loo
 
 - **Nested epics.** Sub-issues with the `epic` label are skipped with a warning. Build a flat epic instead.
 - **Cross-repo sub-issue references.** Lines like `- [ ] owner/other-repo#42` are ignored silently. Sub-issues must live in the same repo as the epic.
-- **Automatic epic creation.** You create the epic issue and populate its task-list yourself. The loop does not turn loose issues into an epic.
+- **Automatic epic creation during `run`.** The run loop does not turn loose issues into an epic while processing work. Use `alpha-loop triage` to propose or apply epic groupings before roadmap scheduling.
 - **GitHub Projects v2 native sub-issues API.** The loop reads task-lists from the issue body, not from the Projects v2 sub-issue hierarchy.
 
 ## Example Workflow

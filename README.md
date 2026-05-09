@@ -41,6 +41,17 @@ alpha-loop run
 alpha-loop run --milestone "v1.0"
 ```
 
+### Recommended Epic-First Flow
+
+For planned feature work, use epics as the unit you schedule and ship:
+
+1. `alpha-loop triage` reviews open issues, proposes cleanup, and groups related ready issues into parent epics with ordered child checklists.
+2. `alpha-loop roadmap` schedules parent epic issues into milestones, while still scheduling standalone issues that are not part of an epic.
+3. `alpha-loop run --epic <N>` ships the epic's child issues in checklist order. Agents working on each child issue receive the parent epic goal, acceptance criteria, and sibling checklist as context.
+4. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
+
+Milestones answer "when should this epic ship?" The epic checklist answers "what child issues ship, and in what order?"
+
 ## How It Works
 
 Alpha Loop implements a 12-step pipeline for each issue:
@@ -293,12 +304,12 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
 | `alpha-loop plan --dry-run` | Display the plan without creating any GitHub resources |
 | `alpha-loop plan --yes --seed <file>` | Non-interactive mode: accept all AI recommendations |
-| `alpha-loop triage` | Analyze and improve existing issues (cleanup, enrichment, and epic grouping) |
-| `alpha-loop triage --dry-run` | Display findings without making changes |
+| `alpha-loop triage` | Analyze open issues, clean up backlog noise, and propose/apply epic groups |
+| `alpha-loop triage --dry-run` | Display cleanup findings and epic proposals without making changes |
 | `alpha-loop triage --yes` | Non-interactive mode: apply AI-selected cleanup actions and epic proposals |
-| `alpha-loop roadmap` | Organize open issues into milestones using AI analysis |
-| `alpha-loop roadmap --dry-run` | Display proposed roadmap without making changes |
-| `alpha-loop roadmap --yes` | Non-interactive mode: apply all AI-recommended assignments |
+| `alpha-loop roadmap` | Schedule parent epics and standalone issues into milestones using AI analysis |
+| `alpha-loop roadmap --dry-run` | Display proposed epic/standalone milestone assignments without making changes |
+| `alpha-loop roadmap --yes` | Non-interactive mode: apply all AI-recommended epic and standalone assignments |
 
 ### Run Options
 
