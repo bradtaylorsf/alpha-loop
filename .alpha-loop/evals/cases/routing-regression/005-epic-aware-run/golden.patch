@@ -5,7 +5,7 @@ index 27626bc..e936c6d 100644
 @@ -41,6 +41,17 @@ alpha-loop run
  alpha-loop run --milestone "v1.0"
  ```
- 
+
 +### Recommended Epic-First Flow
 +
 +For planned feature work, use epics as the unit you schedule and ship:
@@ -18,7 +18,7 @@ index 27626bc..e936c6d 100644
 +Milestones answer "when should this epic ship?" The epic checklist answers "what child issues ship, and in what order?"
 +
  ## How It Works
- 
+
  Alpha Loop implements a 12-step pipeline for each issue:
 @@ -293,12 +304,12 @@ During live verification, the agent takes screenshots at key states and saves th
  | `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
@@ -35,17 +35,17 @@ index 27626bc..e936c6d 100644
 +| `alpha-loop roadmap` | Schedule parent epics and standalone issues into milestones using AI analysis |
 +| `alpha-loop roadmap --dry-run` | Display proposed epic/standalone milestone assignments without making changes |
 +| `alpha-loop roadmap --yes` | Non-interactive mode: apply all AI-recommended epic and standalone assignments |
- 
+
  ### Run Options
- 
+
 diff --git a/docs/epics.md b/docs/epics.md
 index 41d8104..ad1f5bf 100644
 --- a/docs/epics.md
 +++ b/docs/epics.md
 @@ -48,6 +48,26 @@ The task-list lines are the source of truth for both ordering and completion tra
- 
+
  This keeps epic detection explicit. You opt in by labeling.
- 
+
 +## Milestones + Epics
 +
 +Alpha Loop's recommended planning flow is epic-first:
@@ -67,14 +67,14 @@ index 41d8104..ad1f5bf 100644
 +When a child issue is processed from an epic, the implementation, planning, review, batch, and session-review prompts include parent epic context: the parent goal/body summary, parent acceptance criteria, and the full ordered sibling checklist. This keeps each child narrowly scoped while preserving the integration expectations of the whole epic.
 +
  ## Running the Loop Against an Epic
- 
+
  ### Interactive
 diff --git a/src/cli.ts b/src/cli.ts
 index 843b36a..c6bd916 100644
 --- a/src/cli.ts
 +++ b/src/cli.ts
 @@ -119,8 +119,8 @@ program
- 
+
  program
    .command('triage')
 -  .description('Analyze and improve existing issues (cleanup and epic grouping)')
@@ -85,7 +85,7 @@ index 843b36a..c6bd916 100644
    .action(async (options) => {
      const { triageCommand } = await import('./commands/triage.js');
 @@ -129,8 +129,8 @@ program
- 
+
  program
    .command('roadmap')
 -  .description('Organize open issues into milestones using AI analysis')

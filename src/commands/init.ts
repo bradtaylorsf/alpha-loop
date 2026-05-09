@@ -223,7 +223,7 @@ function configTemplate(repo: string, scan: ProjectScan, answers: WizardAnswers)
 # Identifies the GitHub repo + project board the loop reads from.
 repo: ${repo}
 # project: 0           # GitHub Project number (from project URL: /projects/N)
-# milestone: ""        # Only process issues in this milestone (empty = all)
+# milestone: ""        # Process this milestone's scheduled epic, or ready flat issues if none
 
 # === Agent ==================================================================
 # The CLI agent that drives Plan/Build/Test/Review. Supported values:
