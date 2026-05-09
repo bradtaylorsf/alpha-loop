@@ -201,7 +201,7 @@ export function labelIssue(repo: string, issueNum: number, addLabel: string, rem
  * Comment on an issue.
  * Uses --body-file to avoid shell escaping issues with newlines and special characters.
  */
-export function commentIssue(repo: string, issueNum: number, body: string): void {
+export function commentIssue(repo: string, issueNum: number, body: string): boolean {
   const bodyFile = join(tmpdir(), `alpha-loop-comment-${Date.now()}`);
   writeFileSync(bodyFile, body, 'utf-8');
   try {
@@ -211,7 +211,9 @@ export function commentIssue(repo: string, issueNum: number, body: string): void
     );
     if (result.exitCode !== 0) {
       log.warn(`Failed to comment on issue #${issueNum}: ${result.stderr}`);
+      return false;
     }
+    return true;
   } finally {
     try { unlinkSync(bodyFile); } catch { /* cleanup best-effort */ }
   }
@@ -488,8 +490,8 @@ export function createIssue(repo: string, title: string, body: string, labels: s
 /**
  * Update an existing issue's title and/or body.
  */
-export function updateIssue(repo: string, issueNum: number, updates: { title?: string; body?: string }): void {
-  if (!updates.title && updates.body === undefined) return;
+export function updateIssue(repo: string, issueNum: number, updates: { title?: string; body?: string }): boolean {
+  if (!updates.title && updates.body === undefined) return true;
   let bodyFile: string | undefined;
   try {
     let cmd = `gh issue edit ${issueNum} --repo "${repo}"`;
@@ -504,7 +506,9 @@ export function updateIssue(repo: string, issueNum: number, updates: { title?: s
     const result = ghExec(cmd, undefined, true);
     if (result.exitCode !== 0) {
       log.warn(`Failed to update issue #${issueNum}: ${result.stderr}`);
+      return false;
     }
+    return true;
   } finally {
     if (bodyFile) {
       try { unlinkSync(bodyFile); } catch { /* cleanup best-effort */ }
@@ -727,6 +731,32 @@ export function getIssueWithComments(repo: string, issueNum: number): Issue | nu
     log.warn(`Failed to parse issue #${issueNum}`);
     return null;
   }
+}
+
+/**
+ * Fetch only the current body for an issue.
+ */
+export function getIssueBody(repo: string, issueNum: number): string | null {
+  const issue = getIssueWithComments(repo, issueNum);
+  return issue?.body ?? null;
+}
+
+/**
+ * Update the body for an epic issue.
+ */
+export function updateEpicIssueBody(repo: string, epicNum: number, body: string): boolean {
+  return updateIssue(repo, epicNum, { body });
+}
+
+/**
+ * Add a lightweight backlink comment from a child issue to its parent epic.
+ */
+export function commentChildEpicBacklink(repo: string, childIssueNum: number, epicNum: number): boolean {
+  return commentIssue(
+    repo,
+    childIssueNum,
+    `Grouped under parent epic #${epicNum}.\n\n_Triaged by alpha-loop._`,
+  );
 }
 
 /**

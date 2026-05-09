@@ -62,6 +62,8 @@ export type ProposedEpicGroup = {
   rationale: string;
   orderedChildIssueNumbers: number[];
   acceptanceCriteria: string[];
+  selected: boolean;
+  existingEpicIssueNum?: number;
 };
 
 export type TriageAnalysis = {
@@ -278,6 +280,28 @@ function requireIssueNumberArray(
   return numbers;
 }
 
+function normalizeSelected(value: Record<string, unknown>, context: string): boolean {
+  const raw = value.selected;
+  if (raw === undefined) return false;
+  if (typeof raw !== 'boolean') {
+    throw new Error(`${context}.selected must be a boolean`);
+  }
+  return raw;
+}
+
+function normalizeOptionalIssueNumber(
+  value: Record<string, unknown>,
+  field: keyof ProposedEpicGroup,
+  context: string,
+): number | undefined {
+  const raw = value[field];
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
+    throw new Error(`${context}.${String(field)} must be a positive integer issue number`);
+  }
+  return raw;
+}
+
 function normalizeProposedEpicGroup(value: unknown, index: number): ProposedEpicGroup {
   const context = `epicGroups[${index}]`;
   if (!isRecord(value)) {
@@ -290,6 +314,8 @@ function normalizeProposedEpicGroup(value: unknown, index: number): ProposedEpic
     rationale: requireString(value, 'rationale', context),
     orderedChildIssueNumbers: requireIssueNumberArray(value, 'orderedChildIssueNumbers', context),
     acceptanceCriteria: requireStringArray(value, 'acceptanceCriteria', context),
+    selected: normalizeSelected(value, context),
+    existingEpicIssueNum: normalizeOptionalIssueNumber(value, 'existingEpicIssueNum', context),
   };
 }
 
@@ -449,7 +475,11 @@ export function formatEpicGroupProposals(groups: ProposedEpicGroup[]): string {
   const lines: string[] = [`\n${BOLD}${CYAN}── Proposed Epic Groups (${groups.length}) ──${NC}`];
 
   groups.forEach((group, index) => {
-    lines.push(`  ${index + 1}. ${group.title}`);
+    const sel = group.selected ? '✓' : ' ';
+    const target = group.existingEpicIssueNum
+      ? `updates epic #${group.existingEpicIssueNum}`
+      : 'creates new epic';
+    lines.push(`  [${sel}] ${index + 1}. ${group.title} (${target})`);
     lines.push(`      ${GRAY}Goal: ${group.goal}${NC}`);
     lines.push(`      ${GRAY}Rationale: ${group.rationale}${NC}`);
     lines.push(`      Children: ${group.orderedChildIssueNumbers.map((n) => `#${n}`).join(' -> ')}`);

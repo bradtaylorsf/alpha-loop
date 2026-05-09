@@ -119,7 +119,7 @@ program
 
 program
   .command('triage')
-  .description('Analyze and improve existing issues (staleness, clarity, size, duplicates)')
+  .description('Analyze and improve existing issues (cleanup and epic grouping)')
   .option('--dry-run', 'Display findings without making changes')
   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .action(async (options) => {

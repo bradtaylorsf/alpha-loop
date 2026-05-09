@@ -2,6 +2,7 @@ import {
   pollIssues, labelIssue, commentIssue, createPR, mergePR,
   createIssue, updateIssue, closeIssue, createMilestone,
   setIssueMilestone, listOpenIssues, addIssueToProject,
+  getIssueBody, updateEpicIssueBody, commentChildEpicBacklink,
 } from '../../src/lib/github';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -123,11 +124,20 @@ describe('labelIssue', () => {
 
 describe('commentIssue', () => {
   test('posts comment via gh issue comment', () => {
-    commentIssue('owner/repo', 42, 'Build started');
+    const ok = commentIssue('owner/repo', 42, 'Build started');
 
+    expect(ok).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       expect.stringContaining('gh issue comment 42 --repo "owner/repo"'),
     );
+  });
+
+  test('returns false when comment command fails', () => {
+    mockExec.mockReturnValue({ stdout: '', stderr: 'error', exitCode: 1 });
+
+    const ok = commentIssue('owner/repo', 42, 'Build started');
+
+    expect(ok).toBe(false);
   });
 });
 
@@ -339,8 +349,9 @@ describe('createIssue', () => {
 
 describe('updateIssue', () => {
   test('updates title only', () => {
-    updateIssue('owner/repo', 42, { title: 'New title' });
+    const ok = updateIssue('owner/repo', 42, { title: 'New title' });
 
+    expect(ok).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       expect.stringContaining('gh issue edit 42 --repo "owner/repo" --title'),
     );
@@ -366,8 +377,53 @@ describe('updateIssue', () => {
     mockExec.mockReturnValue({ stdout: '', stderr: 'error', exitCode: 1 });
 
     const { log: mockLog } = require('../../src/lib/logger');
-    updateIssue('owner/repo', 42, { title: 'New title' });
+    const ok = updateIssue('owner/repo', 42, { title: 'New title' });
+    expect(ok).toBe(false);
     expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to update issue'));
+  });
+});
+
+describe('epic issue helpers', () => {
+  test('getIssueBody fetches a single issue body', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify({
+        number: 99,
+        title: 'Existing epic',
+        body: '## Ordered Work\n\n- [ ] #1',
+        labels: [{ name: 'epic' }],
+        comments: [],
+      }),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    const body = getIssueBody('owner/repo', 99);
+
+    expect(body).toBe('## Ordered Work\n\n- [ ] #1');
+    expect(mockExec).toHaveBeenCalledWith(
+      'gh issue view 99 --repo "owner/repo" --json number,title,body,labels,comments',
+    );
+  });
+
+  test('updateEpicIssueBody delegates to issue body update', () => {
+    const ok = updateEpicIssueBody('owner/repo', 99, 'new body');
+
+    expect(ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('gh issue edit 99 --repo "owner/repo"'),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--body-file'),
+    );
+  });
+
+  test('commentChildEpicBacklink posts a lightweight parent backlink', () => {
+    const ok = commentChildEpicBacklink('owner/repo', 12, 99);
+
+    expect(ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('gh issue comment 12 --repo "owner/repo"'),
+    );
   });
 });
 
