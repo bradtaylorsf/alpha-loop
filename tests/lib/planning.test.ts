@@ -26,8 +26,11 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'n
 import { join } from 'node:path';
 import {
   extractJsonFromResponse,
+  parseTriageAnalysisResponse,
+  normalizeTriageAnalysis,
   formatIssueTable,
   formatTriageFindings,
+  formatEpicGroupProposals,
   normalizeMilestoneTitles,
   normalizePlanMilestones,
   normalizeRoadmapMilestones,
@@ -37,6 +40,7 @@ import {
   type PlannedIssue,
   type PlannedMilestone,
   type TriageFinding,
+  type ProposedEpicGroup,
   type PlanDraft,
 } from '../../src/lib/planning';
 import { getVisionContext } from '../../src/lib/vision';
@@ -117,6 +121,77 @@ That's all.`;
 
     const result = extractJsonFromResponse<{ correct: boolean }>(response);
     expect(result).toEqual({ correct: true });
+  });
+});
+
+// ── triage analysis parsing ─────────────────────────────────────────────────
+
+describe('parseTriageAnalysisResponse', () => {
+  const finding: TriageFinding = {
+    issueNum: 10,
+    title: 'Old bug',
+    category: 'stale',
+    reason: 'Already implemented',
+    action: 'close',
+    selected: true,
+  };
+
+  const epicGroup: ProposedEpicGroup = {
+    title: 'Epic: Settings reliability',
+    goal: 'Make settings saves reliable.',
+    rationale: 'The child issues all complete the same settings-save workflow.',
+    orderedChildIssueNumbers: [12, 13, 14],
+    acceptanceCriteria: [
+      '- [ ] Settings save successfully',
+      '- [ ] Users see error states',
+    ],
+  };
+
+  it('parses findings plus proposed epic groups from the new object shape', () => {
+    const response = JSON.stringify({
+      findings: [finding],
+      epicGroups: [epicGroup],
+    });
+
+    const result = parseTriageAnalysisResponse(response);
+
+    expect(result.findings).toEqual([finding]);
+    expect(result.epicGroups).toEqual([epicGroup]);
+  });
+
+  it('accepts legacy finding arrays without epic groups', () => {
+    const result = normalizeTriageAnalysis([finding]);
+
+    expect(result).toEqual({
+      findings: [finding],
+      epicGroups: [],
+    });
+  });
+
+  it('rejects malformed epic group fields', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [],
+      epicGroups: [{
+        title: '',
+        goal: 'Goal',
+        rationale: 'Rationale',
+        orderedChildIssueNumbers: [1, 2],
+        acceptanceCriteria: ['- [ ] Done'],
+      }],
+    })).toThrow('epicGroups[0].title');
+  });
+
+  it('rejects epic groups with fewer than two ordered children', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [],
+      epicGroups: [{
+        title: 'Epic title',
+        goal: 'Goal',
+        rationale: 'Rationale',
+        orderedChildIssueNumbers: [1],
+        acceptanceCriteria: ['- [ ] Done'],
+      }],
+    })).toThrow('at least two issue numbers');
   });
 });
 
@@ -231,6 +306,39 @@ describe('formatTriageFindings', () => {
     const output = formatTriageFindings(findings);
     expect(output).toContain('Too Large');
     expect(output).toContain('Part A, Part B, Part C');
+  });
+});
+
+// ── formatEpicGroupProposals ────────────────────────────────────────────────
+
+describe('formatEpicGroupProposals', () => {
+  it('renders proposed epic groups with ordered children and acceptance criteria', () => {
+    const groups: ProposedEpicGroup[] = [
+      {
+        title: 'Epic: Settings reliability',
+        goal: 'Make settings saves reliable.',
+        rationale: 'These issues form one settings-save deliverable.',
+        orderedChildIssueNumbers: [12, 13, 14],
+        acceptanceCriteria: [
+          '- [ ] Settings save successfully',
+          '- [ ] Regression coverage exists',
+        ],
+      },
+    ];
+
+    const output = formatEpicGroupProposals(groups);
+
+    expect(output).toContain('Proposed Epic Groups');
+    expect(output).toContain('Epic: Settings reliability');
+    expect(output).toContain('Goal: Make settings saves reliable.');
+    expect(output).toContain('Rationale: These issues form one settings-save deliverable.');
+    expect(output).toContain('Children: #12 -> #13 -> #14');
+    expect(output).toContain('- [ ] Settings save successfully');
+  });
+
+  it('handles empty proposal lists', () => {
+    const output = formatEpicGroupProposals([]);
+    expect(output).toContain('No proposed epic groups');
   });
 });
 

@@ -7,6 +7,7 @@ import {
   buildBatchImplementPrompt,
   buildBatchReviewPrompt,
   buildSessionReviewPrompt,
+  buildTriagePrompt,
   formatEpicPromptContext,
   type EpicPromptContext,
 } from '../../src/lib/prompts';
@@ -384,6 +385,37 @@ describe('buildBatchReviewPrompt', () => {
 
     expect(prompt).toContain('## Parent Epic Context');
     expect(prompt).toContain('integration-sensitive work across siblings');
+  });
+});
+
+describe('buildTriagePrompt', () => {
+  test('includes epic grouping instructions and guardrails', () => {
+    const prompt = buildTriagePrompt({
+      issues: [
+        { number: 1, title: 'Add settings API', body: 'Implement endpoint' },
+        { number: 2, title: 'Wire settings UI', body: 'Call endpoint' },
+      ],
+    });
+
+    expect(prompt).toContain('candidate epic groups');
+    expect(prompt).toContain('coherent deliverable');
+    expect(prompt).toContain('Do NOT propose nested epics');
+    expect(prompt).toContain('Do NOT group unrelated issues merely because they share a milestone, label');
+  });
+
+  test('includes triage analysis JSON schema with epicGroups', () => {
+    const prompt = buildTriagePrompt({
+      issues: [{ number: 1, title: 'Issue', body: 'Body' }],
+    });
+
+    expect(prompt).toContain('"findings": [');
+    expect(prompt).toContain('"epicGroups": [');
+    expect(prompt).toContain('"title": "Epic: Settings reliability"');
+    expect(prompt).toContain('"goal":');
+    expect(prompt).toContain('"rationale":');
+    expect(prompt).toContain('"orderedChildIssueNumbers": [46, 47, 48]');
+    expect(prompt).toContain('"acceptanceCriteria": [');
+    expect(prompt).toContain('{ "findings": [], "epicGroups": [] }');
   });
 });
 

@@ -13,11 +13,13 @@ import { buildTriagePrompt } from '../lib/prompts.js';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
 import {
-  extractJsonFromResponse,
   formatTriageFindings,
+  formatEpicGroupProposals,
+  parseTriageAnalysisResponse,
   buildPlanningContext,
   type TriageFinding,
   type TriageAction,
+  type TriageAnalysis,
 } from '../lib/planning.js';
 import {
   listOpenIssuesWithComments,
@@ -89,29 +91,45 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
     return;
   }
 
-  let findings: TriageFinding[];
+  let analysis: TriageAnalysis;
   try {
-    findings = extractJsonFromResponse<TriageFinding[]>(result.stdout);
+    analysis = parseTriageAnalysisResponse(result.stdout);
   } catch (err) {
     log.error(`Failed to parse triage JSON: ${(err as Error).message}`);
     log.error(`Agent response (first 500 chars): ${result.stdout.slice(0, 500)}`);
     return;
   }
 
-  if (!Array.isArray(findings) || findings.length === 0) {
+  const { findings, epicGroups } = analysis;
+
+  if (findings.length === 0 && epicGroups.length === 0) {
     log.success('All issues look good — no triage actions needed.');
     return;
   }
 
-  // ── Display findings ───────────────────────────────────────────────────────
-  console.log('');
-  console.log(formatTriageFindings(findings));
-  console.log('');
-  log.info(`Found ${findings.length} issue(s) needing attention`);
+  // ── Display findings and proposed epic groups ─────────────────────────────
+  if (findings.length > 0) {
+    console.log('');
+    console.log(formatTriageFindings(findings));
+    console.log('');
+    log.info(`Found ${findings.length} issue(s) needing attention`);
+  }
+
+  if (epicGroups.length > 0) {
+    console.log('');
+    console.log(formatEpicGroupProposals(epicGroups));
+    console.log('');
+    log.info(`Found ${epicGroups.length} proposed epic group(s)`);
+  }
 
   // ── Dry run exit ───────────────────────────────────────────────────────────
   if (options.dryRun) {
     log.dry('Dry run — no changes will be made.');
+    return;
+  }
+
+  if (findings.length === 0) {
+    log.info('No per-issue triage actions to apply.');
     return;
   }
 
