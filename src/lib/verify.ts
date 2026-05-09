@@ -12,6 +12,7 @@ import { exec } from './shell.js';
 import { log } from './logger.js';
 import { spawnAgent } from './agent.js';
 import type { Config } from './config.js';
+import { formatEpicPromptContext, type EpicPromptContext } from './prompts.js';
 
 export type VerifyResult = {
   passed: boolean;
@@ -104,8 +105,10 @@ export async function runVerify(options: {
   verifyMethod?: VerifyMethod;
   /** Shell command for 'script' method verification. */
   verifyCommand?: string;
+  /** Parent epic context for sub-issue verification. */
+  epicContext?: EpicPromptContext;
 }): Promise<VerifyResult> {
-  const { worktree, logFile, issueNum, title, body, config, sessionDir, verifyInstructions, verifyMethod, verifyCommand } = options;
+  const { worktree, logFile, issueNum, title, body, config, sessionDir, verifyInstructions, verifyMethod, verifyCommand, epicContext } = options;
 
   if (config.skipVerify) {
     log.info('Verification skipped (skipVerify=true)');
@@ -199,6 +202,8 @@ export async function runVerify(options: {
 ## Issue: ${title}
 
 ${body}
+
+${epicContext ? `${formatEpicPromptContext(epicContext)}\n\nUse the parent epic context to verify integration-sensitive behavior while keeping judgment focused on issue #${issueNum}.\n` : ''}
 
 ## What Changed
 ${diffStat.stdout || 'No diff available'}

@@ -27,13 +27,16 @@ import {
   type Comment,
 } from './github.js';
 import {
+  buildIssuePlanPrompt,
   buildImplementPrompt,
   buildReviewPrompt,
   buildAssumptionsPrompt,
   buildBatchPlanPrompt,
   buildBatchImplementPrompt,
   buildBatchReviewPrompt,
+  formatEpicPromptContext,
   type BatchIssue,
+  type EpicPromptContext,
 } from './prompts.js';
 import { runTests } from './testing.js';
 import { runVerify } from './verify.js';
@@ -324,6 +327,29 @@ export type PipelineResult = {
   escalationEvents?: EscalationEvent[];
 };
 
+export type PipelineOptions = {
+  epicContext?: EpicPromptContext;
+};
+
+function resolvePipelineOptions(
+  trackerOrOptions?: EscalationTracker | PipelineOptions,
+  maybeOptions?: PipelineOptions,
+): { trackerOverride?: EscalationTracker; options: PipelineOptions } {
+  if (trackerOrOptions instanceof EscalationTracker) {
+    return { trackerOverride: trackerOrOptions, options: maybeOptions ?? {} };
+  }
+  return { options: trackerOrOptions ?? {} };
+}
+
+function epicPromptOption(options: PipelineOptions): { epicContext?: EpicPromptContext } {
+  return options.epicContext ? { epicContext: options.epicContext } : {};
+}
+
+function formatEpicFixContext(options: PipelineOptions, issueNum: number): string {
+  if (!options.epicContext) return '';
+  return `\n\n${formatEpicPromptContext(options.epicContext)}\n\nUse the parent epic context to keep fixes scoped to issue #${issueNum} while preserving integration with sibling work.`;
+}
+
 /** Per-issue context for the escalation wrapper. */
 type StageContext = {
   stage: RoutingStageName;
@@ -527,16 +553,19 @@ export async function processIssue(
   body: string,
   config: Config,
   session: SessionContext,
-  trackerOverride?: EscalationTracker,
+  trackerOrOptions?: EscalationTracker | PipelineOptions,
+  maybeOptions?: PipelineOptions,
 ): Promise<PipelineResult> {
   const startTime = Date.now();
   const projectDir = process.cwd();
   const stepCosts: StepCost[] = [];
   const stepsCompleted: string[] = [];
   const escalationEvents: EscalationEvent[] = [];
+  const { trackerOverride, options: pipelineOptions } = resolvePipelineOptions(trackerOrOptions, maybeOptions);
   const tracker = trackerOverride ?? new EscalationTracker({
     statePath: defaultEscalationStatePath(projectDir),
   });
+  const epicOption = epicPromptOption(pipelineOptions);
   let turnCounter = 0;
   const stageCtx = (stage: RoutingStageName): StageContext => ({
     stage,
@@ -600,41 +629,12 @@ export async function processIssue(
   const planFileInSession = join(session.logsDir, `plan-issue-${issueNum}.json`);
   if (!config.dryRun) {
     try {
-      const planPrompt = `Analyze this GitHub issue and produce a structured implementation plan.
-
-Issue #${issueNum}: ${title}
-
-${body}
-
-Write a JSON file to: plan-issue-${issueNum}.json
-
-The file must contain ONLY valid JSON with this exact schema:
-
-{
-  "summary": "One-line description of what needs to be done",
-  "files": ["src/path/to/file.ts", "..."],
-  "implementation": "Concise step-by-step plan. What to create, modify, wire up. No issue restatement.",
-  "testing": {
-    "needed": true,
-    "reason": "Why tests are or aren't needed for this change"
-  },
-  "verification": {
-    "needed": false,
-    "method": "playwright",
-    "command": "optional shell command for script/cli/boot/api methods",
-    "instructions": "If needed: specific steps to verify the feature. If not needed: omit this field.",
-    "reason": "Why verification is or isn't needed"
-  }
-}
-
-Rules:
-- testing.needed: true if ANY code changes could affect behavior. false only for docs, config, or comments.
-- verification.needed: true if the issue changes behavior that can be validated at runtime.
-- verification.method: "playwright" for UI changes, "script" for validation scripts, "boot" for service startup checks, "cli" for CLI testing, "api" for API endpoint testing.
-- verification.command: required for script/cli/boot/api methods — the shell command to run. Exit code 0 = pass.
-- verification.instructions: for playwright method, list the exact playwright-cli commands to verify.
-- implementation: be concise and actionable. List files to modify and what to change in each.
-- Write ONLY the JSON file. Do not create any other files or make any code changes.`;
+      const planPrompt = buildIssuePlanPrompt({
+        issueNum,
+        title,
+        body,
+        ...epicOption,
+      });
 
       // Trace the plan prompt
       tracePrompt(session.name, issueNum, 'plan', planPrompt);
@@ -710,6 +710,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       body,
       comments: issueComments.length > 0 ? issueComments : undefined,
       planContent: plan.implementation || undefined,
+      ...epicOption,
       visionContext: visionContext ?? undefined,
       projectContext: projectContext ?? undefined,
       previousResult: previousResult ?? undefined,
@@ -872,6 +873,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           body,
           comments: issueComments.length > 0 ? issueComments : undefined,
           baseBranch: config.baseBranch,
+          ...epicOption,
           visionContext: loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md')) ?? undefined,
         });
 
@@ -917,7 +919,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
       if (attempt < config.maxTestRetries) {
         const findings = formatGateFindings(reviewGate, 'Code Review');
-        const fixPrompt = `The code review for issue #${issueNum} found problems that need to be fixed.\n\n${findings}\n\nInstructions:\n1. Address each finding listed above\n2. Run tests to make sure nothing is broken\n3. Commit your fixes with: git commit -m "fix(#${issueNum}): address review findings"`;
+        const fixPrompt = `The code review for issue #${issueNum} found problems that need to be fixed.\n\n${findings}${formatEpicFixContext(pipelineOptions, issueNum)}\n\nInstructions:\n1. Address each finding listed above\n2. Run tests to make sure nothing is broken\n3. Commit your fixes with: git commit -m "fix(#${issueNum}): address review findings"`;
 
         // Trace review-fix prompt
         tracePrompt(session.name, issueNum, `review-fix-${attempt}`, fixPrompt);
@@ -990,6 +992,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         verifyInstructions: plan.verification.instructions,
         verifyMethod: plan.verification.method,
         verifyCommand: plan.verification.command,
+        ...epicOption,
       });
       verifyOutput = verifyResult.output;
 
@@ -1028,7 +1031,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
             ? formatGateFindings(verifyGate, 'Verification')
             : `## Verification Findings (MUST FIX)\n\n${verifyOutput}`;
 
-          const fixPrompt = `Live verification failed for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\n\n${findings}\n\nInstructions:\n1. Read the verification findings and identify the ROOT CAUSE\n2. Fix ONLY code related to issue #${issueNum}\n3. Run tests to make sure nothing is broken\n4. Commit your fixes with: git commit -m "fix(#${issueNum}): address verification findings"`;
+          const fixPrompt = `Live verification failed for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\n\n${findings}${formatEpicFixContext(pipelineOptions, issueNum)}\n\nInstructions:\n1. Read the verification findings and identify the ROOT CAUSE\n2. Fix ONLY code related to issue #${issueNum}\n3. Run tests to make sure nothing is broken\n4. Commit your fixes with: git commit -m "fix(#${issueNum}): address verification findings"`;
 
           // Trace verify-fix prompt
           tracePrompt(session.name, issueNum, `verify-fix-${attempt}`, fixPrompt);
@@ -1337,12 +1340,14 @@ export async function processBatch(
   issues: Array<{ number: number; title: string; body: string }>,
   config: Config,
   session: SessionContext,
+  options: PipelineOptions = {},
 ): Promise<PipelineResult[]> {
   const startTime = Date.now();
   const projectDir = process.cwd();
   const stepCosts: StepCost[] = [];
   const stepsCompleted: string[] = [];
   const issueNums = issues.map((i) => i.number);
+  const epicOption = epicPromptOption(options);
 
   mkdirSync(session.logsDir, { recursive: true });
   const logFile = join(session.logsDir, `batch-${issueNums.join('-')}.log`);
@@ -1424,7 +1429,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   if (!config.dryRun) {
     try {
-      const planPrompt = resumeNote + buildBatchPlanPrompt({ issues: batchIssues });
+      const planPrompt = resumeNote + buildBatchPlanPrompt({ issues: batchIssues, ...epicOption });
       tracePrompt(session.name, issues[0].number, 'batch-plan', planPrompt);
 
       const planResult = await spawnAgent({
@@ -1483,6 +1488,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     const implementPrompt = resumeNote + buildBatchImplementPrompt({
       issues: batchIssues,
       planContent: allPlans,
+      ...epicOption,
       visionContext: visionContext ?? undefined,
       projectContext: projectContext ?? undefined,
       learningContext: learningContext || undefined,
@@ -1628,6 +1634,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         const reviewPrompt = buildBatchReviewPrompt({
           issues: batchIssues,
           baseBranch: config.baseBranch,
+          ...epicOption,
           visionContext: loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md')) ?? undefined,
         });
 
@@ -1668,7 +1675,10 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
       if (attempt < config.maxTestRetries) {
         const findings = formatGateFindings(reviewGate, 'Code Review');
-        const fixPrompt = `The code review for the batch found problems that need to be fixed.\n\n${findings}\n\nInstructions:\n1. Address each finding listed above\n2. Run tests to make sure nothing is broken\n3. Commit your fixes`;
+        const epicFixContext = options.epicContext
+          ? `\n\n${formatEpicPromptContext(options.epicContext)}\n\nUse the parent epic context to keep batch fixes scoped while preserving sibling integration.`
+          : '';
+        const fixPrompt = `The code review for the batch found problems that need to be fixed.\n\n${findings}${epicFixContext}\n\nInstructions:\n1. Address each finding listed above\n2. Run tests to make sure nothing is broken\n3. Commit your fixes`;
 
         tracePrompt(session.name, issues[0].number, `batch-review-fix-${attempt}`, fixPrompt);
 

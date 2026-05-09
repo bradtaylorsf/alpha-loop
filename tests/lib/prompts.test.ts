@@ -1,4 +1,68 @@
-import { buildImplementPrompt, buildReviewPrompt, buildLearnPrompt, buildBatchPlanPrompt, buildBatchReviewPrompt, buildSessionReviewPrompt } from '../../src/lib/prompts';
+import {
+  buildImplementPrompt,
+  buildReviewPrompt,
+  buildLearnPrompt,
+  buildIssuePlanPrompt,
+  buildBatchPlanPrompt,
+  buildBatchImplementPrompt,
+  buildBatchReviewPrompt,
+  buildSessionReviewPrompt,
+  formatEpicPromptContext,
+  type EpicPromptContext,
+} from '../../src/lib/prompts';
+
+const epicContext: EpicPromptContext = {
+  number: 195,
+  title: 'Improve epic execution',
+  bodySummary: 'Make sub-issue agents aware of the parent epic goal.',
+  acceptanceCriteria: [
+    '- [ ] Agents receive parent context',
+    '- [ ] Sibling checklist order is preserved',
+  ],
+  subIssues: [
+    { issueNum: 188, title: 'Add epic issue template during init', checked: true },
+    { issueNum: 189, title: 'Inject parent epic context into sub-issue agents', checked: false },
+  ],
+};
+
+describe('formatEpicPromptContext', () => {
+  test('renders parent title, summary, acceptance criteria, and ordered checklist', () => {
+    const prompt = formatEpicPromptContext(epicContext);
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Epic #195: Improve epic execution');
+    expect(prompt).toContain('Make sub-issue agents aware of the parent epic goal.');
+    expect(prompt).toContain('- [ ] Agents receive parent context');
+    expect(prompt).toContain('1. [x] #188 Add epic issue template during init');
+    expect(prompt).toContain('2. [ ] #189 Inject parent epic context into sub-issue agents');
+  });
+});
+
+describe('buildIssuePlanPrompt', () => {
+  test('includes parent epic context when provided', () => {
+    const prompt = buildIssuePlanPrompt({
+      issueNum: 189,
+      title: 'Inject parent context',
+      body: 'Child issue body',
+      epicContext,
+    });
+
+    expect(prompt).toContain('Analyze this GitHub issue and produce a structured implementation plan.');
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Epic #195: Improve epic execution');
+    expect(prompt).toContain('Ordered Sub-Issue Checklist');
+  });
+
+  test('omits parent epic context when not provided', () => {
+    const prompt = buildIssuePlanPrompt({
+      issueNum: 42,
+      title: 'Flat issue',
+      body: 'Child issue body',
+    });
+
+    expect(prompt).not.toContain('## Parent Epic Context');
+  });
+});
 
 describe('buildImplementPrompt', () => {
   test('includes issue number, title, and body', () => {
@@ -52,6 +116,20 @@ describe('buildImplementPrompt', () => {
     expect(prompt).toContain('## Before You Start');
     expect(prompt).toContain('## After Implementing');
     expect(prompt).toContain('git commit -m "feat: Add login page (closes #42)"');
+  });
+
+  test('includes parent epic context and narrow scope guidance when provided', () => {
+    const prompt = buildImplementPrompt({
+      issueNum: 189,
+      title: 'Inject parent context',
+      body: 'Child issue body',
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Epic #195: Improve epic execution');
+    expect(prompt).toContain('Keep the implementation narrowly scoped to issue #189');
+    expect(prompt).toContain('Preserve contracts that sibling sub-issues depend on');
   });
 });
 
@@ -145,6 +223,19 @@ describe('buildReviewPrompt', () => {
     expect(prompt).toContain('review-issue-42.json');
     expect(prompt).toContain('"passed"');
     expect(prompt).toContain('"findings"');
+  });
+
+  test('includes parent epic context when provided', () => {
+    const prompt = buildReviewPrompt({
+      issueNum: 189,
+      title: 'Inject parent context',
+      body: 'Child issue body',
+      baseBranch: 'master',
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('judge whether this child issue preserves integration');
   });
 });
 
@@ -242,6 +333,28 @@ describe('buildBatchPlanPrompt', () => {
     });
     expect(prompt).toContain('grep the codebase to verify it exists');
   });
+
+  test('includes parent epic context for epic batches', () => {
+    const prompt = buildBatchPlanPrompt({
+      issues: [{ issueNum: 189, title: 'Test', body: 'Body' }],
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Plan only the listed batch issues');
+  });
+});
+
+describe('buildBatchImplementPrompt', () => {
+  test('includes parent epic context and batch scope guidance', () => {
+    const prompt = buildBatchImplementPrompt({
+      issues: [{ issueNum: 189, title: 'Test', body: 'Body' }],
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Keep this batch limited to the listed issues');
+  });
 });
 
 describe('buildBatchReviewPrompt', () => {
@@ -260,6 +373,17 @@ describe('buildBatchReviewPrompt', () => {
     });
     expect(prompt).toContain('RED FLAG');
     expect(prompt).toContain('silently hide missing injection');
+  });
+
+  test('includes parent epic context for epic batches', () => {
+    const prompt = buildBatchReviewPrompt({
+      issues: [{ issueNum: 189, title: 'Test', body: 'Body' }],
+      baseBranch: 'master',
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('integration-sensitive work across siblings');
   });
 });
 
