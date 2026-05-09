@@ -82,11 +82,13 @@ jest.mock('../../src/lib/config', () => ({
 }));
 
 jest.mock('../../src/lib/prompts', () => ({
+  buildIssuePlanPrompt: jest.fn().mockReturnValue('structured implementation plan prompt'),
   buildImplementPrompt: jest.fn().mockReturnValue('implement prompt'),
   buildReviewPrompt: jest.fn().mockReturnValue('review prompt'),
   buildBatchPlanPrompt: jest.fn().mockReturnValue('batch plan prompt'),
   buildBatchImplementPrompt: jest.fn().mockReturnValue('batch implement prompt'),
   buildBatchReviewPrompt: jest.fn().mockReturnValue('batch review prompt'),
+  formatEpicPromptContext: jest.fn().mockReturnValue('## Parent Epic Context\nEpic #195: Parent epic'),
   buildAssumptionsPrompt: jest.fn().mockReturnValue('assumptions prompt'),
 }));
 
@@ -103,8 +105,11 @@ import { spawnAgent } from '../../src/lib/agent';
 import { setupWorktree, cleanupWorktree } from '../../src/lib/worktree';
 import { labelIssue, commentIssue, createPR, mergePR, updateProjectStatus } from '../../src/lib/github';
 import { runTests } from '../../src/lib/testing';
+import { runVerify } from '../../src/lib/verify';
 import { extractLearnings, getLearningContext } from '../../src/lib/learning';
 import { saveResult, getPreviousResult } from '../../src/lib/session';
+import { buildIssuePlanPrompt, buildImplementPrompt, buildReviewPrompt, buildBatchPlanPrompt, buildBatchImplementPrompt, buildBatchReviewPrompt } from '../../src/lib/prompts';
+import { writeTraceToSubdir } from '../../src/lib/traces';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
@@ -114,10 +119,28 @@ const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanu
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockMergePR = mergePR as jest.MockedFunction<typeof mergePR>;
 const mockRunTests = runTests as jest.MockedFunction<typeof runTests>;
+const mockRunVerify = runVerify as jest.MockedFunction<typeof runVerify>;
 const mockExtractLearnings = extractLearnings as jest.MockedFunction<typeof extractLearnings>;
 const mockGetLearningContext = getLearningContext as jest.MockedFunction<typeof getLearningContext>;
 const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGetPreviousResult = getPreviousResult as jest.MockedFunction<typeof getPreviousResult>;
+const mockBuildIssuePlanPrompt = buildIssuePlanPrompt as jest.MockedFunction<typeof buildIssuePlanPrompt>;
+const mockBuildImplementPrompt = buildImplementPrompt as jest.MockedFunction<typeof buildImplementPrompt>;
+const mockBuildReviewPrompt = buildReviewPrompt as jest.MockedFunction<typeof buildReviewPrompt>;
+const mockBuildBatchPlanPrompt = buildBatchPlanPrompt as jest.MockedFunction<typeof buildBatchPlanPrompt>;
+const mockBuildBatchImplementPrompt = buildBatchImplementPrompt as jest.MockedFunction<typeof buildBatchImplementPrompt>;
+const mockBuildBatchReviewPrompt = buildBatchReviewPrompt as jest.MockedFunction<typeof buildBatchReviewPrompt>;
+const mockWriteTraceToSubdir = writeTraceToSubdir as jest.MockedFunction<typeof writeTraceToSubdir>;
+
+const epicContext = {
+  number: 195,
+  title: 'Parent epic',
+  bodySummary: 'Parent body summary',
+  acceptanceCriteria: ['- [ ] Parent AC'],
+  subIssues: [
+    { issueNum: 42, title: 'Test issue', checked: false },
+  ],
+};
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -188,6 +211,11 @@ function makeSession(): SessionContext {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  const { existsSync, readFileSync } = require('node:fs');
+  (existsSync as jest.Mock).mockReset();
+  (existsSync as jest.Mock).mockReturnValue(false);
+  (readFileSync as jest.Mock).mockReset();
+  (readFileSync as jest.Mock).mockReturnValue('');
 
   // Default: everything succeeds
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
@@ -223,6 +251,79 @@ describe('processIssue', () => {
     expect(mockExtractLearnings).toHaveBeenCalled();
     expect(mockSaveResult).toHaveBeenCalled();
     expect(mockCleanupWorktree).toHaveBeenCalled();
+  });
+
+  test('passes epic context into plan, implementation, and review prompt builders', async () => {
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession(), { epicContext });
+
+    expect(mockBuildIssuePlanPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+    expect(mockBuildImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+    expect(mockBuildReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+  });
+
+  test('does not pass epic context when pipeline options are omitted', async () => {
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(mockBuildIssuePlanPrompt.mock.calls[0][0]).not.toHaveProperty('epicContext');
+    expect(mockBuildImplementPrompt.mock.calls[0][0]).not.toHaveProperty('epicContext');
+    expect(mockBuildReviewPrompt.mock.calls[0][0]).not.toHaveProperty('epicContext');
+  });
+
+  test('prompt traces contain epic context only when provided', async () => {
+    mockBuildIssuePlanPrompt.mockImplementationOnce((options: any) =>
+      options.epicContext ? 'plan prompt\n## Parent Epic Context' : 'plan prompt',
+    );
+    mockBuildImplementPrompt.mockImplementationOnce((options: any) =>
+      options.epicContext ? 'implement prompt\n## Parent Epic Context' : 'implement prompt',
+    );
+    mockBuildReviewPrompt.mockImplementationOnce((options: any) =>
+      options.epicContext ? 'review prompt\n## Parent Epic Context' : 'review prompt',
+    );
+
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession(), { epicContext });
+
+    const promptTraceBodies = mockWriteTraceToSubdir.mock.calls
+      .filter((call) => call[1] === 'prompts')
+      .map((call) => String(call[3]));
+
+    expect(promptTraceBodies.some((body) => body.includes('## Parent Epic Context'))).toBe(true);
+
+    jest.clearAllMocks();
+    mockBuildIssuePlanPrompt.mockReturnValue('structured implementation plan prompt');
+    mockBuildImplementPrompt.mockReturnValue('implement prompt');
+    mockBuildReviewPrompt.mockReturnValue('review prompt');
+
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    const nonEpicPromptTraceBodies = mockWriteTraceToSubdir.mock.calls
+      .filter((call) => call[1] === 'prompts')
+      .map((call) => String(call[3]));
+    expect(nonEpicPromptTraceBodies.every((body) => !body.includes('## Parent Epic Context'))).toBe(true);
+  });
+
+  test('passes epic context into runVerify when plan requires verification', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+
+    mockExistsSync.mockImplementation((path: any) => String(path).includes('plan-issue-42.json'));
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).includes('plan-issue-42.json')) {
+        return JSON.stringify({
+          summary: 'Plan',
+          files: ['src/index.ts'],
+          implementation: 'Implement it',
+          testing: { needed: false, reason: 'Covered by verification' },
+          verification: { needed: true, method: 'playwright', instructions: 'Open app', reason: 'Runtime behavior' },
+        });
+      }
+      return '';
+    });
+    mockRunVerify.mockResolvedValue({ passed: true, skipped: false, output: 'Status: PASS' });
+
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig({ skipVerify: false }), makeSession(), { epicContext });
+
+    expect(mockRunVerify).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
   });
 
   test('returns failure and labels failed when implementation fails', async () => {
@@ -664,6 +765,14 @@ describe('processBatch', () => {
     { number: 10, title: 'Issue 10', body: 'Body 10' },
     { number: 11, title: 'Issue 11', body: 'Body 11' },
   ];
+
+  test('passes epic context into batch plan, implementation, and review prompt builders', async () => {
+    await processBatch(batchIssues, makeConfig({ batch: true }), makeSession(), { epicContext });
+
+    expect(mockBuildBatchPlanPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+    expect(mockBuildBatchImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+    expect(mockBuildBatchReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+  });
 
   test('skips auto-merge when tests are failing', async () => {
     mockRunTests.mockReturnValue({ passed: false, output: 'Tests failed' });

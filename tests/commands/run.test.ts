@@ -24,10 +24,19 @@ jest.mock('../../src/lib/config', () => ({
 jest.mock('../../src/lib/github', () => ({
   pollIssues: jest.fn(),
   listMilestones: jest.fn().mockReturnValue([]),
+  listEpics: jest.fn().mockReturnValue([]),
+  getEpicSubIssues: jest.fn().mockReturnValue([]),
+  getIssueWithComments: jest.fn(),
+  getMergedPRForIssue: jest.fn(),
+  updateEpicChecklist: jest.fn(),
+  commentIssue: jest.fn(),
+  closeIssue: jest.fn(),
+  labelIssue: jest.fn(),
 }));
 
 jest.mock('../../src/lib/pipeline', () => ({
   processIssue: jest.fn(),
+  processBatch: jest.fn(),
 }));
 
 jest.mock('../../src/lib/session', () => ({
@@ -68,14 +77,17 @@ jest.mock('node:fs', () => ({
 
 import { exec } from '../../src/lib/shell';
 import { loadConfig } from '../../src/lib/config';
-import { pollIssues } from '../../src/lib/github';
-import { processIssue } from '../../src/lib/pipeline';
+import { pollIssues, getIssueWithComments, updateEpicChecklist } from '../../src/lib/github';
+import { processIssue, processBatch } from '../../src/lib/pipeline';
 import { createSession, finalizeSession } from '../../src/lib/session';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>;
 const mockPollIssues = pollIssues as jest.MockedFunction<typeof pollIssues>;
+const mockGetIssueWithComments = getIssueWithComments as jest.MockedFunction<typeof getIssueWithComments>;
+const mockUpdateEpicChecklist = updateEpicChecklist as jest.MockedFunction<typeof updateEpicChecklist>;
 const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue>;
+const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
 
@@ -136,7 +148,7 @@ beforeEach(() => {
   jest.clearAllMocks();
 
   mockExec.mockReturnValue({ stdout: '/usr/bin/tool', stderr: '', exitCode: 0 });
-  mockLoadConfig.mockReturnValue(makeConfig() as any);
+  mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig(overrides) as any);
   mockCreateSession.mockReturnValue({
     name: 'session/20260330-143000',
     branch: 'session/20260330-143000',
@@ -146,6 +158,8 @@ beforeEach(() => {
   });
   mockFinalizeSession.mockResolvedValue(null);
   mockPollIssues.mockReturnValue([]);
+  mockGetIssueWithComments.mockReturnValue(null);
+  mockProcessBatch.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -224,5 +238,112 @@ describe('runCommand', () => {
     expect(mockExec).toHaveBeenCalledWith('command -v "gh"');
     expect(mockExec).toHaveBeenCalledWith('command -v "git"');
     expect(mockExec).toHaveBeenCalledWith('command -v "claude"');
+  });
+
+  test('passes compact parent epic context to sub-issue processing for --epic runs', async () => {
+    const epicBody = `## Goal
+Ship the epic as a coordinated set of sub-issues.
+
+## Acceptance Criteria
+- [ ] Parent agents understand the epic
+- [ ] Sibling ordering is visible
+
+## Checklist
+- [x] #188 Add epic issue template during init
+- [ ] #189 Inject parent epic context into sub-issue agents`;
+
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) {
+        return { number: 195, title: 'Parent Epic', body: epicBody, labels: ['epic'] };
+      }
+      if (issueNum === 189) {
+        return { number: 189, title: 'Child Issue', body: 'Child body', labels: ['ready'] };
+      }
+      return null;
+    });
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 189,
+      title: 'Child Issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({ epic: 195, dryRun: true });
+
+    expect(mockGetIssueWithComments.mock.calls.filter((call) => call[1] === 195)).toHaveLength(1);
+    const options = mockProcessIssue.mock.calls[0][5] as any;
+    expect(options.epicContext).toEqual(expect.objectContaining({
+      number: 195,
+      title: 'Parent Epic',
+      bodySummary: expect.stringContaining('Ship the epic'),
+      acceptanceCriteria: expect.arrayContaining(['- [ ] Parent agents understand the epic']),
+    }));
+    expect(options.epicContext.subIssues).toEqual([
+      { issueNum: 188, title: 'Add epic issue template during init', checked: true },
+      { issueNum: 189, title: 'Inject parent epic context into sub-issue agents', checked: false },
+    ]);
+  });
+
+  test('passes parent epic context to batch processing for --epic batch runs', async () => {
+    const epicBody = `## Goal
+Coordinate batch children.
+
+## Acceptance Criteria
+- [ ] Batch agents understand the epic
+
+## Checklist
+- [ ] #189 First child
+- [ ] #190 Second child`;
+
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) {
+        return { number: 195, title: 'Parent Epic', body: epicBody, labels: ['epic'] };
+      }
+      if (issueNum === 189) {
+        return { number: 189, title: 'First child', body: 'First body', labels: ['ready'] };
+      }
+      if (issueNum === 190) {
+        return { number: 190, title: 'Second child', body: 'Second body', labels: ['ready'] };
+      }
+      return null;
+    });
+    mockProcessBatch.mockResolvedValue([
+      { issueNum: 189, title: 'First child', status: 'success', testsPassing: true, verifyPassing: true, verifySkipped: true, duration: 30, filesChanged: 1 },
+      { issueNum: 190, title: 'Second child', status: 'success', testsPassing: true, verifyPassing: true, verifySkipped: true, duration: 30, filesChanged: 1 },
+    ]);
+
+    await runCommand({ epic: 195, dryRun: true, batch: true });
+
+    const options = mockProcessBatch.mock.calls[0][3] as any;
+    expect(options.epicContext).toEqual(expect.objectContaining({
+      number: 195,
+      title: 'Parent Epic',
+      bodySummary: expect.stringContaining('Coordinate batch children'),
+    }));
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+  });
+
+  test('does not pass epic context for flat runs', async () => {
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Test issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({});
+
+    expect(mockProcessIssue.mock.calls[0]).toHaveLength(5);
   });
 });

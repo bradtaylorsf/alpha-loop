@@ -9,6 +9,7 @@ export type ImplementPromptOptions = {
   body: string;
   comments?: Array<{ author: string; body: string; createdAt: string }>;
   planContent?: string;
+  epicContext?: EpicPromptContext;
   visionContext?: string;
   projectContext?: string;
   previousResult?: string;
@@ -21,7 +22,20 @@ export type ReviewPromptOptions = {
   body: string;
   comments?: Array<{ author: string; body: string; createdAt: string }>;
   baseBranch: string;
+  epicContext?: EpicPromptContext;
   visionContext?: string;
+};
+
+export type EpicPromptContext = {
+  number: number;
+  title: string;
+  bodySummary: string;
+  acceptanceCriteria: string[];
+  subIssues: Array<{
+    issueNum: number;
+    title?: string;
+    checked: boolean;
+  }>;
 };
 
 /** A single issue within a batch. */
@@ -34,11 +48,13 @@ export type BatchIssue = {
 
 export type BatchPlanPromptOptions = {
   issues: BatchIssue[];
+  epicContext?: EpicPromptContext;
 };
 
 export type BatchImplementPromptOptions = {
   issues: BatchIssue[];
   planContent?: string;
+  epicContext?: EpicPromptContext;
   visionContext?: string;
   projectContext?: string;
   learningContext?: string;
@@ -47,7 +63,15 @@ export type BatchImplementPromptOptions = {
 export type BatchReviewPromptOptions = {
   issues: BatchIssue[];
   baseBranch: string;
+  epicContext?: EpicPromptContext;
   visionContext?: string;
+};
+
+export type IssuePlanPromptOptions = {
+  issueNum: number;
+  title: string;
+  body: string;
+  epicContext?: EpicPromptContext;
 };
 
 export type LearnPromptOptions = {
@@ -63,17 +87,127 @@ export type LearnPromptOptions = {
   body?: string;
 };
 
+function normalizeBulletText(text: string): string {
+  return text.trim().replace(/^[-*]\s+/, '').trim();
+}
+
+export function formatEpicPromptContext(context: EpicPromptContext): string {
+  const lines: string[] = [
+    '## Parent Epic Context',
+    '',
+    `Epic #${context.number}: ${context.title}`,
+    '',
+    '### Goal / Body Summary',
+    context.bodySummary.trim() || '(no parent epic body summary available)',
+    '',
+    '### Acceptance Criteria',
+  ];
+
+  if (context.acceptanceCriteria.length > 0) {
+    for (const criterion of context.acceptanceCriteria) {
+      lines.push(`- ${normalizeBulletText(criterion)}`);
+    }
+  } else {
+    lines.push('- (none identified in parent epic body)');
+  }
+
+  lines.push('', '### Ordered Sub-Issue Checklist');
+  if (context.subIssues.length > 0) {
+    context.subIssues.forEach((issue, index) => {
+      const status = issue.checked ? '[x]' : '[ ]';
+      const title = issue.title ? ` ${issue.title}` : '';
+      lines.push(`${index + 1}. ${status} #${issue.issueNum}${title}`);
+    });
+  } else {
+    lines.push('(no sub-issues found)');
+  }
+
+  return lines.join('\n');
+}
+
+function appendEpicContextSection(
+  sections: string[],
+  epicContext: EpicPromptContext | undefined,
+  guidance?: string[],
+): void {
+  if (!epicContext) return;
+  sections.push('', '', formatEpicPromptContext(epicContext));
+  if (guidance && guidance.length > 0) {
+    sections.push('', '### Epic Scope Guidance', ...guidance.map((line) => `- ${line}`));
+  }
+}
+
+/**
+ * Build the planning prompt for a single issue.
+ */
+export function buildIssuePlanPrompt(options: IssuePlanPromptOptions): string {
+  const { issueNum, title, body, epicContext } = options;
+
+  const sections: string[] = [
+    'Analyze this GitHub issue and produce a structured implementation plan.',
+    '',
+    `Issue #${issueNum}: ${title}`,
+    '',
+    body,
+  ];
+
+  appendEpicContextSection(sections, epicContext, [
+    `Plan only the work needed for issue #${issueNum}; use sibling items to understand dependencies and integration boundaries.`,
+  ]);
+
+  sections.push(
+    '',
+    '',
+    `Write a JSON file to: plan-issue-${issueNum}.json`,
+    '',
+    'The file must contain ONLY valid JSON with this exact schema:',
+    '',
+    '{',
+    '  "summary": "One-line description of what needs to be done",',
+    '  "files": ["src/path/to/file.ts", "..."],',
+    '  "implementation": "Concise step-by-step plan. What to create, modify, wire up. No issue restatement.",',
+    '  "testing": {',
+    '    "needed": true,',
+    '    "reason": "Why tests are or aren\'t needed for this change"',
+    '  },',
+    '  "verification": {',
+    '    "needed": false,',
+    '    "method": "playwright",',
+    '    "command": "optional shell command for script/cli/boot/api methods",',
+    '    "instructions": "If needed: specific steps to verify the feature. If not needed: omit this field.",',
+    '    "reason": "Why verification is or isn\'t needed"',
+    '  }',
+    '}',
+    '',
+    'Rules:',
+    '- testing.needed: true if ANY code changes could affect behavior. false only for docs, config, or comments.',
+    '- verification.needed: true if the issue changes behavior that can be validated at runtime.',
+    '- verification.method: "playwright" for UI changes, "script" for validation scripts, "boot" for service startup checks, "cli" for CLI testing, "api" for API endpoint testing.',
+    '- verification.command: required for script/cli/boot/api methods - the shell command to run. Exit code 0 = pass.',
+    '- verification.instructions: for playwright method, list the exact playwright-cli commands to verify.',
+    '- implementation: be concise and actionable. List files to modify and what to change in each.',
+    '- Write ONLY the JSON file. Do not create any other files or make any code changes.',
+  );
+
+  return sections.join('\n');
+}
+
 /**
  * Build the implementation prompt for an AI agent.
  */
 export function buildImplementPrompt(options: ImplementPromptOptions): string {
-  const { issueNum, title, body, comments, planContent, visionContext, projectContext, previousResult, learningContext } = options;
+  const { issueNum, title, body, comments, planContent, epicContext, visionContext, projectContext, previousResult, learningContext } = options;
 
   const sections: string[] = [
     `Implement GitHub issue #${issueNum}: ${title}`,
     '',
     body,
   ];
+
+  appendEpicContextSection(sections, epicContext, [
+    `Keep the implementation narrowly scoped to issue #${issueNum}. Do not implement sibling checklist items unless this issue explicitly requires shared integration work.`,
+    'Preserve contracts that sibling sub-issues depend on, and call out any integration assumptions in your final notes.',
+  ]);
 
   if (comments && comments.length > 0) {
     sections.push('', '', '## Discussion (issue comments)');
@@ -131,7 +265,7 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
  * The agent writes one plan JSON per issue.
  */
 export function buildBatchPlanPrompt(options: BatchPlanPromptOptions): string {
-  const { issues } = options;
+  const { issues, epicContext } = options;
 
   const issueList = issues.map((i) => {
     let entry = `### Issue #${i.issueNum}: ${i.title}\n${i.body || '(no description)'}`;
@@ -145,8 +279,11 @@ export function buildBatchPlanPrompt(options: BatchPlanPromptOptions): string {
   }).join('\n\n');
 
   const fileList = issues.map((i) => `plan-issue-${i.issueNum}.json`).join(', ');
+  const epicSection = epicContext
+    ? `\n\n${formatEpicPromptContext(epicContext)}\n\n### Epic Scope Guidance\n- Plan only the listed batch issues. Use unchecked sibling items to identify integration boundaries, not to expand this batch scope.`
+    : '';
 
-  return `Analyze the following GitHub issues and produce a structured implementation plan for EACH one.
+  return `Analyze the following GitHub issues and produce a structured implementation plan for EACH one.${epicSection}
 
 ## Issues to Plan
 
@@ -194,7 +331,7 @@ Each file must contain ONLY valid JSON with this exact schema:
  * Build a batch implementation prompt — implements all issues in a single agent call.
  */
 export function buildBatchImplementPrompt(options: BatchImplementPromptOptions): string {
-  const { issues, planContent, visionContext, projectContext, learningContext } = options;
+  const { issues, planContent, epicContext, visionContext, projectContext, learningContext } = options;
 
   const issueList = issues.map((i) => {
     let entry = `### Issue #${i.issueNum}: ${i.title}\n${i.body || '(no description)'}`;
@@ -216,6 +353,11 @@ export function buildBatchImplementPrompt(options: BatchImplementPromptOptions):
     '',
     issueList,
   ];
+
+  appendEpicContextSection(sections, epicContext, [
+    'Keep this batch limited to the listed issues. Leave other sibling checklist items for their own runs unless a shared integration contract must be preserved.',
+    'When touching shared code, maintain compatibility with sibling work described in the epic checklist.',
+  ]);
 
   if (planContent) {
     sections.push('', '', '## Implementation Plans', planContent);
@@ -263,7 +405,7 @@ export function buildBatchImplementPrompt(options: BatchImplementPromptOptions):
  * Build a batch review prompt — reviews all issues' changes in a single agent call.
  */
 export function buildBatchReviewPrompt(options: BatchReviewPromptOptions): string {
-  const { issues, baseBranch, visionContext } = options;
+  const { issues, baseBranch, epicContext, visionContext } = options;
 
   const issueList = issues.map((i) => {
     let entry = `### Issue #${i.issueNum}: ${i.title}\n${i.body || '(no description)'}`;
@@ -285,6 +427,11 @@ export function buildBatchReviewPrompt(options: BatchReviewPromptOptions): strin
     '',
     issueList,
   ];
+
+  appendEpicContextSection(sections, epicContext, [
+    'Use the epic context to judge integration-sensitive work across siblings.',
+    'Do not block this batch for unrelated sibling checklist items that were intentionally left for separate runs.',
+  ]);
 
   if (visionContext) {
     sections.push('', '', '## Product Vision (guide your review decisions)', visionContext);
@@ -365,7 +512,7 @@ export function buildBatchReviewPrompt(options: BatchReviewPromptOptions): strin
  * Build the code review prompt for an AI agent.
  */
 export function buildReviewPrompt(options: ReviewPromptOptions): string {
-  const { issueNum, title, body, comments, baseBranch, visionContext } = options;
+  const { issueNum, title, body, comments, baseBranch, epicContext, visionContext } = options;
 
   const sections: string[] = [
     `Review the code changes for issue #${issueNum}: ${title}`,
@@ -375,6 +522,11 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     'Original requirements:',
     body,
   ];
+
+  appendEpicContextSection(sections, epicContext, [
+    'Use the epic context to judge whether this child issue preserves integration with sibling work.',
+    `Do not fail issue #${issueNum} for parent checklist items that belong to other sub-issues unless this change breaks their integration contract.`,
+  ]);
 
   if (comments && comments.length > 0) {
     sections.push('', 'Discussion (issue comments):');
@@ -472,6 +624,7 @@ export type SessionReviewPromptOptions = {
     testsPassing: boolean;
   }>;
   includeSecurityScan: boolean;
+  epicContext?: EpicPromptContext;
   visionContext?: string;
 };
 
@@ -481,7 +634,7 @@ export type SessionReviewPromptOptions = {
  * cross-issue integration problems that per-issue reviews miss.
  */
 export function buildSessionReviewPrompt(options: SessionReviewPromptOptions): string {
-  const { sessionName, baseBranch, issuesSummary, includeSecurityScan, visionContext } = options;
+  const { sessionName, baseBranch, issuesSummary, includeSecurityScan, epicContext, visionContext } = options;
 
   const issuesList = issuesSummary.map((i) =>
     `- #${i.issueNum}: ${i.title} — ${i.status}${i.testsPassing ? '' : ' (tests failing)'}`,
@@ -523,6 +676,10 @@ export function buildSessionReviewPrompt(options: SessionReviewPromptOptions): s
     '- Dead code (functions, imports, variables) that no remaining code references',
     '- Missing error handling at integration boundaries',
   ];
+
+  appendEpicContextSection(sections, epicContext, [
+    'Use this parent epic context to catch cross-issue integration problems across the processed sub-issues.',
+  ]);
 
   sections.push(
     '',
