@@ -419,6 +419,20 @@ describe('buildTriagePrompt', () => {
     expect(prompt).toContain('"acceptanceCriteria": [');
     expect(prompt).toContain('{ "findings": [], "epicGroups": [] }');
   });
+
+  test('frames triage as bounded analysis instead of implementation work', () => {
+    const prompt = buildTriagePrompt({
+      issues: [{ number: 1, title: 'Issue', body: 'Body' }],
+      projectContext: 'src/commands/triage.ts handles issue cleanup.',
+    });
+
+    expect(prompt).toContain('analysis-only backlog triage task');
+    expect(prompt).toContain('not an implementation task');
+    expect(prompt).toContain('Do not modify files');
+    expect(prompt).toContain('Do not inspect repository files or run shell commands');
+    expect(prompt).toContain('Return exactly one JSON object');
+    expect(prompt).toContain('Check the provided codebase context');
+  });
 });
 
 describe('buildSessionReviewPrompt', () => {
