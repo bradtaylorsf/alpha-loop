@@ -1,4 +1,70 @@
-import { buildImplementPrompt, buildReviewPrompt, buildLearnPrompt, buildBatchPlanPrompt, buildBatchReviewPrompt, buildSessionReviewPrompt } from '../../src/lib/prompts';
+import {
+  buildImplementPrompt,
+  buildReviewPrompt,
+  buildLearnPrompt,
+  buildIssuePlanPrompt,
+  buildBatchPlanPrompt,
+  buildBatchImplementPrompt,
+  buildBatchReviewPrompt,
+  buildSessionReviewPrompt,
+  buildTriagePrompt,
+  buildRoadmapPrompt,
+  formatEpicPromptContext,
+  type EpicPromptContext,
+} from '../../src/lib/prompts';
+
+const epicContext: EpicPromptContext = {
+  number: 195,
+  title: 'Improve epic execution',
+  bodySummary: 'Make sub-issue agents aware of the parent epic goal.',
+  acceptanceCriteria: [
+    '- [ ] Agents receive parent context',
+    '- [ ] Sibling checklist order is preserved',
+  ],
+  subIssues: [
+    { issueNum: 188, title: 'Add epic issue template during init', checked: true },
+    { issueNum: 189, title: 'Inject parent epic context into sub-issue agents', checked: false },
+  ],
+};
+
+describe('formatEpicPromptContext', () => {
+  test('renders parent title, summary, acceptance criteria, and ordered checklist', () => {
+    const prompt = formatEpicPromptContext(epicContext);
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Epic #195: Improve epic execution');
+    expect(prompt).toContain('Make sub-issue agents aware of the parent epic goal.');
+    expect(prompt).toContain('- [ ] Agents receive parent context');
+    expect(prompt).toContain('1. [x] #188 Add epic issue template during init');
+    expect(prompt).toContain('2. [ ] #189 Inject parent epic context into sub-issue agents');
+  });
+});
+
+describe('buildIssuePlanPrompt', () => {
+  test('includes parent epic context when provided', () => {
+    const prompt = buildIssuePlanPrompt({
+      issueNum: 189,
+      title: 'Inject parent context',
+      body: 'Child issue body',
+      epicContext,
+    });
+
+    expect(prompt).toContain('Analyze this GitHub issue and produce a structured implementation plan.');
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Epic #195: Improve epic execution');
+    expect(prompt).toContain('Ordered Sub-Issue Checklist');
+  });
+
+  test('omits parent epic context when not provided', () => {
+    const prompt = buildIssuePlanPrompt({
+      issueNum: 42,
+      title: 'Flat issue',
+      body: 'Child issue body',
+    });
+
+    expect(prompt).not.toContain('## Parent Epic Context');
+  });
+});
 
 describe('buildImplementPrompt', () => {
   test('includes issue number, title, and body', () => {
@@ -52,6 +118,20 @@ describe('buildImplementPrompt', () => {
     expect(prompt).toContain('## Before You Start');
     expect(prompt).toContain('## After Implementing');
     expect(prompt).toContain('git commit -m "feat: Add login page (closes #42)"');
+  });
+
+  test('includes parent epic context and narrow scope guidance when provided', () => {
+    const prompt = buildImplementPrompt({
+      issueNum: 189,
+      title: 'Inject parent context',
+      body: 'Child issue body',
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Epic #195: Improve epic execution');
+    expect(prompt).toContain('Keep the implementation narrowly scoped to issue #189');
+    expect(prompt).toContain('Preserve contracts that sibling sub-issues depend on');
   });
 });
 
@@ -145,6 +225,19 @@ describe('buildReviewPrompt', () => {
     expect(prompt).toContain('review-issue-42.json');
     expect(prompt).toContain('"passed"');
     expect(prompt).toContain('"findings"');
+  });
+
+  test('includes parent epic context when provided', () => {
+    const prompt = buildReviewPrompt({
+      issueNum: 189,
+      title: 'Inject parent context',
+      body: 'Child issue body',
+      baseBranch: 'master',
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('judge whether this child issue preserves integration');
   });
 });
 
@@ -242,6 +335,28 @@ describe('buildBatchPlanPrompt', () => {
     });
     expect(prompt).toContain('grep the codebase to verify it exists');
   });
+
+  test('includes parent epic context for epic batches', () => {
+    const prompt = buildBatchPlanPrompt({
+      issues: [{ issueNum: 189, title: 'Test', body: 'Body' }],
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Plan only the listed batch issues');
+  });
+});
+
+describe('buildBatchImplementPrompt', () => {
+  test('includes parent epic context and batch scope guidance', () => {
+    const prompt = buildBatchImplementPrompt({
+      issues: [{ issueNum: 189, title: 'Test', body: 'Body' }],
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Keep this batch limited to the listed issues');
+  });
 });
 
 describe('buildBatchReviewPrompt', () => {
@@ -260,6 +375,124 @@ describe('buildBatchReviewPrompt', () => {
     });
     expect(prompt).toContain('RED FLAG');
     expect(prompt).toContain('silently hide missing injection');
+  });
+
+  test('includes parent epic context for epic batches', () => {
+    const prompt = buildBatchReviewPrompt({
+      issues: [{ issueNum: 189, title: 'Test', body: 'Body' }],
+      baseBranch: 'master',
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('integration-sensitive work across siblings');
+  });
+});
+
+describe('buildTriagePrompt', () => {
+  test('includes epic grouping instructions and guardrails', () => {
+    const prompt = buildTriagePrompt({
+      issues: [
+        { number: 1, title: 'Add settings API', body: 'Implement endpoint', labels: ['ready', 'backend'] },
+        { number: 2, title: 'Wire settings UI', body: 'Call endpoint', labels: ['ready', 'frontend'] },
+      ],
+    });
+
+    expect(prompt).toContain('candidate epic groups');
+    expect(prompt).toContain('coherent deliverable');
+    expect(prompt).toContain('recommended epic-first workflow');
+    expect(prompt).toContain('roadmap schedules those parent epics into milestones');
+    expect(prompt).toContain('run processes each child issue with parent epic context');
+    expect(prompt).toContain('Labels: ready, backend');
+    expect(prompt).toContain('Use each issue\'s Labels line to identify existing epics');
+    expect(prompt).toContain('Do NOT propose nested epics');
+    expect(prompt).toContain('set `existingEpicIssueNum` to that issue number');
+    expect(prompt).toContain('Do NOT group unrelated issues merely because they share a milestone, label');
+  });
+
+  test('includes triage analysis JSON schema with epicGroups', () => {
+    const prompt = buildTriagePrompt({
+      issues: [{ number: 1, title: 'Issue', body: 'Body' }],
+    });
+
+    expect(prompt).toContain('"findings": [');
+    expect(prompt).toContain('"epicGroups": [');
+    expect(prompt).toContain('"title": "Epic: Settings reliability"');
+    expect(prompt).toContain('"goal":');
+    expect(prompt).toContain('"rationale":');
+    expect(prompt).toContain('"orderedChildIssueNumbers": [46, 47, 48]');
+    expect(prompt).toContain('"acceptanceCriteria": [');
+    expect(prompt).toContain('"selected": true');
+    expect(prompt).toContain('"existingEpicIssueNum": null');
+    expect(prompt).toContain('{ "findings": [], "epicGroups": [] }');
+    expect(prompt).toContain('set `selected: true` only when the grouping is concrete enough');
+  });
+
+  test('frames triage as bounded analysis instead of implementation work', () => {
+    const prompt = buildTriagePrompt({
+      issues: [{ number: 1, title: 'Issue', body: 'Body' }],
+      projectContext: 'src/commands/triage.ts handles issue cleanup.',
+    });
+
+    expect(prompt).toContain('analysis-only backlog triage task');
+    expect(prompt).toContain('not an implementation task');
+    expect(prompt).toContain('Do not modify files');
+    expect(prompt).toContain('Do not inspect repository files or run shell commands');
+    expect(prompt).toContain('Return exactly one JSON object');
+    expect(prompt).toContain('Check the provided codebase context');
+  });
+});
+
+describe('buildRoadmapPrompt', () => {
+  test('includes epic-aware scheduling instructions and split output schema', () => {
+    const prompt = buildRoadmapPrompt({
+      epics: [{
+        issueNum: 195,
+        title: 'Epic: Roadmap scheduling',
+        bodySummary: 'Schedule parent epics instead of every child issue.',
+        currentMilestone: null,
+        completedChildCount: 1,
+        totalChildCount: 2,
+        openChildCount: 1,
+        children: [
+          { issueNum: 188, title: 'Add epic issue template', bodySummary: 'Create the template.', checked: true },
+          { issueNum: 189, title: 'Inject parent context', bodySummary: 'Pass parent context.', checked: false },
+        ],
+      }],
+      issues: [
+        { number: 42, title: 'Standalone cleanup', body: 'Tidy a flat issue.', milestone: null },
+      ],
+      milestones: [],
+    });
+
+    expect(prompt).toContain('## Open Epics');
+    expect(prompt).toContain('Epic #195: Epic: Roadmap scheduling');
+    expect(prompt).toContain('Progress: 1/2 child issues complete; 1 open');
+    expect(prompt).toContain('1. [x] #188 Add epic issue template');
+    expect(prompt).toContain('2. [ ] #189 Inject parent context');
+    expect(prompt).toContain('## Open Standalone Issues');
+    expect(prompt).toContain('Issue #42: Standalone cleanup');
+    expect(prompt).toContain('second step in the epic-first workflow');
+    expect(prompt).toContain('triage creates or updates parent epics');
+    expect(prompt).toContain('run ships their child issues with parent epic context');
+    expect(prompt).toContain('schedule epics as the primary roadmap unit');
+    expect(prompt).toContain('"epicAssignments": [');
+    expect(prompt).toContain('"standaloneAssignments": [');
+    expect(prompt).toContain('Do not separately schedule child issues');
+  });
+
+  test('keeps the no-epic prompt focused on open issues', () => {
+    const prompt = buildRoadmapPrompt({
+      issues: [
+        { number: 3, title: 'Flat issue', body: 'Implement it', milestone: null },
+      ],
+      milestones: [],
+    });
+
+    expect(prompt).toContain('## Open Issues');
+    expect(prompt).toContain('Issue #3: Flat issue');
+    expect(prompt).not.toContain('## Open Epics');
+    expect(prompt).toContain('"standaloneAssignments": [');
   });
 });
 

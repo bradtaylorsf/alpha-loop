@@ -5,6 +5,7 @@ import { scanCommand } from './commands/scan.js';
 import { visionCommand } from './commands/vision.js';
 import { authCommand } from './commands/auth.js';
 import { syncCommand } from './commands/sync.js';
+import { normalizeScriptArgv } from './lib/cli-args.js';
 
 program
   .name('alpha-loop')
@@ -28,7 +29,7 @@ program
   .option('--skip-tests', 'Skip test execution')
   .option('--skip-review', 'Skip code review')
   .option('--skip-learn', 'Skip learning extraction')
-  .option('--milestone <name>', 'Only process issues in this milestone')
+  .option('--milestone <name>', 'Process the scheduled epic for this milestone, or flat issues if none')
   .option('--auto-merge', 'Auto-merge PRs to session branch')
   .option('--merge-to <branch>', 'Use existing branch instead of creating session branch')
   .option('--once', 'Process one issue and exit')
@@ -38,7 +39,7 @@ program
   .option('--fix', 'Auto-fix validation issues (reorder deps, comment on incomplete issues)')
   .option('--verbose', 'Stream live agent output to terminal')
   .option('--epic <n>', 'Process a specific epic by issue number (skips the picker)', parseInt)
-  .option('--skip-epic', 'Skip the epic picker, use flat/milestone flow')
+  .option('--skip-epic', 'Skip epic discovery, use flat/milestone flow')
   .option('--verify-only <n>', 'Run only the verification pass on an existing epic', parseInt)
   .action(async (options) => {
     const { runCommand } = await import('./commands/run.js');
@@ -118,8 +119,8 @@ program
 
 program
   .command('triage')
-  .description('Analyze and improve existing issues (staleness, clarity, size, duplicates)')
-  .option('--dry-run', 'Display findings without making changes')
+  .description('Analyze open issues, clean up backlog noise, and propose/apply epic groups')
+  .option('--dry-run', 'Display cleanup findings and epic proposals without making changes')
   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .action(async (options) => {
     const { triageCommand } = await import('./commands/triage.js');
@@ -128,8 +129,8 @@ program
 
 program
   .command('roadmap')
-  .description('Organize open issues into milestones using AI analysis')
-  .option('--dry-run', 'Display proposed roadmap without making changes')
+  .description('Schedule parent epics and standalone issues into milestones using AI analysis')
+  .option('--dry-run', 'Display proposed epic/standalone milestone assignments without making changes')
   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .action(async (options) => {
     const { roadmapCommand } = await import('./commands/roadmap.js');
@@ -331,4 +332,4 @@ evolveCmd
     await evolveRoutingCommand(options);
   });
 
-program.parse();
+program.parse(normalizeScriptArgv(process.argv));

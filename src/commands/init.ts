@@ -10,7 +10,7 @@
  * 6. Run vision (interactive, if TTY)
  * 7. Run scan (generates context + instructions)
  * 8. Sync templates to configured harnesses
- * 9. Install GitHub issue template
+ * 9. Install GitHub issue templates
  * 10. Commit generated files
  */
 import { existsSync, writeFileSync, readFileSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
@@ -42,7 +42,7 @@ type WizardAnswers = {
   maxIssues: number;
 };
 
-const ISSUE_TEMPLATE = `name: Agent-Ready Task
+const AGENT_READY_ISSUE_TEMPLATE = `name: Agent-Ready Task
 description: A well-structured task for the automated agent loop to implement
 title: ""
 labels: ["ready"]
@@ -111,6 +111,93 @@ body:
       description: Any background, constraints, or references the agent should know
 `;
 
+const EPIC_ISSUE_TEMPLATE = `name: Epic
+description: Group ordered agent-ready sub-issues into one deliverable
+title: "[Epic] "
+labels: ["epic"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template creates an Alpha Loop epic. The \`epic\` label is required and is applied automatically by this template.
+        If GitHub does not apply template labels in your repository, add \`epic\` manually before running \`alpha-loop run --epic <number>\`.
+        Put sub-issues in the exact order Alpha Loop should process them, one per task-list line: \`- [ ] #123 Short description\`.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: The outcome this epic should deliver
+      placeholder: Describe the end-to-end capability or user value this epic delivers...
+    validations:
+      required: true
+
+  - type: textarea
+    id: sub-issues
+    attributes:
+      label: Sub-issues
+      description: Ordered task-list of issue numbers. Alpha Loop processes these from top to bottom.
+      placeholder: |
+        - [ ] #123 First agent-ready task
+        - [ ] #124 Second agent-ready task
+        - [ ] #125 Third agent-ready task
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Epic-level criteria that define done across all sub-issues
+      placeholder: |
+        - [ ] End-to-end workflow is complete
+        - [ ] Required docs are updated
+        - [ ] All sub-issue acceptance criteria are satisfied
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: External blockers, prerequisite decisions, or upstream work
+      placeholder: |
+        - Depends on...
+        - Blocked by...
+
+  - type: textarea
+    id: sequencing-notes
+    attributes:
+      label: Sequencing Notes
+      description: Notes about ordering, coupling, or handoff between sub-issues
+      placeholder: Describe why the checklist order matters or where parallel work is safe...
+
+  - type: textarea
+    id: verification-expectations
+    attributes:
+      label: Verification Expectations
+      description: What the final epic verification pass should confirm
+      placeholder: |
+        - Verify merged PRs satisfy each sub-issue's acceptance criteria
+        - Confirm the integrated workflow works end to end
+        - Note any manual checks required before closing the epic
+    validations:
+      required: true
+`;
+
+const ISSUE_TEMPLATES = [
+  {
+    filename: 'agent-ready.yml',
+    description: 'agent-ready task',
+    content: AGENT_READY_ISSUE_TEMPLATE,
+  },
+  {
+    filename: 'epic.yml',
+    description: 'epic',
+    content: EPIC_ISSUE_TEMPLATE,
+  },
+] as const;
+
 /**
  * Build the full annotated `.alpha-loop.yaml` for a fresh project. Active
  * settings get values from the wizard/scan; everything else is commented out
@@ -136,7 +223,7 @@ function configTemplate(repo: string, scan: ProjectScan, answers: WizardAnswers)
 # Identifies the GitHub repo + project board the loop reads from.
 repo: ${repo}
 # project: 0           # GitHub Project number (from project URL: /projects/N)
-# milestone: ""        # Only process issues in this milestone (empty = all)
+# milestone: ""        # Process this milestone's scheduled epic, or ready flat issues if none
 
 # === Agent ==================================================================
 # The CLI agent that drives Plan/Build/Test/Review. Supported values:
@@ -807,16 +894,22 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     log.success(`Synced templates to ${harnesses.join(', ')}`);
   }
 
-  // --- Step 9: GitHub issue template ---
-  log.step('Step 9: Issue template');
+  // --- Step 9: GitHub issue templates ---
+  log.step('Step 9: Issue templates');
   const templateDir = join('.github', 'ISSUE_TEMPLATE');
-  const templateFile = join(templateDir, 'agent-ready.yml');
-  if (!existsSync(templateFile)) {
-    mkdirSync(templateDir, { recursive: true });
-    writeFileSync(templateFile, ISSUE_TEMPLATE);
-    log.success('Created GitHub issue template');
+  const createdTemplates: string[] = [];
+  for (const template of ISSUE_TEMPLATES) {
+    const templateFile = join(templateDir, template.filename);
+    if (!existsSync(templateFile)) {
+      mkdirSync(templateDir, { recursive: true });
+      writeFileSync(templateFile, template.content);
+      createdTemplates.push(template.description);
+    }
+  }
+  if (createdTemplates.length > 0) {
+    log.success(`Created GitHub issue template(s): ${createdTemplates.join(', ')}`);
   } else {
-    log.info('Issue template already exists');
+    log.info('Issue templates already exist');
   }
 
   // --- Step 10: GitHub labels ---

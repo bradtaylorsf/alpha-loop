@@ -26,17 +26,23 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'n
 import { join } from 'node:path';
 import {
   extractJsonFromResponse,
+  parseTriageAnalysisResponse,
+  normalizeTriageAnalysis,
   formatIssueTable,
   formatTriageFindings,
+  formatEpicGroupProposals,
+  formatRoadmapTable,
   normalizeMilestoneTitles,
   normalizePlanMilestones,
   normalizeRoadmapMilestones,
+  normalizeRoadmapPlan,
   readSeedFiles,
   buildPlanningContext,
   savePlanDraft,
   type PlannedIssue,
   type PlannedMilestone,
   type TriageFinding,
+  type ProposedEpicGroup,
   type PlanDraft,
 } from '../../src/lib/planning';
 import { getVisionContext } from '../../src/lib/vision';
@@ -117,6 +123,124 @@ That's all.`;
 
     const result = extractJsonFromResponse<{ correct: boolean }>(response);
     expect(result).toEqual({ correct: true });
+  });
+});
+
+// ── triage analysis parsing ─────────────────────────────────────────────────
+
+describe('parseTriageAnalysisResponse', () => {
+  const finding: TriageFinding = {
+    issueNum: 10,
+    title: 'Old bug',
+    category: 'stale',
+    reason: 'Already implemented',
+    action: 'close',
+    selected: true,
+  };
+
+  const epicGroup: ProposedEpicGroup = {
+    title: 'Epic: Settings reliability',
+    goal: 'Make settings saves reliable.',
+    rationale: 'The child issues all complete the same settings-save workflow.',
+    orderedChildIssueNumbers: [12, 13, 14],
+    acceptanceCriteria: [
+      '- [ ] Settings save successfully',
+      '- [ ] Users see error states',
+    ],
+    selected: true,
+  };
+
+  it('parses findings plus proposed epic groups from the new object shape', () => {
+    const response = JSON.stringify({
+      findings: [finding],
+      epicGroups: [epicGroup],
+    });
+
+    const result = parseTriageAnalysisResponse(response);
+
+    expect(result.findings).toEqual([finding]);
+    expect(result.epicGroups).toEqual([epicGroup]);
+  });
+
+  it('accepts legacy finding arrays without epic groups', () => {
+    const result = normalizeTriageAnalysis([finding]);
+
+    expect(result).toEqual({
+      findings: [finding],
+      epicGroups: [],
+    });
+  });
+
+  it('rejects malformed epic group fields', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [],
+      epicGroups: [{
+        title: '',
+        goal: 'Goal',
+        rationale: 'Rationale',
+        orderedChildIssueNumbers: [1, 2],
+        acceptanceCriteria: ['- [ ] Done'],
+        selected: true,
+      }],
+    })).toThrow('epicGroups[0].title');
+  });
+
+  it('rejects epic groups with fewer than two ordered children', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [],
+      epicGroups: [{
+        title: 'Epic title',
+        goal: 'Goal',
+        rationale: 'Rationale',
+        orderedChildIssueNumbers: [1],
+        acceptanceCriteria: ['- [ ] Done'],
+        selected: true,
+      }],
+    })).toThrow('at least two issue numbers');
+  });
+
+  it('normalizes missing epic group selected to false and null existing epic to undefined', () => {
+    const result = normalizeTriageAnalysis({
+      findings: [],
+      epicGroups: [{
+        title: 'Epic title',
+        goal: 'Goal',
+        rationale: 'Rationale',
+        orderedChildIssueNumbers: [1, 2],
+        acceptanceCriteria: ['- [ ] Done'],
+        existingEpicIssueNum: null,
+      }],
+    });
+
+    expect(result.epicGroups[0].selected).toBe(false);
+    expect(result.epicGroups[0].existingEpicIssueNum).toBeUndefined();
+  });
+
+  it('rejects malformed epic group selected and existing epic issue number fields', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [],
+      epicGroups: [{
+        title: 'Epic title',
+        goal: 'Goal',
+        rationale: 'Rationale',
+        orderedChildIssueNumbers: [1, 2],
+        acceptanceCriteria: ['- [ ] Done'],
+        selected: 'yes',
+      }],
+    })).toThrow('epicGroups[0].selected');
+
+    expect(() => normalizeTriageAnalysis({
+      findings: [],
+      epicGroups: [{
+        title: 'Epic title',
+        goal: 'Goal',
+        rationale: 'Rationale',
+        orderedChildIssueNumbers: [1, 2],
+        acceptanceCriteria: ['- [ ] Done'],
+        selected: true,
+        existingEpicIssueNum: 0,
+      }],
+    })).toThrow('epicGroups[0].existingEpicIssueNum');
   });
 });
 
@@ -231,6 +355,59 @@ describe('formatTriageFindings', () => {
     const output = formatTriageFindings(findings);
     expect(output).toContain('Too Large');
     expect(output).toContain('Part A, Part B, Part C');
+  });
+});
+
+// ── formatEpicGroupProposals ────────────────────────────────────────────────
+
+describe('formatEpicGroupProposals', () => {
+  it('renders proposed epic groups with ordered children and acceptance criteria', () => {
+    const groups: ProposedEpicGroup[] = [
+      {
+        title: 'Epic: Settings reliability',
+        goal: 'Make settings saves reliable.',
+        rationale: 'These issues form one settings-save deliverable.',
+        orderedChildIssueNumbers: [12, 13, 14],
+        acceptanceCriteria: [
+          '- [ ] Settings save successfully',
+          '- [ ] Regression coverage exists',
+        ],
+        selected: true,
+      },
+    ];
+
+    const output = formatEpicGroupProposals(groups);
+
+    expect(output).toContain('Proposed Epic Groups');
+    expect(output).toContain('[✓] 1. Epic: Settings reliability (creates new epic)');
+    expect(output).toContain('Epic: Settings reliability');
+    expect(output).toContain('Goal: Make settings saves reliable.');
+    expect(output).toContain('Rationale: These issues form one settings-save deliverable.');
+    expect(output).toContain('Children: #12 -> #13 -> #14');
+    expect(output).toContain('- [ ] Settings save successfully');
+  });
+
+  it('renders existing epic update targets', () => {
+    const groups: ProposedEpicGroup[] = [
+      {
+        title: 'Epic: Settings reliability',
+        goal: 'Make settings saves reliable.',
+        rationale: 'These issues form one settings-save deliverable.',
+        orderedChildIssueNumbers: [12, 13],
+        acceptanceCriteria: ['- [ ] Settings save successfully'],
+        selected: false,
+        existingEpicIssueNum: 99,
+      },
+    ];
+
+    const output = formatEpicGroupProposals(groups);
+
+    expect(output).toContain('[ ] 1. Epic: Settings reliability (updates epic #99)');
+  });
+
+  it('handles empty proposal lists', () => {
+    const output = formatEpicGroupProposals([]);
+    expect(output).toContain('No proposed epic groups');
   });
 });
 
@@ -444,5 +621,69 @@ describe('normalizeRoadmapMilestones', () => {
     const result = normalizeRoadmapMilestones(milestones, assignments);
     expect(result.milestones[0].title).toBe('001 - Core');
     expect(result.assignments[0].milestone).toBe('001 - Core');
+  });
+
+  it('normalizes milestone titles across epic and standalone assignments', () => {
+    const milestones: PlannedMilestone[] = [
+      { title: 'Core', description: '', dueOn: null, order: 1 },
+      { title: 'Follow-up', description: '', dueOn: null, order: 2 },
+    ];
+
+    const result = normalizeRoadmapMilestones(milestones, {
+      epicAssignments: [
+        { issueNum: 195, title: 'Epic', milestone: 'Core', currentMilestone: '', selected: true },
+      ],
+      standaloneAssignments: [
+        { issueNum: 15, title: 'Issue', milestone: 'Follow-up', currentMilestone: '', selected: true },
+      ],
+    });
+
+    expect(result.epicAssignments[0].milestone).toBe('001 - Core');
+    expect(result.standaloneAssignments[0].milestone).toBe('002 - Follow-up');
+  });
+});
+
+// ── normalizeRoadmapPlan ────────────────────────────────────────────────────
+
+describe('normalizeRoadmapPlan', () => {
+  it('keeps legacy flat assignments as standalone assignments', () => {
+    const result = normalizeRoadmapPlan({
+      milestones: [{ title: 'Core', description: '', dueOn: null, order: 1 }],
+      assignments: [
+        { issueNum: 5, title: 'Issue', milestone: 'Core', currentMilestone: '', selected: true },
+      ],
+    });
+
+    expect(result.epicAssignments).toEqual([]);
+    expect(result.standaloneAssignments[0]).toEqual(expect.objectContaining({
+      issueNum: 5,
+      milestone: '001 - Core',
+    }));
+  });
+});
+
+// ── formatRoadmapTable ──────────────────────────────────────────────────────
+
+describe('formatRoadmapTable', () => {
+  it('renders epic assignments separately from standalone issue assignments', () => {
+    const milestones: PlannedMilestone[] = [
+      { title: '001 - Core', description: '', dueOn: null, order: 1 },
+      { title: '002 - Follow-up', description: '', dueOn: null, order: 2 },
+    ];
+
+    const output = formatRoadmapTable(milestones, {
+      epicAssignments: [
+        { issueNum: 195, title: 'Epic: Scheduling', milestone: '001 - Core', currentMilestone: '', selected: true },
+      ],
+      standaloneAssignments: [
+        { issueNum: 15, title: 'User dashboard', milestone: '002 - Follow-up', currentMilestone: '', selected: true },
+      ],
+    }, ['001 - Core']);
+
+    expect(output).toContain('Epic Milestone Assignments (1)');
+    expect(output).toContain('Standalone Issue Milestone Assignments (1)');
+    expect(output.indexOf('#195  Epic: Scheduling')).toBeLessThan(output.indexOf('#15  User dashboard'));
+    expect(output).toContain('[EXISTS]');
+    expect(output).toContain('[NEW]');
   });
 });

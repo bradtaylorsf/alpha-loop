@@ -2,6 +2,8 @@ import {
   pollIssues, labelIssue, commentIssue, createPR, mergePR,
   createIssue, updateIssue, closeIssue, createMilestone,
   setIssueMilestone, listOpenIssues, addIssueToProject,
+  getIssueBody, updateEpicIssueBody, commentChildEpicBacklink,
+  listRoadmapEpics, listEpics,
 } from '../../src/lib/github';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -88,6 +90,16 @@ describe('pollIssues', () => {
     );
   });
 
+  test('keeps the ready label filter when polling a milestone', () => {
+    mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });
+
+    pollIssues('owner/repo', 'ready', 5, { milestone: 'Sprint 1' });
+
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('gh issue list --repo "owner/repo" --label "ready" --state open --milestone "Sprint 1"'),
+    );
+  });
+
   test('returns empty array on failure', () => {
     mockExec.mockReturnValue({ stdout: '', stderr: 'not found', exitCode: 1 });
 
@@ -123,11 +135,20 @@ describe('labelIssue', () => {
 
 describe('commentIssue', () => {
   test('posts comment via gh issue comment', () => {
-    commentIssue('owner/repo', 42, 'Build started');
+    const ok = commentIssue('owner/repo', 42, 'Build started');
 
+    expect(ok).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       expect.stringContaining('gh issue comment 42 --repo "owner/repo"'),
     );
+  });
+
+  test('returns false when comment command fails', () => {
+    mockExec.mockReturnValue({ stdout: '', stderr: 'error', exitCode: 1 });
+
+    const ok = commentIssue('owner/repo', 42, 'Build started');
+
+    expect(ok).toBe(false);
   });
 });
 
@@ -339,8 +360,9 @@ describe('createIssue', () => {
 
 describe('updateIssue', () => {
   test('updates title only', () => {
-    updateIssue('owner/repo', 42, { title: 'New title' });
+    const ok = updateIssue('owner/repo', 42, { title: 'New title' });
 
+    expect(ok).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       expect.stringContaining('gh issue edit 42 --repo "owner/repo" --title'),
     );
@@ -366,8 +388,173 @@ describe('updateIssue', () => {
     mockExec.mockReturnValue({ stdout: '', stderr: 'error', exitCode: 1 });
 
     const { log: mockLog } = require('../../src/lib/logger');
-    updateIssue('owner/repo', 42, { title: 'New title' });
+    const ok = updateIssue('owner/repo', 42, { title: 'New title' });
+    expect(ok).toBe(false);
     expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to update issue'));
+  });
+});
+
+describe('epic issue helpers', () => {
+  test('listEpics can filter open epics by milestone and normalizes milestone titles', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify([
+        {
+          number: 195,
+          title: 'Scheduled epic',
+          body: '- [ ] #201',
+          labels: [{ name: 'epic' }],
+          milestone: { title: 'Sprint 1' },
+        },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    const epics = listEpics('owner/repo', { milestone: 'Sprint 1' });
+
+    expect(epics).toEqual([{
+      number: 195,
+      title: 'Scheduled epic',
+      body: '- [ ] #201',
+      labels: ['epic'],
+      milestone: 'Sprint 1',
+    }]);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--milestone "Sprint 1"'),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--json number,title,body,labels,milestone'),
+    );
+  });
+
+  test('listRoadmapEpics returns open epic child counts and summaries from known issues', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify([
+        {
+          number: 195,
+          title: 'Epic: Roadmap scheduling',
+          body: [
+            '## Goal',
+            'Schedule parent epics.',
+            '',
+            '## Ordered Work',
+            '- [x] #3',
+            '- [ ] #7',
+          ].join('\n'),
+          labels: [{ name: 'epic' }],
+          milestone: { title: '001 - Core' },
+        },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    const epics = listRoadmapEpics('owner/repo', [
+      { number: 3, title: 'Set up database schema', body: 'Create tables for roadmap data.', labels: [] },
+      { number: 7, title: 'Create API endpoints', body: 'REST API for scheduling.', labels: [] },
+    ]);
+
+    expect(epics).toEqual([{
+      issueNum: 195,
+      title: 'Epic: Roadmap scheduling',
+      bodySummary: expect.stringContaining('Schedule parent epics.'),
+      currentMilestone: '001 - Core',
+      completedChildCount: 1,
+      totalChildCount: 2,
+      openChildCount: 1,
+      children: [
+        { issueNum: 3, title: 'Set up database schema', bodySummary: 'Create tables for roadmap data.', checked: true },
+        { issueNum: 7, title: 'Create API endpoints', bodySummary: 'REST API for scheduling.', checked: false },
+      ],
+    }]);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--label "epic"'),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--json number,title,body,labels,milestone'),
+    );
+  });
+
+  test('listRoadmapEpics fetches missing child issue details', () => {
+    mockExec
+      .mockReturnValueOnce({
+        stdout: JSON.stringify([
+          {
+            number: 195,
+            title: 'Epic: Roadmap scheduling',
+            body: '- [ ] #7',
+            labels: [{ name: 'epic' }],
+            milestone: null,
+          },
+        ]),
+        stderr: '',
+        exitCode: 0,
+      })
+      .mockReturnValueOnce({
+        stdout: JSON.stringify({
+          number: 7,
+          title: 'Create API endpoints',
+          body: 'REST API for scheduling.',
+          labels: [],
+          comments: [],
+        }),
+        stderr: '',
+        exitCode: 0,
+      });
+
+    const epics = listRoadmapEpics('owner/repo');
+
+    expect(epics[0].children[0]).toEqual({
+      issueNum: 7,
+      title: 'Create API endpoints',
+      bodySummary: 'REST API for scheduling.',
+      checked: false,
+    });
+    expect(mockExec).toHaveBeenCalledWith(
+      'gh issue view 7 --repo "owner/repo" --json number,title,body,labels,comments',
+    );
+  });
+
+  test('getIssueBody fetches a single issue body', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify({
+        number: 99,
+        title: 'Existing epic',
+        body: '## Ordered Work\n\n- [ ] #1',
+        labels: [{ name: 'epic' }],
+        comments: [],
+      }),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    const body = getIssueBody('owner/repo', 99);
+
+    expect(body).toBe('## Ordered Work\n\n- [ ] #1');
+    expect(mockExec).toHaveBeenCalledWith(
+      'gh issue view 99 --repo "owner/repo" --json number,title,body,labels,comments',
+    );
+  });
+
+  test('updateEpicIssueBody delegates to issue body update', () => {
+    const ok = updateEpicIssueBody('owner/repo', 99, 'new body');
+
+    expect(ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('gh issue edit 99 --repo "owner/repo"'),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--body-file'),
+    );
+  });
+
+  test('commentChildEpicBacklink posts a lightweight parent backlink', () => {
+    const ok = commentChildEpicBacklink('owner/repo', 12, 99);
+
+    expect(ok).toBe(true);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('gh issue comment 12 --repo "owner/repo"'),
+    );
   });
 });
 
@@ -465,7 +652,7 @@ describe('listOpenIssues', () => {
     mockExec.mockReturnValue({
       stdout: JSON.stringify([
         { number: 1, title: 'Bug', body: 'Fix it', labels: [{ name: 'bug' }] },
-        { number: 2, title: 'Feature', body: 'Add it', labels: [] },
+        { number: 2, title: 'Feature', body: 'Add it', labels: [], milestone: { title: 'Sprint 1' } },
       ]),
       stderr: '',
       exitCode: 0,
@@ -474,7 +661,17 @@ describe('listOpenIssues', () => {
     const issues = listOpenIssues('owner/repo');
     expect(issues).toHaveLength(2);
     expect(issues[0]).toEqual({ number: 1, title: 'Bug', body: 'Fix it', labels: ['bug'] });
-    expect(issues[1].labels).toEqual([]);
+    expect(issues[1]).toEqual({ number: 2, title: 'Feature', body: 'Add it', labels: [], milestone: 'Sprint 1' });
+  });
+
+  test('requests milestone data for roadmap issue context', () => {
+    mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });
+
+    listOpenIssues('owner/repo');
+
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--json number,title,body,labels,milestone'),
+    );
   });
 
   test('uses default limit of 100', () => {

@@ -23,6 +23,10 @@ jest.mock('../../src/lib/agent', () => ({
   buildOneShotCommand: jest.fn(() => 'claude -p --dangerously-skip-permissions --output-format text'),
 }));
 
+jest.mock('../../src/lib/prompts', () => ({
+  buildRoadmapPrompt: jest.fn(() => 'ROADMAP PROMPT'),
+}));
+
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(() => ({ stdout: '', stderr: '', exitCode: 0 })),
 }));
@@ -54,7 +58,7 @@ jest.mock('../../src/lib/rate-limit', () => ({
 jest.mock('../../src/lib/planning', () => ({
   extractJsonFromResponse: jest.fn(),
   formatRoadmapTable: jest.fn(() => 'FORMATTED ROADMAP'),
-  normalizeRoadmapMilestones: jest.requireActual('../../src/lib/planning').normalizeRoadmapMilestones,
+  normalizeRoadmapPlan: jest.requireActual('../../src/lib/planning').normalizeRoadmapPlan,
   buildPlanningContext: jest.fn(() => ({
     visionContext: null,
     projectContext: null,
@@ -64,6 +68,7 @@ jest.mock('../../src/lib/planning', () => ({
 
 jest.mock('../../src/lib/github', () => ({
   listOpenIssues: jest.fn(() => []),
+  listRoadmapEpics: jest.fn(() => []),
   listMilestones: jest.fn(() => []),
   createMilestone: jest.fn(() => 0),
   setIssueMilestone: jest.fn(),
@@ -73,9 +78,11 @@ jest.mock('../../src/lib/github', () => ({
 import { checkbox, confirm } from '@inquirer/prompts';
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
+import { buildRoadmapPrompt } from '../../src/lib/prompts';
 import { extractJsonFromResponse } from '../../src/lib/planning';
 import {
   listOpenIssues,
+  listRoadmapEpics,
   listMilestones,
   createMilestone,
   setIssueMilestone,
@@ -85,8 +92,10 @@ import {
 const mockCheckbox = checkbox as jest.MockedFunction<typeof checkbox>;
 const mockConfirm = confirm as jest.MockedFunction<typeof confirm>;
 const mockExec = exec as jest.MockedFunction<typeof exec>;
+const mockBuildRoadmapPrompt = buildRoadmapPrompt as jest.MockedFunction<typeof buildRoadmapPrompt>;
 const mockExtractJson = extractJsonFromResponse as jest.MockedFunction<typeof extractJsonFromResponse>;
 const mockListOpenIssues = listOpenIssues as jest.MockedFunction<typeof listOpenIssues>;
+const mockListRoadmapEpics = listRoadmapEpics as jest.MockedFunction<typeof listRoadmapEpics>;
 const mockListMilestones = listMilestones as jest.MockedFunction<typeof listMilestones>;
 const mockCreateMilestone = createMilestone as jest.MockedFunction<typeof createMilestone>;
 const mockSetIssueMilestone = setIssueMilestone as jest.MockedFunction<typeof setIssueMilestone>;
@@ -110,12 +119,40 @@ const SAMPLE_AGENT_RESPONSE = {
   ],
 };
 
+const SAMPLE_EPIC_CONTEXT = [
+  {
+    issueNum: 195,
+    title: 'Epic: Scheduling',
+    bodySummary: 'Ship milestone scheduling for epics.',
+    currentMilestone: null,
+    completedChildCount: 1,
+    totalChildCount: 2,
+    openChildCount: 1,
+    children: [
+      { issueNum: 3, title: 'Set up database schema', bodySummary: 'Create tables', checked: true },
+      { issueNum: 7, title: 'Create API endpoints', bodySummary: 'REST API', checked: false },
+    ],
+  },
+];
+
+const SAMPLE_EPIC_RESPONSE = {
+  milestones: [
+    { title: 'Epic Delivery', description: 'Grouped epic work', dueOn: null, order: 1 },
+  ],
+  epicAssignments: [
+    { issueNum: 195, title: 'Epic: Scheduling', milestone: 'Epic Delivery', currentMilestone: '', selected: true },
+  ],
+  standaloneAssignments: [],
+};
+
 describe('roadmap command', () => {
   let consoleSpy: jest.SpyInstance;
 
   beforeEach(() => {
     consoleSpy = jest.spyOn(console, 'log').mockImplementation();
     jest.clearAllMocks();
+    mockBuildRoadmapPrompt.mockReturnValue('ROADMAP PROMPT');
+    mockListRoadmapEpics.mockReturnValue([]);
   });
 
   afterEach(() => {
@@ -135,6 +172,7 @@ describe('roadmap command', () => {
 
   it('creates milestones and assigns issues on happy path', async () => {
     mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListRoadmapEpics.mockReturnValue([]);
     mockListMilestones.mockReturnValue([]);
     mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
     mockExtractJson.mockReturnValue(SAMPLE_AGENT_RESPONSE);
@@ -145,6 +183,16 @@ describe('roadmap command', () => {
     mockConfirm.mockResolvedValueOnce(true);
 
     await roadmapCommand({});
+
+    expect(mockListRoadmapEpics).toHaveBeenCalledWith('owner/repo', SAMPLE_ISSUES);
+    expect(mockBuildRoadmapPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      epics: [],
+      issues: expect.arrayContaining([
+        expect.objectContaining({ number: 3 }),
+        expect.objectContaining({ number: 7 }),
+        expect.objectContaining({ number: 15 }),
+      ]),
+    }));
 
     // Should create both milestones
     expect(mockCreateMilestone).toHaveBeenCalledTimes(2);
@@ -158,6 +206,72 @@ describe('roadmap command', () => {
     expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, '002 - v1.1 Features');
 
     expect(log.success).toHaveBeenCalledWith(expect.stringContaining('milestone'));
+  });
+
+  it('assigns milestones to parent epic issues for epic-only roadmap output', async () => {
+    mockListOpenIssues.mockReturnValue([
+      { number: 195, title: 'Epic: Scheduling', body: 'Epic body', labels: ['epic'] },
+      { number: 3, title: 'Set up database schema', body: 'Create tables', labels: [] },
+      { number: 7, title: 'Create API endpoints', body: 'REST API', labels: [] },
+    ]);
+    mockListRoadmapEpics.mockReturnValue(SAMPLE_EPIC_CONTEXT);
+    mockListMilestones.mockReturnValue([]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(SAMPLE_EPIC_RESPONSE);
+    mockCreateMilestone.mockReturnValueOnce(1);
+
+    await roadmapCommand({ yes: true });
+
+    expect(mockBuildRoadmapPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      epics: SAMPLE_EPIC_CONTEXT,
+      issues: [],
+    }));
+    expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', '001 - Epic Delivery', 'Grouped epic work', undefined);
+    expect(mockSetIssueMilestone).toHaveBeenCalledTimes(1);
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 195, '001 - Epic Delivery');
+    expect(mockSetIssueMilestone).not.toHaveBeenCalledWith('owner/repo', 3, expect.any(String));
+    expect(mockSetIssueMilestone).not.toHaveBeenCalledWith('owner/repo', 7, expect.any(String));
+  });
+
+  it('filters epic children from standalone scheduling and applies mixed assignments', async () => {
+    mockListOpenIssues.mockReturnValue([
+      { number: 195, title: 'Epic: Scheduling', body: 'Epic body', labels: ['epic'] },
+      { number: 3, title: 'Set up database schema', body: 'Create tables', labels: [] },
+      { number: 7, title: 'Create API endpoints', body: 'REST API', labels: [] },
+      { number: 15, title: 'User dashboard', body: 'Build dashboard UI', labels: [] },
+    ]);
+    mockListRoadmapEpics.mockReturnValue(SAMPLE_EPIC_CONTEXT);
+    mockListMilestones.mockReturnValue([
+      { number: 4, title: '001 - Existing Core', description: 'Core', openIssues: 0, closedIssues: 0, dueOn: null, state: 'open' },
+    ]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue({
+      milestones: [
+        { title: '001 - Existing Core', description: 'Core', dueOn: null, order: 1 },
+        { title: 'New Follow-up', description: 'Standalone work', dueOn: null, order: 2 },
+      ],
+      epicAssignments: [
+        { issueNum: 195, title: 'Epic: Scheduling', milestone: '001 - Existing Core', currentMilestone: '', selected: true },
+      ],
+      standaloneAssignments: [
+        { issueNum: 15, title: 'User dashboard', milestone: 'New Follow-up', currentMilestone: '', selected: true },
+      ],
+    });
+    mockCreateMilestone.mockReturnValueOnce(9);
+
+    await roadmapCommand({ yes: true });
+
+    expect(mockBuildRoadmapPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      issues: [
+        expect.objectContaining({ number: 15, title: 'User dashboard' }),
+      ],
+      epics: SAMPLE_EPIC_CONTEXT,
+    }));
+    expect(mockCreateMilestone).toHaveBeenCalledTimes(1);
+    expect(mockCreateMilestone).toHaveBeenCalledWith('owner/repo', '002 - New Follow-up', 'Standalone work', undefined);
+    expect(mockSetIssueMilestone).toHaveBeenCalledTimes(2);
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 195, '001 - Existing Core');
+    expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, '002 - New Follow-up');
   });
 
   it('does not recreate existing milestones', async () => {

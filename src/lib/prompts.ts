@@ -3,12 +3,15 @@
  * Pure string template functions with no side effects.
  */
 
+import type { RoadmapEpicContext } from './github.js';
+
 export type ImplementPromptOptions = {
   issueNum: number;
   title: string;
   body: string;
   comments?: Array<{ author: string; body: string; createdAt: string }>;
   planContent?: string;
+  epicContext?: EpicPromptContext;
   visionContext?: string;
   projectContext?: string;
   previousResult?: string;
@@ -21,7 +24,20 @@ export type ReviewPromptOptions = {
   body: string;
   comments?: Array<{ author: string; body: string; createdAt: string }>;
   baseBranch: string;
+  epicContext?: EpicPromptContext;
   visionContext?: string;
+};
+
+export type EpicPromptContext = {
+  number: number;
+  title: string;
+  bodySummary: string;
+  acceptanceCriteria: string[];
+  subIssues: Array<{
+    issueNum: number;
+    title?: string;
+    checked: boolean;
+  }>;
 };
 
 /** A single issue within a batch. */
@@ -34,11 +50,13 @@ export type BatchIssue = {
 
 export type BatchPlanPromptOptions = {
   issues: BatchIssue[];
+  epicContext?: EpicPromptContext;
 };
 
 export type BatchImplementPromptOptions = {
   issues: BatchIssue[];
   planContent?: string;
+  epicContext?: EpicPromptContext;
   visionContext?: string;
   projectContext?: string;
   learningContext?: string;
@@ -47,7 +65,15 @@ export type BatchImplementPromptOptions = {
 export type BatchReviewPromptOptions = {
   issues: BatchIssue[];
   baseBranch: string;
+  epicContext?: EpicPromptContext;
   visionContext?: string;
+};
+
+export type IssuePlanPromptOptions = {
+  issueNum: number;
+  title: string;
+  body: string;
+  epicContext?: EpicPromptContext;
 };
 
 export type LearnPromptOptions = {
@@ -63,17 +89,127 @@ export type LearnPromptOptions = {
   body?: string;
 };
 
+function normalizeBulletText(text: string): string {
+  return text.trim().replace(/^[-*]\s+/, '').trim();
+}
+
+export function formatEpicPromptContext(context: EpicPromptContext): string {
+  const lines: string[] = [
+    '## Parent Epic Context',
+    '',
+    `Epic #${context.number}: ${context.title}`,
+    '',
+    '### Goal / Body Summary',
+    context.bodySummary.trim() || '(no parent epic body summary available)',
+    '',
+    '### Acceptance Criteria',
+  ];
+
+  if (context.acceptanceCriteria.length > 0) {
+    for (const criterion of context.acceptanceCriteria) {
+      lines.push(`- ${normalizeBulletText(criterion)}`);
+    }
+  } else {
+    lines.push('- (none identified in parent epic body)');
+  }
+
+  lines.push('', '### Ordered Sub-Issue Checklist');
+  if (context.subIssues.length > 0) {
+    context.subIssues.forEach((issue, index) => {
+      const status = issue.checked ? '[x]' : '[ ]';
+      const title = issue.title ? ` ${issue.title}` : '';
+      lines.push(`${index + 1}. ${status} #${issue.issueNum}${title}`);
+    });
+  } else {
+    lines.push('(no sub-issues found)');
+  }
+
+  return lines.join('\n');
+}
+
+function appendEpicContextSection(
+  sections: string[],
+  epicContext: EpicPromptContext | undefined,
+  guidance?: string[],
+): void {
+  if (!epicContext) return;
+  sections.push('', '', formatEpicPromptContext(epicContext));
+  if (guidance && guidance.length > 0) {
+    sections.push('', '### Epic Scope Guidance', ...guidance.map((line) => `- ${line}`));
+  }
+}
+
+/**
+ * Build the planning prompt for a single issue.
+ */
+export function buildIssuePlanPrompt(options: IssuePlanPromptOptions): string {
+  const { issueNum, title, body, epicContext } = options;
+
+  const sections: string[] = [
+    'Analyze this GitHub issue and produce a structured implementation plan.',
+    '',
+    `Issue #${issueNum}: ${title}`,
+    '',
+    body,
+  ];
+
+  appendEpicContextSection(sections, epicContext, [
+    `Plan only the work needed for issue #${issueNum}; use sibling items to understand dependencies and integration boundaries.`,
+  ]);
+
+  sections.push(
+    '',
+    '',
+    `Write a JSON file to: plan-issue-${issueNum}.json`,
+    '',
+    'The file must contain ONLY valid JSON with this exact schema:',
+    '',
+    '{',
+    '  "summary": "One-line description of what needs to be done",',
+    '  "files": ["src/path/to/file.ts", "..."],',
+    '  "implementation": "Concise step-by-step plan. What to create, modify, wire up. No issue restatement.",',
+    '  "testing": {',
+    '    "needed": true,',
+    '    "reason": "Why tests are or aren\'t needed for this change"',
+    '  },',
+    '  "verification": {',
+    '    "needed": false,',
+    '    "method": "playwright",',
+    '    "command": "optional shell command for script/cli/boot/api methods",',
+    '    "instructions": "If needed: specific steps to verify the feature. If not needed: omit this field.",',
+    '    "reason": "Why verification is or isn\'t needed"',
+    '  }',
+    '}',
+    '',
+    'Rules:',
+    '- testing.needed: true if ANY code changes could affect behavior. false only for docs, config, or comments.',
+    '- verification.needed: true if the issue changes behavior that can be validated at runtime.',
+    '- verification.method: "playwright" for UI changes, "script" for validation scripts, "boot" for service startup checks, "cli" for CLI testing, "api" for API endpoint testing.',
+    '- verification.command: required for script/cli/boot/api methods - the shell command to run. Exit code 0 = pass.',
+    '- verification.instructions: for playwright method, list the exact playwright-cli commands to verify.',
+    '- implementation: be concise and actionable. List files to modify and what to change in each.',
+    '- Write ONLY the JSON file. Do not create any other files or make any code changes.',
+  );
+
+  return sections.join('\n');
+}
+
 /**
  * Build the implementation prompt for an AI agent.
  */
 export function buildImplementPrompt(options: ImplementPromptOptions): string {
-  const { issueNum, title, body, comments, planContent, visionContext, projectContext, previousResult, learningContext } = options;
+  const { issueNum, title, body, comments, planContent, epicContext, visionContext, projectContext, previousResult, learningContext } = options;
 
   const sections: string[] = [
     `Implement GitHub issue #${issueNum}: ${title}`,
     '',
     body,
   ];
+
+  appendEpicContextSection(sections, epicContext, [
+    `Keep the implementation narrowly scoped to issue #${issueNum}. Do not implement sibling checklist items unless this issue explicitly requires shared integration work.`,
+    'Preserve contracts that sibling sub-issues depend on, and call out any integration assumptions in your final notes.',
+  ]);
 
   if (comments && comments.length > 0) {
     sections.push('', '', '## Discussion (issue comments)');
@@ -131,7 +267,7 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
  * The agent writes one plan JSON per issue.
  */
 export function buildBatchPlanPrompt(options: BatchPlanPromptOptions): string {
-  const { issues } = options;
+  const { issues, epicContext } = options;
 
   const issueList = issues.map((i) => {
     let entry = `### Issue #${i.issueNum}: ${i.title}\n${i.body || '(no description)'}`;
@@ -145,8 +281,11 @@ export function buildBatchPlanPrompt(options: BatchPlanPromptOptions): string {
   }).join('\n\n');
 
   const fileList = issues.map((i) => `plan-issue-${i.issueNum}.json`).join(', ');
+  const epicSection = epicContext
+    ? `\n\n${formatEpicPromptContext(epicContext)}\n\n### Epic Scope Guidance\n- Plan only the listed batch issues. Use unchecked sibling items to identify integration boundaries, not to expand this batch scope.`
+    : '';
 
-  return `Analyze the following GitHub issues and produce a structured implementation plan for EACH one.
+  return `Analyze the following GitHub issues and produce a structured implementation plan for EACH one.${epicSection}
 
 ## Issues to Plan
 
@@ -194,7 +333,7 @@ Each file must contain ONLY valid JSON with this exact schema:
  * Build a batch implementation prompt — implements all issues in a single agent call.
  */
 export function buildBatchImplementPrompt(options: BatchImplementPromptOptions): string {
-  const { issues, planContent, visionContext, projectContext, learningContext } = options;
+  const { issues, planContent, epicContext, visionContext, projectContext, learningContext } = options;
 
   const issueList = issues.map((i) => {
     let entry = `### Issue #${i.issueNum}: ${i.title}\n${i.body || '(no description)'}`;
@@ -216,6 +355,11 @@ export function buildBatchImplementPrompt(options: BatchImplementPromptOptions):
     '',
     issueList,
   ];
+
+  appendEpicContextSection(sections, epicContext, [
+    'Keep this batch limited to the listed issues. Leave other sibling checklist items for their own runs unless a shared integration contract must be preserved.',
+    'When touching shared code, maintain compatibility with sibling work described in the epic checklist.',
+  ]);
 
   if (planContent) {
     sections.push('', '', '## Implementation Plans', planContent);
@@ -263,7 +407,7 @@ export function buildBatchImplementPrompt(options: BatchImplementPromptOptions):
  * Build a batch review prompt — reviews all issues' changes in a single agent call.
  */
 export function buildBatchReviewPrompt(options: BatchReviewPromptOptions): string {
-  const { issues, baseBranch, visionContext } = options;
+  const { issues, baseBranch, epicContext, visionContext } = options;
 
   const issueList = issues.map((i) => {
     let entry = `### Issue #${i.issueNum}: ${i.title}\n${i.body || '(no description)'}`;
@@ -285,6 +429,11 @@ export function buildBatchReviewPrompt(options: BatchReviewPromptOptions): strin
     '',
     issueList,
   ];
+
+  appendEpicContextSection(sections, epicContext, [
+    'Use the epic context to judge integration-sensitive work across siblings.',
+    'Do not block this batch for unrelated sibling checklist items that were intentionally left for separate runs.',
+  ]);
 
   if (visionContext) {
     sections.push('', '', '## Product Vision (guide your review decisions)', visionContext);
@@ -365,7 +514,7 @@ export function buildBatchReviewPrompt(options: BatchReviewPromptOptions): strin
  * Build the code review prompt for an AI agent.
  */
 export function buildReviewPrompt(options: ReviewPromptOptions): string {
-  const { issueNum, title, body, comments, baseBranch, visionContext } = options;
+  const { issueNum, title, body, comments, baseBranch, epicContext, visionContext } = options;
 
   const sections: string[] = [
     `Review the code changes for issue #${issueNum}: ${title}`,
@@ -375,6 +524,11 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     'Original requirements:',
     body,
   ];
+
+  appendEpicContextSection(sections, epicContext, [
+    'Use the epic context to judge whether this child issue preserves integration with sibling work.',
+    `Do not fail issue #${issueNum} for parent checklist items that belong to other sub-issues unless this change breaks their integration contract.`,
+  ]);
 
   if (comments && comments.length > 0) {
     sections.push('', 'Discussion (issue comments):');
@@ -472,6 +626,7 @@ export type SessionReviewPromptOptions = {
     testsPassing: boolean;
   }>;
   includeSecurityScan: boolean;
+  epicContext?: EpicPromptContext;
   visionContext?: string;
 };
 
@@ -481,7 +636,7 @@ export type SessionReviewPromptOptions = {
  * cross-issue integration problems that per-issue reviews miss.
  */
 export function buildSessionReviewPrompt(options: SessionReviewPromptOptions): string {
-  const { sessionName, baseBranch, issuesSummary, includeSecurityScan, visionContext } = options;
+  const { sessionName, baseBranch, issuesSummary, includeSecurityScan, epicContext, visionContext } = options;
 
   const issuesList = issuesSummary.map((i) =>
     `- #${i.issueNum}: ${i.title} — ${i.status}${i.testsPassing ? '' : ' (tests failing)'}`,
@@ -523,6 +678,10 @@ export function buildSessionReviewPrompt(options: SessionReviewPromptOptions): s
     '- Dead code (functions, imports, variables) that no remaining code references',
     '- Missing error handling at integration boundaries',
   ];
+
+  appendEpicContextSection(sections, epicContext, [
+    'Use this parent epic context to catch cross-issue integration problems across the processed sub-issues.',
+  ]);
 
   sections.push(
     '',
@@ -687,14 +846,20 @@ Keep it concise. Only include genuinely ambiguous items, not obvious implementat
 }
 
 export type TriagePromptOptions = {
-  issues: Array<{ number: number; title: string; body: string; comments?: Array<{ author: string; body: string; createdAt: string }> }>;
+  issues: Array<{
+    number: number;
+    title: string;
+    body: string;
+    labels?: string[];
+    comments?: Array<{ author: string; body: string; createdAt: string }>;
+  }>;
   projectContext?: string | null;
   visionContext?: string | null;
 };
 
 /**
  * Build the triage analysis prompt for an AI agent.
- * Instructs the agent to categorize open issues and output TriageFinding[] JSON.
+ * Instructs the agent to categorize open issues and output TriageAnalysis JSON.
  */
 export function buildTriagePrompt(options: TriagePromptOptions): string {
   const { issues, projectContext, visionContext } = options;
@@ -705,7 +870,8 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     : '';
 
   const issueList = capped.map((i) => {
-    let entry = `### Issue #${i.number}: ${i.title}\n${i.body || '(no description)'}`;
+    const labels = i.labels && i.labels.length > 0 ? i.labels.join(', ') : '(none)';
+    let entry = `### Issue #${i.number}: ${i.title}\nLabels: ${labels}\n\n${i.body || '(no description)'}`;
     if (i.comments && i.comments.length > 0) {
       const commentLines = i.comments.map((c) =>
         `- **@${c.author}** (${c.createdAt}): ${c.body.length > 200 ? c.body.slice(0, 200) + '...' : c.body}`
@@ -717,6 +883,10 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
 
   const sections: string[] = [
     'You are a project triage assistant. Analyze the following open GitHub issues and categorize any that need attention.',
+    '',
+    'This is an analysis-only backlog triage task, not an implementation task. Do not modify files, create commits, run tests, or start work on any issue. Use the issue text, comments, product vision, and technical context included in this prompt as the codebase context. Do not inspect repository files or run shell commands unless a specific stale/duplicate determination cannot be made from the provided context.',
+    '',
+    'Return exactly one JSON object as your final answer.',
     '',
     '## Open Issues',
     issueList,
@@ -750,7 +920,15 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     '- For `too_large` issues: include `splitInto` array of title strings for the sub-issues',
     '- For `duplicate` issues: include `duplicateOf` with the canonical issue number',
     '',
-    'Check the codebase context for staleness signals (referenced files deleted, features already implemented).',
+    'Also identify candidate epic groups among the open issues when multiple existing issues form one coherent deliverable.',
+    'This is the first step in the recommended epic-first workflow: triage groups related issues under parent epics, roadmap schedules those parent epics into milestones, and run processes each child issue with parent epic context.',
+    'An epic group should represent a single outcome with a clear goal, concrete rationale, and an ordered set of existing child issue numbers.',
+    'Use each issue\'s Labels line to identify existing epics. Do NOT propose nested epics: do not include issues labeled `epic`, issues that are already parent epics, umbrella planning issues, or issues whose purpose is to collect child issues.',
+    'When an existing open issue labeled `epic` already represents the parent outcome, set `existingEpicIssueNum` to that issue number and add only missing child refs to it instead of proposing a duplicate parent. Otherwise omit `existingEpicIssueNum` or set it to null.',
+    'Do NOT group unrelated issues merely because they share a milestone, label, component, or broad theme; the rationale must cite a concrete shared deliverable, dependency chain, or acceptance goal.',
+    'Epic groups must use existing open issue numbers only. Do not list newly split sub-issue titles from `too_large` findings as epic children.',
+    '',
+    'Check the provided codebase context for staleness signals (referenced files deleted, features already implemented).',
     'When rewriting unclear issues, use markdown with acceptance criteria in checkbox format.',
     'When enriching issues, analyze the codebase context to identify affected files and areas, and validate that the reported issue is plausible.',
     '',
@@ -760,61 +938,83 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     'The example below uses fences for illustration only — your output must be raw JSON with no fences:',
     '',
     '```json',
-    '[',
-    '  {',
-    '    "issueNum": 42,',
-    '    "title": "Issue title",',
-    '    "category": "stale",',
-    '    "reason": "This feature was already implemented in PR #30",',
-    '    "action": "close",',
-    '    "selected": true',
-    '  },',
-    '  {',
-    '    "issueNum": 43,',
-    '    "title": "Vague issue title",',
-    '    "category": "unclear",',
-    '    "reason": "No acceptance criteria, scope is ambiguous",',
-    '    "action": "rewrite",',
-    '    "rewrittenBody": "## Summary\\n...\\n\\n## Acceptance Criteria\\n- [ ] Criterion 1\\n- [ ] Criterion 2",',
-    '    "selected": true',
-    '  },',
-    '  {',
-    '    "issueNum": 44,',
-    '    "title": "Large issue title",',
-    '    "category": "too_large",',
-    '    "reason": "Covers 3 independent features",',
-    '    "action": "split",',
-    '    "splitInto": ["Sub-issue A", "Sub-issue B", "Sub-issue C"],',
-    '    "selected": true',
-    '  },',
-    '  {',
-    '    "issueNum": 45,',
-    '    "title": "Duplicate issue",',
-    '    "category": "duplicate",',
-    '    "reason": "Same scope as #42",',
-    '    "action": "merge",',
-    '    "duplicateOf": 42,',
-    '    "selected": true',
-    '  },',
-    '  {',
-    '    "issueNum": 46,',
-    '    "title": "Button broken on settings page",',
-    '    "category": "enrich",',
-    '    "reason": "Raw support ticket with minimal detail — needs affected areas, reproduction steps, and acceptance criteria",',
-    '    "action": "enrich",',
-    '    "enrichedBody": "<details><summary>Original description</summary>\\n\\nButton broken on settings page\\n\\n</details>\\n\\n## Summary\\nThe save button on the settings page is non-functional...\\n\\n## Affected Areas\\n- `src/components/Settings.tsx`\\n\\n## Acceptance Criteria\\n- [ ] Save button triggers form submission\\n- [ ] Success feedback shown to user\\n\\n## Reproduction Steps\\n1. Navigate to Settings\\n2. Click Save\\n3. Observe no response",',
-    '    "selected": true',
-    '  }',
-    ']',
+    '{',
+    '  "findings": [',
+    '    {',
+    '      "issueNum": 42,',
+    '      "title": "Issue title",',
+    '      "category": "stale",',
+    '      "reason": "This feature was already implemented in PR #30",',
+    '      "action": "close",',
+    '      "selected": true',
+    '    },',
+    '    {',
+    '      "issueNum": 43,',
+    '      "title": "Vague issue title",',
+    '      "category": "unclear",',
+    '      "reason": "No acceptance criteria, scope is ambiguous",',
+    '      "action": "rewrite",',
+    '      "rewrittenBody": "## Summary\\n...\\n\\n## Acceptance Criteria\\n- [ ] Criterion 1\\n- [ ] Criterion 2",',
+    '      "selected": true',
+    '    },',
+    '    {',
+    '      "issueNum": 44,',
+    '      "title": "Large issue title",',
+    '      "category": "too_large",',
+    '      "reason": "Covers 3 independent features",',
+    '      "action": "split",',
+    '      "splitInto": ["Sub-issue A", "Sub-issue B", "Sub-issue C"],',
+    '      "selected": true',
+    '    },',
+    '    {',
+    '      "issueNum": 45,',
+    '      "title": "Duplicate issue",',
+    '      "category": "duplicate",',
+    '      "reason": "Same scope as #42",',
+    '      "action": "merge",',
+    '      "duplicateOf": 42,',
+    '      "selected": true',
+    '    },',
+    '    {',
+    '      "issueNum": 46,',
+    '      "title": "Button broken on settings page",',
+    '      "category": "enrich",',
+    '      "reason": "Raw support ticket with minimal detail — needs affected areas, reproduction steps, and acceptance criteria",',
+    '      "action": "enrich",',
+    '      "enrichedBody": "<details><summary>Original description</summary>\\n\\nButton broken on settings page\\n\\n</details>\\n\\n## Summary\\nThe save button on the settings page is non-functional...\\n\\n## Affected Areas\\n- `src/components/Settings.tsx`\\n\\n## Acceptance Criteria\\n- [ ] Save button triggers form submission\\n- [ ] Success feedback shown to user\\n\\n## Reproduction Steps\\n1. Navigate to Settings\\n2. Click Save\\n3. Observe no response",',
+    '      "selected": true',
+    '    }',
+    '  ],',
+    '  "epicGroups": [',
+    '    {',
+    '      "title": "Epic: Settings reliability",',
+    '      "goal": "Make settings changes save reliably and expose clear user feedback.",',
+    '      "rationale": "Issues #46, #47, and #48 all describe dependent parts of the same settings-save workflow; completing them together creates one coherent deliverable.",',
+    '      "orderedChildIssueNumbers": [46, 47, 48],',
+    '      "acceptanceCriteria": [',
+    '        "- [ ] Settings saves persist successfully",',
+    '        "- [ ] Users see success and failure states",',
+    '        "- [ ] Regression coverage exists for the settings-save flow"',
+    '      ],',
+    '      "selected": true,',
+    '      "existingEpicIssueNum": null',
+    '    }',
+    '  ]',
+    '}',
     '```',
     '',
     '## Rules',
     '- Only include issues that need action (skip "ok" issues)',
-    '- If ALL issues are fine, output an empty array: `[]`',
+    '- Always output an object with `findings` and `epicGroups` arrays',
+    '- If ALL issues are fine, output `{ "findings": [], "epicGroups": [] }`',
+    '- If there are cleanup findings but no epic groups, set `epicGroups: []`',
+    '- If there are epic groups but no cleanup findings, set `findings: []`',
     '- Set `selected: true` for all findings (user will deselect if needed)',
+    '- For epic groups, set `selected: true` only when the grouping is concrete enough to apply automatically with `--yes`; set `selected: false` for speculative groupings that need human review',
     '- action mapping: stale→close, unclear→rewrite, too_large→split, duplicate→merge, enrich→enrich',
     '- Be conservative — only flag issues when you are confident about the categorization',
     '- Prefer `enrich` over `unclear` for issues that have some useful info (e.g., support tickets, bug reports) but need technical detail added',
+    '- For epic groups, include at least two ordered child issue numbers, at least one acceptance criterion, `selected`, and `existingEpicIssueNum` when updating an existing open epic',
   );
 
   return sections.join('\n');
@@ -822,6 +1022,7 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
 
 export type RoadmapPromptOptions = {
   issues: Array<{ number: number; title: string; body: string; milestone: string | null }>;
+  epics?: RoadmapEpicContext[];
   milestones: Array<{ title: string; description: string; dueOn: string | null }>;
   projectContext?: string | null;
   visionContext?: string | null;
@@ -832,7 +1033,7 @@ export type RoadmapPromptOptions = {
  * Instructs the agent to suggest milestone groupings for open issues.
  */
 export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
-  const { issues, milestones, projectContext, visionContext } = options;
+  const { issues, epics = [], milestones, projectContext, visionContext } = options;
 
   const capped = issues.slice(0, 100);
   const cappedWarning = issues.length > 100
@@ -845,6 +1046,27 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     return `### Issue #${i.number}: ${i.title}${ms}\n${body || '(no description)'}`;
   }).join('\n\n');
 
+  const epicList = epics.length > 0
+    ? epics.map((epic) => {
+        const ms = epic.currentMilestone ? ` [milestone: ${epic.currentMilestone}]` : ' [unassigned]';
+        const children = epic.children.length > 0
+          ? epic.children.map((child, index) => {
+              const status = child.checked ? '[x]' : '[ ]';
+              const summary = child.bodySummary ? `\n   Summary: ${child.bodySummary}` : '';
+              return `${index + 1}. ${status} #${child.issueNum} ${child.title}${summary}`;
+            }).join('\n')
+          : '(no child issues found)';
+        return [
+          `### Epic #${epic.issueNum}: ${epic.title}${ms}`,
+          `Progress: ${epic.completedChildCount}/${epic.totalChildCount} child issues complete; ${epic.openChildCount} open`,
+          `Summary: ${epic.bodySummary || '(no description)'}`,
+          '',
+          'Ordered child issues:',
+          children,
+        ].join('\n');
+      }).join('\n\n')
+    : '';
+
   const milestoneList = milestones.length > 0
     ? milestones.map((m) => {
         const due = m.dueOn ? ` (due: ${m.dueOn})` : '';
@@ -853,15 +1075,22 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     : '(none)';
 
   const sections: string[] = [
-    'You are a project roadmap assistant. Analyze the following open issues and existing milestones, then suggest how to organize issues into milestones.',
+    'You are a project roadmap assistant. Analyze the following open issues, open epics, and existing milestones, then suggest how to organize work into milestones.',
     '',
-    '## Open Issues',
-    issueList,
+    epics.length > 0 ? '## Open Epics' : '## Open Issues',
+    epics.length > 0 ? epicList : issueList,
     cappedWarning,
-    '',
-    '## Existing Milestones',
-    milestoneList,
   ];
+
+  if (epics.length > 0) {
+    sections.push(
+      '',
+      '## Open Standalone Issues',
+      issueList || '(none)',
+    );
+  }
+
+  sections.push('', '## Existing Milestones', milestoneList);
 
   if (visionContext) {
     sections.push('', '## Product Vision', visionContext);
@@ -888,7 +1117,16 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     '      "order": 1',
     '    }',
     '  ],',
-    '  "assignments": [',
+    '  "epicAssignments": [',
+    '    {',
+    '      "issueNum": 195,',
+    '      "title": "Parent epic title",',
+    '      "milestone": "001 - Milestone Name",',
+    '      "currentMilestone": "",',
+    '      "selected": true',
+    '    }',
+    '  ],',
+    '  "standaloneAssignments": [',
     '    {',
     '      "issueNum": 3,',
     '      "title": "Issue title",',
@@ -903,10 +1141,16 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     '## Instructions',
     '- Respect existing milestone structure — reuse existing milestones where appropriate',
     '- Only create new milestones when issues clearly don\'t fit existing ones',
+    '- This is the second step in the epic-first workflow: triage creates or updates parent epics, roadmap schedules those parent epics, and run ships their child issues with parent epic context.',
+    '- When open epics exist, schedule epics as the primary roadmap unit: assign the parent epic issue to a milestone in `epicAssignments`',
+    '- Do not separately schedule child issues that are listed inside an open epic; use their ordered checklist only as planning context',
+    '- Preserve child issue ordering inside each epic when deciding which milestone the parent epic belongs in',
+    '- Put standalone issues that are not children of any open epic in `standaloneAssignments`',
     '- Consider dependency order: foundational work (database, API, infra) in earlier milestones',
     '- Suggest realistic due dates based on issue complexity and number of issues per milestone',
-    '- Set `currentMilestone` to the issue\'s current milestone title, or empty string if unassigned',
-    '- Include ALL open issues in assignments (even ones already assigned to milestones)',
+    '- Set `currentMilestone` to the issue or epic\'s current milestone title, or empty string if unassigned',
+    '- Include ALL open epics in `epicAssignments` and ALL standalone open issues in `standaloneAssignments` (even ones already assigned to milestones)',
+    '- Return both `epicAssignments` and `standaloneAssignments` arrays; use an empty array when a category has no schedulable items',
     '- Set `selected: true` for all assignments (user will deselect if needed)',
     '- Order milestones by suggested execution order (order field)',
     '- Group related issues together (same feature area, same dependency chain)',

@@ -9,6 +9,8 @@ An epic is a GitHub issue with:
 1. The `epic` label applied.
 2. A GitHub task-list in the body that references sub-issues by number.
 
+Run `alpha-loop init` to install the epic issue template at `.github/ISSUE_TEMPLATE/epic.yml`. The template applies the `epic` label and includes fields for the goal, ordered sub-issues, acceptance criteria, dependencies, sequencing notes, and verification expectations.
+
 Example epic body:
 
 ```markdown
@@ -25,6 +27,16 @@ Add multi-tenant support to the API layer.
 ## Acceptance Criteria
 - [ ] All endpoints scoped by tenant
 - [ ] Backward-compatible for single-tenant deployments
+
+## Dependencies
+- None
+
+## Sequencing Notes
+- Run data model changes before API middleware changes.
+
+## Verification Expectations
+- Confirm each merged sub-issue satisfies its acceptance criteria.
+- Confirm the integrated tenant workflow works end to end.
 ```
 
 The task-list lines are the source of truth for both ordering and completion tracking.
@@ -35,6 +47,26 @@ The task-list lines are the source of truth for both ordering and completion tra
 - If an issue has a task-list body with three or more `- [ ] #N` items but no `epic` label, it is treated as a **hint** — the picker may flag it as a candidate, but the loop will not process it as an epic until you add the label.
 
 This keeps epic detection explicit. You opt in by labeling.
+
+## Milestones + Epics
+
+Alpha Loop's recommended planning flow is epic-first:
+
+1. `alpha-loop triage` groups related open issues into parent epics. It can create a new parent epic or update an existing open issue labeled `epic`, then comments on child issues with a backlink to the parent.
+2. `alpha-loop roadmap` schedules the parent epic issue into a milestone. It uses the ordered child checklist as planning context, but does not assign those child issues separately as standalone roadmap items.
+3. `alpha-loop run --epic <N>` ships the child issues from the epic checklist in order. You can also run `alpha-loop run --milestone "<name>"`; when that milestone has exactly one open parent epic, the loop processes that epic.
+4. The verification pass evaluates the completed child issues against the parent epic's acceptance criteria.
+
+Milestones and epics answer different questions:
+
+| Concept | Source of truth | What it controls |
+|---------|-----------------|------------------|
+| Milestone | GitHub milestone on the parent epic issue | Which delivery window or release the epic belongs to |
+| Epic | Parent issue labeled `epic` | Goal, acceptance criteria, ordered child issue checklist, completion verification |
+| Child issue | Task-list item inside the epic body | The concrete implementation unit processed by agents |
+| Standalone issue | Open issue not listed in any open epic | Can be scheduled directly into a milestone by `roadmap` |
+
+When a child issue is processed from an epic, the implementation, planning, review, batch, and session-review prompts include parent epic context: the parent goal/body summary, parent acceptance criteria, and the full ordered sibling checklist. This keeps each child narrowly scoped while preserving the integration expectations of the whole epic.
 
 ## Running the Loop Against an Epic
 
@@ -48,13 +80,15 @@ The picker lists open epics above milestones:
 
 ```
   Open Epics
-  1  #165 Multi-tenant support (0/7 sub-issues done)
-  2  #170 Billing revamp (2/5 sub-issues done)
+  1  Multi-tenant support #165 (0/7 done · milestone v1.1)
+  2  Billing revamp #170 (2/5 done)
 
   Open Milestones
-  3  v1.1 — Polish (10 open)
+  3  v1.1 — Polish (10 open, 3/13 done · 1 scheduled epic)
 
-  Select [1-3]:
+  0  All ready issues (no filter)
+
+  Select [0-3]:
 ```
 
 ### Forced
@@ -65,13 +99,27 @@ alpha-loop run --epic 165
 
 Processes epic `#165` directly, skipping the picker.
 
+`--epic` is the explicit override. If you also pass `--milestone`, the milestone filter is ignored and the selected epic's checklist is processed.
+
+### Milestone Scheduled
+
+```bash
+alpha-loop run --milestone "v1.1"
+```
+
+When a milestone contains open parent issues labeled `epic`, Alpha Loop applies this rule before fetching flat issues:
+
+1. Exactly one scheduled epic: process that epic's checklist.
+2. Multiple scheduled epics: print their issue numbers and titles, then exit. Re-run with `--epic <N>` to choose one.
+3. No scheduled epics: use the existing flat milestone flow and process ready non-epic issues in that milestone.
+
 ### Excluded
 
 ```bash
-alpha-loop run --skip-epic
+alpha-loop run --skip-epic --milestone "v1.1"
 ```
 
-Skips the epic picker entirely and goes straight to milestones. Useful when you want to work on standalone issues in a repo that has open epics.
+Skips epic discovery entirely and uses the flat milestone issue flow. Useful when you want to work on standalone issues in a milestone that also has scheduled parent epics.
 
 ## Sub-Issue Ordering
 
@@ -169,14 +217,14 @@ This is useful for teams that keep one active epic at a time and want `alpha-loo
 
 - **Nested epics.** Sub-issues with the `epic` label are skipped with a warning. Build a flat epic instead.
 - **Cross-repo sub-issue references.** Lines like `- [ ] owner/other-repo#42` are ignored silently. Sub-issues must live in the same repo as the epic.
-- **Automatic epic creation.** You create the epic issue and populate its task-list yourself. The loop does not turn loose issues into an epic.
+- **Automatic epic creation during `run`.** The run loop does not turn loose issues into an epic while processing work. Use `alpha-loop triage` to propose or apply epic groupings before roadmap scheduling.
 - **GitHub Projects v2 native sub-issues API.** The loop reads task-lists from the issue body, not from the Projects v2 sub-issue hierarchy.
 
 ## Example Workflow
 
 A walk-through of epic `#165` "Multi-tenant support" with 7 sub-issues.
 
-**1. Create the epic.** You open issue `#165`, add the `epic` label, and populate the body:
+**1. Create the epic.** You open issue `#165` with the installed epic template, confirm the `epic` label is applied, and populate the body:
 
 ```markdown
 ## Sub-issues

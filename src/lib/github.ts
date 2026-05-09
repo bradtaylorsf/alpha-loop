@@ -24,6 +24,25 @@ export type Issue = {
   body: string;
   labels: string[];
   comments?: Comment[];
+  milestone?: string | null;
+};
+
+export type RoadmapEpicChildContext = {
+  issueNum: number;
+  title: string;
+  bodySummary: string;
+  checked: boolean;
+};
+
+export type RoadmapEpicContext = {
+  issueNum: number;
+  title: string;
+  bodySummary: string;
+  currentMilestone: string | null;
+  completedChildCount: number;
+  totalChildCount: number;
+  openChildCount: number;
+  children: RoadmapEpicChildContext[];
 };
 
 export type Milestone = {
@@ -148,12 +167,12 @@ function getMilestoneIssueNumbers(repo: string, milestone: string): Set<number> 
 
 /**
  * Fallback: poll issues by label when no project board is configured.
- * Optionally filters by milestone. When a milestone is specified, the
- * milestone is the primary filter and the label is not required.
+ * Optionally filters by milestone; the ready label remains authoritative
+ * because milestones are scheduling metadata, not workflow state.
  */
 function pollIssuesByLabel(repo: string, label: string, limit: number, milestone?: string): Issue[] {
   const milestoneFlag = milestone ? ` --milestone "${milestone}"` : '';
-  const labelFlag = milestone ? '' : ` --label "${label}"`;
+  const labelFlag = label ? ` --label "${label}"` : '';
   const result = ghExec(
     `gh issue list --repo "${repo}"${labelFlag} --state open${milestoneFlag} --json number,title,body,labels --limit ${limit}`,
   );
@@ -201,7 +220,7 @@ export function labelIssue(repo: string, issueNum: number, addLabel: string, rem
  * Comment on an issue.
  * Uses --body-file to avoid shell escaping issues with newlines and special characters.
  */
-export function commentIssue(repo: string, issueNum: number, body: string): void {
+export function commentIssue(repo: string, issueNum: number, body: string): boolean {
   const bodyFile = join(tmpdir(), `alpha-loop-comment-${Date.now()}`);
   writeFileSync(bodyFile, body, 'utf-8');
   try {
@@ -211,7 +230,9 @@ export function commentIssue(repo: string, issueNum: number, body: string): void
     );
     if (result.exitCode !== 0) {
       log.warn(`Failed to comment on issue #${issueNum}: ${result.stderr}`);
+      return false;
     }
+    return true;
   } finally {
     try { unlinkSync(bodyFile); } catch { /* cleanup best-effort */ }
   }
@@ -488,8 +509,8 @@ export function createIssue(repo: string, title: string, body: string, labels: s
 /**
  * Update an existing issue's title and/or body.
  */
-export function updateIssue(repo: string, issueNum: number, updates: { title?: string; body?: string }): void {
-  if (!updates.title && updates.body === undefined) return;
+export function updateIssue(repo: string, issueNum: number, updates: { title?: string; body?: string }): boolean {
+  if (!updates.title && updates.body === undefined) return true;
   let bodyFile: string | undefined;
   try {
     let cmd = `gh issue edit ${issueNum} --repo "${repo}"`;
@@ -504,7 +525,9 @@ export function updateIssue(repo: string, issueNum: number, updates: { title?: s
     const result = ghExec(cmd, undefined, true);
     if (result.exitCode !== 0) {
       log.warn(`Failed to update issue #${issueNum}: ${result.stderr}`);
+      return false;
     }
+    return true;
   } finally {
     if (bodyFile) {
       try { unlinkSync(bodyFile); } catch { /* cleanup best-effort */ }
@@ -604,7 +627,7 @@ export function setIssueMilestone(repo: string, issueNum: number, milestoneTitle
 export function listOpenIssues(repo: string, limit = 100): Issue[] {
   const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
   const result = ghExec(
-    `gh issue list --repo "${repo}" --state open --json number,title,body,labels --limit ${safeLimit}`,
+    `gh issue list --repo "${repo}" --state open --json number,title,body,labels,milestone --limit ${safeLimit}`,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to list open issues: ${result.stderr}`);
@@ -616,17 +639,94 @@ export function listOpenIssues(repo: string, limit = 100): Issue[] {
       title: string;
       body: string;
       labels: Array<{ name: string }>;
+      milestone?: unknown;
     }>;
-    return raw.map((issue) => ({
-      number: issue.number,
-      title: issue.title,
-      body: issue.body ?? '',
-      labels: (issue.labels ?? []).map((l) => l.name),
-    }));
+    return raw.map((issue) => {
+      const msTitle = milestoneTitle(issue.milestone);
+      return {
+        number: issue.number,
+        title: issue.title,
+        body: issue.body ?? '',
+        labels: (issue.labels ?? []).map((l) => l.name),
+        ...(msTitle ? { milestone: msTitle } : {}),
+      };
+    });
   } catch {
     log.warn('Failed to parse open issues JSON');
     return [];
   }
+}
+
+function milestoneTitle(raw: unknown): string | null {
+  if (!raw) return null;
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object' && raw !== null && 'title' in raw) {
+    const title = (raw as { title?: unknown }).title;
+    return typeof title === 'string' ? title : null;
+  }
+  return null;
+}
+
+function summarizeBody(body: string, maxChars: number): string {
+  const text = body
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(' ');
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}...`;
+}
+
+function summarizeEpicBody(body: string, maxChars: number): string {
+  const checklistLines = new Set(parseSubIssues(body).map((ref) => ref.lineIndex));
+  const text = body
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .filter((_, index) => !checklistLines.has(index))
+    .join('\n');
+  return summarizeBody(text, maxChars);
+}
+
+/**
+ * List open epics with ordered child issue summaries for roadmap planning.
+ * Known open issues are used first; missing child issue details are fetched
+ * individually so checked/closed child refs can still provide context.
+ */
+export function listRoadmapEpics(repo: string, knownOpenIssues: Issue[] = []): RoadmapEpicContext[] {
+  const epics = listEpics(repo);
+  const issueMap = new Map<number, Issue>();
+  for (const issue of knownOpenIssues) {
+    issueMap.set(issue.number, issue);
+  }
+
+  return epics.map((epic) => {
+    const refs = parseSubIssues(epic.body);
+    const children = refs.map((ref) => {
+      let child = issueMap.get(ref.number);
+      if (!child) {
+        child = getIssueWithComments(repo, ref.number) ?? undefined;
+        if (child) issueMap.set(child.number, child);
+      }
+      return {
+        issueNum: ref.number,
+        title: child?.title ?? '(issue details unavailable)',
+        bodySummary: child ? summarizeBody(child.body, 220) : '',
+        checked: ref.checked,
+      };
+    });
+
+    return {
+      issueNum: epic.number,
+      title: epic.title,
+      bodySummary: summarizeEpicBody(epic.body, 500),
+      currentMilestone: epic.milestone ?? null,
+      completedChildCount: refs.filter((ref) => ref.checked).length,
+      totalChildCount: refs.length,
+      openChildCount: refs.filter((ref) => !ref.checked).length,
+      children,
+    };
+  });
 }
 
 /**
@@ -730,6 +830,32 @@ export function getIssueWithComments(repo: string, issueNum: number): Issue | nu
 }
 
 /**
+ * Fetch only the current body for an issue.
+ */
+export function getIssueBody(repo: string, issueNum: number): string | null {
+  const issue = getIssueWithComments(repo, issueNum);
+  return issue?.body ?? null;
+}
+
+/**
+ * Update the body for an epic issue.
+ */
+export function updateEpicIssueBody(repo: string, epicNum: number, body: string): boolean {
+  return updateIssue(repo, epicNum, { body });
+}
+
+/**
+ * Add a lightweight backlink comment from a child issue to its parent epic.
+ */
+export function commentChildEpicBacklink(repo: string, childIssueNum: number, epicNum: number): boolean {
+  return commentIssue(
+    repo,
+    childIssueNum,
+    `Grouped under parent epic #${epicNum}.\n\n_Triaged by alpha-loop._`,
+  );
+}
+
+/**
  * Add an issue to a GitHub Project v2.
  */
 export function addIssueToProject(owner: string, projectNum: number, repo: string, issueNum: number): void {
@@ -754,9 +880,10 @@ function truncateBody(body: string): string {
 /**
  * List open issues labeled `epic`.
  */
-export function listEpics(repo: string): Issue[] {
+export function listEpics(repo: string, options?: { milestone?: string }): Issue[] {
+  const milestoneFlag = options?.milestone ? ` --milestone ${JSON.stringify(options.milestone)}` : '';
   const result = ghExec(
-    `gh issue list --repo "${repo}" --label "epic" --state open --json number,title,body,labels --limit 100`,
+    `gh issue list --repo "${repo}" --label "epic" --state open${milestoneFlag} --json number,title,body,labels,milestone --limit 100`,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to list epics: ${result.stderr}`);
@@ -768,12 +895,14 @@ export function listEpics(repo: string): Issue[] {
       title: string;
       body: string;
       labels: Array<{ name: string }>;
+      milestone?: unknown;
     }>;
     return raw.map((issue) => ({
       number: issue.number,
       title: issue.title,
       body: issue.body ?? '',
       labels: (issue.labels ?? []).map((l) => l.name),
+      milestone: milestoneTitle(issue.milestone),
     }));
   } catch {
     log.warn('Failed to parse epics JSON');

@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
@@ -214,6 +214,41 @@ describe('init command', () => {
 
     const gitignore = readFileSync(join(tempDir, '.gitignore'), 'utf-8');
     expect(gitignore).not.toContain('.alpha-loop/learnings/');
+  });
+
+  it('creates agent-ready and epic issue templates on fresh init', async () => {
+    await initCommand({ yes: true });
+
+    expect(existsSync(join(tempDir, '.github', 'ISSUE_TEMPLATE', 'agent-ready.yml'))).toBe(true);
+    expect(existsSync(join(tempDir, '.github', 'ISSUE_TEMPLATE', 'epic.yml'))).toBe(true);
+  });
+
+  it('creates an epic template with the required label and sections', async () => {
+    await initCommand({ yes: true });
+
+    const epicTemplate = readFileSync(join(tempDir, '.github', 'ISSUE_TEMPLATE', 'epic.yml'), 'utf-8');
+    expect(epicTemplate).toContain('labels: ["epic"]');
+    expect(epicTemplate).toContain('The `epic` label is required');
+    expect(epicTemplate).toContain('label: Goal');
+    expect(epicTemplate).toContain('label: Sub-issues');
+    expect(epicTemplate).toContain('label: Acceptance Criteria');
+    expect(epicTemplate).toContain('label: Dependencies');
+    expect(epicTemplate).toContain('label: Sequencing Notes');
+    expect(epicTemplate).toContain('label: Verification Expectations');
+    expect(epicTemplate).toContain('- [ ] #123 First agent-ready task');
+  });
+
+  it('preserves an existing epic issue template', async () => {
+    const templateDir = join(tempDir, '.github', 'ISSUE_TEMPLATE');
+    const epicTemplatePath = join(templateDir, 'epic.yml');
+    const customEpicTemplate = 'name: Custom Epic\nlabels: ["custom"]\n';
+    mkdirSync(templateDir, { recursive: true });
+    writeFileSync(epicTemplatePath, customEpicTemplate);
+
+    await initCommand({ yes: true });
+
+    expect(readFileSync(epicTemplatePath, 'utf-8')).toBe(customEpicTemplate);
+    expect(existsSync(join(templateDir, 'agent-ready.yml'))).toBe(true);
   });
 });
 

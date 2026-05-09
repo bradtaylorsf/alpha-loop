@@ -56,12 +56,36 @@ export type TriageFinding = {
   selected: boolean;
 };
 
+export type ProposedEpicGroup = {
+  title: string;
+  goal: string;
+  rationale: string;
+  orderedChildIssueNumbers: number[];
+  acceptanceCriteria: string[];
+  selected: boolean;
+  existingEpicIssueNum?: number;
+};
+
+export type TriageAnalysis = {
+  findings: TriageFinding[];
+  epicGroups: ProposedEpicGroup[];
+};
+
 export type RoadmapAssignment = {
   issueNum: number;
   title: string;
   milestone: string;
   currentMilestone: string;
   selected: boolean;
+};
+
+export type RoadmapAssignmentGroups = {
+  epicAssignments: RoadmapAssignment[];
+  standaloneAssignments: RoadmapAssignment[];
+};
+
+export type RoadmapPlan = RoadmapAssignmentGroups & {
+  milestones: PlannedMilestone[];
 };
 
 // ── ANSI Colors ──────────────────────────────────────────────────────────────
@@ -131,7 +155,15 @@ export function normalizePlanMilestones(draft: PlanDraft): PlanDraft {
 export function normalizeRoadmapMilestones(
   milestones: PlannedMilestone[],
   assignments: RoadmapAssignment[],
-): { milestones: PlannedMilestone[]; assignments: RoadmapAssignment[] } {
+): { milestones: PlannedMilestone[]; assignments: RoadmapAssignment[] };
+export function normalizeRoadmapMilestones(
+  milestones: PlannedMilestone[],
+  assignments: RoadmapAssignmentGroups,
+): RoadmapPlan;
+export function normalizeRoadmapMilestones(
+  milestones: PlannedMilestone[],
+  assignments: RoadmapAssignment[] | RoadmapAssignmentGroups,
+): { milestones: PlannedMilestone[]; assignments: RoadmapAssignment[] } | RoadmapPlan {
   const originalTitles = milestones.map((ms) => ms.title);
   const normalized = normalizeMilestoneTitles(milestones);
   const titleMap = new Map<string, string>();
@@ -140,13 +172,100 @@ export function normalizeRoadmapMilestones(
       titleMap.set(originalTitles[i], normalized[i].title);
     }
   }
-  const updatedAssignments = titleMap.size > 0
-    ? assignments.map((a) => {
+
+  const updateAssignments = (items: RoadmapAssignment[]): RoadmapAssignment[] => {
+    if (titleMap.size === 0) return items;
+    return items.map((a) => {
         const mapped = titleMap.get(a.milestone);
         return mapped ? { ...a, milestone: mapped } : a;
-      })
-    : assignments;
-  return { milestones: normalized, assignments: updatedAssignments };
+      });
+  };
+
+  if (Array.isArray(assignments)) {
+    return { milestones: normalized, assignments: updateAssignments(assignments) };
+  }
+
+  return {
+    milestones: normalized,
+    epicAssignments: updateAssignments(assignments.epicAssignments),
+    standaloneAssignments: updateAssignments(assignments.standaloneAssignments),
+  };
+}
+
+function normalizeRoadmapAssignment(value: unknown, context: string): RoadmapAssignment {
+  if (!isRecord(value)) {
+    throw new Error(`${context} must be an object`);
+  }
+
+  const issueNum = value.issueNum;
+  if (!Number.isInteger(issueNum) || (issueNum as number) <= 0) {
+    throw new Error(`${context}.issueNum must be a positive integer`);
+  }
+
+  const title = value.title;
+  if (typeof title !== 'string' || title.trim().length === 0) {
+    throw new Error(`${context}.title must be a non-empty string`);
+  }
+
+  const milestone = value.milestone;
+  if (typeof milestone !== 'string' || milestone.trim().length === 0) {
+    throw new Error(`${context}.milestone must be a non-empty string`);
+  }
+
+  const currentMilestone = value.currentMilestone;
+  if (currentMilestone !== undefined && typeof currentMilestone !== 'string') {
+    throw new Error(`${context}.currentMilestone must be a string`);
+  }
+
+  const selected = value.selected;
+  if (selected !== undefined && typeof selected !== 'boolean') {
+    throw new Error(`${context}.selected must be a boolean`);
+  }
+
+  return {
+    issueNum: issueNum as number,
+    title: title.trim(),
+    milestone: milestone.trim(),
+    currentMilestone: typeof currentMilestone === 'string' ? currentMilestone.trim() : '',
+    selected: selected === undefined ? false : selected,
+  };
+}
+
+function normalizeRoadmapAssignmentArray(value: unknown, field: string): RoadmapAssignment[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`Roadmap ${field} must be an array`);
+  }
+  return value.map((assignment, index) => normalizeRoadmapAssignment(assignment, `${field}[${index}]`));
+}
+
+/**
+ * Normalize roadmap JSON into split assignment arrays. Legacy `assignments`
+ * responses are accepted as standalone issue assignments for no-epic repos.
+ */
+export function normalizeRoadmapPlan(value: unknown): RoadmapPlan {
+  if (!isRecord(value)) {
+    throw new Error('Roadmap plan must be a JSON object');
+  }
+
+  if (!Array.isArray(value.milestones)) {
+    throw new Error('Roadmap milestones must be an array');
+  }
+
+  const epicAssignments = normalizeRoadmapAssignmentArray(value.epicAssignments, 'epicAssignments');
+  const explicitStandaloneAssignments = normalizeRoadmapAssignmentArray(
+    value.standaloneAssignments,
+    'standaloneAssignments',
+  );
+  const legacyAssignments = normalizeRoadmapAssignmentArray(value.assignments, 'assignments');
+  const standaloneAssignments = explicitStandaloneAssignments.length > 0 || value.standaloneAssignments !== undefined
+    ? explicitStandaloneAssignments
+    : legacyAssignments;
+
+  return normalizeRoadmapMilestones(
+    value.milestones as PlannedMilestone[],
+    { epicAssignments, standaloneAssignments },
+  ) as RoadmapPlan;
 }
 
 /**
@@ -209,6 +328,135 @@ export function extractJsonFromResponse<T>(response: string): T {
     'Could not extract valid JSON from response. Expected a JSON object or array, ' +
       'optionally wrapped in ```json ... ``` fences.'
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requireString(
+  value: Record<string, unknown>,
+  field: keyof ProposedEpicGroup,
+  context: string,
+): string {
+  const raw = value[field];
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    throw new Error(`${context}.${String(field)} must be a non-empty string`);
+  }
+  return raw.trim();
+}
+
+function requireStringArray(
+  value: Record<string, unknown>,
+  field: keyof ProposedEpicGroup,
+  context: string,
+): string[] {
+  const raw = value[field];
+  if (
+    !Array.isArray(raw) ||
+    raw.length === 0 ||
+    raw.some((item) => typeof item !== 'string' || item.trim().length === 0)
+  ) {
+    throw new Error(`${context}.${String(field)} must be a non-empty array of non-empty strings`);
+  }
+  return raw.map((item) => (item as string).trim());
+}
+
+function requireIssueNumberArray(
+  value: Record<string, unknown>,
+  field: keyof ProposedEpicGroup,
+  context: string,
+): number[] {
+  const raw = value[field];
+  if (!Array.isArray(raw) || raw.length < 2) {
+    throw new Error(`${context}.${String(field)} must include at least two issue numbers`);
+  }
+  const numbers = raw.map((item) => {
+    if (!Number.isInteger(item) || item <= 0) {
+      throw new Error(`${context}.${String(field)} must contain positive integer issue numbers`);
+    }
+    return item as number;
+  });
+  const unique = new Set(numbers);
+  if (unique.size !== numbers.length) {
+    throw new Error(`${context}.${String(field)} must not contain duplicate issue numbers`);
+  }
+  return numbers;
+}
+
+function normalizeSelected(value: Record<string, unknown>, context: string): boolean {
+  const raw = value.selected;
+  if (raw === undefined) return false;
+  if (typeof raw !== 'boolean') {
+    throw new Error(`${context}.selected must be a boolean`);
+  }
+  return raw;
+}
+
+function normalizeOptionalIssueNumber(
+  value: Record<string, unknown>,
+  field: keyof ProposedEpicGroup,
+  context: string,
+): number | undefined {
+  const raw = value[field];
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
+    throw new Error(`${context}.${String(field)} must be a positive integer issue number`);
+  }
+  return raw;
+}
+
+function normalizeProposedEpicGroup(value: unknown, index: number): ProposedEpicGroup {
+  const context = `epicGroups[${index}]`;
+  if (!isRecord(value)) {
+    throw new Error(`${context} must be an object`);
+  }
+
+  return {
+    title: requireString(value, 'title', context),
+    goal: requireString(value, 'goal', context),
+    rationale: requireString(value, 'rationale', context),
+    orderedChildIssueNumbers: requireIssueNumberArray(value, 'orderedChildIssueNumbers', context),
+    acceptanceCriteria: requireStringArray(value, 'acceptanceCriteria', context),
+    selected: normalizeSelected(value, context),
+    existingEpicIssueNum: normalizeOptionalIssueNumber(value, 'existingEpicIssueNum', context),
+  };
+}
+
+/**
+ * Normalize triage JSON into the current analysis shape. Legacy TriageFinding[]
+ * responses are still accepted so older agents fail gracefully.
+ */
+export function normalizeTriageAnalysis(value: unknown): TriageAnalysis {
+  if (Array.isArray(value)) {
+    return { findings: value as TriageFinding[], epicGroups: [] };
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('Triage analysis must be a JSON object with findings and epicGroups arrays');
+  }
+
+  const findings = value.findings ?? [];
+  const epicGroups = value.epicGroups ?? [];
+
+  if (!Array.isArray(findings)) {
+    throw new Error('Triage analysis findings must be an array');
+  }
+  if (!Array.isArray(epicGroups)) {
+    throw new Error('Triage analysis epicGroups must be an array');
+  }
+
+  return {
+    findings: findings as TriageFinding[],
+    epicGroups: epicGroups.map((group, index) => normalizeProposedEpicGroup(group, index)),
+  };
+}
+
+/**
+ * Extract and normalize a triage agent response.
+ */
+export function parseTriageAnalysisResponse(response: string): TriageAnalysis {
+  return normalizeTriageAnalysis(extractJsonFromResponse<unknown>(response));
 }
 
 /**
@@ -321,22 +569,80 @@ export function formatTriageFindings(findings: TriageFinding[]): string {
 }
 
 /**
+ * Format proposed epic groups separately from per-issue cleanup findings.
+ */
+export function formatEpicGroupProposals(groups: ProposedEpicGroup[]): string {
+  if (groups.length === 0) {
+    return `${GRAY}No proposed epic groups.${NC}`;
+  }
+
+  const lines: string[] = [`\n${BOLD}${CYAN}── Proposed Epic Groups (${groups.length}) ──${NC}`];
+
+  groups.forEach((group, index) => {
+    const sel = group.selected ? '✓' : ' ';
+    const target = group.existingEpicIssueNum
+      ? `updates epic #${group.existingEpicIssueNum}`
+      : 'creates new epic';
+    lines.push(`  [${sel}] ${index + 1}. ${group.title} (${target})`);
+    lines.push(`      ${GRAY}Goal: ${group.goal}${NC}`);
+    lines.push(`      ${GRAY}Rationale: ${group.rationale}${NC}`);
+    lines.push(`      Children: ${group.orderedChildIssueNumbers.map((n) => `#${n}`).join(' -> ')}`);
+    lines.push('      Acceptance Criteria:');
+    for (const criterion of group.acceptanceCriteria) {
+      lines.push(`        - ${criterion.replace(/^[-*]\s+/, '').trim()}`);
+    }
+  });
+
+  return lines.join('\n');
+}
+
+/**
  * Format a roadmap table grouped by milestone, showing [NEW]/[EXISTS] tags
  * per milestone and [currently: <milestone>]/[currently: unassigned] per issue.
  */
 export function formatRoadmapTable(
   milestones: PlannedMilestone[],
-  assignments: RoadmapAssignment[],
+  assignments: RoadmapAssignment[] | RoadmapAssignmentGroups,
   existingMilestones: string[],
 ): string {
-  if (assignments.length === 0) {
+  const groups = Array.isArray(assignments)
+    ? { epicAssignments: [], standaloneAssignments: assignments }
+    : assignments;
+  const hasEpicAssignments = groups.epicAssignments.length > 0;
+  const hasStandaloneAssignments = groups.standaloneAssignments.length > 0;
+
+  if (!hasEpicAssignments && !hasStandaloneAssignments) {
     return `${GRAY}No assignments to display.${NC}`;
   }
 
   const sorted = [...milestones].sort((a, b) => a.order - b.order);
   const existingSet = new Set(existingMilestones);
+  const lines: string[] = [];
 
-  // Group assignments by milestone
+  if (hasEpicAssignments) {
+    lines.push(
+      `${BOLD}${YELLOW}Epic Milestone Assignments (${groups.epicAssignments.length})${NC}`,
+      formatRoadmapAssignmentSection(sorted, groups.epicAssignments, existingSet),
+    );
+  }
+
+  if (hasStandaloneAssignments) {
+    if (lines.length > 0) lines.push('');
+    const header = hasEpicAssignments
+      ? `${BOLD}${YELLOW}Standalone Issue Milestone Assignments (${groups.standaloneAssignments.length})${NC}`
+      : '';
+    if (header) lines.push(header);
+    lines.push(formatRoadmapAssignmentSection(sorted, groups.standaloneAssignments, existingSet));
+  }
+
+  return lines.filter((line) => line !== '').join('\n');
+}
+
+function formatRoadmapAssignmentSection(
+  sortedMilestones: PlannedMilestone[],
+  assignments: RoadmapAssignment[],
+  existingSet: Set<string>,
+): string {
   const grouped = new Map<string, RoadmapAssignment[]>();
   for (const a of assignments) {
     const key = a.milestone || '(no milestone)';
@@ -346,7 +652,7 @@ export function formatRoadmapTable(
 
   const lines: string[] = [];
 
-  for (const ms of sorted) {
+  for (const ms of sortedMilestones) {
     const group = grouped.get(ms.title);
     if (!group || group.length === 0) continue;
     grouped.delete(ms.title);

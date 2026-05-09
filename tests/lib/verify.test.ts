@@ -290,6 +290,41 @@ describe('runVerify', () => {
     expect(result.skipped).toBe(true);
     expect(result.output).toContain('no command');
   });
+
+  it('includes parent epic context in playwright verification prompts', async () => {
+    exec.mockImplementation((cmd: string) => {
+      if (cmd === 'which playwright-cli') {
+        return { exitCode: 0, stdout: '/usr/bin/playwright-cli', stderr: '' };
+      }
+      if (cmd.includes('git diff --stat')) {
+        return { exitCode: 0, stdout: ' src/app.tsx | 5 +++++\n 1 file changed, 5 insertions(+)', stderr: '' };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+    spawnAgent.mockResolvedValue({ exitCode: 0, output: '### Status: PASS', duration: 1000 });
+
+    await runVerify({
+      worktree: '/tmp/test',
+      logFile: '/tmp/test.log',
+      issueNum: 189,
+      title: 'test',
+      body: 'test body',
+      config: makeConfig(),
+      sessionDir: '/tmp/session',
+      epicContext: {
+        number: 195,
+        title: 'Parent Epic',
+        bodySummary: 'Coordinate sibling work.',
+        acceptanceCriteria: ['- [ ] Parent AC'],
+        subIssues: [{ issueNum: 189, title: 'Child issue', checked: false }],
+      },
+    });
+
+    expect(spawnAgent).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: expect.stringContaining('## Parent Epic Context'),
+    }));
+    expect(spawnAgent.mock.calls[0][0].prompt).toContain('Epic #195: Parent Epic');
+  });
 });
 
 describe('runScriptVerify', () => {
