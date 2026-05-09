@@ -5,6 +5,7 @@ import { scanCommand } from './commands/scan.js';
 import { visionCommand } from './commands/vision.js';
 import { authCommand } from './commands/auth.js';
 import { syncCommand } from './commands/sync.js';
+import { normalizeScriptArgv } from './lib/cli-args.js';
 
 program
   .name('alpha-loop')
@@ -331,4 +332,4 @@ evolveCmd
     await evolveRoutingCommand(options);
   });
 
-program.parse();
+program.parse(normalizeScriptArgv(process.argv));

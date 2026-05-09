@@ -20,6 +20,7 @@ import {
   type TriageFinding,
   type TriageAction,
   type TriageAnalysis,
+  type ProposedEpicGroup,
 } from '../lib/planning.js';
 import {
   listOpenIssuesWithComments,
@@ -36,6 +37,38 @@ export type TriageOptions = {
 
 /** Truncate issue bodies to stay within agent context limits. */
 const MAX_BODY_CHARS = 500;
+
+function hasLabel(issue: { labels?: string[] }, label: string): boolean {
+  return (issue.labels ?? []).some((item) => item.toLowerCase() === label.toLowerCase());
+}
+
+function filterValidEpicGroups(
+  groups: ProposedEpicGroup[],
+  issues: Array<{ number: number; labels?: string[] }>,
+): ProposedEpicGroup[] {
+  if (groups.length === 0) return [];
+
+  const issueByNumber = new Map(issues.map((issue) => [issue.number, issue]));
+  return groups.filter((group) => {
+    const unknown = group.orderedChildIssueNumbers.filter((num) => !issueByNumber.has(num));
+    const nested = group.orderedChildIssueNumbers.filter((num) => {
+      const issue = issueByNumber.get(num);
+      return issue ? hasLabel(issue, 'epic') : false;
+    });
+
+    if (unknown.length > 0) {
+      log.warn(`Skipping epic proposal "${group.title}": child issue(s) not found among open issues: ${unknown.map((n) => `#${n}`).join(', ')}`);
+      return false;
+    }
+
+    if (nested.length > 0) {
+      log.warn(`Skipping epic proposal "${group.title}": nested epic child issue(s) are not supported: ${nested.map((n) => `#${n}`).join(', ')}`);
+      return false;
+    }
+
+    return true;
+  });
+}
 
 export async function triageCommand(options: TriageOptions): Promise<void> {
   const config = loadConfig({ dryRun: options.dryRun });
@@ -100,9 +133,14 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
     return;
   }
 
-  const { findings, epicGroups } = analysis;
+  const findings = analysis.findings;
+  const epicGroups = filterValidEpicGroups(analysis.epicGroups, issues);
 
   if (findings.length === 0 && epicGroups.length === 0) {
+    if (analysis.epicGroups.length > 0) {
+      log.info('No valid epic proposals after filtering invalid or nested groups.');
+      return;
+    }
     log.success('All issues look good — no triage actions needed.');
     return;
   }

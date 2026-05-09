@@ -844,7 +844,13 @@ Keep it concise. Only include genuinely ambiguous items, not obvious implementat
 }
 
 export type TriagePromptOptions = {
-  issues: Array<{ number: number; title: string; body: string; comments?: Array<{ author: string; body: string; createdAt: string }> }>;
+  issues: Array<{
+    number: number;
+    title: string;
+    body: string;
+    labels?: string[];
+    comments?: Array<{ author: string; body: string; createdAt: string }>;
+  }>;
   projectContext?: string | null;
   visionContext?: string | null;
 };
@@ -862,7 +868,8 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     : '';
 
   const issueList = capped.map((i) => {
-    let entry = `### Issue #${i.number}: ${i.title}\n${i.body || '(no description)'}`;
+    const labels = i.labels && i.labels.length > 0 ? i.labels.join(', ') : '(none)';
+    let entry = `### Issue #${i.number}: ${i.title}\nLabels: ${labels}\n\n${i.body || '(no description)'}`;
     if (i.comments && i.comments.length > 0) {
       const commentLines = i.comments.map((c) =>
         `- **@${c.author}** (${c.createdAt}): ${c.body.length > 200 ? c.body.slice(0, 200) + '...' : c.body}`
@@ -909,7 +916,7 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     '',
     'Also identify candidate epic groups among the open issues when multiple existing issues form one coherent deliverable.',
     'An epic group should represent a single outcome with a clear goal, concrete rationale, and an ordered set of existing child issue numbers.',
-    'Do NOT propose nested epics: do not include issues that are already parent epics, umbrella planning issues, or issues whose purpose is to collect child issues.',
+    'Use each issue\'s Labels line to identify existing epics. Do NOT propose nested epics: do not include issues labeled `epic`, issues that are already parent epics, umbrella planning issues, or issues whose purpose is to collect child issues.',
     'Do NOT group unrelated issues merely because they share a milestone, label, component, or broad theme; the rationale must cite a concrete shared deliverable, dependency chain, or acceptance goal.',
     'Epic groups must use existing open issue numbers only. Do not list newly split sub-issue titles from `too_large` findings as epic children.',
     '',

@@ -75,7 +75,7 @@ jest.mock('../../src/lib/github', () => ({
 import { checkbox, confirm } from '@inquirer/prompts';
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
-import { parseTriageAnalysisResponse } from '../../src/lib/planning';
+import { parseTriageAnalysisResponse, formatEpicGroupProposals } from '../../src/lib/planning';
 import {
   listOpenIssuesWithComments,
   closeIssue,
@@ -88,6 +88,7 @@ const mockCheckbox = checkbox as jest.MockedFunction<typeof checkbox>;
 const mockConfirm = confirm as jest.MockedFunction<typeof confirm>;
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockParseTriageAnalysis = parseTriageAnalysisResponse as jest.MockedFunction<typeof parseTriageAnalysisResponse>;
+const mockFormatEpicGroupProposals = formatEpicGroupProposals as jest.MockedFunction<typeof formatEpicGroupProposals>;
 const mockListOpenIssuesWithComments = listOpenIssuesWithComments as jest.MockedFunction<typeof listOpenIssuesWithComments>;
 const mockCloseIssue = closeIssue as jest.MockedFunction<typeof closeIssue>;
 const mockUpdateIssue = updateIssue as jest.MockedFunction<typeof updateIssue>;
@@ -290,6 +291,30 @@ describe('triage command', () => {
     expect(log.success).not.toHaveBeenCalledWith(expect.stringContaining('All issues look good'));
     expect(log.dry).toHaveBeenCalledWith(expect.stringContaining('Dry run'));
     expect(mockCheckbox).not.toHaveBeenCalled();
+  });
+
+  it('filters proposed epic groups that include nested epic children', async () => {
+    mockListOpenIssuesWithComments.mockReturnValue([
+      { number: 1, title: 'Existing epic', body: 'Umbrella issue', labels: ['epic'] },
+      { number: 2, title: 'Child issue', body: 'Concrete task', labels: ['ready'] },
+    ]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({
+      findings: [],
+      epicGroups: [{
+        title: 'Epic: Nested proposal',
+        goal: 'Invalid nested group.',
+        rationale: 'Includes an existing epic.',
+        orderedChildIssueNumbers: [1, 2],
+        acceptanceCriteria: ['- [ ] Done'],
+      }],
+    });
+
+    await triageCommand({ dryRun: true });
+
+    expect(mockFormatEpicGroupProposals).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('nested epic child'));
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('No valid epic proposals'));
   });
 
   it('truncates large issue bodies before building prompt', async () => {

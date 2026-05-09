@@ -392,13 +392,15 @@ describe('buildTriagePrompt', () => {
   test('includes epic grouping instructions and guardrails', () => {
     const prompt = buildTriagePrompt({
       issues: [
-        { number: 1, title: 'Add settings API', body: 'Implement endpoint' },
-        { number: 2, title: 'Wire settings UI', body: 'Call endpoint' },
+        { number: 1, title: 'Add settings API', body: 'Implement endpoint', labels: ['ready', 'backend'] },
+        { number: 2, title: 'Wire settings UI', body: 'Call endpoint', labels: ['ready', 'frontend'] },
       ],
     });
 
     expect(prompt).toContain('candidate epic groups');
     expect(prompt).toContain('coherent deliverable');
+    expect(prompt).toContain('Labels: ready, backend');
+    expect(prompt).toContain('Use each issue\'s Labels line to identify existing epics');
     expect(prompt).toContain('Do NOT propose nested epics');
     expect(prompt).toContain('Do NOT group unrelated issues merely because they share a milestone, label');
   });
