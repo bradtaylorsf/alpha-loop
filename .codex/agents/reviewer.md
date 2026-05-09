@@ -2,7 +2,7 @@
 name: reviewer
 description: Reviews code changes, fixes issues found, and produces a review summary. Runs after implementation.
 tools: Read, Write, Edit, Glob, Grep, Bash
-model: opus
+
 skills: code-review, security-analysis, testing-patterns, test-robustness, api-patterns, docs-sync
 ---
 
@@ -28,6 +28,14 @@ You review code changes for a completed GitHub issue. You have full edit permiss
 - TypeScript `any` types
 - Console.log left in code
 - Code that doesn't match project conventions
+- **Silent failure detection**: parameters defaulting to `undefined` with optional chaining or `if (x != null)` guards that hide missing dependency injection
+- **Dependency chain verification**: for every service/dependency new code uses, verify it's instantiated AND passed to the consumer
+- **Stale documentation**: if CLI commands, config options, or directory structure changed, update README.md and CLAUDE.md in the same commit
+
+## Review Process Additions
+
+- **End-to-end flow tracing**: for critical data flows, trace creation → persistence → retrieval → display
+- **Boot test**: verify the application entry point starts without import errors before reporting review results
 
 ## What to Report (Not Fix)
 

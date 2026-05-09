@@ -1,36 +1,141 @@
 # Alpha Loop configuration
-# This repo uses itself to build itself
+# ----------------------------------------------------------------------------
+# This repo uses alpha-loop to build alpha-loop.
+# Docs: https://github.com/bradtaylorsf/alpha-loop#configuration
+#
+# Active settings are intentionally small. The commented sections below expose
+# the current configuration surface so future init runs/settings are easier to
+# discover without changing behavior.
+# ----------------------------------------------------------------------------
 
+# === Project ================================================================
+# Identifies the GitHub repo + project board the loop reads from.
 repo: bradtaylorsf/alpha-loop
-repo_owner: bradtaylorsf
-project: 2
-agent: claude
+project: 2           # GitHub Project number (from project URL: /projects/N)
+# milestone: ""      # Only process issues in this milestone (empty = all)
+
+# === Agent ==================================================================
+# The CLI agent that drives Plan/Build/Test/Review. Supported values:
+#   claude     - Anthropic Claude Code
+#   codex      - OpenAI Codex CLI
+#   opencode   - Open-source coding harness
+#   lmstudio   - LM Studio (local models, requires running server)
+#   ollama     - Ollama (local models, requires running daemon)
+agent: codex
+# model: ""          # Override default model (e.g., gpt-5.4, gpt-5.3-codex)
+# review_model: ""   # Different model for review step (defaults to model)
+# agent_timeout: 1800
+
+# === Workflow ===============================================================
+# Branch and label conventions for the loop.
 base_branch: master
 label: ready
+auto_merge: true
+# merge_to: ""       # Reuse an existing session branch instead of creating one
+# auto_cleanup: true
+# prefer_epics: false
+
+# === Testing ================================================================
+# Commands the loop runs to verify changes.
 test_command: pnpm test
 dev_command: pnpm dev
-auto_merge: true
+# setup_command: ""
+# smoke_test: ""
+max_test_retries: 3
+# skip_tests: false
+# skip_review: false
+# skip_e2e: false
+# skip_preflight: false
+# skip_verify: false
+# skip_learn: false
+# skip_install: false
 
-# Safety limits (0 = unlimited)
+# === Safety limits ==========================================================
+# Caps to keep an unattended loop from running away. 0 = unlimited.
 max_issues: 0
 max_session_duration: 0
-max_test_retries: 3
+# poll_interval: 60
 
-# Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
+# === Harnesses ==============================================================
+# Coding harnesses to sync skills/agents to. Codex syncs skills to .agents/
+# and agents to .codex/.
 harnesses:
-  - claude-code
+  - codex
 
-# Per-model pricing (cost per million tokens) for cost tracking
-pricing:
-  claude-opus-4-6:
-    input: 15.0
-    output: 75.0
-  claude-sonnet-4-6:
-    input: 3.0
-    output: 15.0
-  claude-haiku-4-5:
-    input: 0.80
-    output: 4.0
-  codex-mini:
-    input: 1.50
-    output: 6.0
+# === Pipeline overrides (advanced) ==========================================
+# Use a different agent or model for specific pipeline steps. Useful for
+# routing cheaper/faster models to simpler steps.
+# pipeline:
+#   plan:
+#     model: gpt-5.4-mini
+#   implement:
+#     model: gpt-5.4
+#   test_fix:
+#     model: gpt-5.4-mini
+#   review:
+#     model: gpt-5.4
+#   verify:
+#     model: gpt-5.4
+#   learn:
+#     model: gpt-5.4-mini
+
+# === Routing (advanced, hybrid local/cloud) =================================
+# Route Loop stages to specific models on specific endpoints.
+# routing:
+#   profile: hybrid-v1
+#   endpoints:
+#     local:
+#       type: openai_compat
+#       base_url: http://localhost:1234/v1
+#     cloud:
+#       type: anthropic
+#       base_url: https://api.anthropic.com
+#   stages:
+#     plan:       { model: claude-opus-4-6,      endpoint: cloud }
+#     build:      { model: qwen3-coder-30b-a3b, endpoint: local }
+#     test_write: { model: qwen3-coder-30b-a3b, endpoint: local }
+#     test_exec:  { model: qwen3-coder-30b-a3b, endpoint: local }
+#     review:     { model: claude-opus-4-6,      endpoint: cloud }
+#     summary:    { model: claude-haiku-4-5,     endpoint: cloud }
+#   fallback:
+#     on_tool_error: escalate
+#     escalate_to: { model: claude-sonnet-4-6, endpoint: cloud }
+#     escalation_window_issues: 10
+#     escalation_error_threshold: 0.08
+#     escalation_revert_ms: 86400000
+
+# === Batch mode (advanced) ==================================================
+# Process multiple issues in a single agent call.
+# batch: false
+# batch_size: 5
+
+# === Evaluation =============================================================
+# Settings for the eval harness used by `alpha-loop review` and CI eval runs.
+# eval_dir: .alpha-loop/evals
+# eval_model: ""
+# eval_timeout: 300
+# skip_eval: false
+# auto_capture: true
+# eval:
+#   include_agent_prompts: true
+#   include_skills: true
+
+# === Post-session review ====================================================
+# Holistic code review and security scan after the session completes.
+# post_session:
+#   review: true
+#   security_scan: true
+
+# === Logging ================================================================
+# log_dir: logs
+# verbose: false
+# dry_run: false
+
+# === Pricing (cost tracking) ================================================
+# Per-million-token pricing for cost reports. Defaults are also merged in by
+# alpha-loop, so this table only needs explicit overrides.
+# pricing:
+#   gpt-5.4:          { input: 0, output: 0 }
+#   gpt-5.4-mini:     { input: 0, output: 0 }
+#   gpt-5.3-codex:    { input: 0, output: 0 }
+#   claude-opus-4-6:  { input: 15.0, output: 75.0 }

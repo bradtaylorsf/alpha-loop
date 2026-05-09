@@ -15,3 +15,5 @@ logs/*
 *.db-shm
 .DS_Store
 *.bak
+# Alpha-loop ephemeral data (not shared)
+.alpha-loop/templates/*.bak

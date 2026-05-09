@@ -1,0 +1,11 @@
+- type: llm_judge
+  prompt: |
+    The diff creates an analytics dashboard that reads from a tool_executions
+    table via AnalyticsRepository. But nothing in the diff (or mentioned as
+    existing) WRITES to the tool_executions table. The dashboard will always
+    show empty data because there is no producer for the data it consumes.
+    The review MUST flag that the data source has no writer.
+  rubric: |
+    Score 1.0 if the review identifies that nothing writes to tool_executions — the dashboard has no data source.
+    Score 0.5 if the review raises general concerns about data availability but doesn't identify the specific missing write path.
+    Score 0.0 if the review misses the unthreaded dependency entirely.
