@@ -159,6 +159,38 @@ export type PickTargetResult =
   | { type: 'milestone'; title: string }
   | { type: 'all' };
 
+type ResolvedRunTarget = {
+  activeEpic?: number;
+  activeEpicTitle?: string;
+  activeEpicIssue?: Issue;
+  activeMilestone: string;
+};
+
+function hasEpicLabel(issue: Issue): boolean {
+  return issue.labels.some((label) => label.toLowerCase() === 'epic');
+}
+
+export function formatEpicPickerMeta(epic: Issue): string {
+  const summary = buildEpicSummary(epic);
+  const progress = summary.totalCount > 0
+    ? `${summary.doneCount}/${summary.totalCount} done`
+    : 'no sub-issues';
+  const milestone = epic.milestone ? ` · milestone ${epic.milestone}` : '';
+  return `${progress}${milestone}`;
+}
+
+export function formatMilestonePickerMeta(milestone: Milestone, epics: Issue[]): string {
+  const progress = milestone.openIssues + milestone.closedIssues > 0
+    ? `${milestone.closedIssues}/${milestone.openIssues + milestone.closedIssues} done`
+    : 'empty';
+  const due = milestone.dueOn ? ` · due ${milestone.dueOn.split('T')[0]}` : '';
+  const scheduledEpicCount = epics.filter((epic) => epic.milestone === milestone.title).length;
+  const scheduled = scheduledEpicCount > 0
+    ? ` · ${scheduledEpicCount} scheduled epic${scheduledEpicCount === 1 ? '' : 's'}`
+    : '';
+  return `${milestone.openIssues} open, ${progress}${due}${scheduled}`;
+}
+
 /**
  * Show open epics + milestones and let the user pick one, or choose "all in order".
  * Epics are listed first (they're typically what the user actually wants).
@@ -199,11 +231,7 @@ async function pickTarget(
     console.error('');
     for (let i = 0; i < epics.length; i++) {
       const e = epics[i];
-      const summary = buildEpicSummary(e);
-      const progress = summary.totalCount > 0
-        ? `${summary.doneCount}/${summary.totalCount} done`
-        : 'no sub-issues';
-      console.error(`  ${BOLD}${i + 1}${NC}  ${e.title} #${e.number} ${DIM}(${progress})${NC}`);
+      console.error(`  ${BOLD}${i + 1}${NC}  ${e.title} #${e.number} ${DIM}(${formatEpicPickerMeta(e)})${NC}`);
     }
     console.error('');
   }
@@ -213,11 +241,7 @@ async function pickTarget(
     console.error('');
     for (let i = 0; i < milestones.length; i++) {
       const m = milestones[i];
-      const progress = m.openIssues + m.closedIssues > 0
-        ? `${m.closedIssues}/${m.openIssues + m.closedIssues} done`
-        : 'empty';
-      const due = m.dueOn ? ` · due ${m.dueOn.split('T')[0]}` : '';
-      console.error(`  ${BOLD}${epics.length + i + 1}${NC}  ${m.title} ${DIM}(${m.openIssues} open, ${progress}${due})${NC}`);
+      console.error(`  ${BOLD}${epics.length + i + 1}${NC}  ${m.title} ${DIM}(${formatMilestonePickerMeta(m, epics)})${NC}`);
     }
     console.error('');
   }
@@ -243,6 +267,79 @@ async function pickTarget(
   const selected = milestones[milestoneIdx];
   log.success(`Milestone selected: ${selected.title} (${selected.openIssues} open issues)`);
   return { type: 'milestone', title: selected.title };
+}
+
+async function resolveRunTarget(config: Config, options: RunOptions): Promise<ResolvedRunTarget | null> {
+  let activeMilestone = config.milestone;
+
+  // --epic <N> overrides everything except --verify-only
+  if (options.epic !== undefined) {
+    if (typeof options.epic !== 'number' || !Number.isFinite(options.epic) || options.epic <= 0) {
+      log.error('--epic requires a positive integer issue number (e.g. --epic 165)');
+      process.exit(1);
+      return null;
+    }
+    const epic = getIssueWithComments(config.repo, options.epic);
+    if (!epic) {
+      log.error(`Could not fetch epic #${options.epic}`);
+      process.exit(1);
+      return null;
+    }
+    return {
+      activeEpic: epic.number,
+      activeEpicTitle: epic.title,
+      activeEpicIssue: epic,
+      activeMilestone: '',
+    };
+  }
+
+  if (activeMilestone && options.skipEpic !== true) {
+    const scheduledEpics = listEpics(config.repo, { milestone: activeMilestone });
+
+    if (scheduledEpics.length === 1) {
+      const epic = scheduledEpics[0];
+      log.info(`Milestone '${activeMilestone}' has one scheduled epic; processing epic #${epic.number}: ${epic.title}`);
+      return {
+        activeEpic: epic.number,
+        activeEpicTitle: epic.title,
+        activeEpicIssue: epic,
+        activeMilestone: '',
+      };
+    }
+
+    if (scheduledEpics.length > 1) {
+      log.error(`Milestone '${activeMilestone}' has multiple scheduled epics:`);
+      for (const epic of scheduledEpics) {
+        log.error(`  #${epic.number} ${epic.title}`);
+      }
+      log.error(`Use --epic <N> to choose one, or --skip-epic --milestone ${JSON.stringify(activeMilestone)} to process flat issues.`);
+      process.exit(1);
+      return null;
+    }
+
+    log.info(`No open epics scheduled for milestone '${activeMilestone}' — using flat milestone issue flow`);
+  }
+
+  // Interactive picker when TTY and nothing preset
+  if (!activeMilestone && !config.dryRun && process.stdin.isTTY) {
+    const target = await pickTarget(config.repo, {
+      preferEpics: config.preferEpics,
+      hideEpics: options.skipEpic === true,
+    });
+    if (target.type === 'epic') {
+      return {
+        activeEpic: target.epicNum,
+        activeEpicTitle: target.epicTitle,
+        activeEpicIssue: target.epic,
+        activeMilestone: '',
+      };
+    }
+    if (target.type === 'milestone') {
+      activeMilestone = target.title;
+    }
+  }
+
+  return { activeMilestone };
 }
 
 /**
@@ -464,42 +561,12 @@ export async function runCommand(options: RunOptions): Promise<void> {
   }
 
   // --- Target selection (epic or milestone) — must happen before session creation ---
-  let activeEpic: number | undefined;
-  let activeEpicTitle: string | undefined;
-  let activeEpicIssue: Issue | undefined;
-  let activeMilestone = config.milestone;
-
-  // --epic <N> overrides everything except --verify-only
-  if (options.epic !== undefined) {
-    if (typeof options.epic !== 'number' || !Number.isFinite(options.epic) || options.epic <= 0) {
-      log.error('--epic requires a positive integer issue number (e.g. --epic 165)');
-      process.exit(1);
-    }
-    const epic = getIssueWithComments(config.repo, options.epic);
-    if (!epic) {
-      log.error(`Could not fetch epic #${options.epic}`);
-      process.exit(1);
-    }
-    activeEpic = epic.number;
-    activeEpicTitle = epic.title;
-    activeEpicIssue = epic;
-    activeMilestone = '';
-  }
-
-  // Interactive picker when TTY and nothing preset
-  if (activeEpic === undefined && !activeMilestone && !config.dryRun && process.stdin.isTTY) {
-    const target = await pickTarget(config.repo, {
-      preferEpics: config.preferEpics,
-      hideEpics: options.skipEpic === true,
-    });
-    if (target.type === 'epic') {
-      activeEpic = target.epicNum;
-      activeEpicTitle = target.epicTitle;
-      activeEpicIssue = target.epic;
-    } else if (target.type === 'milestone') {
-      activeMilestone = target.title;
-    }
-  }
+  const target = await resolveRunTarget(config, options);
+  if (!target) return;
+  let activeEpic = target.activeEpic;
+  let activeEpicTitle = target.activeEpicTitle;
+  let activeEpicIssue = target.activeEpicIssue;
+  const activeMilestone = target.activeMilestone;
 
   if (activeEpic !== undefined) {
     log.info(`Processing epic #${activeEpic}${activeEpicTitle ? ': ' + activeEpicTitle : ''}`);
@@ -647,7 +714,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
         continue;
       }
       ref.title = ref.title ?? sub.title;
-      if (sub.labels.includes('epic')) {
+      if (hasEpicLabel(sub)) {
         log.warn(`Sub-issue #${sub.number} skipped: is itself an epic (nested epics unsupported in v1)`);
         continue;
       }
@@ -665,7 +732,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
       project: config.project,
       repoOwner: config.repoOwner,
       milestone: activeMilestone || undefined,
-    }).filter((iss) => !iss.labels.includes('epic'));
+    }).filter((iss) => !hasEpicLabel(iss));
   }
 
   // When set mid-loop, skip post-loop epic verification (e.g. checklist body inconsistency).

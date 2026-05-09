@@ -34,7 +34,7 @@ alpha-loop init
 
 # 2. Edit .alpha-loop.yaml if needed (agent, model, test_command, etc.)
 
-# 3. Run the loop — you'll be prompted to pick a milestone
+# 3. Run the loop — you'll be prompted to pick an epic or milestone
 alpha-loop run
 
 # Or target a specific milestone directly
@@ -68,19 +68,24 @@ After all issues are processed, Alpha Loop:
 
 ### Milestone-Based Workflow
 
-When you start the loop interactively, Alpha Loop shows your open milestones and lets you pick which one to work on:
+When you start the loop interactively, Alpha Loop shows open epics above milestones and lets you pick which target to work on:
 
 ```
+  Open Epics
+
+  1  Multi-tenant support #165 (0/7 done · milestone v1.0)
+
   Open Milestones
 
-  0  All issues (no milestone filter)
-  1  v1.0 — MVP (5 open, 3/8 done · due 2026-04-15)
-  2  v1.1 — Polish (10 open, 0/10 done)
+  2  v1.0 — MVP (5 open, 3/8 done · due 2026-04-15 · 1 scheduled epic)
+  3  v1.1 — Polish (10 open, 0/10 done)
 
-  Select milestone [0-2]: 1
+  0  All ready issues (no filter)
+
+  Select [0-3]: 1
 ```
 
-This lets you plan work in GitHub milestones and control exactly how much the loop processes per session. You can also pass `--milestone "v1.0"` to skip the prompt, or set `milestone: v1.0` in your config file.
+This lets you plan work in GitHub milestones and control exactly how much the loop processes per session. You can also pass `--milestone "v1.0"` to skip the prompt, or set `milestone: v1.0` in your config file. If that milestone has exactly one open parent issue labeled `epic`, Alpha Loop processes that epic's checklist; if it has multiple scheduled epics, it exits with their numbers and asks you to choose with `--epic <N>`. Use `--skip-epic --milestone "v1.0"` to force the flat milestone issue flow.
 
 ### Session Branches
 
@@ -304,7 +309,7 @@ Options:
   --once              Process one issue and exit
   --dry-run           Preview without making changes
   --model <model>     AI model override (e.g., opus, sonnet, gpt-5.4, gpt-5.3-codex)
-  --milestone <name>  Only process issues in this milestone (skips interactive prompt)
+  --milestone <name>  Process this milestone's scheduled epic, or flat issues if none
   --skip-tests        Skip test execution
   --skip-review       Skip code review step
   --skip-learn        Skip learning extraction
@@ -313,7 +318,7 @@ Options:
   --batch             Batch mode: process multiple issues per agent call (faster, fewer tokens)
   --batch-size <n>    Issues per batch (default: 5)
   --epic <n>          Process a specific epic by issue number (skips the picker)
-  --skip-epic         Skip the epic picker, use flat/milestone flow
+  --skip-epic         Skip epic discovery, use flat/milestone flow
   --verify-only <n>   Run only the verification pass on an existing epic
 ```
 
@@ -554,7 +559,7 @@ The loop uses these labels. Run `alpha-loop init` to create any that are missing
 
 ### Milestones
 
-Use GitHub milestones to group issues into planned releases or sprints. When you start the loop, you'll be prompted to pick a milestone — only issues in that milestone will be processed.
+Use GitHub milestones to group issues into planned releases or sprints. When you start the loop, you'll be prompted to pick an epic or milestone; milestone rows show scheduled epic counts when parent epics are assigned to them.
 
 Create milestones at `github.com/<owner>/<repo>/milestones/new`. Set due dates to keep yourself on track.
 
@@ -571,11 +576,13 @@ An epic is a GitHub issue with the `epic` label and a task-list body that refere
 
 Run `alpha-loop init` to install the epic issue template at `.github/ISSUE_TEMPLATE/epic.yml`. It applies the `epic` label and prompts for the goal, ordered sub-issues, acceptance criteria, dependencies, sequencing notes, and verification expectations.
 
-When you start the loop, open epics appear above milestones in the picker. You can also target one directly:
+When you start the loop, open epics appear above milestones in the picker and show milestone membership when present. You can also target one directly:
 
 ```bash
 alpha-loop run --epic 165
 ```
+
+`alpha-loop run --milestone "v1.0"` checks for open epics assigned to that milestone before fetching flat issues. One scheduled epic is processed automatically, multiple scheduled epics require `--epic <N>`, and no scheduled epics falls back to ready non-epic issues in that milestone. `--epic` always wins over `--milestone`; `--skip-epic` disables epic discovery and preserves the flat milestone flow.
 
 Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
 

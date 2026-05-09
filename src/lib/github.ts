@@ -875,9 +875,10 @@ function truncateBody(body: string): string {
 /**
  * List open issues labeled `epic`.
  */
-export function listEpics(repo: string): Issue[] {
+export function listEpics(repo: string, options?: { milestone?: string }): Issue[] {
+  const milestoneFlag = options?.milestone ? ` --milestone ${JSON.stringify(options.milestone)}` : '';
   const result = ghExec(
-    `gh issue list --repo "${repo}" --label "epic" --state open --json number,title,body,labels,milestone --limit 100`,
+    `gh issue list --repo "${repo}" --label "epic" --state open${milestoneFlag} --json number,title,body,labels,milestone --limit 100`,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to list epics: ${result.stderr}`);
