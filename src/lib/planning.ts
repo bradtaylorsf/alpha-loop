@@ -56,6 +56,19 @@ export type TriageFinding = {
   selected: boolean;
 };
 
+export type ProposedEpicGroup = {
+  title: string;
+  goal: string;
+  rationale: string;
+  orderedChildIssueNumbers: number[];
+  acceptanceCriteria: string[];
+};
+
+export type TriageAnalysis = {
+  findings: TriageFinding[];
+  epicGroups: ProposedEpicGroup[];
+};
+
 export type RoadmapAssignment = {
   issueNum: number;
   title: string;
@@ -211,6 +224,111 @@ export function extractJsonFromResponse<T>(response: string): T {
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requireString(
+  value: Record<string, unknown>,
+  field: keyof ProposedEpicGroup,
+  context: string,
+): string {
+  const raw = value[field];
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    throw new Error(`${context}.${String(field)} must be a non-empty string`);
+  }
+  return raw.trim();
+}
+
+function requireStringArray(
+  value: Record<string, unknown>,
+  field: keyof ProposedEpicGroup,
+  context: string,
+): string[] {
+  const raw = value[field];
+  if (
+    !Array.isArray(raw) ||
+    raw.length === 0 ||
+    raw.some((item) => typeof item !== 'string' || item.trim().length === 0)
+  ) {
+    throw new Error(`${context}.${String(field)} must be a non-empty array of non-empty strings`);
+  }
+  return raw.map((item) => (item as string).trim());
+}
+
+function requireIssueNumberArray(
+  value: Record<string, unknown>,
+  field: keyof ProposedEpicGroup,
+  context: string,
+): number[] {
+  const raw = value[field];
+  if (!Array.isArray(raw) || raw.length < 2) {
+    throw new Error(`${context}.${String(field)} must include at least two issue numbers`);
+  }
+  const numbers = raw.map((item) => {
+    if (!Number.isInteger(item) || item <= 0) {
+      throw new Error(`${context}.${String(field)} must contain positive integer issue numbers`);
+    }
+    return item as number;
+  });
+  const unique = new Set(numbers);
+  if (unique.size !== numbers.length) {
+    throw new Error(`${context}.${String(field)} must not contain duplicate issue numbers`);
+  }
+  return numbers;
+}
+
+function normalizeProposedEpicGroup(value: unknown, index: number): ProposedEpicGroup {
+  const context = `epicGroups[${index}]`;
+  if (!isRecord(value)) {
+    throw new Error(`${context} must be an object`);
+  }
+
+  return {
+    title: requireString(value, 'title', context),
+    goal: requireString(value, 'goal', context),
+    rationale: requireString(value, 'rationale', context),
+    orderedChildIssueNumbers: requireIssueNumberArray(value, 'orderedChildIssueNumbers', context),
+    acceptanceCriteria: requireStringArray(value, 'acceptanceCriteria', context),
+  };
+}
+
+/**
+ * Normalize triage JSON into the current analysis shape. Legacy TriageFinding[]
+ * responses are still accepted so older agents fail gracefully.
+ */
+export function normalizeTriageAnalysis(value: unknown): TriageAnalysis {
+  if (Array.isArray(value)) {
+    return { findings: value as TriageFinding[], epicGroups: [] };
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('Triage analysis must be a JSON object with findings and epicGroups arrays');
+  }
+
+  const findings = value.findings ?? [];
+  const epicGroups = value.epicGroups ?? [];
+
+  if (!Array.isArray(findings)) {
+    throw new Error('Triage analysis findings must be an array');
+  }
+  if (!Array.isArray(epicGroups)) {
+    throw new Error('Triage analysis epicGroups must be an array');
+  }
+
+  return {
+    findings: findings as TriageFinding[],
+    epicGroups: epicGroups.map((group, index) => normalizeProposedEpicGroup(group, index)),
+  };
+}
+
+/**
+ * Extract and normalize a triage agent response.
+ */
+export function parseTriageAnalysisResponse(response: string): TriageAnalysis {
+  return normalizeTriageAnalysis(extractJsonFromResponse<unknown>(response));
+}
+
 /**
  * Format a table of planned issues grouped by milestone, with colored
  * priority and complexity columns.
@@ -316,6 +434,30 @@ export function formatTriageFindings(findings: TriageFinding[]): string {
       }
     }
   }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format proposed epic groups separately from per-issue cleanup findings.
+ */
+export function formatEpicGroupProposals(groups: ProposedEpicGroup[]): string {
+  if (groups.length === 0) {
+    return `${GRAY}No proposed epic groups.${NC}`;
+  }
+
+  const lines: string[] = [`\n${BOLD}${CYAN}── Proposed Epic Groups (${groups.length}) ──${NC}`];
+
+  groups.forEach((group, index) => {
+    lines.push(`  ${index + 1}. ${group.title}`);
+    lines.push(`      ${GRAY}Goal: ${group.goal}${NC}`);
+    lines.push(`      ${GRAY}Rationale: ${group.rationale}${NC}`);
+    lines.push(`      Children: ${group.orderedChildIssueNumbers.map((n) => `#${n}`).join(' -> ')}`);
+    lines.push('      Acceptance Criteria:');
+    for (const criterion of group.acceptanceCriteria) {
+      lines.push(`        - ${criterion.replace(/^[-*]\s+/, '').trim()}`);
+    }
+  });
 
   return lines.join('\n');
 }

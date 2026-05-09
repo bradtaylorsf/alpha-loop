@@ -7,6 +7,7 @@ import {
   buildBatchImplementPrompt,
   buildBatchReviewPrompt,
   buildSessionReviewPrompt,
+  buildTriagePrompt,
   formatEpicPromptContext,
   type EpicPromptContext,
 } from '../../src/lib/prompts';
@@ -384,6 +385,53 @@ describe('buildBatchReviewPrompt', () => {
 
     expect(prompt).toContain('## Parent Epic Context');
     expect(prompt).toContain('integration-sensitive work across siblings');
+  });
+});
+
+describe('buildTriagePrompt', () => {
+  test('includes epic grouping instructions and guardrails', () => {
+    const prompt = buildTriagePrompt({
+      issues: [
+        { number: 1, title: 'Add settings API', body: 'Implement endpoint', labels: ['ready', 'backend'] },
+        { number: 2, title: 'Wire settings UI', body: 'Call endpoint', labels: ['ready', 'frontend'] },
+      ],
+    });
+
+    expect(prompt).toContain('candidate epic groups');
+    expect(prompt).toContain('coherent deliverable');
+    expect(prompt).toContain('Labels: ready, backend');
+    expect(prompt).toContain('Use each issue\'s Labels line to identify existing epics');
+    expect(prompt).toContain('Do NOT propose nested epics');
+    expect(prompt).toContain('Do NOT group unrelated issues merely because they share a milestone, label');
+  });
+
+  test('includes triage analysis JSON schema with epicGroups', () => {
+    const prompt = buildTriagePrompt({
+      issues: [{ number: 1, title: 'Issue', body: 'Body' }],
+    });
+
+    expect(prompt).toContain('"findings": [');
+    expect(prompt).toContain('"epicGroups": [');
+    expect(prompt).toContain('"title": "Epic: Settings reliability"');
+    expect(prompt).toContain('"goal":');
+    expect(prompt).toContain('"rationale":');
+    expect(prompt).toContain('"orderedChildIssueNumbers": [46, 47, 48]');
+    expect(prompt).toContain('"acceptanceCriteria": [');
+    expect(prompt).toContain('{ "findings": [], "epicGroups": [] }');
+  });
+
+  test('frames triage as bounded analysis instead of implementation work', () => {
+    const prompt = buildTriagePrompt({
+      issues: [{ number: 1, title: 'Issue', body: 'Body' }],
+      projectContext: 'src/commands/triage.ts handles issue cleanup.',
+    });
+
+    expect(prompt).toContain('analysis-only backlog triage task');
+    expect(prompt).toContain('not an implementation task');
+    expect(prompt).toContain('Do not modify files');
+    expect(prompt).toContain('Do not inspect repository files or run shell commands');
+    expect(prompt).toContain('Return exactly one JSON object');
+    expect(prompt).toContain('Check the provided codebase context');
   });
 });
 

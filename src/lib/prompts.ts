@@ -844,14 +844,20 @@ Keep it concise. Only include genuinely ambiguous items, not obvious implementat
 }
 
 export type TriagePromptOptions = {
-  issues: Array<{ number: number; title: string; body: string; comments?: Array<{ author: string; body: string; createdAt: string }> }>;
+  issues: Array<{
+    number: number;
+    title: string;
+    body: string;
+    labels?: string[];
+    comments?: Array<{ author: string; body: string; createdAt: string }>;
+  }>;
   projectContext?: string | null;
   visionContext?: string | null;
 };
 
 /**
  * Build the triage analysis prompt for an AI agent.
- * Instructs the agent to categorize open issues and output TriageFinding[] JSON.
+ * Instructs the agent to categorize open issues and output TriageAnalysis JSON.
  */
 export function buildTriagePrompt(options: TriagePromptOptions): string {
   const { issues, projectContext, visionContext } = options;
@@ -862,7 +868,8 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     : '';
 
   const issueList = capped.map((i) => {
-    let entry = `### Issue #${i.number}: ${i.title}\n${i.body || '(no description)'}`;
+    const labels = i.labels && i.labels.length > 0 ? i.labels.join(', ') : '(none)';
+    let entry = `### Issue #${i.number}: ${i.title}\nLabels: ${labels}\n\n${i.body || '(no description)'}`;
     if (i.comments && i.comments.length > 0) {
       const commentLines = i.comments.map((c) =>
         `- **@${c.author}** (${c.createdAt}): ${c.body.length > 200 ? c.body.slice(0, 200) + '...' : c.body}`
@@ -874,6 +881,10 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
 
   const sections: string[] = [
     'You are a project triage assistant. Analyze the following open GitHub issues and categorize any that need attention.',
+    '',
+    'This is an analysis-only backlog triage task, not an implementation task. Do not modify files, create commits, run tests, or start work on any issue. Use the issue text, comments, product vision, and technical context included in this prompt as the codebase context. Do not inspect repository files or run shell commands unless a specific stale/duplicate determination cannot be made from the provided context.',
+    '',
+    'Return exactly one JSON object as your final answer.',
     '',
     '## Open Issues',
     issueList,
@@ -907,7 +918,13 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     '- For `too_large` issues: include `splitInto` array of title strings for the sub-issues',
     '- For `duplicate` issues: include `duplicateOf` with the canonical issue number',
     '',
-    'Check the codebase context for staleness signals (referenced files deleted, features already implemented).',
+    'Also identify candidate epic groups among the open issues when multiple existing issues form one coherent deliverable.',
+    'An epic group should represent a single outcome with a clear goal, concrete rationale, and an ordered set of existing child issue numbers.',
+    'Use each issue\'s Labels line to identify existing epics. Do NOT propose nested epics: do not include issues labeled `epic`, issues that are already parent epics, umbrella planning issues, or issues whose purpose is to collect child issues.',
+    'Do NOT group unrelated issues merely because they share a milestone, label, component, or broad theme; the rationale must cite a concrete shared deliverable, dependency chain, or acceptance goal.',
+    'Epic groups must use existing open issue numbers only. Do not list newly split sub-issue titles from `too_large` findings as epic children.',
+    '',
+    'Check the provided codebase context for staleness signals (referenced files deleted, features already implemented).',
     'When rewriting unclear issues, use markdown with acceptance criteria in checkbox format.',
     'When enriching issues, analyze the codebase context to identify affected files and areas, and validate that the reported issue is plausible.',
     '',
@@ -917,61 +934,80 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     'The example below uses fences for illustration only — your output must be raw JSON with no fences:',
     '',
     '```json',
-    '[',
-    '  {',
-    '    "issueNum": 42,',
-    '    "title": "Issue title",',
-    '    "category": "stale",',
-    '    "reason": "This feature was already implemented in PR #30",',
-    '    "action": "close",',
-    '    "selected": true',
-    '  },',
-    '  {',
-    '    "issueNum": 43,',
-    '    "title": "Vague issue title",',
-    '    "category": "unclear",',
-    '    "reason": "No acceptance criteria, scope is ambiguous",',
-    '    "action": "rewrite",',
-    '    "rewrittenBody": "## Summary\\n...\\n\\n## Acceptance Criteria\\n- [ ] Criterion 1\\n- [ ] Criterion 2",',
-    '    "selected": true',
-    '  },',
-    '  {',
-    '    "issueNum": 44,',
-    '    "title": "Large issue title",',
-    '    "category": "too_large",',
-    '    "reason": "Covers 3 independent features",',
-    '    "action": "split",',
-    '    "splitInto": ["Sub-issue A", "Sub-issue B", "Sub-issue C"],',
-    '    "selected": true',
-    '  },',
-    '  {',
-    '    "issueNum": 45,',
-    '    "title": "Duplicate issue",',
-    '    "category": "duplicate",',
-    '    "reason": "Same scope as #42",',
-    '    "action": "merge",',
-    '    "duplicateOf": 42,',
-    '    "selected": true',
-    '  },',
-    '  {',
-    '    "issueNum": 46,',
-    '    "title": "Button broken on settings page",',
-    '    "category": "enrich",',
-    '    "reason": "Raw support ticket with minimal detail — needs affected areas, reproduction steps, and acceptance criteria",',
-    '    "action": "enrich",',
-    '    "enrichedBody": "<details><summary>Original description</summary>\\n\\nButton broken on settings page\\n\\n</details>\\n\\n## Summary\\nThe save button on the settings page is non-functional...\\n\\n## Affected Areas\\n- `src/components/Settings.tsx`\\n\\n## Acceptance Criteria\\n- [ ] Save button triggers form submission\\n- [ ] Success feedback shown to user\\n\\n## Reproduction Steps\\n1. Navigate to Settings\\n2. Click Save\\n3. Observe no response",',
-    '    "selected": true',
-    '  }',
-    ']',
+    '{',
+    '  "findings": [',
+    '    {',
+    '      "issueNum": 42,',
+    '      "title": "Issue title",',
+    '      "category": "stale",',
+    '      "reason": "This feature was already implemented in PR #30",',
+    '      "action": "close",',
+    '      "selected": true',
+    '    },',
+    '    {',
+    '      "issueNum": 43,',
+    '      "title": "Vague issue title",',
+    '      "category": "unclear",',
+    '      "reason": "No acceptance criteria, scope is ambiguous",',
+    '      "action": "rewrite",',
+    '      "rewrittenBody": "## Summary\\n...\\n\\n## Acceptance Criteria\\n- [ ] Criterion 1\\n- [ ] Criterion 2",',
+    '      "selected": true',
+    '    },',
+    '    {',
+    '      "issueNum": 44,',
+    '      "title": "Large issue title",',
+    '      "category": "too_large",',
+    '      "reason": "Covers 3 independent features",',
+    '      "action": "split",',
+    '      "splitInto": ["Sub-issue A", "Sub-issue B", "Sub-issue C"],',
+    '      "selected": true',
+    '    },',
+    '    {',
+    '      "issueNum": 45,',
+    '      "title": "Duplicate issue",',
+    '      "category": "duplicate",',
+    '      "reason": "Same scope as #42",',
+    '      "action": "merge",',
+    '      "duplicateOf": 42,',
+    '      "selected": true',
+    '    },',
+    '    {',
+    '      "issueNum": 46,',
+    '      "title": "Button broken on settings page",',
+    '      "category": "enrich",',
+    '      "reason": "Raw support ticket with minimal detail — needs affected areas, reproduction steps, and acceptance criteria",',
+    '      "action": "enrich",',
+    '      "enrichedBody": "<details><summary>Original description</summary>\\n\\nButton broken on settings page\\n\\n</details>\\n\\n## Summary\\nThe save button on the settings page is non-functional...\\n\\n## Affected Areas\\n- `src/components/Settings.tsx`\\n\\n## Acceptance Criteria\\n- [ ] Save button triggers form submission\\n- [ ] Success feedback shown to user\\n\\n## Reproduction Steps\\n1. Navigate to Settings\\n2. Click Save\\n3. Observe no response",',
+    '      "selected": true',
+    '    }',
+    '  ],',
+    '  "epicGroups": [',
+    '    {',
+    '      "title": "Epic: Settings reliability",',
+    '      "goal": "Make settings changes save reliably and expose clear user feedback.",',
+    '      "rationale": "Issues #46, #47, and #48 all describe dependent parts of the same settings-save workflow; completing them together creates one coherent deliverable.",',
+    '      "orderedChildIssueNumbers": [46, 47, 48],',
+    '      "acceptanceCriteria": [',
+    '        "- [ ] Settings saves persist successfully",',
+    '        "- [ ] Users see success and failure states",',
+    '        "- [ ] Regression coverage exists for the settings-save flow"',
+    '      ]',
+    '    }',
+    '  ]',
+    '}',
     '```',
     '',
     '## Rules',
     '- Only include issues that need action (skip "ok" issues)',
-    '- If ALL issues are fine, output an empty array: `[]`',
+    '- Always output an object with `findings` and `epicGroups` arrays',
+    '- If ALL issues are fine, output `{ "findings": [], "epicGroups": [] }`',
+    '- If there are cleanup findings but no epic groups, set `epicGroups: []`',
+    '- If there are epic groups but no cleanup findings, set `findings: []`',
     '- Set `selected: true` for all findings (user will deselect if needed)',
     '- action mapping: stale→close, unclear→rewrite, too_large→split, duplicate→merge, enrich→enrich',
     '- Be conservative — only flag issues when you are confident about the categorization',
     '- Prefer `enrich` over `unclear` for issues that have some useful info (e.g., support tickets, bug reports) but need technical detail added',
+    '- For epic groups, include at least two ordered child issue numbers and at least one acceptance criterion',
   );
 
   return sections.join('\n');
