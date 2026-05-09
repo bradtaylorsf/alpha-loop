@@ -3,7 +3,7 @@ import {
   createIssue, updateIssue, closeIssue, createMilestone,
   setIssueMilestone, listOpenIssues, addIssueToProject,
   getIssueBody, updateEpicIssueBody, commentChildEpicBacklink,
-  listRoadmapEpics,
+  listRoadmapEpics, listEpics,
 } from '../../src/lib/github';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -385,6 +385,38 @@ describe('updateIssue', () => {
 });
 
 describe('epic issue helpers', () => {
+  test('listEpics can filter open epics by milestone and normalizes milestone titles', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify([
+        {
+          number: 195,
+          title: 'Scheduled epic',
+          body: '- [ ] #201',
+          labels: [{ name: 'epic' }],
+          milestone: { title: 'Sprint 1' },
+        },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    const epics = listEpics('owner/repo', { milestone: 'Sprint 1' });
+
+    expect(epics).toEqual([{
+      number: 195,
+      title: 'Scheduled epic',
+      body: '- [ ] #201',
+      labels: ['epic'],
+      milestone: 'Sprint 1',
+    }]);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--milestone "Sprint 1"'),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--json number,title,body,labels,milestone'),
+    );
+  });
+
   test('listRoadmapEpics returns open epic child counts and summaries from known issues', () => {
     mockExec.mockReturnValue({
       stdout: JSON.stringify([

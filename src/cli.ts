@@ -29,7 +29,7 @@ program
   .option('--skip-tests', 'Skip test execution')
   .option('--skip-review', 'Skip code review')
   .option('--skip-learn', 'Skip learning extraction')
-  .option('--milestone <name>', 'Only process issues in this milestone')
+  .option('--milestone <name>', 'Process the scheduled epic for this milestone, or flat issues if none')
   .option('--auto-merge', 'Auto-merge PRs to session branch')
   .option('--merge-to <branch>', 'Use existing branch instead of creating session branch')
   .option('--once', 'Process one issue and exit')
@@ -39,7 +39,7 @@ program
   .option('--fix', 'Auto-fix validation issues (reorder deps, comment on incomplete issues)')
   .option('--verbose', 'Stream live agent output to terminal')
   .option('--epic <n>', 'Process a specific epic by issue number (skips the picker)', parseInt)
-  .option('--skip-epic', 'Skip the epic picker, use flat/milestone flow')
+  .option('--skip-epic', 'Skip epic discovery, use flat/milestone flow')
   .option('--verify-only <n>', 'Run only the verification pass on an existing epic', parseInt)
   .action(async (options) => {
     const { runCommand } = await import('./commands/run.js');

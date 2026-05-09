@@ -60,13 +60,15 @@ The picker lists open epics above milestones:
 
 ```
   Open Epics
-  1  #165 Multi-tenant support (0/7 sub-issues done)
-  2  #170 Billing revamp (2/5 sub-issues done)
+  1  Multi-tenant support #165 (0/7 done · milestone v1.1)
+  2  Billing revamp #170 (2/5 done)
 
   Open Milestones
-  3  v1.1 — Polish (10 open)
+  3  v1.1 — Polish (10 open, 3/13 done · 1 scheduled epic)
 
-  Select [1-3]:
+  0  All ready issues (no filter)
+
+  Select [0-3]:
 ```
 
 ### Forced
@@ -77,13 +79,27 @@ alpha-loop run --epic 165
 
 Processes epic `#165` directly, skipping the picker.
 
+`--epic` is the explicit override. If you also pass `--milestone`, the milestone filter is ignored and the selected epic's checklist is processed.
+
+### Milestone Scheduled
+
+```bash
+alpha-loop run --milestone "v1.1"
+```
+
+When a milestone contains open parent issues labeled `epic`, Alpha Loop applies this rule before fetching flat issues:
+
+1. Exactly one scheduled epic: process that epic's checklist.
+2. Multiple scheduled epics: print their issue numbers and titles, then exit. Re-run with `--epic <N>` to choose one.
+3. No scheduled epics: use the existing flat milestone flow and process ready non-epic issues in that milestone.
+
 ### Excluded
 
 ```bash
-alpha-loop run --skip-epic
+alpha-loop run --skip-epic --milestone "v1.1"
 ```
 
-Skips the epic picker entirely and goes straight to milestones. Useful when you want to work on standalone issues in a repo that has open epics.
+Skips epic discovery entirely and uses the flat milestone issue flow. Useful when you want to work on standalone issues in a milestone that also has scheduled parent epics.
 
 ## Sub-Issue Ordering
 
