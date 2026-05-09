@@ -285,6 +285,11 @@ async function resolveRunTarget(config: Config, options: RunOptions): Promise<Re
       process.exit(1);
       return null;
     }
+    if (!hasEpicLabel(epic)) {
+      log.error(`Issue #${options.epic} is not labeled 'epic'. Add the epic label before running --epic.`);
+      process.exit(1);
+      return null;
+    }
     return {
       activeEpic: epic.number,
       activeEpicTitle: epic.title,
@@ -357,6 +362,11 @@ async function runEpicVerificationFlow(
   const epic = getIssueWithComments(config.repo, epicNum);
   if (!epic) {
     log.error(`Could not fetch epic #${epicNum}`);
+    return;
+  }
+  if (!hasEpicLabel(epic)) {
+    log.error(`Issue #${epicNum} is not labeled 'epic'. Add the epic label before running epic verification.`);
+    process.exit(1);
     return;
   }
   const refs = getEpicSubIssues(config.repo, epicNum);

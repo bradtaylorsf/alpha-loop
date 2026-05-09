@@ -167,12 +167,12 @@ function getMilestoneIssueNumbers(repo: string, milestone: string): Set<number> 
 
 /**
  * Fallback: poll issues by label when no project board is configured.
- * Optionally filters by milestone. When a milestone is specified, the
- * milestone is the primary filter and the label is not required.
+ * Optionally filters by milestone; the ready label remains authoritative
+ * because milestones are scheduling metadata, not workflow state.
  */
 function pollIssuesByLabel(repo: string, label: string, limit: number, milestone?: string): Issue[] {
   const milestoneFlag = milestone ? ` --milestone "${milestone}"` : '';
-  const labelFlag = milestone ? '' : ` --label "${label}"`;
+  const labelFlag = label ? ` --label "${label}"` : '';
   const result = ghExec(
     `gh issue list --repo "${repo}"${labelFlag} --state open${milestoneFlag} --json number,title,body,labels --limit ${limit}`,
   );
@@ -627,7 +627,7 @@ export function setIssueMilestone(repo: string, issueNum: number, milestoneTitle
 export function listOpenIssues(repo: string, limit = 100): Issue[] {
   const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)));
   const result = ghExec(
-    `gh issue list --repo "${repo}" --state open --json number,title,body,labels --limit ${safeLimit}`,
+    `gh issue list --repo "${repo}" --state open --json number,title,body,labels,milestone --limit ${safeLimit}`,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to list open issues: ${result.stderr}`);
@@ -639,13 +639,18 @@ export function listOpenIssues(repo: string, limit = 100): Issue[] {
       title: string;
       body: string;
       labels: Array<{ name: string }>;
+      milestone?: unknown;
     }>;
-    return raw.map((issue) => ({
-      number: issue.number,
-      title: issue.title,
-      body: issue.body ?? '',
-      labels: (issue.labels ?? []).map((l) => l.name),
-    }));
+    return raw.map((issue) => {
+      const msTitle = milestoneTitle(issue.milestone);
+      return {
+        number: issue.number,
+        title: issue.title,
+        body: issue.body ?? '',
+        labels: (issue.labels ?? []).map((l) => l.name),
+        ...(msTitle ? { milestone: msTitle } : {}),
+      };
+    });
   } catch {
     log.warn('Failed to parse open issues JSON');
     return [];

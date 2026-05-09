@@ -90,6 +90,16 @@ describe('pollIssues', () => {
     );
   });
 
+  test('keeps the ready label filter when polling a milestone', () => {
+    mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });
+
+    pollIssues('owner/repo', 'ready', 5, { milestone: 'Sprint 1' });
+
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('gh issue list --repo "owner/repo" --label "ready" --state open --milestone "Sprint 1"'),
+    );
+  });
+
   test('returns empty array on failure', () => {
     mockExec.mockReturnValue({ stdout: '', stderr: 'not found', exitCode: 1 });
 
@@ -642,7 +652,7 @@ describe('listOpenIssues', () => {
     mockExec.mockReturnValue({
       stdout: JSON.stringify([
         { number: 1, title: 'Bug', body: 'Fix it', labels: [{ name: 'bug' }] },
-        { number: 2, title: 'Feature', body: 'Add it', labels: [] },
+        { number: 2, title: 'Feature', body: 'Add it', labels: [], milestone: { title: 'Sprint 1' } },
       ]),
       stderr: '',
       exitCode: 0,
@@ -651,7 +661,17 @@ describe('listOpenIssues', () => {
     const issues = listOpenIssues('owner/repo');
     expect(issues).toHaveLength(2);
     expect(issues[0]).toEqual({ number: 1, title: 'Bug', body: 'Fix it', labels: ['bug'] });
-    expect(issues[1].labels).toEqual([]);
+    expect(issues[1]).toEqual({ number: 2, title: 'Feature', body: 'Add it', labels: [], milestone: 'Sprint 1' });
+  });
+
+  test('requests milestone data for roadmap issue context', () => {
+    mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });
+
+    listOpenIssues('owner/repo');
+
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--json number,title,body,labels,milestone'),
+    );
   });
 
   test('uses default limit of 100', () => {

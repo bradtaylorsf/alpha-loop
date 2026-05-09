@@ -374,6 +374,37 @@ describe('runCommand', () => {
     );
   });
 
+  test('--epic rejects issues that are not labeled epic', async () => {
+    mockGetIssueWithComments.mockReturnValue({
+      number: 195,
+      title: 'Unlabeled tracker',
+      body: '- [ ] #201',
+      labels: ['ready'],
+    });
+
+    await runCommand({ epic: 195, dryRun: true });
+
+    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockPollIssues).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+  });
+
+  test('--verify-only rejects issues that are not labeled epic', async () => {
+    mockGetIssueWithComments.mockReturnValue({
+      number: 195,
+      title: 'Unlabeled tracker',
+      body: '- [x] #201',
+      labels: ['ready'],
+    });
+
+    await runCommand({ verifyOnly: 195 });
+
+    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+  });
+
   test('exits cleanly when no issues found', async () => {
     mockPollIssues.mockReturnValue([]);
 

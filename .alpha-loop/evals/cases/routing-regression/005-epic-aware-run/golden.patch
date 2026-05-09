@@ -1,1 +1,145 @@
-# TODO: backfill from the issue #194 PR after it is merged
+diff --git a/README.md b/README.md
+index 27626bc..e936c6d 100644
+--- a/README.md
++++ b/README.md
+@@ -41,6 +41,17 @@ alpha-loop run
+ alpha-loop run --milestone "v1.0"
+ ```
+ 
++### Recommended Epic-First Flow
++
++For planned feature work, use epics as the unit you schedule and ship:
++
++1. `alpha-loop triage` reviews open issues, proposes cleanup, and groups related ready issues into parent epics with ordered child checklists.
++2. `alpha-loop roadmap` schedules parent epic issues into milestones, while still scheduling standalone issues that are not part of an epic.
++3. `alpha-loop run --epic <N>` ships the epic's child issues in checklist order. Agents working on each child issue receive the parent epic goal, acceptance criteria, and sibling checklist as context.
++4. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
++
++Milestones answer "when should this epic ship?" The epic checklist answers "what child issues ship, and in what order?"
++
+ ## How It Works
+ 
+ Alpha Loop implements a 12-step pipeline for each issue:
+@@ -293,12 +304,12 @@ During live verification, the agent takes screenshots at key states and saves th
+ | `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
+ | `alpha-loop plan --dry-run` | Display the plan without creating any GitHub resources |
+ | `alpha-loop plan --yes --seed <file>` | Non-interactive mode: accept all AI recommendations |
+-| `alpha-loop triage` | Analyze and improve existing issues (cleanup, enrichment, and epic grouping) |
+-| `alpha-loop triage --dry-run` | Display findings without making changes |
++| `alpha-loop triage` | Analyze open issues, clean up backlog noise, and propose/apply epic groups |
++| `alpha-loop triage --dry-run` | Display cleanup findings and epic proposals without making changes |
+ | `alpha-loop triage --yes` | Non-interactive mode: apply AI-selected cleanup actions and epic proposals |
+-| `alpha-loop roadmap` | Organize open issues into milestones using AI analysis |
+-| `alpha-loop roadmap --dry-run` | Display proposed roadmap without making changes |
+-| `alpha-loop roadmap --yes` | Non-interactive mode: apply all AI-recommended assignments |
++| `alpha-loop roadmap` | Schedule parent epics and standalone issues into milestones using AI analysis |
++| `alpha-loop roadmap --dry-run` | Display proposed epic/standalone milestone assignments without making changes |
++| `alpha-loop roadmap --yes` | Non-interactive mode: apply all AI-recommended epic and standalone assignments |
+ 
+ ### Run Options
+ 
+diff --git a/docs/epics.md b/docs/epics.md
+index 41d8104..ad1f5bf 100644
+--- a/docs/epics.md
++++ b/docs/epics.md
+@@ -48,6 +48,26 @@ The task-list lines are the source of truth for both ordering and completion tra
+ 
+ This keeps epic detection explicit. You opt in by labeling.
+ 
++## Milestones + Epics
++
++Alpha Loop's recommended planning flow is epic-first:
++
++1. `alpha-loop triage` groups related open issues into parent epics. It can create a new parent epic or update an existing open issue labeled `epic`, then comments on child issues with a backlink to the parent.
++2. `alpha-loop roadmap` schedules the parent epic issue into a milestone. It uses the ordered child checklist as planning context, but does not assign those child issues separately as standalone roadmap items.
++3. `alpha-loop run --epic <N>` ships the child issues from the epic checklist in order. You can also run `alpha-loop run --milestone "<name>"`; when that milestone has exactly one open parent epic, the loop processes that epic.
++4. The verification pass evaluates the completed child issues against the parent epic's acceptance criteria.
++
++Milestones and epics answer different questions:
++
++| Concept | Source of truth | What it controls |
++|---------|-----------------|------------------|
++| Milestone | GitHub milestone on the parent epic issue | Which delivery window or release the epic belongs to |
++| Epic | Parent issue labeled `epic` | Goal, acceptance criteria, ordered child issue checklist, completion verification |
++| Child issue | Task-list item inside the epic body | The concrete implementation unit processed by agents |
++| Standalone issue | Open issue not listed in any open epic | Can be scheduled directly into a milestone by `roadmap` |
++
++When a child issue is processed from an epic, the implementation, planning, review, batch, and session-review prompts include parent epic context: the parent goal/body summary, parent acceptance criteria, and the full ordered sibling checklist. This keeps each child narrowly scoped while preserving the integration expectations of the whole epic.
++
+ ## Running the Loop Against an Epic
+ 
+ ### Interactive
+diff --git a/src/cli.ts b/src/cli.ts
+index 843b36a..c6bd916 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -119,8 +119,8 @@ program
+ 
+ program
+   .command('triage')
+-  .description('Analyze and improve existing issues (cleanup and epic grouping)')
+-  .option('--dry-run', 'Display findings without making changes')
++  .description('Analyze open issues, clean up backlog noise, and propose/apply epic groups')
++  .option('--dry-run', 'Display cleanup findings and epic proposals without making changes')
+   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
+   .action(async (options) => {
+     const { triageCommand } = await import('./commands/triage.js');
+@@ -129,8 +129,8 @@ program
+ 
+ program
+   .command('roadmap')
+-  .description('Organize open issues into milestones using AI analysis')
+-  .option('--dry-run', 'Display proposed roadmap without making changes')
++  .description('Schedule parent epics and standalone issues into milestones using AI analysis')
++  .option('--dry-run', 'Display proposed epic/standalone milestone assignments without making changes')
+   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
+   .action(async (options) => {
+     const { roadmapCommand } = await import('./commands/roadmap.js');
+diff --git a/src/lib/prompts.ts b/src/lib/prompts.ts
+index acb631a..6b44ffa 100644
+--- a/src/lib/prompts.ts
++++ b/src/lib/prompts.ts
+@@ -921,6 +921,7 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
+     '- For `duplicate` issues: include `duplicateOf` with the canonical issue number',
+     '',
+     'Also identify candidate epic groups among the open issues when multiple existing issues form one coherent deliverable.',
++    'This is the first step in the recommended epic-first workflow: triage groups related issues under parent epics, roadmap schedules those parent epics into milestones, and run processes each child issue with parent epic context.',
+     'An epic group should represent a single outcome with a clear goal, concrete rationale, and an ordered set of existing child issue numbers.',
+     'Use each issue\'s Labels line to identify existing epics. Do NOT propose nested epics: do not include issues labeled `epic`, issues that are already parent epics, umbrella planning issues, or issues whose purpose is to collect child issues.',
+     'When an existing open issue labeled `epic` already represents the parent outcome, set `existingEpicIssueNum` to that issue number and add only missing child refs to it instead of proposing a duplicate parent. Otherwise omit `existingEpicIssueNum` or set it to null.',
+@@ -1140,6 +1141,7 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
+     '## Instructions',
+     '- Respect existing milestone structure - reuse existing milestones where appropriate',
+     '- Only create new milestones when issues clearly don\'t fit existing ones',
++    '- This is the second step in the epic-first workflow: triage creates or updates parent epics, roadmap schedules those parent epics, and run ships their child issues with parent epic context.',
+     '- When open epics exist, schedule epics as the primary roadmap unit: assign the parent epic issue to a milestone in `epicAssignments`',
+     '- Do not separately schedule child issues that are listed inside an open epic; use their ordered checklist only as planning context',
+     '- Preserve child issue ordering inside each epic when deciding which milestone the parent epic belongs in',
+diff --git a/tests/commands/epic-first-workflow.test.ts b/tests/commands/epic-first-workflow.test.ts
+new file mode 100644
+index 0000000..9c0b31c
+--- /dev/null
++++ b/tests/commands/epic-first-workflow.test.ts
+@@ -0,0 +1,34 @@
++import { triageCommand } from '../../src/commands/triage';
++import { roadmapCommand } from '../../src/commands/roadmap';
++import { runCommand } from '../../src/commands/run';
++
++describe('epic-first workflow', () => {
++  test('triage can propose an epic, roadmap can schedule it, and run can process it', async () => {
++    const proposedEpic = {
++      title: 'Epic: checkout workflow',
++      goal: 'Ship checkout end to end',
++      rationale: 'The child issues form one cohesive deliverable',
++      orderedChildIssueNumbers: [101, 102],
++      acceptanceCriteria: ['Checkout works end to end'],
++      selected: true,
++    };
++
++    await triageCommand({ dryRun: true });
++    await roadmapCommand({ dryRun: true });
++    await runCommand({ epic: 200, once: true, dryRun: true });
++
++    expect(proposedEpic.orderedChildIssueNumbers).toEqual([101, 102]);
++  });
++});
