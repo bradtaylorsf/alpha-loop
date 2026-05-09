@@ -402,6 +402,7 @@ describe('buildTriagePrompt', () => {
     expect(prompt).toContain('Labels: ready, backend');
     expect(prompt).toContain('Use each issue\'s Labels line to identify existing epics');
     expect(prompt).toContain('Do NOT propose nested epics');
+    expect(prompt).toContain('set `existingEpicIssueNum` to that issue number');
     expect(prompt).toContain('Do NOT group unrelated issues merely because they share a milestone, label');
   });
 
@@ -417,7 +418,10 @@ describe('buildTriagePrompt', () => {
     expect(prompt).toContain('"rationale":');
     expect(prompt).toContain('"orderedChildIssueNumbers": [46, 47, 48]');
     expect(prompt).toContain('"acceptanceCriteria": [');
+    expect(prompt).toContain('"selected": true');
+    expect(prompt).toContain('"existingEpicIssueNum": null');
     expect(prompt).toContain('{ "findings": [], "epicGroups": [] }');
+    expect(prompt).toContain('set `selected: true` only when the grouping is concrete enough');
   });
 
   test('frames triage as bounded analysis instead of implementation work', () => {

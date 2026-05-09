@@ -69,6 +69,9 @@ jest.mock('../../src/lib/github', () => ({
   updateIssue: jest.fn(),
   createIssue: jest.fn(() => 0),
   commentIssue: jest.fn(),
+  getIssueBody: jest.fn(() => ''),
+  updateEpicIssueBody: jest.fn(() => true),
+  commentChildEpicBacklink: jest.fn(() => true),
   getIssueComments: jest.fn(() => []),
 }));
 
@@ -82,6 +85,9 @@ import {
   updateIssue,
   createIssue,
   commentIssue,
+  getIssueBody,
+  updateEpicIssueBody,
+  commentChildEpicBacklink,
 } from '../../src/lib/github';
 
 const mockCheckbox = checkbox as jest.MockedFunction<typeof checkbox>;
@@ -94,6 +100,9 @@ const mockCloseIssue = closeIssue as jest.MockedFunction<typeof closeIssue>;
 const mockUpdateIssue = updateIssue as jest.MockedFunction<typeof updateIssue>;
 const mockCreateIssue = createIssue as jest.MockedFunction<typeof createIssue>;
 const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue>;
+const mockGetIssueBody = getIssueBody as jest.MockedFunction<typeof getIssueBody>;
+const mockUpdateEpicIssueBody = updateEpicIssueBody as jest.MockedFunction<typeof updateEpicIssueBody>;
+const mockCommentChildEpicBacklink = commentChildEpicBacklink as jest.MockedFunction<typeof commentChildEpicBacklink>;
 
 const SAMPLE_ISSUES = [
   { number: 1, title: 'Old feature', body: 'Implement X', labels: [] },
@@ -147,6 +156,7 @@ const SAMPLE_EPIC_GROUPS = [
     rationale: 'Issues #2 and #3 form one settings workflow deliverable.',
     orderedChildIssueNumbers: [2, 3],
     acceptanceCriteria: ['- [ ] Settings save successfully'],
+    selected: true,
   },
 ];
 
@@ -161,6 +171,10 @@ describe('triage command', () => {
   beforeEach(() => {
     consoleSpy = jest.spyOn(console, 'log').mockImplementation();
     jest.clearAllMocks();
+    mockCreateIssue.mockReturnValue(0);
+    mockGetIssueBody.mockReturnValue('');
+    mockUpdateEpicIssueBody.mockReturnValue(true);
+    mockCommentChildEpicBacklink.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -293,6 +307,131 @@ describe('triage command', () => {
     expect(mockCheckbox).not.toHaveBeenCalled();
   });
 
+  it('prompts for cleanup actions and epic proposals independently', async () => {
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({
+      findings: [SAMPLE_FINDINGS[0]],
+      epicGroups: SAMPLE_EPIC_GROUPS,
+    });
+    mockCreateIssue.mockReturnValueOnce(200);
+    mockCheckbox
+      .mockResolvedValueOnce([1])
+      .mockResolvedValueOnce([0]);
+    mockConfirm.mockResolvedValueOnce(true);
+
+    await triageCommand({});
+
+    expect(mockCheckbox).toHaveBeenCalledTimes(2);
+    expect(mockCheckbox.mock.calls[0][0]).toMatchObject({
+      message: 'Select cleanup actions to apply:',
+    });
+    expect(mockCheckbox.mock.calls[1][0]).toMatchObject({
+      message: 'Select epic proposals to apply:',
+    });
+    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 1, 'not_planned');
+    expect(mockCreateIssue).toHaveBeenCalledWith(
+      'owner/repo',
+      'Epic: Settings reliability',
+      expect.stringContaining('## Ordered Work'),
+      ['epic'],
+    );
+    expect(mockCommentChildEpicBacklink).toHaveBeenCalledWith('owner/repo', 2, 200);
+    expect(mockCommentChildEpicBacklink).toHaveBeenCalledWith('owner/repo', 3, 200);
+  });
+
+  it('--yes applies only epic proposals marked selected by the agent', async () => {
+    mockListOpenIssuesWithComments.mockReturnValue([
+      { number: 2, title: 'Settings API', body: 'Build API', labels: ['ready'] },
+      { number: 3, title: 'Settings UI', body: 'Build UI', labels: ['ready'] },
+      { number: 4, title: 'Settings tests', body: 'Add tests', labels: ['ready'] },
+    ]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({
+      findings: [],
+      epicGroups: [
+        {
+          ...SAMPLE_EPIC_GROUPS[0],
+          title: 'Epic: Speculative grouping',
+          orderedChildIssueNumbers: [2, 3],
+          selected: false,
+        },
+        {
+          ...SAMPLE_EPIC_GROUPS[0],
+          title: 'Epic: Selected grouping',
+          orderedChildIssueNumbers: [3, 4],
+          selected: true,
+        },
+      ],
+    });
+    mockCreateIssue.mockReturnValueOnce(201);
+
+    await triageCommand({ yes: true });
+
+    expect(mockCheckbox).not.toHaveBeenCalled();
+    expect(mockConfirm).not.toHaveBeenCalled();
+    expect(mockCreateIssue).toHaveBeenCalledTimes(1);
+    expect(mockCreateIssue).toHaveBeenCalledWith(
+      'owner/repo',
+      'Epic: Selected grouping',
+      expect.any(String),
+      ['epic'],
+    );
+    expect(mockCommentChildEpicBacklink).toHaveBeenCalledWith('owner/repo', 3, 201);
+    expect(mockCommentChildEpicBacklink).toHaveBeenCalledWith('owner/repo', 4, 201);
+    expect(mockCommentChildEpicBacklink).not.toHaveBeenCalledWith('owner/repo', 2, expect.any(Number));
+    expect(mockCloseIssue).not.toHaveBeenCalled();
+  });
+
+  it('updates an existing candidate epic without duplicating child refs', async () => {
+    mockListOpenIssuesWithComments.mockReturnValue([
+      { number: 2, title: 'Settings API', body: 'Build API', labels: ['ready'] },
+      { number: 3, title: 'Settings UI', body: 'Build UI', labels: ['ready'] },
+      { number: 99, title: 'Epic: Settings reliability', body: '- [ ] #2', labels: ['epic'] },
+    ]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({
+      findings: [],
+      epicGroups: [{
+        ...SAMPLE_EPIC_GROUPS[0],
+        orderedChildIssueNumbers: [2, 3],
+        existingEpicIssueNum: 99,
+        selected: true,
+      }],
+    });
+    mockGetIssueBody.mockReturnValue('## Ordered Work\n\n- [ ] #2');
+
+    await triageCommand({ yes: true });
+
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+    expect(mockUpdateEpicIssueBody).toHaveBeenCalledTimes(1);
+    const updatedBody = mockUpdateEpicIssueBody.mock.calls[0][2];
+    expect(updatedBody.match(/#2/g)).toHaveLength(1);
+    expect(updatedBody).toContain('- [ ] #3');
+    expect(mockCommentChildEpicBacklink).toHaveBeenCalledWith('owner/repo', 2, 99);
+    expect(mockCommentChildEpicBacklink).toHaveBeenCalledWith('owner/repo', 3, 99);
+  });
+
+  it('summarizes backlink failures while still reporting created epic resources', async () => {
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({
+      findings: [],
+      epicGroups: SAMPLE_EPIC_GROUPS,
+    });
+    mockCreateIssue.mockReturnValueOnce(202);
+    mockCommentChildEpicBacklink
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+
+    await triageCommand({ yes: true });
+
+    expect(log.success).toHaveBeenCalledWith(expect.stringContaining('Created epic #202'));
+    expect(log.success).toHaveBeenCalledWith(expect.stringContaining('Applied 1 epic proposal'));
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('operation(s) failed'));
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Child #3: backlink to epic #202 failed'));
+  });
+
   it('filters proposed epic groups that include nested epic children', async () => {
     mockListOpenIssuesWithComments.mockReturnValue([
       { number: 1, title: 'Existing epic', body: 'Umbrella issue', labels: ['epic'] },
@@ -307,6 +446,7 @@ describe('triage command', () => {
         rationale: 'Includes an existing epic.',
         orderedChildIssueNumbers: [1, 2],
         acceptanceCriteria: ['- [ ] Done'],
+        selected: true,
       }],
     });
 

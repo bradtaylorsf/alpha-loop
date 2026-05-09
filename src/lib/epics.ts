@@ -28,6 +28,26 @@ export type EpicSummary = {
   totalCount: number;
 };
 
+export type EpicIssueBodyInput = {
+  goal: string;
+  rationale: string;
+  orderedChildIssueNumbers: number[];
+  acceptanceCriteria: string[];
+};
+
+function normalizeAcceptanceCriterion(criterion: string): string {
+  const text = criterion
+    .trim()
+    .replace(/^[-*]\s+\[[ xX]\]\s+/, '')
+    .replace(/^[-*]\s+/, '')
+    .trim();
+  return `- [ ] ${text}`;
+}
+
+function formatChildChecklist(issueNumbers: number[]): string[] {
+  return issueNumbers.map((issueNum) => `- [ ] #${issueNum}`);
+}
+
 /**
  * Parse task-list sub-issue references from an issue body.
  *
@@ -51,6 +71,55 @@ export function parseSubIssues(body: string): SubIssueRef[] {
     });
   }
   return refs;
+}
+
+/**
+ * Build the body for a newly created parent epic issue.
+ */
+export function buildEpicIssueBody(input: EpicIssueBodyInput): string {
+  const criteria = input.acceptanceCriteria.map(normalizeAcceptanceCriterion);
+
+  return [
+    '## Goal',
+    '',
+    input.goal.trim(),
+    '',
+    '## Rationale',
+    '',
+    input.rationale.trim(),
+    '',
+    '## Ordered Work',
+    '',
+    ...formatChildChecklist(input.orderedChildIssueNumbers),
+    '',
+    '## Epic Acceptance Criteria',
+    '',
+    ...criteria,
+  ].join('\n');
+}
+
+/**
+ * Merge child refs into an existing epic body without duplicating checklist
+ * lines that already reference the same child issue.
+ */
+export function mergeEpicChecklist(body: string, orderedChildIssueNumbers: number[]): string {
+  const refs = parseSubIssues(body);
+  const existing = new Set(refs.map((ref) => ref.number));
+  const missing = orderedChildIssueNumbers.filter((issueNum) => !existing.has(issueNum));
+
+  if (missing.length === 0) return body;
+
+  const missingLines = formatChildChecklist(missing);
+  if (refs.length === 0) {
+    const prefix = body.trimEnd();
+    const checklistSection = ['## Ordered Work', '', ...missingLines].join('\n');
+    return prefix ? `${prefix}\n\n${checklistSection}` : checklistSection;
+  }
+
+  const lines = body.split('\n');
+  const lastChecklistLine = refs[refs.length - 1].lineIndex;
+  lines.splice(lastChecklistLine + 1, 0, ...missingLines);
+  return lines.join('\n');
 }
 
 /**

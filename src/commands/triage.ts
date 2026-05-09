@@ -12,6 +12,7 @@ import { buildOneShotCommand } from '../lib/agent.js';
 import { buildTriagePrompt } from '../lib/prompts.js';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
+import { buildEpicIssueBody, mergeEpicChecklist } from '../lib/epics.js';
 import {
   formatTriageFindings,
   formatEpicGroupProposals,
@@ -28,6 +29,9 @@ import {
   updateIssue,
   createIssue,
   commentIssue,
+  getIssueBody,
+  updateEpicIssueBody,
+  commentChildEpicBacklink,
 } from '../lib/github.js';
 
 export type TriageOptions = {
@@ -55,6 +59,9 @@ function filterValidEpicGroups(
       const issue = issueByNumber.get(num);
       return issue ? hasLabel(issue, 'epic') : false;
     });
+    const existingEpic = group.existingEpicIssueNum
+      ? issueByNumber.get(group.existingEpicIssueNum)
+      : undefined;
 
     if (unknown.length > 0) {
       log.warn(`Skipping epic proposal "${group.title}": child issue(s) not found among open issues: ${unknown.map((n) => `#${n}`).join(', ')}`);
@@ -66,8 +73,66 @@ function filterValidEpicGroups(
       return false;
     }
 
+    if (group.existingEpicIssueNum && !existingEpic) {
+      log.warn(`Skipping epic proposal "${group.title}": existing epic #${group.existingEpicIssueNum} is not an open issue`);
+      return false;
+    }
+
+    if (existingEpic && !hasLabel(existingEpic, 'epic')) {
+      log.warn(`Skipping epic proposal "${group.title}": existing candidate #${group.existingEpicIssueNum} is not labeled epic`);
+      return false;
+    }
+
     return true;
   });
+}
+
+function formatEpicChoice(group: ProposedEpicGroup, index: number): string {
+  const target = group.existingEpicIssueNum
+    ? `update #${group.existingEpicIssueNum}`
+    : 'create new epic';
+  const children = group.orderedChildIssueNumbers.map((n) => `#${n}`).join(' -> ');
+  return `[${target}] ${index + 1}. ${group.title} — ${children}`;
+}
+
+function applyEpicProposal(repo: string, group: ProposedEpicGroup, failures: string[]): number | null {
+  let epicNum = group.existingEpicIssueNum;
+
+  if (epicNum) {
+    const existingBody = getIssueBody(repo, epicNum);
+    if (existingBody == null) {
+      failures.push(`Epic #${epicNum}: could not fetch existing body`);
+      return null;
+    }
+
+    const nextBody = mergeEpicChecklist(existingBody, group.orderedChildIssueNumbers);
+    if (nextBody !== existingBody && !updateEpicIssueBody(repo, epicNum, nextBody)) {
+      failures.push(`Epic #${epicNum}: checklist update failed`);
+      return null;
+    }
+    log.success(`Updated epic #${epicNum}: ${group.title}`);
+  } else {
+    const body = buildEpicIssueBody({
+      goal: group.goal,
+      rationale: group.rationale,
+      orderedChildIssueNumbers: group.orderedChildIssueNumbers,
+      acceptanceCriteria: group.acceptanceCriteria,
+    });
+    epicNum = createIssue(repo, group.title, body, ['epic']);
+    if (epicNum <= 0) {
+      failures.push(`Epic "${group.title}": creation returned 0`);
+      return null;
+    }
+    log.success(`Created epic #${epicNum}: ${group.title}`);
+  }
+
+  for (const childIssueNum of group.orderedChildIssueNumbers) {
+    if (!commentChildEpicBacklink(repo, childIssueNum, epicNum)) {
+      failures.push(`Child #${childIssueNum}: backlink to epic #${epicNum} failed`);
+    }
+  }
+
+  return epicNum;
 }
 
 export async function triageCommand(options: TriageOptions): Promise<void> {
@@ -166,17 +231,17 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
     return;
   }
 
-  if (findings.length === 0) {
-    log.info('No per-issue triage actions to apply.');
-    return;
-  }
-
   // ── Interactive review ─────────────────────────────────────────────────────
   let selectedNums: number[];
+  let selectedEpicIndexes: number[];
 
   if (options.yes) {
     selectedNums = findings.filter((f) => f.selected).map((f) => f.issueNum);
-    log.info(`--yes: applying all ${selectedNums.length} triage action(s)`);
+    selectedEpicIndexes = epicGroups
+      .map((group, index) => ({ group, index }))
+      .filter(({ group }) => group.selected)
+      .map(({ index }) => index);
+    log.info(`--yes: applying all ${selectedNums.length} selected triage action(s) and ${selectedEpicIndexes.length} selected epic proposal(s)`);
   } else {
     const actionLabels: Record<TriageAction, string> = {
       close: 'Close as stale',
@@ -186,24 +251,43 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
       enrich: 'Enrich with details',
     };
 
-    const choices = findings.map((f) => ({
-      name: `[${actionLabels[f.action]}] #${f.issueNum} ${f.title} — ${f.reason.slice(0, 60)}`,
-      value: f.issueNum,
-      checked: f.selected,
-    }));
+    if (findings.length > 0) {
+      const choices = findings.map((f) => ({
+        name: `[${actionLabels[f.action]}] #${f.issueNum} ${f.title} — ${f.reason.slice(0, 60)}`,
+        value: f.issueNum,
+        checked: f.selected,
+      }));
 
-    selectedNums = await checkbox({
-      message: 'Select actions to apply:',
-      choices,
-    });
+      selectedNums = await checkbox({
+        message: 'Select cleanup actions to apply:',
+        choices,
+      });
+    } else {
+      selectedNums = [];
+      log.info('No per-issue cleanup actions to apply.');
+    }
 
-    if (selectedNums.length === 0) {
-      log.info('No actions selected.');
+    if (epicGroups.length > 0) {
+      selectedEpicIndexes = await checkbox({
+        message: 'Select epic proposals to apply:',
+        choices: epicGroups.map((group, index) => ({
+          name: formatEpicChoice(group, index),
+          value: index,
+          checked: group.selected,
+        })),
+      });
+    } else {
+      selectedEpicIndexes = [];
+    }
+
+    const totalSelections = selectedNums.length + selectedEpicIndexes.length;
+    if (totalSelections === 0) {
+      log.info('No changes selected.');
       return;
     }
 
     const proceed = await confirm({
-      message: `Apply ${selectedNums.length} change(s)?`,
+      message: `Apply ${selectedNums.length} cleanup action(s) and ${selectedEpicIndexes.length} epic proposal(s)?`,
     });
 
     if (!proceed) {
@@ -212,9 +296,16 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
     }
   }
 
+  if (selectedNums.length === 0 && selectedEpicIndexes.length === 0) {
+    log.info('No selected triage actions or epic proposals to apply.');
+    return;
+  }
+
   // ── Execute actions ────────────────────────────────────────────────────────
   const failures: string[] = [];
   let applied = 0;
+  let appliedEpics = 0;
+  const appliedEpicNums: number[] = [];
 
   for (const finding of findings) {
     if (!selectedNums.includes(finding.issueNum)) continue;
@@ -303,9 +394,28 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
     }
   }
 
+  for (const index of selectedEpicIndexes) {
+    const group = epicGroups[index];
+    if (!group) continue;
+    try {
+      const epicNum = applyEpicProposal(config.repo, group, failures);
+      if (epicNum != null) {
+        appliedEpics++;
+        appliedEpicNums.push(epicNum);
+      }
+    } catch (err) {
+      failures.push(`Epic "${group.title}": ${(err as Error).message}`);
+    }
+  }
+
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log('');
   log.success(`Applied ${applied} triage action(s)`);
+  if (appliedEpics > 0) {
+    log.success(`Applied ${appliedEpics} epic proposal(s): ${appliedEpicNums.map((n) => `#${n}`).join(', ')}`);
+  } else if (selectedEpicIndexes.length > 0) {
+    log.warn('Applied 0 epic proposal(s)');
+  }
 
   if (failures.length > 0) {
     console.log('');

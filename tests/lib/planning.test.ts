@@ -145,6 +145,7 @@ describe('parseTriageAnalysisResponse', () => {
       '- [ ] Settings save successfully',
       '- [ ] Users see error states',
     ],
+    selected: true,
   };
 
   it('parses findings plus proposed epic groups from the new object shape', () => {
@@ -177,6 +178,7 @@ describe('parseTriageAnalysisResponse', () => {
         rationale: 'Rationale',
         orderedChildIssueNumbers: [1, 2],
         acceptanceCriteria: ['- [ ] Done'],
+        selected: true,
       }],
     })).toThrow('epicGroups[0].title');
   });
@@ -190,8 +192,53 @@ describe('parseTriageAnalysisResponse', () => {
         rationale: 'Rationale',
         orderedChildIssueNumbers: [1],
         acceptanceCriteria: ['- [ ] Done'],
+        selected: true,
       }],
     })).toThrow('at least two issue numbers');
+  });
+
+  it('normalizes missing epic group selected to false and null existing epic to undefined', () => {
+    const result = normalizeTriageAnalysis({
+      findings: [],
+      epicGroups: [{
+        title: 'Epic title',
+        goal: 'Goal',
+        rationale: 'Rationale',
+        orderedChildIssueNumbers: [1, 2],
+        acceptanceCriteria: ['- [ ] Done'],
+        existingEpicIssueNum: null,
+      }],
+    });
+
+    expect(result.epicGroups[0].selected).toBe(false);
+    expect(result.epicGroups[0].existingEpicIssueNum).toBeUndefined();
+  });
+
+  it('rejects malformed epic group selected and existing epic issue number fields', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [],
+      epicGroups: [{
+        title: 'Epic title',
+        goal: 'Goal',
+        rationale: 'Rationale',
+        orderedChildIssueNumbers: [1, 2],
+        acceptanceCriteria: ['- [ ] Done'],
+        selected: 'yes',
+      }],
+    })).toThrow('epicGroups[0].selected');
+
+    expect(() => normalizeTriageAnalysis({
+      findings: [],
+      epicGroups: [{
+        title: 'Epic title',
+        goal: 'Goal',
+        rationale: 'Rationale',
+        orderedChildIssueNumbers: [1, 2],
+        acceptanceCriteria: ['- [ ] Done'],
+        selected: true,
+        existingEpicIssueNum: 0,
+      }],
+    })).toThrow('epicGroups[0].existingEpicIssueNum');
   });
 });
 
@@ -323,17 +370,37 @@ describe('formatEpicGroupProposals', () => {
           '- [ ] Settings save successfully',
           '- [ ] Regression coverage exists',
         ],
+        selected: true,
       },
     ];
 
     const output = formatEpicGroupProposals(groups);
 
     expect(output).toContain('Proposed Epic Groups');
+    expect(output).toContain('[✓] 1. Epic: Settings reliability (creates new epic)');
     expect(output).toContain('Epic: Settings reliability');
     expect(output).toContain('Goal: Make settings saves reliable.');
     expect(output).toContain('Rationale: These issues form one settings-save deliverable.');
     expect(output).toContain('Children: #12 -> #13 -> #14');
     expect(output).toContain('- [ ] Settings save successfully');
+  });
+
+  it('renders existing epic update targets', () => {
+    const groups: ProposedEpicGroup[] = [
+      {
+        title: 'Epic: Settings reliability',
+        goal: 'Make settings saves reliable.',
+        rationale: 'These issues form one settings-save deliverable.',
+        orderedChildIssueNumbers: [12, 13],
+        acceptanceCriteria: ['- [ ] Settings save successfully'],
+        selected: false,
+        existingEpicIssueNum: 99,
+      },
+    ];
+
+    const output = formatEpicGroupProposals(groups);
+
+    expect(output).toContain('[ ] 1. Epic: Settings reliability (updates epic #99)');
   });
 
   it('handles empty proposal lists', () => {

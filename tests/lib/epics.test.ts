@@ -1,4 +1,11 @@
-import { parseSubIssues, flipChecklistItem, looksLikeEpic, buildEpicSummary } from '../../src/lib/epics.js';
+import {
+  parseSubIssues,
+  buildEpicIssueBody,
+  mergeEpicChecklist,
+  flipChecklistItem,
+  looksLikeEpic,
+  buildEpicSummary,
+} from '../../src/lib/epics.js';
 import type { Issue } from '../../src/lib/github.js';
 
 // epics.ts contains only pure functions — no mocks needed.
@@ -79,6 +86,62 @@ describe('parseSubIssues', () => {
     expect(refs).toHaveLength(2);
     expect(refs[0].lineIndex).toBe(4);
     expect(refs[1].lineIndex).toBe(5);
+  });
+});
+
+describe('buildEpicIssueBody', () => {
+  test('builds a new epic body with goal, rationale, ordered children, and acceptance criteria', () => {
+    const body = buildEpicIssueBody({
+      goal: 'Make settings saves reliable.',
+      rationale: 'The child issues form one settings workflow.',
+      orderedChildIssueNumbers: [12, 13, 14],
+      acceptanceCriteria: [
+        'Settings save successfully',
+        '- [ ] Users see failure states',
+      ],
+    });
+
+    expect(body).toContain('## Goal\n\nMake settings saves reliable.');
+    expect(body).toContain('## Rationale\n\nThe child issues form one settings workflow.');
+    expect(body).toContain('## Ordered Work\n\n- [ ] #12\n- [ ] #13\n- [ ] #14');
+    expect(body).toContain('## Epic Acceptance Criteria\n\n- [ ] Settings save successfully\n- [ ] Users see failure states');
+  });
+});
+
+describe('mergeEpicChecklist', () => {
+  test('appends missing child refs after the existing checklist without duplicating refs', () => {
+    const body = [
+      '## Goal',
+      '',
+      'Existing goal.',
+      '',
+      '## Ordered Work',
+      '',
+      '- [ ] #12',
+      '- [x] #14',
+      '',
+      '## Notes',
+      'Keep this text.',
+    ].join('\n');
+
+    const result = mergeEpicChecklist(body, [12, 13, 14, 15]);
+
+    expect(result).toContain('- [ ] #12\n- [x] #14\n- [ ] #13\n- [ ] #15');
+    expect(result.match(/#12/g)).toHaveLength(1);
+    expect(result.match(/#14/g)).toHaveLength(1);
+    expect(result).toContain('## Notes\nKeep this text.');
+  });
+
+  test('adds an ordered work section when the existing body has no checklist', () => {
+    const result = mergeEpicChecklist('## Goal\n\nExisting goal.\n', [21, 22]);
+
+    expect(result).toBe('## Goal\n\nExisting goal.\n\n## Ordered Work\n\n- [ ] #21\n- [ ] #22');
+  });
+
+  test('returns the original body when all child refs already exist', () => {
+    const body = '- [ ] #1\n- [ ] #2';
+
+    expect(mergeEpicChecklist(body, [1, 2])).toBe(body);
   });
 });
 

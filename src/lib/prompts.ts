@@ -921,6 +921,7 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     'Also identify candidate epic groups among the open issues when multiple existing issues form one coherent deliverable.',
     'An epic group should represent a single outcome with a clear goal, concrete rationale, and an ordered set of existing child issue numbers.',
     'Use each issue\'s Labels line to identify existing epics. Do NOT propose nested epics: do not include issues labeled `epic`, issues that are already parent epics, umbrella planning issues, or issues whose purpose is to collect child issues.',
+    'When an existing open issue labeled `epic` already represents the parent outcome, set `existingEpicIssueNum` to that issue number and add only missing child refs to it instead of proposing a duplicate parent. Otherwise omit `existingEpicIssueNum` or set it to null.',
     'Do NOT group unrelated issues merely because they share a milestone, label, component, or broad theme; the rationale must cite a concrete shared deliverable, dependency chain, or acceptance goal.',
     'Epic groups must use existing open issue numbers only. Do not list newly split sub-issue titles from `too_large` findings as epic children.',
     '',
@@ -991,7 +992,9 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     '        "- [ ] Settings saves persist successfully",',
     '        "- [ ] Users see success and failure states",',
     '        "- [ ] Regression coverage exists for the settings-save flow"',
-    '      ]',
+    '      ],',
+    '      "selected": true,',
+    '      "existingEpicIssueNum": null',
     '    }',
     '  ]',
     '}',
@@ -1004,10 +1007,11 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
     '- If there are cleanup findings but no epic groups, set `epicGroups: []`',
     '- If there are epic groups but no cleanup findings, set `findings: []`',
     '- Set `selected: true` for all findings (user will deselect if needed)',
+    '- For epic groups, set `selected: true` only when the grouping is concrete enough to apply automatically with `--yes`; set `selected: false` for speculative groupings that need human review',
     '- action mapping: stale→close, unclear→rewrite, too_large→split, duplicate→merge, enrich→enrich',
     '- Be conservative — only flag issues when you are confident about the categorization',
     '- Prefer `enrich` over `unclear` for issues that have some useful info (e.g., support tickets, bug reports) but need technical detail added',
-    '- For epic groups, include at least two ordered child issue numbers and at least one acceptance criterion',
+    '- For epic groups, include at least two ordered child issue numbers, at least one acceptance criterion, `selected`, and `existingEpicIssueNum` when updating an existing open epic',
   );
 
   return sections.join('\n');
