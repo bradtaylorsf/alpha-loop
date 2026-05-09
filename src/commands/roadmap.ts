@@ -15,13 +15,13 @@ import { log } from '../lib/logger.js';
 import {
   extractJsonFromResponse,
   formatRoadmapTable,
-  normalizeRoadmapMilestones,
+  normalizeRoadmapPlan,
   buildPlanningContext,
-  type PlannedMilestone,
-  type RoadmapAssignment,
+  type RoadmapPlan,
 } from '../lib/planning.js';
 import {
   listOpenIssues,
+  listRoadmapEpics,
   listMilestones,
   createMilestone,
   setIssueMilestone,
@@ -50,23 +50,30 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
 
   log.info(`Found ${issues.length} open issue(s)`);
 
+  log.step('Fetching open epics...');
+  const epics = listRoadmapEpics(config.repo, issues);
+  log.info(`Found ${epics.length} open epic(s)`);
+
   // ── Fetch existing milestones ─────────────────────────────────────────────
   log.step('Fetching existing milestones...');
   const existingMilestones = listMilestones(config.repo);
   log.info(`Found ${existingMilestones.length} existing milestone(s)`);
 
-  // Build a map of issue number → current milestone title
-  // Note: listOpenIssues doesn't return milestone info, so we rely on the agent
-  // to include currentMilestone from its analysis. We pass milestone names for context.
+  const epicIssueNums = new Set(epics.map((epic) => epic.issueNum));
+  const epicChildIssueNums = new Set(epics.flatMap((epic) => epic.children.map((child) => child.issueNum)));
+  const standaloneIssues = issues.filter((issue) => (
+    !epicIssueNums.has(issue.number) &&
+    !epicChildIssueNums.has(issue.number)
+  ));
 
-  // Truncate issue bodies
-  const truncatedIssues = issues.map((issue) => ({
+  // Truncate standalone issue bodies
+  const truncatedIssues = standaloneIssues.map((issue) => ({
     number: issue.number,
     title: issue.title,
     body: issue.body.length > MAX_BODY_CHARS
       ? issue.body.slice(0, MAX_BODY_CHARS) + '...'
       : issue.body,
-    milestone: null as string | null,
+    milestone: issue.milestone ?? null,
   }));
 
   // ── Build context ──────────────────────────────────────────────────────────
@@ -76,6 +83,7 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
   log.step('Analyzing issues via AI agent...');
   const roadmapPrompt = buildRoadmapPrompt({
     issues: truncatedIssues,
+    epics,
     milestones: existingMilestones.map((m) => ({
       title: m.title,
       description: m.description,
@@ -105,33 +113,32 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
     return;
   }
 
-  let parsed: { milestones: PlannedMilestone[]; assignments: RoadmapAssignment[] };
+  let parsed: RoadmapPlan;
   try {
-    parsed = extractJsonFromResponse<{ milestones: PlannedMilestone[]; assignments: RoadmapAssignment[] }>(result.stdout);
+    parsed = normalizeRoadmapPlan(extractJsonFromResponse<unknown>(result.stdout));
   } catch (err) {
     log.error(`Failed to parse roadmap JSON: ${(err as Error).message}`);
     log.error(`Agent response (first 500 chars): ${result.stdout.slice(0, 500)}`);
     return;
   }
 
-  if (!parsed.milestones || !parsed.assignments || parsed.assignments.length === 0) {
+  const assignments = [...parsed.epicAssignments, ...parsed.standaloneAssignments];
+  if (!parsed.milestones || assignments.length === 0) {
     log.info('Agent returned no roadmap assignments.');
     return;
   }
 
-  // Normalize milestone titles to use 3-digit zero-padded prefixes
-  const normalizedRoadmap = normalizeRoadmapMilestones(parsed.milestones, parsed.assignments);
-  parsed.milestones = normalizedRoadmap.milestones;
-  parsed.assignments = normalizedRoadmap.assignments;
-
   // ── Display roadmap ────────────────────────────────────────────────────────
   const existingTitles = existingMilestones.map((m) => m.title);
   console.log('');
-  console.log(formatRoadmapTable(parsed.milestones, parsed.assignments, existingTitles));
+  console.log(formatRoadmapTable(parsed.milestones, {
+    epicAssignments: parsed.epicAssignments,
+    standaloneAssignments: parsed.standaloneAssignments,
+  }, existingTitles));
   console.log('');
 
   const newMilestones = parsed.milestones.filter((m) => !existingTitles.includes(m.title));
-  log.info(`${newMilestones.length} new milestone(s), ${parsed.assignments.length} assignment(s)`);
+  log.info(`${newMilestones.length} new milestone(s), ${assignments.length} assignment(s)`);
 
   // ── Dry run exit ───────────────────────────────────────────────────────────
   if (options.dryRun) {
@@ -143,13 +150,16 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
   let selectedNums: number[];
 
   if (options.yes) {
-    selectedNums = parsed.assignments.filter((a) => a.selected).map((a) => a.issueNum);
+    selectedNums = assignments.filter((a) => a.selected).map((a) => a.issueNum);
     log.info(`--yes: applying all ${selectedNums.length} milestone assignment(s)`);
   } else {
-    const choices = parsed.assignments.map((a) => {
+    const choices = assignments.map((a) => {
       const current = a.currentMilestone || 'unassigned';
+      const kind = parsed.epicAssignments.some((epicAssignment) => epicAssignment.issueNum === a.issueNum)
+        ? 'Epic'
+        : 'Issue';
       return {
-        name: `#${a.issueNum} ${a.title} → ${a.milestone} [currently: ${current}]`,
+        name: `${kind} #${a.issueNum} ${a.title} → ${a.milestone} [currently: ${current}]`,
         value: a.issueNum,
         checked: a.selected,
       };
@@ -205,7 +215,7 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
 
   // Assign issues to milestones
   let assigned = 0;
-  for (const assignment of parsed.assignments) {
+  for (const assignment of assignments) {
     if (!selectedNums.includes(assignment.issueNum)) continue;
 
     if (!milestoneNumMap.has(assignment.milestone)) {
@@ -223,7 +233,7 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
 
   // Add untracked issues to project board if configured
   if (config.project > 0) {
-    for (const assignment of parsed.assignments) {
+    for (const assignment of assignments) {
       if (!selectedNums.includes(assignment.issueNum)) continue;
       try {
         addIssueToProject(config.repoOwner, config.project, config.repo, assignment.issueNum);

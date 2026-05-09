@@ -79,6 +79,15 @@ export type RoadmapAssignment = {
   selected: boolean;
 };
 
+export type RoadmapAssignmentGroups = {
+  epicAssignments: RoadmapAssignment[];
+  standaloneAssignments: RoadmapAssignment[];
+};
+
+export type RoadmapPlan = RoadmapAssignmentGroups & {
+  milestones: PlannedMilestone[];
+};
+
 // ── ANSI Colors ──────────────────────────────────────────────────────────────
 
 const RED = '\x1b[0;31m';
@@ -146,7 +155,15 @@ export function normalizePlanMilestones(draft: PlanDraft): PlanDraft {
 export function normalizeRoadmapMilestones(
   milestones: PlannedMilestone[],
   assignments: RoadmapAssignment[],
-): { milestones: PlannedMilestone[]; assignments: RoadmapAssignment[] } {
+): { milestones: PlannedMilestone[]; assignments: RoadmapAssignment[] };
+export function normalizeRoadmapMilestones(
+  milestones: PlannedMilestone[],
+  assignments: RoadmapAssignmentGroups,
+): RoadmapPlan;
+export function normalizeRoadmapMilestones(
+  milestones: PlannedMilestone[],
+  assignments: RoadmapAssignment[] | RoadmapAssignmentGroups,
+): { milestones: PlannedMilestone[]; assignments: RoadmapAssignment[] } | RoadmapPlan {
   const originalTitles = milestones.map((ms) => ms.title);
   const normalized = normalizeMilestoneTitles(milestones);
   const titleMap = new Map<string, string>();
@@ -155,13 +172,100 @@ export function normalizeRoadmapMilestones(
       titleMap.set(originalTitles[i], normalized[i].title);
     }
   }
-  const updatedAssignments = titleMap.size > 0
-    ? assignments.map((a) => {
+
+  const updateAssignments = (items: RoadmapAssignment[]): RoadmapAssignment[] => {
+    if (titleMap.size === 0) return items;
+    return items.map((a) => {
         const mapped = titleMap.get(a.milestone);
         return mapped ? { ...a, milestone: mapped } : a;
-      })
-    : assignments;
-  return { milestones: normalized, assignments: updatedAssignments };
+      });
+  };
+
+  if (Array.isArray(assignments)) {
+    return { milestones: normalized, assignments: updateAssignments(assignments) };
+  }
+
+  return {
+    milestones: normalized,
+    epicAssignments: updateAssignments(assignments.epicAssignments),
+    standaloneAssignments: updateAssignments(assignments.standaloneAssignments),
+  };
+}
+
+function normalizeRoadmapAssignment(value: unknown, context: string): RoadmapAssignment {
+  if (!isRecord(value)) {
+    throw new Error(`${context} must be an object`);
+  }
+
+  const issueNum = value.issueNum;
+  if (!Number.isInteger(issueNum) || (issueNum as number) <= 0) {
+    throw new Error(`${context}.issueNum must be a positive integer`);
+  }
+
+  const title = value.title;
+  if (typeof title !== 'string' || title.trim().length === 0) {
+    throw new Error(`${context}.title must be a non-empty string`);
+  }
+
+  const milestone = value.milestone;
+  if (typeof milestone !== 'string' || milestone.trim().length === 0) {
+    throw new Error(`${context}.milestone must be a non-empty string`);
+  }
+
+  const currentMilestone = value.currentMilestone;
+  if (currentMilestone !== undefined && typeof currentMilestone !== 'string') {
+    throw new Error(`${context}.currentMilestone must be a string`);
+  }
+
+  const selected = value.selected;
+  if (selected !== undefined && typeof selected !== 'boolean') {
+    throw new Error(`${context}.selected must be a boolean`);
+  }
+
+  return {
+    issueNum: issueNum as number,
+    title: title.trim(),
+    milestone: milestone.trim(),
+    currentMilestone: typeof currentMilestone === 'string' ? currentMilestone.trim() : '',
+    selected: selected === undefined ? false : selected,
+  };
+}
+
+function normalizeRoadmapAssignmentArray(value: unknown, field: string): RoadmapAssignment[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`Roadmap ${field} must be an array`);
+  }
+  return value.map((assignment, index) => normalizeRoadmapAssignment(assignment, `${field}[${index}]`));
+}
+
+/**
+ * Normalize roadmap JSON into split assignment arrays. Legacy `assignments`
+ * responses are accepted as standalone issue assignments for no-epic repos.
+ */
+export function normalizeRoadmapPlan(value: unknown): RoadmapPlan {
+  if (!isRecord(value)) {
+    throw new Error('Roadmap plan must be a JSON object');
+  }
+
+  if (!Array.isArray(value.milestones)) {
+    throw new Error('Roadmap milestones must be an array');
+  }
+
+  const epicAssignments = normalizeRoadmapAssignmentArray(value.epicAssignments, 'epicAssignments');
+  const explicitStandaloneAssignments = normalizeRoadmapAssignmentArray(
+    value.standaloneAssignments,
+    'standaloneAssignments',
+  );
+  const legacyAssignments = normalizeRoadmapAssignmentArray(value.assignments, 'assignments');
+  const standaloneAssignments = explicitStandaloneAssignments.length > 0 || value.standaloneAssignments !== undefined
+    ? explicitStandaloneAssignments
+    : legacyAssignments;
+
+  return normalizeRoadmapMilestones(
+    value.milestones as PlannedMilestone[],
+    { epicAssignments, standaloneAssignments },
+  ) as RoadmapPlan;
 }
 
 /**
@@ -498,17 +602,47 @@ export function formatEpicGroupProposals(groups: ProposedEpicGroup[]): string {
  */
 export function formatRoadmapTable(
   milestones: PlannedMilestone[],
-  assignments: RoadmapAssignment[],
+  assignments: RoadmapAssignment[] | RoadmapAssignmentGroups,
   existingMilestones: string[],
 ): string {
-  if (assignments.length === 0) {
+  const groups = Array.isArray(assignments)
+    ? { epicAssignments: [], standaloneAssignments: assignments }
+    : assignments;
+  const hasEpicAssignments = groups.epicAssignments.length > 0;
+  const hasStandaloneAssignments = groups.standaloneAssignments.length > 0;
+
+  if (!hasEpicAssignments && !hasStandaloneAssignments) {
     return `${GRAY}No assignments to display.${NC}`;
   }
 
   const sorted = [...milestones].sort((a, b) => a.order - b.order);
   const existingSet = new Set(existingMilestones);
+  const lines: string[] = [];
 
-  // Group assignments by milestone
+  if (hasEpicAssignments) {
+    lines.push(
+      `${BOLD}${YELLOW}Epic Milestone Assignments (${groups.epicAssignments.length})${NC}`,
+      formatRoadmapAssignmentSection(sorted, groups.epicAssignments, existingSet),
+    );
+  }
+
+  if (hasStandaloneAssignments) {
+    if (lines.length > 0) lines.push('');
+    const header = hasEpicAssignments
+      ? `${BOLD}${YELLOW}Standalone Issue Milestone Assignments (${groups.standaloneAssignments.length})${NC}`
+      : '';
+    if (header) lines.push(header);
+    lines.push(formatRoadmapAssignmentSection(sorted, groups.standaloneAssignments, existingSet));
+  }
+
+  return lines.filter((line) => line !== '').join('\n');
+}
+
+function formatRoadmapAssignmentSection(
+  sortedMilestones: PlannedMilestone[],
+  assignments: RoadmapAssignment[],
+  existingSet: Set<string>,
+): string {
   const grouped = new Map<string, RoadmapAssignment[]>();
   for (const a of assignments) {
     const key = a.milestone || '(no milestone)';
@@ -518,7 +652,7 @@ export function formatRoadmapTable(
 
   const lines: string[] = [];
 
-  for (const ms of sorted) {
+  for (const ms of sortedMilestones) {
     const group = grouped.get(ms.title);
     if (!group || group.length === 0) continue;
     grouped.delete(ms.title);

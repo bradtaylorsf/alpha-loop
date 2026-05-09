@@ -3,6 +3,8 @@
  * Pure string template functions with no side effects.
  */
 
+import type { RoadmapEpicContext } from './github.js';
+
 export type ImplementPromptOptions = {
   issueNum: number;
   title: string;
@@ -1019,6 +1021,7 @@ export function buildTriagePrompt(options: TriagePromptOptions): string {
 
 export type RoadmapPromptOptions = {
   issues: Array<{ number: number; title: string; body: string; milestone: string | null }>;
+  epics?: RoadmapEpicContext[];
   milestones: Array<{ title: string; description: string; dueOn: string | null }>;
   projectContext?: string | null;
   visionContext?: string | null;
@@ -1029,7 +1032,7 @@ export type RoadmapPromptOptions = {
  * Instructs the agent to suggest milestone groupings for open issues.
  */
 export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
-  const { issues, milestones, projectContext, visionContext } = options;
+  const { issues, epics = [], milestones, projectContext, visionContext } = options;
 
   const capped = issues.slice(0, 100);
   const cappedWarning = issues.length > 100
@@ -1042,6 +1045,27 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     return `### Issue #${i.number}: ${i.title}${ms}\n${body || '(no description)'}`;
   }).join('\n\n');
 
+  const epicList = epics.length > 0
+    ? epics.map((epic) => {
+        const ms = epic.currentMilestone ? ` [milestone: ${epic.currentMilestone}]` : ' [unassigned]';
+        const children = epic.children.length > 0
+          ? epic.children.map((child, index) => {
+              const status = child.checked ? '[x]' : '[ ]';
+              const summary = child.bodySummary ? `\n   Summary: ${child.bodySummary}` : '';
+              return `${index + 1}. ${status} #${child.issueNum} ${child.title}${summary}`;
+            }).join('\n')
+          : '(no child issues found)';
+        return [
+          `### Epic #${epic.issueNum}: ${epic.title}${ms}`,
+          `Progress: ${epic.completedChildCount}/${epic.totalChildCount} child issues complete; ${epic.openChildCount} open`,
+          `Summary: ${epic.bodySummary || '(no description)'}`,
+          '',
+          'Ordered child issues:',
+          children,
+        ].join('\n');
+      }).join('\n\n')
+    : '';
+
   const milestoneList = milestones.length > 0
     ? milestones.map((m) => {
         const due = m.dueOn ? ` (due: ${m.dueOn})` : '';
@@ -1050,15 +1074,22 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     : '(none)';
 
   const sections: string[] = [
-    'You are a project roadmap assistant. Analyze the following open issues and existing milestones, then suggest how to organize issues into milestones.',
+    'You are a project roadmap assistant. Analyze the following open issues, open epics, and existing milestones, then suggest how to organize work into milestones.',
     '',
-    '## Open Issues',
-    issueList,
+    epics.length > 0 ? '## Open Epics' : '## Open Issues',
+    epics.length > 0 ? epicList : issueList,
     cappedWarning,
-    '',
-    '## Existing Milestones',
-    milestoneList,
   ];
+
+  if (epics.length > 0) {
+    sections.push(
+      '',
+      '## Open Standalone Issues',
+      issueList || '(none)',
+    );
+  }
+
+  sections.push('', '## Existing Milestones', milestoneList);
 
   if (visionContext) {
     sections.push('', '## Product Vision', visionContext);
@@ -1085,7 +1116,16 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     '      "order": 1',
     '    }',
     '  ],',
-    '  "assignments": [',
+    '  "epicAssignments": [',
+    '    {',
+    '      "issueNum": 195,',
+    '      "title": "Parent epic title",',
+    '      "milestone": "001 - Milestone Name",',
+    '      "currentMilestone": "",',
+    '      "selected": true',
+    '    }',
+    '  ],',
+    '  "standaloneAssignments": [',
     '    {',
     '      "issueNum": 3,',
     '      "title": "Issue title",',
@@ -1100,10 +1140,15 @@ export function buildRoadmapPrompt(options: RoadmapPromptOptions): string {
     '## Instructions',
     '- Respect existing milestone structure — reuse existing milestones where appropriate',
     '- Only create new milestones when issues clearly don\'t fit existing ones',
+    '- When open epics exist, schedule epics as the primary roadmap unit: assign the parent epic issue to a milestone in `epicAssignments`',
+    '- Do not separately schedule child issues that are listed inside an open epic; use their ordered checklist only as planning context',
+    '- Preserve child issue ordering inside each epic when deciding which milestone the parent epic belongs in',
+    '- Put standalone issues that are not children of any open epic in `standaloneAssignments`',
     '- Consider dependency order: foundational work (database, API, infra) in earlier milestones',
     '- Suggest realistic due dates based on issue complexity and number of issues per milestone',
-    '- Set `currentMilestone` to the issue\'s current milestone title, or empty string if unassigned',
-    '- Include ALL open issues in assignments (even ones already assigned to milestones)',
+    '- Set `currentMilestone` to the issue or epic\'s current milestone title, or empty string if unassigned',
+    '- Include ALL open epics in `epicAssignments` and ALL standalone open issues in `standaloneAssignments` (even ones already assigned to milestones)',
+    '- Return both `epicAssignments` and `standaloneAssignments` arrays; use an empty array when a category has no schedulable items',
     '- Set `selected: true` for all assignments (user will deselect if needed)',
     '- Order milestones by suggested execution order (order field)',
     '- Group related issues together (same feature area, same dependency chain)',

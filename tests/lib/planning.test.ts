@@ -31,9 +31,11 @@ import {
   formatIssueTable,
   formatTriageFindings,
   formatEpicGroupProposals,
+  formatRoadmapTable,
   normalizeMilestoneTitles,
   normalizePlanMilestones,
   normalizeRoadmapMilestones,
+  normalizeRoadmapPlan,
   readSeedFiles,
   buildPlanningContext,
   savePlanDraft,
@@ -619,5 +621,69 @@ describe('normalizeRoadmapMilestones', () => {
     const result = normalizeRoadmapMilestones(milestones, assignments);
     expect(result.milestones[0].title).toBe('001 - Core');
     expect(result.assignments[0].milestone).toBe('001 - Core');
+  });
+
+  it('normalizes milestone titles across epic and standalone assignments', () => {
+    const milestones: PlannedMilestone[] = [
+      { title: 'Core', description: '', dueOn: null, order: 1 },
+      { title: 'Follow-up', description: '', dueOn: null, order: 2 },
+    ];
+
+    const result = normalizeRoadmapMilestones(milestones, {
+      epicAssignments: [
+        { issueNum: 195, title: 'Epic', milestone: 'Core', currentMilestone: '', selected: true },
+      ],
+      standaloneAssignments: [
+        { issueNum: 15, title: 'Issue', milestone: 'Follow-up', currentMilestone: '', selected: true },
+      ],
+    });
+
+    expect(result.epicAssignments[0].milestone).toBe('001 - Core');
+    expect(result.standaloneAssignments[0].milestone).toBe('002 - Follow-up');
+  });
+});
+
+// ── normalizeRoadmapPlan ────────────────────────────────────────────────────
+
+describe('normalizeRoadmapPlan', () => {
+  it('keeps legacy flat assignments as standalone assignments', () => {
+    const result = normalizeRoadmapPlan({
+      milestones: [{ title: 'Core', description: '', dueOn: null, order: 1 }],
+      assignments: [
+        { issueNum: 5, title: 'Issue', milestone: 'Core', currentMilestone: '', selected: true },
+      ],
+    });
+
+    expect(result.epicAssignments).toEqual([]);
+    expect(result.standaloneAssignments[0]).toEqual(expect.objectContaining({
+      issueNum: 5,
+      milestone: '001 - Core',
+    }));
+  });
+});
+
+// ── formatRoadmapTable ──────────────────────────────────────────────────────
+
+describe('formatRoadmapTable', () => {
+  it('renders epic assignments separately from standalone issue assignments', () => {
+    const milestones: PlannedMilestone[] = [
+      { title: '001 - Core', description: '', dueOn: null, order: 1 },
+      { title: '002 - Follow-up', description: '', dueOn: null, order: 2 },
+    ];
+
+    const output = formatRoadmapTable(milestones, {
+      epicAssignments: [
+        { issueNum: 195, title: 'Epic: Scheduling', milestone: '001 - Core', currentMilestone: '', selected: true },
+      ],
+      standaloneAssignments: [
+        { issueNum: 15, title: 'User dashboard', milestone: '002 - Follow-up', currentMilestone: '', selected: true },
+      ],
+    }, ['001 - Core']);
+
+    expect(output).toContain('Epic Milestone Assignments (1)');
+    expect(output).toContain('Standalone Issue Milestone Assignments (1)');
+    expect(output.indexOf('#195  Epic: Scheduling')).toBeLessThan(output.indexOf('#15  User dashboard'));
+    expect(output).toContain('[EXISTS]');
+    expect(output).toContain('[NEW]');
   });
 });

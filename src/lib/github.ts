@@ -24,6 +24,25 @@ export type Issue = {
   body: string;
   labels: string[];
   comments?: Comment[];
+  milestone?: string | null;
+};
+
+export type RoadmapEpicChildContext = {
+  issueNum: number;
+  title: string;
+  bodySummary: string;
+  checked: boolean;
+};
+
+export type RoadmapEpicContext = {
+  issueNum: number;
+  title: string;
+  bodySummary: string;
+  currentMilestone: string | null;
+  completedChildCount: number;
+  totalChildCount: number;
+  openChildCount: number;
+  children: RoadmapEpicChildContext[];
 };
 
 export type Milestone = {
@@ -633,6 +652,78 @@ export function listOpenIssues(repo: string, limit = 100): Issue[] {
   }
 }
 
+function milestoneTitle(raw: unknown): string | null {
+  if (!raw) return null;
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object' && raw !== null && 'title' in raw) {
+    const title = (raw as { title?: unknown }).title;
+    return typeof title === 'string' ? title : null;
+  }
+  return null;
+}
+
+function summarizeBody(body: string, maxChars: number): string {
+  const text = body
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(' ');
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}...`;
+}
+
+function summarizeEpicBody(body: string, maxChars: number): string {
+  const checklistLines = new Set(parseSubIssues(body).map((ref) => ref.lineIndex));
+  const text = body
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .filter((_, index) => !checklistLines.has(index))
+    .join('\n');
+  return summarizeBody(text, maxChars);
+}
+
+/**
+ * List open epics with ordered child issue summaries for roadmap planning.
+ * Known open issues are used first; missing child issue details are fetched
+ * individually so checked/closed child refs can still provide context.
+ */
+export function listRoadmapEpics(repo: string, knownOpenIssues: Issue[] = []): RoadmapEpicContext[] {
+  const epics = listEpics(repo);
+  const issueMap = new Map<number, Issue>();
+  for (const issue of knownOpenIssues) {
+    issueMap.set(issue.number, issue);
+  }
+
+  return epics.map((epic) => {
+    const refs = parseSubIssues(epic.body);
+    const children = refs.map((ref) => {
+      let child = issueMap.get(ref.number);
+      if (!child) {
+        child = getIssueWithComments(repo, ref.number) ?? undefined;
+        if (child) issueMap.set(child.number, child);
+      }
+      return {
+        issueNum: ref.number,
+        title: child?.title ?? '(issue details unavailable)',
+        bodySummary: child ? summarizeBody(child.body, 220) : '',
+        checked: ref.checked,
+      };
+    });
+
+    return {
+      issueNum: epic.number,
+      title: epic.title,
+      bodySummary: summarizeEpicBody(epic.body, 500),
+      currentMilestone: epic.milestone ?? null,
+      completedChildCount: refs.filter((ref) => ref.checked).length,
+      totalChildCount: refs.length,
+      openChildCount: refs.filter((ref) => !ref.checked).length,
+      children,
+    };
+  });
+}
+
 /**
  * List all open issues with their comments in a single API call.
  * Avoids the N+1 problem of fetching comments per-issue.
@@ -786,7 +877,7 @@ function truncateBody(body: string): string {
  */
 export function listEpics(repo: string): Issue[] {
   const result = ghExec(
-    `gh issue list --repo "${repo}" --label "epic" --state open --json number,title,body,labels --limit 100`,
+    `gh issue list --repo "${repo}" --label "epic" --state open --json number,title,body,labels,milestone --limit 100`,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to list epics: ${result.stderr}`);
@@ -798,12 +889,14 @@ export function listEpics(repo: string): Issue[] {
       title: string;
       body: string;
       labels: Array<{ name: string }>;
+      milestone?: unknown;
     }>;
     return raw.map((issue) => ({
       number: issue.number,
       title: issue.title,
       body: issue.body ?? '',
       labels: (issue.labels ?? []).map((l) => l.name),
+      milestone: milestoneTitle(issue.milestone),
     }));
   } catch {
     log.warn('Failed to parse epics JSON');
