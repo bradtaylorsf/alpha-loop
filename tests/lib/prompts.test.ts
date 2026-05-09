@@ -400,6 +400,9 @@ describe('buildTriagePrompt', () => {
 
     expect(prompt).toContain('candidate epic groups');
     expect(prompt).toContain('coherent deliverable');
+    expect(prompt).toContain('recommended epic-first workflow');
+    expect(prompt).toContain('roadmap schedules those parent epics into milestones');
+    expect(prompt).toContain('run processes each child issue with parent epic context');
     expect(prompt).toContain('Labels: ready, backend');
     expect(prompt).toContain('Use each issue\'s Labels line to identify existing epics');
     expect(prompt).toContain('Do NOT propose nested epics');
@@ -469,6 +472,9 @@ describe('buildRoadmapPrompt', () => {
     expect(prompt).toContain('2. [ ] #189 Inject parent context');
     expect(prompt).toContain('## Open Standalone Issues');
     expect(prompt).toContain('Issue #42: Standalone cleanup');
+    expect(prompt).toContain('second step in the epic-first workflow');
+    expect(prompt).toContain('triage creates or updates parent epics');
+    expect(prompt).toContain('run ships their child issues with parent epic context');
     expect(prompt).toContain('schedule epics as the primary roadmap unit');
     expect(prompt).toContain('"epicAssignments": [');
     expect(prompt).toContain('"standaloneAssignments": [');

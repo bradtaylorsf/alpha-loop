@@ -119,8 +119,8 @@ program
 
 program
   .command('triage')
-  .description('Analyze and improve existing issues (cleanup and epic grouping)')
-  .option('--dry-run', 'Display findings without making changes')
+  .description('Analyze open issues, clean up backlog noise, and propose/apply epic groups')
+  .option('--dry-run', 'Display cleanup findings and epic proposals without making changes')
   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .action(async (options) => {
     const { triageCommand } = await import('./commands/triage.js');
@@ -129,8 +129,8 @@ program
 
 program
   .command('roadmap')
-  .description('Organize open issues into milestones using AI analysis')
-  .option('--dry-run', 'Display proposed roadmap without making changes')
+  .description('Schedule parent epics and standalone issues into milestones using AI analysis')
+  .option('--dry-run', 'Display proposed epic/standalone milestone assignments without making changes')
   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .action(async (options) => {
     const { roadmapCommand } = await import('./commands/roadmap.js');
