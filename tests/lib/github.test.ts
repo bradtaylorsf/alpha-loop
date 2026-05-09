@@ -3,6 +3,7 @@ import {
   createIssue, updateIssue, closeIssue, createMilestone,
   setIssueMilestone, listOpenIssues, addIssueToProject,
   getIssueBody, updateEpicIssueBody, commentChildEpicBacklink,
+  listRoadmapEpics,
 } from '../../src/lib/github';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -384,6 +385,94 @@ describe('updateIssue', () => {
 });
 
 describe('epic issue helpers', () => {
+  test('listRoadmapEpics returns open epic child counts and summaries from known issues', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify([
+        {
+          number: 195,
+          title: 'Epic: Roadmap scheduling',
+          body: [
+            '## Goal',
+            'Schedule parent epics.',
+            '',
+            '## Ordered Work',
+            '- [x] #3',
+            '- [ ] #7',
+          ].join('\n'),
+          labels: [{ name: 'epic' }],
+          milestone: { title: '001 - Core' },
+        },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    const epics = listRoadmapEpics('owner/repo', [
+      { number: 3, title: 'Set up database schema', body: 'Create tables for roadmap data.', labels: [] },
+      { number: 7, title: 'Create API endpoints', body: 'REST API for scheduling.', labels: [] },
+    ]);
+
+    expect(epics).toEqual([{
+      issueNum: 195,
+      title: 'Epic: Roadmap scheduling',
+      bodySummary: expect.stringContaining('Schedule parent epics.'),
+      currentMilestone: '001 - Core',
+      completedChildCount: 1,
+      totalChildCount: 2,
+      openChildCount: 1,
+      children: [
+        { issueNum: 3, title: 'Set up database schema', bodySummary: 'Create tables for roadmap data.', checked: true },
+        { issueNum: 7, title: 'Create API endpoints', bodySummary: 'REST API for scheduling.', checked: false },
+      ],
+    }]);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--label "epic"'),
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('--json number,title,body,labels,milestone'),
+    );
+  });
+
+  test('listRoadmapEpics fetches missing child issue details', () => {
+    mockExec
+      .mockReturnValueOnce({
+        stdout: JSON.stringify([
+          {
+            number: 195,
+            title: 'Epic: Roadmap scheduling',
+            body: '- [ ] #7',
+            labels: [{ name: 'epic' }],
+            milestone: null,
+          },
+        ]),
+        stderr: '',
+        exitCode: 0,
+      })
+      .mockReturnValueOnce({
+        stdout: JSON.stringify({
+          number: 7,
+          title: 'Create API endpoints',
+          body: 'REST API for scheduling.',
+          labels: [],
+          comments: [],
+        }),
+        stderr: '',
+        exitCode: 0,
+      });
+
+    const epics = listRoadmapEpics('owner/repo');
+
+    expect(epics[0].children[0]).toEqual({
+      issueNum: 7,
+      title: 'Create API endpoints',
+      bodySummary: 'REST API for scheduling.',
+      checked: false,
+    });
+    expect(mockExec).toHaveBeenCalledWith(
+      'gh issue view 7 --repo "owner/repo" --json number,title,body,labels,comments',
+    );
+  });
+
   test('getIssueBody fetches a single issue body', () => {
     mockExec.mockReturnValue({
       stdout: JSON.stringify({

@@ -8,6 +8,7 @@ import {
   buildBatchReviewPrompt,
   buildSessionReviewPrompt,
   buildTriagePrompt,
+  buildRoadmapPrompt,
   formatEpicPromptContext,
   type EpicPromptContext,
 } from '../../src/lib/prompts';
@@ -436,6 +437,56 @@ describe('buildTriagePrompt', () => {
     expect(prompt).toContain('Do not inspect repository files or run shell commands');
     expect(prompt).toContain('Return exactly one JSON object');
     expect(prompt).toContain('Check the provided codebase context');
+  });
+});
+
+describe('buildRoadmapPrompt', () => {
+  test('includes epic-aware scheduling instructions and split output schema', () => {
+    const prompt = buildRoadmapPrompt({
+      epics: [{
+        issueNum: 195,
+        title: 'Epic: Roadmap scheduling',
+        bodySummary: 'Schedule parent epics instead of every child issue.',
+        currentMilestone: null,
+        completedChildCount: 1,
+        totalChildCount: 2,
+        openChildCount: 1,
+        children: [
+          { issueNum: 188, title: 'Add epic issue template', bodySummary: 'Create the template.', checked: true },
+          { issueNum: 189, title: 'Inject parent context', bodySummary: 'Pass parent context.', checked: false },
+        ],
+      }],
+      issues: [
+        { number: 42, title: 'Standalone cleanup', body: 'Tidy a flat issue.', milestone: null },
+      ],
+      milestones: [],
+    });
+
+    expect(prompt).toContain('## Open Epics');
+    expect(prompt).toContain('Epic #195: Epic: Roadmap scheduling');
+    expect(prompt).toContain('Progress: 1/2 child issues complete; 1 open');
+    expect(prompt).toContain('1. [x] #188 Add epic issue template');
+    expect(prompt).toContain('2. [ ] #189 Inject parent context');
+    expect(prompt).toContain('## Open Standalone Issues');
+    expect(prompt).toContain('Issue #42: Standalone cleanup');
+    expect(prompt).toContain('schedule epics as the primary roadmap unit');
+    expect(prompt).toContain('"epicAssignments": [');
+    expect(prompt).toContain('"standaloneAssignments": [');
+    expect(prompt).toContain('Do not separately schedule child issues');
+  });
+
+  test('keeps the no-epic prompt focused on open issues', () => {
+    const prompt = buildRoadmapPrompt({
+      issues: [
+        { number: 3, title: 'Flat issue', body: 'Implement it', milestone: null },
+      ],
+      milestones: [],
+    });
+
+    expect(prompt).toContain('## Open Issues');
+    expect(prompt).toContain('Issue #3: Flat issue');
+    expect(prompt).not.toContain('## Open Epics');
+    expect(prompt).toContain('"standaloneAssignments": [');
   });
 });
 
