@@ -80,22 +80,37 @@ function hasMeaningfulContent(content: string): boolean {
 }
 
 function trimTrailingCliNoise(content: string): string {
-  const cliNoiseLine = /^(?:tokens used|token usage|session id|openai codex|workdir|model|approval|sandbox|reasoning effort)(?:\b|:)/i;
+  const cliNoiseLine = /^(?:tokens used|token usage|session id|openai codex|workdir|provider|model|approval|sandbox|reasoning effort|reasoning summaries|warning|reading prompt from stdin)(?:\b|:|\.\.\.$)/i;
+  const timestampedCliLogLine = /^\d{4}-\d{2}-\d{2}T\S+\s+(?:TRACE|DEBUG|INFO|WARN|ERROR)\b/;
   const transcriptRoleLine = /^(?:user|assistant|codex|system|developer|thinking)$/i;
+  const transcriptDelimiterLine = /^-{8,}$/;
   const lines = content.trim().split(/\r?\n/);
   const noiseIndex = lines.findIndex((line) => {
     const trimmed = line.trim();
-    return cliNoiseLine.test(trimmed) || transcriptRoleLine.test(trimmed);
+    return (
+      cliNoiseLine.test(trimmed)
+      || timestampedCliLogLine.test(trimmed)
+      || transcriptRoleLine.test(trimmed)
+      || transcriptDelimiterLine.test(trimmed)
+    );
   });
 
   return (noiseIndex === -1 ? lines : lines.slice(0, noiseIndex)).join('\n').trim();
+}
+
+function removePlaceholderLines(content: string): string {
+  return content
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length === 0 || !isPlaceholderLine(line))
+    .join('\n')
+    .trim();
 }
 
 function extractSection(markdown: string, header: string): string | null {
   const pattern = new RegExp(`^${escapeRegex(header)}[ \\t]*\\r?\\n([\\s\\S]*?)(?=\\r?\\n## |$)`, 'm');
   const match = markdown.match(pattern);
   if (!match) return null;
-  return trimTrailingCliNoise(match[1]);
+  return removePlaceholderLines(trimTrailingCliNoise(match[1]));
 }
 
 function extractLeadingFrontmatter(markdown: string): string | null {

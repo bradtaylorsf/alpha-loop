@@ -181,6 +181,24 @@ status: success
 - (specific skill file changes, or "None")`;
 }
 
+function placeholderLearningOutputWithCodexWarnings(): string {
+  return `${placeholderLearningOutput()}
+2026-05-10T00:29:54.376528Z  WARN codex_core_plugins::manifest: ignoring interface.defaultPrompt: prompt must be at most 128 characters
+2026-05-10T00:29:57.379740Z  WARN codex_core_skills::loader: ignoring interface.icon_small: icon path must not contain '..'
+codex
+warning: \`--full-auto\` is deprecated; use \`--sandbox workspace-write\` instead.
+Reading prompt from stdin...
+OpenAI Codex v0.130.0
+--------
+workdir: /repo
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write
+reasoning effort: xhigh
+session id: 019e0f4c-aae2-72d2-a8eb-4d4f739cbbbd`;
+}
+
 function learningFileContent(): string {
   return `---
 issue: 42
@@ -467,6 +485,13 @@ Some trailing garbage text`;
 
   test('rejects placeholder-only learning structure', () => {
     const { sections, hasMeaningfulSections } = parseLearningOutput(placeholderLearningOutput());
+
+    expect(sections).toBe('');
+    expect(hasMeaningfulSections).toBe(false);
+  });
+
+  test('rejects placeholder learning structure even when followed by Codex CLI warning noise', () => {
+    const { sections, hasMeaningfulSections } = parseLearningOutput(placeholderLearningOutputWithCodexWarnings());
 
     expect(sections).toBe('');
     expect(hasMeaningfulSections).toBe(false);
