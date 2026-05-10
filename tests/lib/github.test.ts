@@ -3,7 +3,7 @@ import {
   createIssue, updateIssue, closeIssue, createMilestone,
   setIssueMilestone, listOpenIssues, addIssueToProject,
   getIssueBody, updateEpicIssueBody, commentChildEpicBacklink,
-  listRoadmapEpics, listEpics,
+  listRoadmapEpics, listEpics, getEpicSubIssues,
 } from '../../src/lib/github';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -512,6 +512,41 @@ describe('epic issue helpers', () => {
     });
     expect(mockExec).toHaveBeenCalledWith(
       'gh issue view 7 --repo "owner/repo" --json number,title,body,labels,comments',
+    );
+  });
+
+  test('getEpicSubIssues warns when an issue-like checklist line is not parsed', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify({
+        number: 214,
+        title: 'Epic: Parser regression',
+        body: [
+          '- [ ] **#10** - parsed bold ref',
+          '- [ ] [#11](https://github.com/owner/repo/issues/11) - parsed link ref',
+          '- [ ] (#12) - unsupported wrapper',
+          '- [ ] owner/repo#13 - cross-repo refs are out of scope',
+          '- [ ] 14 - numeric-only refs are out of scope',
+        ].join('\n'),
+        labels: [{ name: 'epic' }],
+        comments: [],
+      }),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    const { log: mockLog } = require('../../src/lib/logger');
+    const refs = getEpicSubIssues('owner/repo', 214);
+
+    expect(refs).toEqual([
+      { number: 10, checked: false, lineIndex: 0 },
+      { number: 11, checked: false, lineIndex: 1 },
+    ]);
+    expect(mockLog.warn).toHaveBeenCalledTimes(1);
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Checklist line did not parse in epic #214 at line 3: - [ ] (#12) - unsupported wrapper'),
+    );
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.stringContaining("Hint: expected '- [ ] #N - title' format"),
     );
   });
 
