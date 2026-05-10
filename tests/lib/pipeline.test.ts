@@ -326,6 +326,53 @@ describe('processIssue', () => {
     expect(mockRunVerify).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
   });
 
+  test('continues from verify-fix into PR creation when verification passes on retry', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+
+    mockExistsSync.mockImplementation((path: any) => String(path).includes('plan-issue-42.json'));
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).includes('plan-issue-42.json')) {
+        return JSON.stringify({
+          summary: 'Plan with live verification',
+          files: ['src/index.ts'],
+          implementation: 'Implement it',
+          testing: { needed: false, reason: 'Verified live' },
+          verification: { needed: true, method: 'playwright', instructions: 'Open app', reason: 'Runtime behavior' },
+        });
+      }
+      return '';
+    });
+
+    let verifyAttempt = 0;
+    mockRunVerify.mockImplementation(async () => {
+      verifyAttempt++;
+      if (verifyAttempt === 1) {
+        return { passed: false, skipped: false, output: 'Verification failed' };
+      }
+      return { passed: true, skipped: false, output: 'Verification passed' };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({ skipVerify: false }), makeSession());
+
+    expect(result.status).toBe('success');
+    expect(mockRunVerify).toHaveBeenCalledTimes(2);
+    expect(mockCreatePR).toHaveBeenCalled();
+
+    const verifyFixCallIndex = (mockSpawnAgent as jest.Mock).mock.calls.findIndex(
+      (call: any[]) => (call[0] as any).prompt?.includes('Live verification failed for issue #42'),
+    );
+    expect(verifyFixCallIndex).toBeGreaterThanOrEqual(0);
+    const verifyFixOptions = (mockSpawnAgent as jest.Mock).mock.calls[verifyFixCallIndex][0] as any;
+    expect(verifyFixOptions.resume).toBe(true);
+    expect(verifyFixOptions.resultGraceMs).toBe(60_000);
+
+    expect(mockCreatePR.mock.invocationCallOrder[0]).toBeGreaterThan(
+      (mockSpawnAgent as jest.Mock).mock.invocationCallOrder[verifyFixCallIndex],
+    );
+  });
+
   test('returns failure and labels failed when implementation fails', async () => {
     mockSpawnAgent.mockImplementation(async (options) => {
       // Plan succeeds, implement fails

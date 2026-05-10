@@ -18,6 +18,7 @@ const mockChild = {
   stdout: mockStdout,
   stderr: mockStderr,
   on: jest.fn(),
+  kill: jest.fn(),
 };
 
 jest.mock('node:child_process', () => ({
@@ -40,6 +41,7 @@ beforeEach(() => {
   mockStdout.on.mockReset();
   mockStderr.on.mockReset();
   mockChild.on.mockReset();
+  mockChild.kill.mockReset();
 });
 
 describe('buildAgentArgs', () => {
@@ -342,6 +344,108 @@ describe('spawnAgent', () => {
     expect(result.costUsd).toBe(1.234);
     expect(result.inputTokens).toBe(50000);
     expect(result.outputTokens).toBe(12000);
+  });
+
+  test('resolves from Claude stream-json result when the child never closes', async () => {
+    jest.useFakeTimers();
+    try {
+      let stdoutHandler: Function;
+      mockStdout.on.mockImplementation((event: string, cb: Function) => {
+        if (event === 'data') stdoutHandler = cb;
+      });
+      mockChild.on.mockImplementation(() => {
+        // Reproduce the deadlock: no close event after the result line.
+      });
+
+      const resultPromise = spawnAgent({
+        ...baseOptions,
+        resultGraceMs: 10,
+      });
+
+      stdoutHandler!(Buffer.from(JSON.stringify({
+        type: 'result',
+        result: 'Done.',
+        total_cost_usd: 0.25,
+        usage: { input_tokens: 100, output_tokens: 20 },
+      }) + '\n'));
+
+      await jest.advanceTimersByTimeAsync(10);
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
+
+      await jest.advanceTimersByTimeAsync(5000);
+      const result = await resultPromise;
+
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toBe('Done.');
+      expect(result.costUsd).toBe(0.25);
+      expect(result.inputTokens).toBe(100);
+      expect(result.outputTokens).toBe(20);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('returns only the final result text when assistant text duplicates the result payload', async () => {
+    let stdoutHandler: Function;
+    mockStdout.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'data') stdoutHandler = cb;
+    });
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'close') {
+        setTimeout(() => {
+          stdoutHandler(Buffer.from([
+            JSON.stringify({
+              type: 'assistant',
+              message: { content: [{ type: 'text', text: 'Done.' }] },
+            }),
+            JSON.stringify({ type: 'result', result: 'Done.' }),
+            '',
+          ].join('\n')));
+          cb(0);
+        }, 10);
+      }
+    });
+
+    const result = await spawnAgent(baseOptions);
+    expect(result.output).toBe('Done.');
+  });
+
+  test('preserves Claude result error metadata when recovering after result grace', async () => {
+    jest.useFakeTimers();
+    try {
+      let stdoutHandler: Function;
+      mockStdout.on.mockImplementation((event: string, cb: Function) => {
+        if (event === 'data') stdoutHandler = cb;
+      });
+      mockChild.on.mockImplementation(() => {
+        // No close event.
+      });
+
+      const resultPromise = spawnAgent({
+        ...baseOptions,
+        resultGraceMs: 10,
+      });
+
+      stdoutHandler!(Buffer.from(JSON.stringify({
+        type: 'result',
+        subtype: 'error_max_turns',
+        is_error: true,
+        result: '',
+        total_cost_usd: 0.5,
+      }) + '\n'));
+
+      await jest.advanceTimersByTimeAsync(5010);
+      const result = await resultPromise;
+
+      expect(result.exitCode).toBe(1);
+      expect(result.resultSubtype).toBe('error_max_turns');
+      expect(result.resultIsError).toBe(true);
+      expect(result.output).toContain('"subtype":"error_max_turns"');
+      expect(result.costUsd).toBe(0.5);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('cost fields are undefined when not provided', async () => {
