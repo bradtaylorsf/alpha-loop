@@ -168,6 +168,8 @@ jest.mock('../../src/lib/worktree', () => ({
 
 jest.mock('../../src/lib/learning', () => ({
   generateSessionSummary: jest.fn().mockResolvedValue(null),
+  repairSessionLearningArtifacts: jest.fn(),
+  repairSessionSummaryArtifact: jest.fn(),
 }));
 
 jest.mock('../../src/lib/vision', () => ({

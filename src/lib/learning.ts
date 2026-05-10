@@ -25,6 +25,21 @@ export type ExtractLearningsOptions = {
   sessionName?: string;
 };
 
+export type SessionLearningRepairResult = {
+  repaired: number;
+  created: number;
+  skipped: number;
+  failed: number;
+};
+
+export type SessionLearningRepairIssue = {
+  issueNum: number;
+  title?: string;
+  status?: string;
+  duration?: number;
+  retries?: number;
+};
+
 /** Expected sections in learning output. */
 const LEARNING_SECTIONS = [
   '## What Worked',
@@ -118,6 +133,12 @@ function extractLeadingFrontmatter(markdown: string): string | null {
   return match ? match[1] : null;
 }
 
+function frontmatterValue(frontmatter: string | null, key: string): string | null {
+  if (!frontmatter) return null;
+  const match = frontmatter.match(new RegExp(`^${escapeRegex(key)}:\\s*(.+)$`, 'm'));
+  return match ? match[1].trim() : null;
+}
+
 function findFrontmatterBlocks(raw: string): FrontmatterBlock[] {
   const blocks: FrontmatterBlock[] = [];
   const pattern = /(?:^|\r?\n)(---\r?\n[\s\S]*?\r?\n---)(?=\r?\n|$)/g;
@@ -185,6 +206,24 @@ function parseLearningCandidate(markdown: string): MarkdownCandidate {
     hasMeaningfulSections: meaningfulSectionCount > 0,
     sectionCount,
   };
+}
+
+function hasCliNoise(content: string): boolean {
+  return /(?:OpenAI Codex|Reading prompt from stdin|tokens used|codex_core_|^workdir:|^provider:|^sandbox:|^reasoning effort:)/mi.test(content);
+}
+
+function hasPlaceholderContent(content: string): boolean {
+  return content
+    .split(/\r?\n/)
+    .some((line) => isPlaceholderLine(line));
+}
+
+function learningArtifactIsClean(content: string): boolean {
+  const parsed = parseLearningOutput(content);
+  return parsed.hasMeaningfulSections
+    && parsed.sections.trim().length > 0
+    && !hasCliNoise(content)
+    && !hasPlaceholderContent(content);
 }
 
 /**
@@ -270,6 +309,157 @@ function buildTracePointers(sessionName: string, issueNum: number): string {
     `  review: ${base}/traces/outputs/review-issue-${issueNum}.log`,
     `  diff: ${base}/diffs/issue-${issueNum}.diff`,
   ].join('\n');
+}
+
+function buildRepairedLearningFrontmatter(options: {
+  issue: SessionLearningRepairIssue;
+  existingFrontmatter: string | null;
+  parsedFrontmatter: string | null;
+  sessionName: string;
+}): string {
+  const { issue, existingFrontmatter, parsedFrontmatter, sessionName } = options;
+  const retries = issue.retries
+    ?? Number(frontmatterValue(existingFrontmatter, 'retries') ?? frontmatterValue(parsedFrontmatter, 'retries') ?? frontmatterValue(parsedFrontmatter, 'test_fix_retries') ?? 0);
+  const duration = issue.duration
+    ?? Number(frontmatterValue(existingFrontmatter, 'duration') ?? frontmatterValue(parsedFrontmatter, 'duration') ?? 0);
+  const status = issue.status ?? frontmatterValue(existingFrontmatter, 'status') ?? frontmatterValue(parsedFrontmatter, 'status') ?? 'success';
+  const date = frontmatterValue(existingFrontmatter, 'date')
+    ?? frontmatterValue(parsedFrontmatter, 'date')
+    ?? new Date().toISOString().split('T')[0];
+
+  return [
+    `issue: ${issue.issueNum}`,
+    `status: ${status}`,
+    `retries: ${Number.isFinite(retries) ? retries : 0}`,
+    `duration: ${Number.isFinite(duration) ? duration : 0}`,
+    `date: ${date}`,
+    buildTracePointers(sessionName, issue.issueNum),
+  ].join('\n');
+}
+
+function learningFilesForSession(learningsDir: string, issueNum: number, sessionName: string): string[] {
+  if (!existsSync(learningsDir)) return [];
+  const marker = `.alpha-loop/sessions/${sessionName}/`;
+  return readdirSync(learningsDir)
+    .filter((file) => file.startsWith(`issue-${issueNum}-`) && file.endsWith('.md'))
+    .filter((file) => {
+      try {
+        return readFileSync(join(learningsDir, file), 'utf-8').includes(marker);
+      } catch {
+        return false;
+      }
+    })
+    .sort();
+}
+
+function writeRepairedLearningFile(options: {
+  targetFile: string;
+  issue: SessionLearningRepairIssue;
+  sessionName: string;
+  rawOutput: string;
+  existingContent: string;
+}): boolean {
+  const parsed = parseLearningOutput(options.rawOutput);
+  if (!parsed.hasMeaningfulSections || !parsed.sections.trim()) return false;
+
+  const existingFrontmatter = extractLeadingFrontmatter(options.existingContent);
+  const frontmatter = buildRepairedLearningFrontmatter({
+    issue: options.issue,
+    existingFrontmatter,
+    parsedFrontmatter: parsed.frontmatter,
+    sessionName: options.sessionName,
+  });
+  const content = `---\n${frontmatter}\n---\n\n${parsed.sections}\n`;
+  writeFileSync(options.targetFile, content);
+  return true;
+}
+
+/**
+ * Repair tracked learning artifacts for a session from the raw agent outputs
+ * saved under `.alpha-loop/sessions/<session>/logs/learnings/`.
+ *
+ * This is intentionally deterministic and local: it does not call an agent.
+ * It protects self-hosted runs where the parent process may have generated
+ * placeholder/noisy learnings before a child issue fixed the parser on disk.
+ */
+export function repairSessionLearningArtifacts(options: {
+  sessionName: string;
+  issues: SessionLearningRepairIssue[];
+  learningsDir: string;
+  sessionLogsDir: string;
+}): SessionLearningRepairResult {
+  const result: SessionLearningRepairResult = { repaired: 0, created: 0, skipped: 0, failed: 0 };
+  mkdirSync(options.learningsDir, { recursive: true });
+
+  for (const issue of options.issues) {
+    const rawPath = join(options.sessionLogsDir, 'learnings', `issue-${issue.issueNum}-raw.md`);
+    const files = learningFilesForSession(options.learningsDir, issue.issueNum, options.sessionName);
+
+    if (!existsSync(rawPath)) {
+      result.skipped += files.length > 0 ? files.length : 1;
+      continue;
+    }
+
+    const rawOutput = readFileSync(rawPath, 'utf-8');
+    const targets = files.length > 0
+      ? files.map((file) => join(options.learningsDir, file))
+      : [join(options.learningsDir, `issue-${issue.issueNum}-${formatTimestamp(new Date())}.md`)];
+
+    for (const targetFile of targets) {
+      const existingContent = existsSync(targetFile) ? readFileSync(targetFile, 'utf-8') : '';
+      if (existingContent && learningArtifactIsClean(existingContent)) {
+        result.skipped++;
+        continue;
+      }
+
+      if (writeRepairedLearningFile({
+        targetFile,
+        issue,
+        sessionName: options.sessionName,
+        rawOutput,
+        existingContent,
+      })) {
+        if (existingContent) result.repaired++;
+        else result.created++;
+      } else {
+        result.failed++;
+        log.warn(`Could not repair learning artifact for issue #${issue.issueNum}: raw output did not contain meaningful sections`);
+      }
+    }
+  }
+
+  const changed = result.repaired + result.created;
+  if (changed > 0 || result.failed > 0) {
+    log.info(`Learning artifact repair: ${result.repaired} repaired, ${result.created} created, ${result.skipped} skipped, ${result.failed} failed`);
+  }
+
+  return result;
+}
+
+/**
+ * Repair a tracked session summary if it accidentally contains a raw Codex
+ * transcript. The raw transcript often still contains a valid final markdown
+ * summary later in the file, so we extract and rewrite that final candidate.
+ */
+export function repairSessionSummaryArtifact(options: {
+  sessionName: string;
+  learningsDir: string;
+}): boolean {
+  const summaryFile = join(options.learningsDir, `session-summary-${options.sessionName.replace(/\//g, '-')}.md`);
+  if (!existsSync(summaryFile)) return false;
+
+  const existing = readFileSync(summaryFile, 'utf-8');
+  const summary = parseSessionSummaryOutput(existing);
+  if (!summary) {
+    log.warn(`Could not repair session summary for ${options.sessionName}: no valid summary found`);
+    return false;
+  }
+
+  const next = summary + '\n';
+  if (existing === next) return false;
+  writeFileSync(summaryFile, next);
+  log.info(`Session summary repaired: ${summaryFile}`);
+  return true;
 }
 
 /**

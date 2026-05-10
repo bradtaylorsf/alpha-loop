@@ -1,4 +1,12 @@
-import { extractLearnings, generateSessionSummary, getLearningContext, countLearnings, parseLearningOutput } from '../../src/lib/learning';
+import {
+  extractLearnings,
+  generateSessionSummary,
+  getLearningContext,
+  countLearnings,
+  parseLearningOutput,
+  repairSessionLearningArtifacts,
+  repairSessionSummaryArtifact,
+} from '../../src/lib/learning';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
@@ -197,6 +205,40 @@ approval: never
 sandbox: workspace-write
 reasoning effort: xhigh
 session id: 019e0f4c-aae2-72d2-a8eb-4d4f739cbbbd`;
+}
+
+function pollutedLearningArtifact(): string {
+  return `---
+issue: 42
+status: success
+retries: 1
+duration: 120
+date: 2026-01-01
+traces:
+  plan: .alpha-loop/sessions/session/test/traces/prompts/plan-issue-42.md
+  implement: .alpha-loop/sessions/session/test/logs/issue-42-implement.log
+  review: .alpha-loop/sessions/session/test/traces/outputs/review-issue-42.log
+  diff: .alpha-loop/sessions/session/test/diffs/issue-42.diff
+---
+
+## What Worked
+- (list what went well)
+
+## What Failed
+- (list what went wrong, or "Nothing" if all passed)
+
+## Patterns
+- (reusable patterns discovered)
+
+## Anti-Patterns
+- (mistakes to avoid in future)
+
+## Suggested Skill Updates
+- (specific skill file changes, or "None")
+
+Reading prompt from stdin...
+OpenAI Codex v0.130.0
+tokens used: 5,432`;
 }
 
 function learningFileContent(): string {
@@ -562,6 +604,104 @@ describe('generateSessionSummary', () => {
     expect(result).toBeNull();
     expect(mockWriteFileSync).not.toHaveBeenCalled();
     expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('did not return a valid markdown summary'));
+  });
+});
+
+describe('repairSessionLearningArtifacts', () => {
+  test('repairs stale Codex learning artifacts from raw session logs', () => {
+    mockExistsSync.mockImplementation((filePath) => {
+      const path = String(filePath);
+      return path === '/fake/learnings'
+        || path === '/fake/session/logs/learnings/issue-42-raw.md'
+        || path === '/fake/learnings/issue-42-20260101-000000.md';
+    });
+    mockReaddirSync.mockReturnValue(['issue-42-20260101-000000.md' as any]);
+    mockReadFileSync.mockImplementation((filePath) => {
+      const path = String(filePath);
+      if (path.endsWith('/issue-42-raw.md')) return codexLearningTranscript();
+      if (path.endsWith('/issue-42-20260101-000000.md')) return pollutedLearningArtifact();
+      return '';
+    });
+
+    const result = repairSessionLearningArtifacts({
+      sessionName: 'session/test',
+      issues: [{ issueNum: 42, title: 'Test issue', status: 'success', duration: 120, retries: 1 }],
+      learningsDir: '/fake/learnings',
+      sessionLogsDir: '/fake/session/logs',
+    });
+
+    expect(result).toEqual({ repaired: 1, created: 0, skipped: 0, failed: 0 });
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      '/fake/learnings/issue-42-20260101-000000.md',
+      expect.any(String),
+    );
+
+    const writtenContent = mockWriteFileSync.mock.calls[0][1] as string;
+    expect(writtenContent).toContain('Codex final answer was parsed instead of the echoed prompt');
+    expect(writtenContent).toContain('Parse the last meaningful learning markdown candidate');
+    expect(writtenContent).toContain('.alpha-loop/sessions/session/test/traces/prompts/plan-issue-42.md');
+    expect(writtenContent).not.toContain('OpenAI Codex');
+    expect(writtenContent).not.toContain('Reading prompt from stdin');
+    expect(writtenContent).not.toContain('tokens used');
+    expect(writtenContent).not.toContain('(list what went well)');
+  });
+
+  test('repairs raw transcript artifacts even when they contain a valid final answer', () => {
+    mockExistsSync.mockImplementation((filePath) => {
+      const path = String(filePath);
+      return path === '/fake/learnings'
+        || path === '/fake/session/logs/learnings/issue-42-raw.md'
+        || path === '/fake/learnings/issue-42-20260101-000000.md';
+    });
+    mockReaddirSync.mockReturnValue(['issue-42-20260101-000000.md' as any]);
+    mockReadFileSync.mockImplementation((filePath) => {
+      const path = String(filePath);
+      if (path.endsWith('/issue-42-raw.md')) return codexLearningTranscript();
+      if (path.endsWith('/issue-42-20260101-000000.md')) {
+        return `${pollutedLearningArtifact()}\n\n${codexLearningTranscript()}`;
+      }
+      return '';
+    });
+
+    const result = repairSessionLearningArtifacts({
+      sessionName: 'session/test',
+      issues: [{ issueNum: 42, title: 'Test issue', status: 'success', duration: 120, retries: 1 }],
+      learningsDir: '/fake/learnings',
+      sessionLogsDir: '/fake/session/logs',
+    });
+
+    expect(result.repaired).toBe(1);
+    const writtenContent = mockWriteFileSync.mock.calls[0][1] as string;
+    expect(writtenContent).toContain('Codex final answer was parsed instead of the echoed prompt');
+    expect(writtenContent).not.toContain('OpenAI Codex');
+    expect(writtenContent).not.toContain('tokens used');
+    expect(writtenContent).not.toContain('(list what went well)');
+  });
+});
+
+describe('repairSessionSummaryArtifact', () => {
+  test('rewrites raw Codex transcript summary to final markdown only', () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(codexSummaryTranscript());
+
+    const repaired = repairSessionSummaryArtifact({
+      sessionName: 'session/test',
+      learningsDir: '/fake/learnings',
+    });
+
+    expect(repaired).toBe(true);
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      '/fake/learnings/session-summary-session-test.md',
+      expect.any(String),
+    );
+
+    const writtenContent = mockWriteFileSync.mock.calls[0][1] as string;
+    expect(writtenContent.startsWith('# Session Summary: session/test')).toBe(true);
+    expect(writtenContent).toContain('The session completed the bug fix');
+    expect(writtenContent).not.toContain('OpenAI Codex');
+    expect(writtenContent).not.toContain('terminal could not enable raw mode');
+    expect(writtenContent).not.toContain('tokens used');
+    expect(writtenContent).not.toContain('(2-3 sentences summarizing the session)');
   });
 });
 

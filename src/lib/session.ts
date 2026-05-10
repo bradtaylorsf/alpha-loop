@@ -7,6 +7,7 @@ import { log } from './logger.js';
 import { exec, formatTimestamp } from './shell.js';
 import { ghExec } from './rate-limit.js';
 import { createPR, updateProjectStatus } from './github.js';
+import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from './learning.js';
 import { readStageTelemetry } from './telemetry.js';
 import { runDir } from './traces.js';
 import type { Config } from './config.js';
@@ -223,6 +224,21 @@ export async function finalizeSession(
   // Save session manifest to learnings directory (tracked in git, shared with team)
   const learningsDir = join(projectDir, '.alpha-loop', 'learnings');
   mkdirSync(learningsDir, { recursive: true });
+  repairSessionLearningArtifacts({
+    sessionName: session.name,
+    issues: session.results.map((r) => ({
+      issueNum: r.issueNum,
+      title: r.title,
+      status: r.status,
+      duration: r.duration,
+    })),
+    learningsDir,
+    sessionLogsDir: session.logsDir,
+  });
+  repairSessionSummaryArtifact({
+    sessionName: session.name,
+    learningsDir,
+  });
 
   const manifestName = `session-${session.name.replace(/\//g, '-')}.json`;
   const stageEntries = (() => {
@@ -382,4 +398,3 @@ export async function finalizeSession(
     return null;
   }
 }
-

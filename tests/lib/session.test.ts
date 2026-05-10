@@ -23,6 +23,11 @@ jest.mock('../../src/lib/github', () => ({
   updateProjectStatus: jest.fn(),
 }));
 
+jest.mock('../../src/lib/learning', () => ({
+  repairSessionLearningArtifacts: jest.fn(),
+  repairSessionSummaryArtifact: jest.fn(),
+}));
+
 jest.mock('node:fs', () => ({
   mkdirSync: jest.fn(),
   writeFileSync: jest.fn(),
@@ -31,6 +36,7 @@ jest.mock('node:fs', () => ({
 
 import { exec } from '../../src/lib/shell';
 import { createPR } from '../../src/lib/github';
+import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import type { Config } from '../../src/lib/config';
 
@@ -39,6 +45,8 @@ const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>;
 const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
+const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
+const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -291,6 +299,14 @@ describe('finalizeSession', () => {
     const result = await finalizeSession(session, config);
 
     expect(result).toBe('https://github.com/owner/repo/pull/99');
+    expect(mockRepairSessionLearningArtifacts).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: session.name,
+      sessionLogsDir: session.logsDir,
+      issues: [expect.objectContaining({ issueNum: 1, title: 'First issue', status: 'success', duration: 60 })],
+    }));
+    expect(mockRepairSessionSummaryArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: session.name,
+    }));
     expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
       repo: 'owner/repo',
       base: 'master',
