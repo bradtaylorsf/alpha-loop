@@ -30,6 +30,10 @@ export type AgentResult = {
   toolCalls?: number;
   /** Number of tool_result blocks with is_error === true. */
   toolErrors?: number;
+  /** Claude stream-json result subtype, when present. */
+  resultSubtype?: string;
+  /** Whether the Claude stream-json result reported an error. */
+  resultIsError?: boolean;
 };
 
 /**
@@ -90,6 +94,10 @@ function formatStreamJsonLine(line: string): string | null {
 
 /** Default agent timeout: 30 minutes */
 const DEFAULT_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
+/** Grace period after a Claude stream-json result before treating the run as done. */
+const DEFAULT_RESULT_GRACE_MS = 60 * 1000;
+/** Time to wait for SIGTERM before forcing a stuck child down. */
+const FORCE_KILL_GRACE_MS = 5 * 1000;
 
 export type AgentOptions = {
   agent: AgentType;
@@ -100,6 +108,11 @@ export type AgentOptions = {
   verbose?: boolean;
   /** Timeout in milliseconds. Defaults to 30 minutes. */
   timeout?: number;
+  /**
+   * Grace period after a Claude stream-json `result` event before resolving if
+   * the child process never closes. Set to 0 to disable result-based recovery.
+   */
+  resultGraceMs?: number;
   /** Max conversation turns for the agent. Only supported by claude. */
   maxTurns?: number;
   /** Resume the most recent agent session in the CWD instead of starting fresh. */
@@ -252,7 +265,7 @@ function defaultLocalEnv(agent: AgentType, model: string): Record<string, string
  */
 export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
   const { command, args } = buildAgentArgs(options);
-  const useStreamJson = options.agent === 'claude';
+  const useStreamJson = command === 'claude' && args.includes('stream-json');
 
   log.info(`Agent: ${options.agent} | Model: ${options.model} | CWD: ${options.cwd}`);
 
@@ -289,6 +302,14 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
     let parsedCostUsd: number | undefined;
     let parsedInputTokens: number | undefined;
     let parsedOutputTokens: number | undefined;
+    let parsedResultSubtype: string | undefined;
+    let parsedResultIsError = false;
+    let sawStreamResult = false;
+    let agentTimeoutTimer: NodeJS.Timeout | undefined;
+    let resultGraceTimer: NodeJS.Timeout | undefined;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    let pendingTerminationExitCode: number | undefined;
+    let pendingTerminationOutput: string | undefined;
     // Tool-use telemetry (per-stage metrics aggregation).
     let toolUseCount = 0;
     let toolErrorCount = 0;
@@ -318,6 +339,90 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       writeToLog(stream, data.toString());
     };
 
+    function terminateChild(
+      reason: string,
+      exitCode: number,
+      output: string,
+      signal: NodeJS.Signals = 'SIGTERM',
+    ) {
+      if (resolved) return;
+      pendingTerminationExitCode = exitCode;
+      pendingTerminationOutput = output;
+      log.warn(reason);
+      try { child.kill(signal); } catch { /* ignore */ }
+      forceKillTimer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        finish(exitCode, output);
+      }, FORCE_KILL_GRACE_MS);
+    }
+
+    function resultExitCode() {
+      return parsedResultIsError ? 1 : 0;
+    }
+
+    function startResultGraceTimer() {
+      const resultGraceMs = options.resultGraceMs ?? DEFAULT_RESULT_GRACE_MS;
+      if (resultGraceMs <= 0 || resolved) return;
+      if (resultGraceTimer) clearTimeout(resultGraceTimer);
+      resultGraceTimer = setTimeout(() => {
+        terminateChild(
+          `Agent emitted a stream-json result but did not close after ${Math.round(resultGraceMs / 1000)}s; terminating stuck process...`,
+          resultExitCode(),
+          getOutput(),
+        );
+      }, resultGraceMs);
+    }
+
+    function processStreamJsonLine(stream: typeof child.stdout, line: string) {
+      if (!line) return;
+
+      // Extract the final result text and cost/token data for the return value
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>;
+        if (obj.type === 'result') {
+          sawStreamResult = true;
+          finalResultText = typeof obj.result === 'string' ? obj.result : '';
+          parsedResultSubtype = typeof obj.subtype === 'string' ? obj.subtype : undefined;
+          parsedResultIsError = obj.is_error === true || parsedResultSubtype?.startsWith('error') === true;
+          // Capture structured error info so transient/permanent classification
+          // still has something useful when Claude reports an empty error result.
+          if (parsedResultIsError) {
+            finalResultText = finalResultText || JSON.stringify(obj);
+          }
+          // Parse cost from result block
+          if (typeof obj.total_cost_usd === 'number') {
+            parsedCostUsd = obj.total_cost_usd;
+          }
+          // Parse token usage from result block
+          const usage = obj.usage as Record<string, unknown> | undefined;
+          if (usage) {
+            if (typeof usage.input_tokens === 'number') parsedInputTokens = usage.input_tokens;
+            if (typeof usage.output_tokens === 'number') parsedOutputTokens = usage.output_tokens;
+          }
+          startResultGraceTimer();
+        } else if (obj.type === 'assistant') {
+          const msg = obj.message as Record<string, unknown> | undefined;
+          const content = (msg?.content ?? []) as Array<Record<string, unknown>>;
+          for (const block of content) {
+            if (block.type === 'tool_use') toolUseCount++;
+          }
+        } else if (obj.type === 'user') {
+          const msg = obj.message as Record<string, unknown> | undefined;
+          const content = (msg?.content ?? []) as Array<Record<string, unknown>>;
+          for (const block of content) {
+            if (block.type === 'tool_result' && block.is_error === true) toolErrorCount++;
+          }
+        }
+      } catch { /* not valid JSON, ignore */ }
+
+      const formatted = formatStreamJsonLine(line);
+      if (formatted) {
+        const logLine = formatted + '\n';
+        if (options.verbose) process.stderr.write(logLine);
+        writeToLog(stream, logLine);
+      }
+    }
+
     /**
      * Handle stream-json data for Claude — parse JSON lines into readable output.
      */
@@ -330,49 +435,7 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       while ((newlineIdx = lineBuffer.indexOf('\n')) !== -1) {
         const line = lineBuffer.slice(0, newlineIdx).trim();
         lineBuffer = lineBuffer.slice(newlineIdx + 1);
-
-        if (!line) continue;
-
-        // Extract the final result text and cost/token data for the return value
-        try {
-          const obj = JSON.parse(line) as Record<string, unknown>;
-          if (obj.type === 'result') {
-            finalResultText = typeof obj.result === 'string' ? obj.result : '';
-            // Capture error info so transient error detection works
-            if (obj.is_error || obj.subtype === 'error') {
-              finalResultText = finalResultText || JSON.stringify(obj);
-            }
-            // Parse cost from result block
-            if (typeof obj.total_cost_usd === 'number') {
-              parsedCostUsd = obj.total_cost_usd;
-            }
-            // Parse token usage from result block
-            const usage = obj.usage as Record<string, unknown> | undefined;
-            if (usage) {
-              if (typeof usage.input_tokens === 'number') parsedInputTokens = usage.input_tokens;
-              if (typeof usage.output_tokens === 'number') parsedOutputTokens = usage.output_tokens;
-            }
-          } else if (obj.type === 'assistant') {
-            const msg = obj.message as Record<string, unknown> | undefined;
-            const content = (msg?.content ?? []) as Array<Record<string, unknown>>;
-            for (const block of content) {
-              if (block.type === 'tool_use') toolUseCount++;
-            }
-          } else if (obj.type === 'user') {
-            const msg = obj.message as Record<string, unknown> | undefined;
-            const content = (msg?.content ?? []) as Array<Record<string, unknown>>;
-            for (const block of content) {
-              if (block.type === 'tool_result' && block.is_error === true) toolErrorCount++;
-            }
-          }
-        } catch { /* not valid JSON, ignore */ }
-
-        const formatted = formatStreamJsonLine(line);
-        if (formatted) {
-          const logLine = formatted + '\n';
-          if (options.verbose) process.stderr.write(logLine);
-          writeToLog(stream, logLine);
-        }
+        processStreamJsonLine(stream, line);
       }
     };
 
@@ -389,27 +452,34 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
     child.stdout.on('error', () => {});
     child.stderr.on('error', () => {});
 
-    const getOutput = () => {
+    function getOutput() {
       if (useStreamJson) {
         // Return the parsed result text, not raw JSON
         return finalResultText || Buffer.concat(chunks).toString();
       }
       return Buffer.concat(chunks).toString();
-    };
+    }
 
-    const finish = (exitCode: number, output: string) => {
+    function finish(exitCode: number, output?: string) {
       if (resolved) return;
       resolved = true;
-      clearTimeout(timer);
+      if (agentTimeoutTimer) clearTimeout(agentTimeoutTimer);
+      if (resultGraceTimer) clearTimeout(resultGraceTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (useStreamJson && !sawStreamResult && lineBuffer.trim()) {
+        processStreamJsonLine(child.stdout, lineBuffer.trim());
+        lineBuffer = '';
+      }
+      const finalOutput = output ?? getOutput();
       const duration = Date.now() - startTime;
       // Fall back to output-string classification when we didn't see structured
       // tool_result error blocks (e.g. non-stream-json agents like codex).
       const toolErrorsFinal = toolErrorCount > 0
         ? toolErrorCount
-        : classifyToolErrors(output).length;
+        : classifyToolErrors(finalOutput).length;
       const result: AgentResult = {
         exitCode,
-        output,
+        output: finalOutput,
         duration,
         model: options.model || undefined,
         costUsd: parsedCostUsd,
@@ -418,6 +488,8 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
         toolCalls: toolUseCount,
         toolErrors: toolErrorsFinal,
       };
+      if (parsedResultSubtype !== undefined) result.resultSubtype = parsedResultSubtype;
+      if (parsedResultIsError) result.resultIsError = true;
       if (logStream) {
         logStream.end(() => {
           resolve(result);
@@ -425,22 +497,24 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       } else {
         resolve(result);
       }
-    };
+    }
 
     // Kill the agent if it exceeds the timeout
-    const timer = setTimeout(() => {
+    agentTimeoutTimer = setTimeout(() => {
       if (!resolved) {
-        log.warn(`Agent timed out after ${Math.round(timeoutMs / 1000)}s, killing process...`);
-        try { child.kill('SIGTERM'); } catch { /* ignore */ }
-        setTimeout(() => {
-          try { child.kill('SIGKILL'); } catch { /* ignore */ }
-        }, 5000);
-        finish(1, getOutput() + '\n[TIMEOUT] Agent killed after exceeding time limit.');
+        terminateChild(
+          `Agent timed out after ${Math.round(timeoutMs / 1000)}s, killing process...`,
+          1,
+          getOutput() + '\n[TIMEOUT] Agent killed after exceeding time limit.',
+        );
       }
     }, timeoutMs);
 
     child.on('close', (code) => {
-      finish(code ?? 1, getOutput());
+      finish(
+        pendingTerminationExitCode ?? code ?? (sawStreamResult ? resultExitCode() : 1),
+        pendingTerminationOutput,
+      );
     });
 
     child.on('error', (err) => {
