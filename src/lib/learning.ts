@@ -34,32 +34,213 @@ const LEARNING_SECTIONS = [
   '## Suggested Skill Updates',
 ];
 
+const SESSION_SUMMARY_SECTIONS = [
+  '## Overview',
+  '## Recurring Patterns',
+  '## Recurring Anti-Patterns',
+  '## Recommendations',
+  '## Metrics',
+];
+
+type MarkdownCandidate = {
+  frontmatter: string | null;
+  sections: string;
+  hasMeaningfulSections: boolean;
+  sectionCount: number;
+};
+
+type FrontmatterBlock = {
+  start: number;
+  end: number;
+};
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripListMarker(line: string): string {
+  return line
+    .trim()
+    .replace(/^[-*+]\s+/, '')
+    .replace(/^\d+[.)]\s+/, '')
+    .trim();
+}
+
+function isPlaceholderLine(line: string): boolean {
+  const normalized = stripListMarker(line).replace(/\s+/g, ' ').trim();
+  return normalized.startsWith('(') && normalized.endsWith(')');
+}
+
+function hasMeaningfulContent(content: string): boolean {
+  return content
+    .split(/\r?\n/)
+    .map(stripListMarker)
+    .filter((line) => line.length > 0)
+    .some((line) => !isPlaceholderLine(line));
+}
+
+function trimTrailingCliNoise(content: string): string {
+  const cliNoiseLine = /^(?:tokens used|token usage|session id|openai codex|workdir|model|approval|sandbox|reasoning effort)(?:\b|:)/i;
+  const transcriptRoleLine = /^(?:user|assistant|codex|system|developer|thinking)$/i;
+  const lines = content.trim().split(/\r?\n/);
+  const noiseIndex = lines.findIndex((line) => {
+    const trimmed = line.trim();
+    return cliNoiseLine.test(trimmed) || transcriptRoleLine.test(trimmed);
+  });
+
+  return (noiseIndex === -1 ? lines : lines.slice(0, noiseIndex)).join('\n').trim();
+}
+
+function extractSection(markdown: string, header: string): string | null {
+  const pattern = new RegExp(`^${escapeRegex(header)}[ \\t]*\\r?\\n([\\s\\S]*?)(?=\\r?\\n## |$)`, 'm');
+  const match = markdown.match(pattern);
+  if (!match) return null;
+  return trimTrailingCliNoise(match[1]);
+}
+
+function extractLeadingFrontmatter(markdown: string): string | null {
+  const match = markdown.trimStart().match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  return match ? match[1] : null;
+}
+
+function findFrontmatterBlocks(raw: string): FrontmatterBlock[] {
+  const blocks: FrontmatterBlock[] = [];
+  const pattern = /(?:^|\r?\n)(---\r?\n[\s\S]*?\r?\n---)(?=\r?\n|$)/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(raw)) !== null) {
+    const fullMatch = match[0];
+    const prefixLength = fullMatch.startsWith('\r\n') ? 2 : fullMatch.startsWith('\n') ? 1 : 0;
+    const start = match.index + prefixLength;
+    const end = start + match[1].length;
+    blocks.push({ start, end });
+  }
+
+  return blocks;
+}
+
+function findPrecedingFrontmatterStart(raw: string, headerIndex: number, blocks: FrontmatterBlock[]): number | null {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i];
+    if (block.end > headerIndex) continue;
+    if (raw.slice(block.end, headerIndex).trim() === '') {
+      return block.start;
+    }
+  }
+  return null;
+}
+
+function collectLearningCandidates(raw: string): string[] {
+  const frontmatterBlocks = findFrontmatterBlocks(raw);
+  const starts: number[] = [];
+  const headerPattern = /^## What Worked[ \t]*$/gm;
+  let match: RegExpExecArray | null;
+
+  while ((match = headerPattern.exec(raw)) !== null) {
+    const start = findPrecedingFrontmatterStart(raw, match.index, frontmatterBlocks) ?? match.index;
+    if (starts[starts.length - 1] !== start) starts.push(start);
+  }
+
+  if (starts.length === 0) return [raw.trim()];
+
+  return starts.map((start, index) => {
+    const end = starts[index + 1] ?? raw.length;
+    return raw.slice(start, end).trim();
+  });
+}
+
+function parseLearningCandidate(markdown: string): MarkdownCandidate {
+  const extracted: string[] = [];
+  let meaningfulSectionCount = 0;
+  let sectionCount = 0;
+
+  for (const header of LEARNING_SECTIONS) {
+    const content = extractSection(markdown, header);
+    if (!content) continue;
+    sectionCount++;
+    if (!hasMeaningfulContent(content)) continue;
+
+    extracted.push(`${header}\n${content}`);
+    meaningfulSectionCount++;
+  }
+
+  return {
+    frontmatter: extractLeadingFrontmatter(markdown),
+    sections: extracted.join('\n\n'),
+    hasMeaningfulSections: meaningfulSectionCount > 0,
+    sectionCount,
+  };
+}
+
 /**
  * Parse raw agent output and extract only the expected learning sections.
  * Discards prompt echoes, session logs, tool calls, and other noise.
  */
-export function parseLearningOutput(raw: string): { frontmatter: string | null; sections: string } {
-  // Extract frontmatter if present
-  let frontmatter: string | null = null;
-  const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
-  if (fmMatch) {
-    frontmatter = fmMatch[1];
+export function parseLearningOutput(raw: string): { frontmatter: string | null; sections: string; hasMeaningfulSections: boolean } {
+  const parsedCandidates = collectLearningCandidates(raw)
+    .map(parseLearningCandidate)
+    .filter((candidate) => candidate.hasMeaningfulSections);
+
+  const completeCandidates = parsedCandidates.filter((candidate) => candidate.sectionCount === LEARNING_SECTIONS.length);
+  const candidates = completeCandidates.length > 0 ? completeCandidates : parsedCandidates;
+  const selected = candidates[candidates.length - 1];
+  return selected ?? { frontmatter: null, sections: '', hasMeaningfulSections: false };
+}
+
+function collectSessionSummaryCandidates(raw: string): string[] {
+  const starts: number[] = [];
+  const titlePattern = /^# Session Summary: .+$/gm;
+  let match: RegExpExecArray | null;
+
+  while ((match = titlePattern.exec(raw)) !== null) {
+    starts.push(match.index);
   }
 
-  // Extract each expected section
-  const extracted: string[] = [];
-  for (const header of LEARNING_SECTIONS) {
-    const pattern = new RegExp(`${header.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n([\\s\\S]*?)(?=\\n## |$)`);
-    const match = raw.match(pattern);
-    if (match) {
-      const content = match[1].trim();
-      if (content) {
-        extracted.push(`${header}\n${content}`);
-      }
-    }
+  if (starts.length === 0) return [];
+
+  return starts.map((start, index) => {
+    const end = starts[index + 1] ?? raw.length;
+    return raw.slice(start, end).trim();
+  });
+}
+
+function parseSessionSummaryCandidate(markdown: string): string | null {
+  const title = markdown.match(/^# Session Summary: .+$/m)?.[0].trim();
+  if (!title) return null;
+
+  const sections = new Map<string, string>();
+  for (const header of SESSION_SUMMARY_SECTIONS) {
+    const content = extractSection(markdown, header);
+    if (!content) return null;
+    sections.set(header, content);
   }
 
-  return { frontmatter, sections: extracted.join('\n\n') };
+  const overview = sections.get('## Overview') ?? '';
+  const narrativeSections = [
+    sections.get('## Recurring Patterns') ?? '',
+    sections.get('## Recurring Anti-Patterns') ?? '',
+    sections.get('## Recommendations') ?? '',
+  ];
+  if (!hasMeaningfulContent(overview) || !narrativeSections.some(hasMeaningfulContent)) {
+    return null;
+  }
+
+  return [
+    title,
+    '',
+    ...SESSION_SUMMARY_SECTIONS.flatMap((header) => [header, sections.get(header) ?? '', '']),
+  ].join('\n').trim();
+}
+
+/**
+ * Extract the final session summary markdown from raw agent output.
+ */
+export function parseSessionSummaryOutput(raw: string): string | null {
+  const validCandidates = collectSessionSummaryCandidates(raw)
+    .map(parseSessionSummaryCandidate)
+    .filter((candidate): candidate is string => candidate !== null);
+
+  return validCandidates[validCandidates.length - 1] ?? null;
 }
 
 /**
@@ -140,7 +321,12 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
   }
 
   // Parse the output to extract only expected sections
-  const { frontmatter: parsedFm, sections } = parseLearningOutput(rawOutput);
+  const { frontmatter: parsedFm, sections, hasMeaningfulSections } = parseLearningOutput(rawOutput);
+  if (!hasMeaningfulSections || !sections.trim()) {
+    log.warn(`Learning extraction output for issue #${options.issueNum} did not contain meaningful learning sections, skipping`);
+    return;
+  }
+
   const today = new Date().toISOString().split('T')[0];
 
   // Build frontmatter with trace pointers — always ensure key fields exist
@@ -172,7 +358,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
     fmLines.push(buildTracePointers(options.sessionName, options.issueNum));
   }
 
-  const conciseContent = sections || rawOutput;
+  const conciseContent = sections;
   const finalOutput = `---\n${fmLines.join('\n')}\n---\n\n${conciseContent}`;
 
   writeFileSync(learningFile, finalOutput + '\n');
@@ -331,10 +517,15 @@ Output ONLY this markdown structure:
     return null;
   }
 
+  const summary = parseSessionSummaryOutput(agentResult.output);
+  if (!summary) {
+    log.warn('Session summary generation did not return a valid markdown summary, skipping');
+    return null;
+  }
+
   const summaryFile = join(learningsDir, `session-summary-${sessionName.replace(/\//g, '-')}.md`);
-  writeFileSync(summaryFile, agentResult.output.trim() + '\n');
+  writeFileSync(summaryFile, summary + '\n');
   log.success(`Session summary saved: ${summaryFile}`);
 
-  return agentResult.output.trim();
+  return summary;
 }
-
