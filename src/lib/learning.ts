@@ -7,6 +7,7 @@ import { log } from './logger.js';
 import { formatTimestamp } from './shell.js';
 import { spawnAgent } from './agent.js';
 import { buildLearnPrompt } from './prompts.js';
+import { resolveStepConfig } from './config.js';
 import type { Config } from './config.js';
 
 export type ExtractLearningsOptions = {
@@ -116,9 +117,10 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
     return;
   }
 
+  const learnStep = resolveStepConfig(config, 'learn');
   const result = await spawnAgent({
-    agent: config.agent,
-    model: config.reviewModel,
+    agent: learnStep.agent as typeof config.agent,
+    model: learnStep.model,
     prompt,
     cwd: process.cwd(),
     logFile: undefined,
@@ -337,4 +339,3 @@ Output ONLY this markdown structure:
 
   return agentResult.output.trim();
 }
-

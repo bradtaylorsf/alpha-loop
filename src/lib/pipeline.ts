@@ -55,8 +55,8 @@ import {
   runDir,
 } from './traces.js';
 import type { StepCost, PipelineResultForScores } from './traces.js';
-import { estimateCost, getFallbackPolicy, resolveRoutingStage, selectRoutingProfile } from './config.js';
-import type { Config, RoutingStageName, RoutingEndpointType } from './config.js';
+import { estimateCost, getFallbackPolicy, resolveRoutingStage, resolveStepConfig, selectRoutingProfile } from './config.js';
+import type { Config, PipelineStepName, RoutingStageName, RoutingEndpointType } from './config.js';
 import type { AgentResult } from './agent.js';
 import type { SessionContext } from './session.js';
 import { buildStageTelemetry, writeStageTelemetry } from './telemetry.js';
@@ -96,6 +96,14 @@ function buildStepCost(
     input_tokens: estimatedInputTokens,
     output_tokens: estimatedOutputTokens,
     cost_usd: costUsd,
+  };
+}
+
+function agentForStep(config: Config, step: PipelineStepName): Pick<AgentOptions, 'agent' | 'model'> {
+  const resolved = resolveStepConfig(config, step);
+  return {
+    agent: resolved.agent as AgentOptions['agent'],
+    model: resolved.model,
   };
 }
 
@@ -641,8 +649,7 @@ export async function processIssue(
 
       const planCtx = stageCtx('plan');
       const planResult = await spawnStageAgent({
-        agent: config.agent,
-        model: config.model,
+        ...agentForStep(config, 'plan'),
         prompt: planPrompt,
         cwd: worktreePath,
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
@@ -722,8 +729,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
     const implCtx = stageCtx('build');
     const implResult = await spawnStageAgent({
-      agent: config.agent,
-      model: config.model,
+      ...agentForStep(config, 'implement'),
       prompt: implementPrompt,
       cwd: worktreePath,
 
@@ -815,8 +821,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
         const fixCtx = stageCtx('test_write');
         const fixResult = await spawnStageAgent({
-          agent: config.agent,
-          model: config.model,
+          ...agentForStep(config, 'test_fix'),
           prompt: fixPrompt,
           cwd: worktreePath,
           resume: true,
@@ -882,8 +887,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
         const reviewCtx = stageCtx('review');
         const reviewResult = await spawnStageAgent({
-          agent: config.agent,
-          model: config.reviewModel,
+          ...agentForStep(config, 'review'),
           prompt: reviewPrompt,
           cwd: worktreePath,
           logFile: join(session.logsDir, `issue-${issueNum}-review${attempt > 1 ? `-${attempt}` : ''}.log`),
@@ -926,8 +930,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
         const reviewFixCtx = stageCtx('build');
         const reviewFixResult = await spawnStageAgent({
-          agent: config.agent,
-          model: config.model,
+          ...agentForStep(config, 'implement'),
           prompt: fixPrompt,
           cwd: worktreePath,
           resume: true,
@@ -1038,8 +1041,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
           const verifyFixCtx = stageCtx('test_exec');
           const verifyFixResult = await spawnStageAgent({
-            agent: config.agent,
-            model: config.model,
+            ...agentForStep(config, 'implement'),
             prompt: fixPrompt,
             cwd: worktreePath,
             resume: true,
@@ -1135,8 +1137,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       tracePrompt(session.name, issueNum, 'assumptions', assumptionsPrompt);
 
       const assumptionsResult = await spawnAgent({
-        agent: config.agent,
-        model: config.model,
+        ...agentForStep(config, 'learn'),
         prompt: assumptionsPrompt,
         cwd: worktreePath,
         logFile: join(session.logsDir, `issue-${issueNum}-assumptions.log`),
@@ -1433,8 +1434,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       tracePrompt(session.name, issues[0].number, 'batch-plan', planPrompt);
 
       const planResult = await spawnAgent({
-        agent: config.agent,
-        model: config.model,
+        ...agentForStep(config, 'plan'),
         prompt: planPrompt,
         cwd: worktreePath,
         logFile: join(session.logsDir, `batch-plan.log`),
@@ -1497,8 +1497,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     tracePrompt(session.name, issues[0].number, 'batch-implement', implementPrompt);
 
     const implResult = await spawnAgent({
-      agent: config.agent,
-      model: config.model,
+      ...agentForStep(config, 'implement'),
       prompt: implementPrompt,
       cwd: worktreePath,
       logFile: join(session.logsDir, `batch-implement.log`),
@@ -1589,8 +1588,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         tracePrompt(session.name, issues[0].number, `batch-fix-${attempt}`, fixPrompt);
 
         const fixResult = await spawnAgent({
-          agent: config.agent,
-          model: config.model,
+          ...agentForStep(config, 'test_fix'),
           prompt: fixPrompt,
           cwd: worktreePath,
           resume: true,
@@ -1641,8 +1639,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         tracePrompt(session.name, issues[0].number, `batch-review${attempt > 1 ? `-${attempt}` : ''}`, reviewPrompt);
 
         const reviewResult = await spawnAgent({
-          agent: config.agent,
-          model: config.reviewModel,
+          ...agentForStep(config, 'review'),
           prompt: reviewPrompt,
           cwd: worktreePath,
           logFile: join(session.logsDir, `batch-review${attempt > 1 ? `-${attempt}` : ''}.log`),
@@ -1683,8 +1680,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         tracePrompt(session.name, issues[0].number, `batch-review-fix-${attempt}`, fixPrompt);
 
         const reviewFixResult = await spawnAgent({
-          agent: config.agent,
-          model: config.model,
+          ...agentForStep(config, 'implement'),
           prompt: fixPrompt,
           cwd: worktreePath,
           resume: true,

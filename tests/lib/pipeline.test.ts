@@ -78,6 +78,13 @@ jest.mock('../../src/lib/config', () => ({
   estimateCost: jest.fn().mockReturnValue(0),
   getFallbackPolicy: jest.fn().mockReturnValue(null),
   resolveRoutingStage: jest.fn().mockReturnValue(undefined),
+  resolveStepConfig: jest.fn((config: Config, step: string) => {
+    const stepOverride = config.pipeline?.[step as keyof typeof config.pipeline];
+    return {
+      agent: stepOverride?.agent ?? config.agent,
+      model: stepOverride?.model ?? (step === 'review' ? (config.reviewModel || config.model) : config.model),
+    };
+  }),
   selectRoutingProfile: jest.fn().mockReturnValue(undefined),
 }));
 
@@ -251,6 +258,69 @@ describe('processIssue', () => {
     expect(mockExtractLearnings).toHaveBeenCalled();
     expect(mockSaveResult).toHaveBeenCalled();
     expect(mockCleanupWorktree).toHaveBeenCalled();
+  });
+
+  test('uses per-step pipeline agents for plan, implementation, and review', async () => {
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig({
+      agent: 'codex',
+      model: 'gpt-5.4',
+      reviewModel: 'gpt-5.4',
+      pipeline: {
+        plan: { agent: 'claude', model: 'claude-opus-4-6' },
+        implement: { agent: 'codex', model: 'gpt-5.4' },
+        review: { agent: 'claude', model: 'claude-sonnet-4-6' },
+      },
+    }), makeSession());
+
+    const planCall = mockSpawnAgent.mock.calls.find(
+      (call: any[]) => call[0].prompt === 'structured implementation plan prompt',
+    );
+    const implementCall = mockSpawnAgent.mock.calls.find(
+      (call: any[]) => call[0].prompt === 'implement prompt',
+    );
+    const reviewCall = mockSpawnAgent.mock.calls.find(
+      (call: any[]) => call[0].prompt === 'review prompt',
+    );
+
+    expect(planCall?.[0]).toEqual(expect.objectContaining({
+      agent: 'claude',
+      model: 'claude-opus-4-6',
+    }));
+    expect(implementCall?.[0]).toEqual(expect.objectContaining({
+      agent: 'codex',
+      model: 'gpt-5.4',
+    }));
+    expect(reviewCall?.[0]).toEqual(expect.objectContaining({
+      agent: 'claude',
+      model: 'claude-sonnet-4-6',
+    }));
+  });
+
+  test('uses test_fix pipeline override for failing test repair', async () => {
+    let testAttempt = 0;
+    mockRunTests.mockImplementation(() => {
+      testAttempt++;
+      return testAttempt === 1
+        ? { passed: false, output: 'First attempt failed' }
+        : { passed: true, output: 'Tests passed on retry' };
+    });
+
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig({
+      agent: 'claude',
+      model: 'opus',
+      pipeline: {
+        test_fix: { agent: 'codex', model: 'gpt-5.4-mini' },
+      },
+    }), makeSession());
+
+    const fixCall = mockSpawnAgent.mock.calls.find(
+      (call: any[]) => call[0].prompt?.includes('Tests are failing for issue #42'),
+    );
+    expect(fixCall?.[0]).toEqual(expect.objectContaining({
+      agent: 'codex',
+      model: 'gpt-5.4-mini',
+      resume: true,
+    }));
   });
 
   test('passes epic context into plan, implementation, and review prompt builders', async () => {

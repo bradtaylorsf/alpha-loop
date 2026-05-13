@@ -7,7 +7,7 @@
  */
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadConfig } from '../lib/config.js';
+import { loadConfig, resolveStepConfig } from '../lib/config.js';
 import { log } from '../lib/logger.js';
 import { exec } from '../lib/shell.js';
 import { ghExec } from '../lib/rate-limit.js';
@@ -204,9 +204,10 @@ async function resumeBranch(
     // Switch to the branch so the agent can run git commands against it.
     exec(`git checkout "${branch}"`);
 
+    const reviewStep = resolveStepConfig(config, 'review');
     const reviewResult = await spawnAgent({
-      agent: 'claude',
-      model: config.reviewModel,
+      agent: reviewStep.agent as typeof config.agent,
+      model: reviewStep.model,
       prompt: reviewPrompt,
       cwd,
       verbose: config.verbose,

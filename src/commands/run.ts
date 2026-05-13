@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
 import { exec } from '../lib/shell.js';
-import { loadConfig, assertSafeShellArg, type Config } from '../lib/config.js';
+import { loadConfig, assertSafeShellArg, resolveStepConfig, type Config } from '../lib/config.js';
 import {
   pollIssues, listMilestones, listEpics, getEpicSubIssues, getIssueWithComments,
   getMergedPRForIssue, updateEpicChecklist, commentIssue, closeIssue, labelIssue,
@@ -1030,9 +1030,10 @@ export async function runCommand(options: RunOptions): Promise<void> {
           // Trace review prompt
           writeTraceToSubdir(session.name, 'prompts', `session-review${attempt > 1 ? `-${attempt}` : ''}.md`, reviewPrompt);
 
+          const reviewStep = resolveStepConfig(config, 'review');
           const reviewResult = await spawnAgent({
-            agent: config.agent,
-            model: config.reviewModel,
+            agent: reviewStep.agent as typeof config.agent,
+            model: reviewStep.model,
             prompt: reviewPrompt,
             cwd: projectDir,
             logFile: join(session.logsDir, `session-review${attempt > 1 ? `-${attempt}` : ''}.log`),
@@ -1072,9 +1073,10 @@ export async function runCommand(options: RunOptions): Promise<void> {
           writeTraceToSubdir(session.name, 'prompts', `session-review-fix-${attempt}.md`, fixPrompt);
 
           try {
+            const implementStep = resolveStepConfig(config, 'implement');
             const fixResult = await spawnAgent({
-              agent: config.agent,
-              model: config.model,
+              agent: implementStep.agent as typeof config.agent,
+              model: implementStep.model,
               prompt: fixPrompt,
               cwd: projectDir,
               logFile: join(session.logsDir, `session-review-fix-${attempt}.log`),

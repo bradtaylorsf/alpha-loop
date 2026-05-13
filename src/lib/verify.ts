@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { exec } from './shell.js';
 import { log } from './logger.js';
 import { spawnAgent } from './agent.js';
+import { resolveStepConfig } from './config.js';
 import type { Config } from './config.js';
 import { formatEpicPromptContext, type EpicPromptContext } from './prompts.js';
 
@@ -257,11 +258,12 @@ Also output a human-readable summary:
 ### What Failed
 ### Console/Network Errors`;
 
-  log.info(`Verification agent: ${config.agent} + playwright-cli`);
+  const verifyStep = resolveStepConfig(config, 'verify');
+  log.info(`Verification agent: ${verifyStep.agent} + playwright-cli`);
 
   const agentResult = await spawnAgent({
-    agent: config.agent,
-    model: config.model,
+    agent: verifyStep.agent as typeof config.agent,
+    model: verifyStep.model,
     prompt: verifyPrompt,
     cwd: worktree,
     logFile,
