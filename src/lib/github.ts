@@ -7,7 +7,12 @@ import { tmpdir } from 'node:os';
 import { exec } from './shell.js';
 import { ghExec, getProjectCache, setProjectCache } from './rate-limit.js';
 import { log } from './logger.js';
-import { flipChecklistItem, parseSubIssues, type SubIssueRef } from './epics.js';
+import {
+  findUnparsedSubIssueChecklistLines,
+  flipChecklistItem,
+  parseSubIssues,
+  type SubIssueRef,
+} from './epics.js';
 
 /** Max PR body length. GitHub supports 65536 but we leave room for metadata. */
 const MAX_PR_BODY_CHARS = 60_000;
@@ -688,6 +693,18 @@ function summarizeEpicBody(body: string, maxChars: number): string {
   return summarizeBody(text, maxChars);
 }
 
+function warnForUnparsedSubIssueChecklistLines(epicNum: number, body: string): void {
+  const unparsedLines = findUnparsedSubIssueChecklistLines(body);
+  for (const { line, lineIndex } of unparsedLines) {
+    log.warn(
+      [
+        `Checklist line did not parse in epic #${epicNum} at line ${lineIndex + 1}: ${line}`,
+        "Hint: expected '- [ ] #N - title' format, with #N immediately after the checkbox; common markdown wrappers around #N are supported.",
+      ].join('\n'),
+    );
+  }
+}
+
 /**
  * List open epics with ordered child issue summaries for roadmap planning.
  * Known open issues are used first; missing child issue details are fetched
@@ -917,6 +934,7 @@ export function listEpics(repo: string, options?: { milestone?: string }): Issue
 export function getEpicSubIssues(repo: string, epicNum: number): SubIssueRef[] {
   const epic = getIssueWithComments(repo, epicNum);
   if (!epic) return [];
+  warnForUnparsedSubIssueChecklistLines(epicNum, epic.body);
   return parseSubIssues(epic.body);
 }
 

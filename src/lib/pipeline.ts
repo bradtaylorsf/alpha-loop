@@ -155,6 +155,9 @@ const TRANSIENT_ERROR_PATTERNS = [
 /** Sentinel appended by agent.ts when the process is killed for exceeding the timeout. */
 const TIMEOUT_SENTINEL = '[TIMEOUT]';
 
+/** Watchdog after Claude stream-json result events for resumed fix stages. */
+const RESUMED_FIX_RESULT_GRACE_MS = 60 * 1000;
+
 /**
  * Check if agent output indicates a transient error (usage limits, rate limits).
  * These issues should be re-queued, not marked as permanently failed.
@@ -828,6 +831,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           logFile: join(session.logsDir, `issue-${issueNum}-fix-${attempt}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
+          resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
         }, config, fixCtx);
 
         // Trace fix output and costs
@@ -937,6 +941,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           logFile: join(session.logsDir, `issue-${issueNum}-review-fix-${attempt}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
+          resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
         }, config, reviewFixCtx);
 
         // Trace review-fix output and costs
@@ -1048,6 +1053,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
             logFile: join(session.logsDir, `issue-${issueNum}-verify-fix-${attempt}.log`),
             verbose: config.verbose,
             timeout: config.agentTimeout * 1000,
+            resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
           }, config, verifyFixCtx);
 
           // Trace verify-fix output and costs
@@ -1595,6 +1601,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           logFile: join(session.logsDir, `batch-fix-${attempt}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
+          resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
         });
 
         traceOutput(session.name, issues[0].number, `batch-fix-${attempt}`, fixResult.output);
@@ -1687,6 +1694,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           logFile: join(session.logsDir, `batch-review-fix-${attempt}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
+          resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
         });
 
         traceOutput(session.name, issues[0].number, `batch-review-fix-${attempt}`, reviewFixResult.output);

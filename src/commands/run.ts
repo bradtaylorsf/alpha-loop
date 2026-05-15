@@ -16,7 +16,11 @@ import { verifyEpic } from '../lib/verify-epic.js';
 import { processIssue, processBatch } from '../lib/pipeline.js';
 import { createSession, finalizeSession, type SessionContext } from '../lib/session.js';
 import { cleanupWorktree } from '../lib/worktree.js';
-import { generateSessionSummary } from '../lib/learning.js';
+import {
+  generateSessionSummary,
+  repairSessionLearningArtifacts,
+  repairSessionSummaryArtifact,
+} from '../lib/learning.js';
 import { hasVision } from '../lib/vision.js';
 import { contextNeedsRefresh } from '../lib/context.js';
 import { runPreflight } from '../lib/preflight.js';
@@ -980,11 +984,26 @@ export async function runCommand(options: RunOptions): Promise<void> {
   // Generate session summary (aggregates learnings across all issues)
   if (session.results.length > 0) {
     const learningsDir = join(process.cwd(), '.alpha-loop', 'learnings');
+    repairSessionLearningArtifacts({
+      sessionName: session.name,
+      issues: session.results.map((r) => ({
+        issueNum: r.issueNum,
+        title: r.title,
+        status: r.status,
+        duration: r.duration,
+      })),
+      learningsDir,
+      sessionLogsDir: session.logsDir,
+    });
     await generateSessionSummary({
       sessionName: session.name,
       results: session.results,
       learningsDir,
       config,
+    });
+    repairSessionSummaryArtifact({
+      sessionName: session.name,
+      learningsDir,
     });
   }
 

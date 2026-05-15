@@ -1,5 +1,6 @@
 import {
   parseSubIssues,
+  findUnparsedSubIssueChecklistLines,
   buildEpicIssueBody,
   mergeEpicChecklist,
   flipChecklistItem,
@@ -45,6 +46,18 @@ describe('parseSubIssues', () => {
     expect(refs[0]).toMatchObject({ number: 42, checked: false, lineIndex: 0 });
   });
 
+  test.each([
+    ['bare issue ref', '- [ ] #211 - feat: skills loader'],
+    ['bold issue ref', '- [ ] **#211** - feat: skills loader'],
+    ['italic issue ref', '- [ ] _#211_ - feat: skills loader'],
+    ['markdown link issue ref', '- [ ] [#211](https://github.com/owner/repo/issues/211) - feat: skills loader'],
+    ['inline code issue ref', '- [ ] `#211` - feat: skills loader'],
+  ])('parses %s', (_label, line) => {
+    const refs = parseSubIssues(line);
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({ number: 211, checked: false, lineIndex: 0 });
+  });
+
   test('parses mixed checked and unchecked items and preserves document order', () => {
     const body = [
       '- [x] #10',
@@ -86,6 +99,26 @@ describe('parseSubIssues', () => {
     expect(refs).toHaveLength(2);
     expect(refs[0].lineIndex).toBe(4);
     expect(refs[1].lineIndex).toBe(5);
+  });
+});
+
+describe('findUnparsedSubIssueChecklistLines', () => {
+  test('returns checklist lines with local issue refs that were not parsed', () => {
+    const body = [
+      '- [ ] #10',
+      '- [ ] (#11)',
+      '- [ ] Work before #12',
+      '- [ ] owner/repo#13',
+      '- [ ] 14 - numeric-only refs are out of scope',
+      '- [ ] Task without an issue ref',
+    ].join('\n');
+
+    const lines = findUnparsedSubIssueChecklistLines(body);
+
+    expect(lines).toEqual([
+      { line: '- [ ] (#11)', lineIndex: 1 },
+      { line: '- [ ] Work before #12', lineIndex: 2 },
+    ]);
   });
 });
 
@@ -178,6 +211,12 @@ describe('flipChecklistItem', () => {
     // Only the checkbox line should change
     const expected = body.replace('- [ ] #7', '- [x] #7');
     expect(result).toBe(expected);
+  });
+
+  test('preserves markdown wrapping around the issue ref when flipping', () => {
+    const body = '- [ ] **#42** - feat: skills loader\n- [ ] _#99_';
+    const result = flipChecklistItem(body, 42, true);
+    expect(result).toBe('- [x] **#42** - feat: skills loader\n- [ ] _#99_');
   });
 
   test('returns body unchanged when target sub-issue is not present', () => {

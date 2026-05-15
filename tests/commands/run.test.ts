@@ -50,6 +50,8 @@ jest.mock('../../src/lib/worktree', () => ({
 
 jest.mock('../../src/lib/learning', () => ({
   generateSessionSummary: jest.fn().mockResolvedValue(null),
+  repairSessionLearningArtifacts: jest.fn(),
+  repairSessionSummaryArtifact: jest.fn(),
 }));
 
 jest.mock('../../src/lib/vision', () => ({
@@ -80,6 +82,7 @@ import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getIssueWithComments, updateEpicChecklist } from '../../src/lib/github';
 import { processIssue, processBatch } from '../../src/lib/pipeline';
 import { createSession, finalizeSession } from '../../src/lib/session';
+import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>;
@@ -91,6 +94,8 @@ const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
+const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
+const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -216,6 +221,14 @@ describe('runCommand', () => {
       expect.any(Object),
       expect.any(Object),
     );
+    expect(mockRepairSessionLearningArtifacts).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: 'session/20260330-143000',
+      sessionLogsDir: '/tmp/sessions/logs',
+      issues: [expect.objectContaining({ issueNum: 42, title: 'Test issue', status: 'success', duration: 60 })],
+    }));
+    expect(mockRepairSessionSummaryArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: 'session/20260330-143000',
+    }));
     expect(mockFinalizeSession).toHaveBeenCalled();
   });
 

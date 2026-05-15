@@ -33,21 +33,40 @@ type StrandedBranch = {
   filesChanged: string[];
 };
 
+function normalizeGitBranchLine(line: string): string {
+  return line.trim().replace(/^[*+]\s*/, '');
+}
+
+function listAgentIssueBranches(): string[] {
+  const branches = new Set<string>();
+
+  const listResult = exec('git branch --list "agent/issue-*"');
+  if (listResult.exitCode === 0) {
+    for (const line of listResult.stdout.split('\n')) {
+      const branch = normalizeGitBranchLine(line);
+      if (branch) branches.add(branch);
+    }
+  }
+
+  const worktreeResult = exec('git worktree list --porcelain');
+  if (worktreeResult.exitCode === 0) {
+    for (const line of worktreeResult.stdout.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('branch refs/heads/')) continue;
+      const branch = trimmed.slice('branch refs/heads/'.length);
+      if (branch.startsWith('agent/issue-')) branches.add(branch);
+    }
+  }
+
+  return Array.from(branches).sort();
+}
+
 /**
  * Find local branches matching agent/issue-* that have no open PR and have
  * commits ahead of the remote base branch.
  */
-function findStrandedBranches(baseBranch: string, filterIssue?: number): StrandedBranch[] {
-  const listResult = exec('git branch --list "agent/issue-*"');
-  if (listResult.exitCode !== 0 || !listResult.stdout.trim()) {
-    return [];
-  }
-
-  const branches = listResult.stdout
-    .split('\n')
-    .map((b) => b.trim().replace(/^\*\s*/, ''))
-    .filter(Boolean);
-
+export function findStrandedBranches(baseBranch: string, filterIssue?: number): StrandedBranch[] {
+  const branches = listAgentIssueBranches();
   const stranded: StrandedBranch[] = [];
 
   for (const branch of branches) {
