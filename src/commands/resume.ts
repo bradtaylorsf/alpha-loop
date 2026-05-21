@@ -5,7 +5,8 @@
  * origin/<baseBranch> but no corresponding open PR, then pushes, reviews,
  * and opens a PR for each one. Also updates the session PR if one exists.
  */
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, resolveStepConfig } from '../lib/config.js';
 import { log } from '../lib/logger.js';
@@ -400,11 +401,10 @@ This PR collects all changes from this session for final review before merging t
   ghExec(`gh pr edit ${prNumber} --repo "${repo}" --title ${JSON.stringify(title)}`, undefined, true);
 
   // Use --body-file to avoid escaping issues
-  const { tmpdir } = require('node:os') as typeof import('node:os');
   const bodyFile = join(tmpdir(), `alpha-loop-session-pr-${Date.now()}`);
   writeFileSync(bodyFile, body, 'utf-8');
   ghExec(`gh pr edit ${prNumber} --repo "${repo}" --body-file "${bodyFile}"`, undefined, true);
-  try { require('node:fs').unlinkSync(bodyFile); } catch { /* cleanup */ }
+  try { unlinkSync(bodyFile); } catch { /* cleanup */ }
 
   log.success(`Session PR updated: ${prUrl}`);
 }
