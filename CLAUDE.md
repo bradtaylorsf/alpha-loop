@@ -30,6 +30,7 @@ alpha-loop plan          # Generate project scope (milestones + issues) from see
 alpha-loop add           # Create a new issue from a free-form description using AI
 alpha-loop triage        # Analyze and improve existing issues
 alpha-loop roadmap       # Organize open issues into milestones
+alpha-loop roadmap --queue       # Recommend the next ordered epic run queue
 alpha-loop vision        # (deprecated) Use "alpha-loop plan" instead
 alpha-loop auth          # Save authenticated browser state
 alpha-loop resume        # Resume stranded work from crashed sessions

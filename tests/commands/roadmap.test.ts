@@ -57,8 +57,17 @@ jest.mock('../../src/lib/rate-limit', () => ({
 
 jest.mock('../../src/lib/planning', () => ({
   extractJsonFromResponse: jest.fn(),
+  formatEpicQueuePlan: jest.fn(() => 'FORMATTED QUEUE PLAN'),
   formatRoadmapTable: jest.fn(() => 'FORMATTED ROADMAP'),
   normalizeRoadmapPlan: jest.requireActual('../../src/lib/planning').normalizeRoadmapPlan,
+  planEpicQueue: jest.fn(() => ({
+    milestoneFilter: null,
+    totalEpicCount: 0,
+    consideredEpicCount: 0,
+    orderedEpics: [],
+    blockedEpics: [],
+    command: null,
+  })),
   buildPlanningContext: jest.fn(() => ({
     visionContext: null,
     projectContext: null,
@@ -79,7 +88,7 @@ import { checkbox, confirm } from '@inquirer/prompts';
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { buildRoadmapPrompt } from '../../src/lib/prompts';
-import { extractJsonFromResponse } from '../../src/lib/planning';
+import { extractJsonFromResponse, formatEpicQueuePlan, planEpicQueue } from '../../src/lib/planning';
 import {
   listOpenIssues,
   listRoadmapEpics,
@@ -94,6 +103,8 @@ const mockConfirm = confirm as jest.MockedFunction<typeof confirm>;
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockBuildRoadmapPrompt = buildRoadmapPrompt as jest.MockedFunction<typeof buildRoadmapPrompt>;
 const mockExtractJson = extractJsonFromResponse as jest.MockedFunction<typeof extractJsonFromResponse>;
+const mockFormatEpicQueuePlan = formatEpicQueuePlan as jest.MockedFunction<typeof formatEpicQueuePlan>;
+const mockPlanEpicQueue = planEpicQueue as jest.MockedFunction<typeof planEpicQueue>;
 const mockListOpenIssues = listOpenIssues as jest.MockedFunction<typeof listOpenIssues>;
 const mockListRoadmapEpics = listRoadmapEpics as jest.MockedFunction<typeof listRoadmapEpics>;
 const mockListMilestones = listMilestones as jest.MockedFunction<typeof listMilestones>;
@@ -168,6 +179,45 @@ describe('roadmap command', () => {
     expect(mockExec).not.toHaveBeenCalled();
     expect(mockCreateMilestone).not.toHaveBeenCalled();
     expect(mockSetIssueMilestone).not.toHaveBeenCalled();
+  });
+
+  it('prints an epic queue recommendation without invoking AI or mutating GitHub', async () => {
+    const { loadConfig } = require('../../src/lib/config');
+    const milestones = [
+      { number: 4, title: '001 - Existing Core', description: 'Core', openIssues: 0, closedIssues: 0, dueOn: null, state: 'open' },
+    ];
+    mockListOpenIssues.mockReturnValue([
+      { number: 195, title: 'Epic: Scheduling', body: 'Epic body', labels: ['epic'], milestone: '001 - Existing Core' },
+      { number: 7, title: 'Create API endpoints', body: 'REST API', labels: ['ready'] },
+    ]);
+    mockListRoadmapEpics.mockReturnValue(SAMPLE_EPIC_CONTEXT);
+    mockListMilestones.mockReturnValue(milestones);
+    mockFormatEpicQueuePlan.mockReturnValue('FORMATTED QUEUE PLAN');
+
+    await roadmapCommand({ queue: true, milestone: '001 - Existing Core' });
+
+    expect(mockListOpenIssues).toHaveBeenCalledWith('owner/repo', 1000);
+    expect(loadConfig).toHaveBeenCalledWith({
+      dryRun: true,
+      milestone: '001 - Existing Core',
+    });
+    expect(mockPlanEpicQueue).toHaveBeenCalledWith(SAMPLE_EPIC_CONTEXT, {
+      labelReady: 'ready',
+      milestone: '001 - Existing Core',
+      openIssues: expect.arrayContaining([
+        expect.objectContaining({ number: 195 }),
+        expect.objectContaining({ number: 7 }),
+      ]),
+      milestones,
+    });
+    expect(consoleSpy).toHaveBeenCalledWith('FORMATTED QUEUE PLAN');
+    expect(log.dry).toHaveBeenCalledWith(expect.stringContaining('Queue planning only'));
+    expect(mockBuildRoadmapPrompt).not.toHaveBeenCalled();
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(mockCheckbox).not.toHaveBeenCalled();
+    expect(mockCreateMilestone).not.toHaveBeenCalled();
+    expect(mockSetIssueMilestone).not.toHaveBeenCalled();
+    expect(mockAddIssueToProject).not.toHaveBeenCalled();
   });
 
   it('creates milestones and assigns issues on happy path', async () => {
