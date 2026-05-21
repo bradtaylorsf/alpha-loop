@@ -277,8 +277,9 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
 | `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
 | `alpha-loop auth` | Save authenticated browser state for verification |
-| `alpha-loop history` | View session history |
+| `alpha-loop history` | View session and queue history |
 | `alpha-loop history <name>` | View a specific session |
+| `alpha-loop history queue-<timestamp>` | Inspect a multi-epic queue manifest, including stopped/pending epics |
 | `alpha-loop history <name> --qa` | Show QA checklist for session |
 | `alpha-loop history <name> --telemetry` | Show per-stage telemetry table (see [docs/telemetry.md](docs/telemetry.md)) |
 | `alpha-loop history --clean` | Remove old session data |
@@ -618,7 +619,7 @@ To run several epics unattended while keeping review scope separate, pass an exp
 alpha-loop run --epics 205,166,214
 ```
 
-The queue is validated before any work starts. Each listed issue must exist, be labeled `epic`, not be duplicated, and be open unless it is already closed as completed. Alpha Loop processes the epics in the given order, creates/finalizes one session branch and PR per epic, and stops on the first epic failure, verification gap, checklist consistency error, or transient agent/rate-limit stop. By default, queue sessions use `stacked` ancestry: later epic session branches start from the previous successful session branch while their PRs still target the configured base branch. Use `--queue-branch-mode independent` for unrelated epics that should all branch from the base branch. Non-dry-run queue attempts write `.alpha-loop/sessions/queue-<timestamp>/queue.json`; `--dry-run` prints the validated queue without mutating GitHub or git state.
+The queue is validated before any work starts. Each listed issue must exist, be labeled `epic`, not be duplicated, and be open unless it is already closed as completed. Alpha Loop processes the epics in the given order, creates/finalizes one session branch and PR per epic, and stops on the first epic failure, verification gap, checklist consistency error, or transient agent/rate-limit stop. By default, queue sessions use `stacked` ancestry: later epic session branches start from the previous successful session branch while their PRs still target the configured base branch. Use `--queue-branch-mode independent` for unrelated epics that should all branch from the base branch. Non-dry-run queue attempts write `.alpha-loop/sessions/queue-<timestamp>/queue.json`; `alpha-loop history` lists those manifests and `alpha-loop history queue-<timestamp>` prints stopped/pending epics, session PRs, and rebase notes. `--dry-run` prints the validated queue without mutating GitHub or git state.
 
 Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
 
@@ -664,6 +665,7 @@ What needs to be done.
 | `.alpha-loop/evals/` | Yes | Eval cases (YAML) and score history (`scores.jsonl`) |
 | `.alpha-loop/traces/` | No (gitignored) | Meta-Harness style execution traces per session |
 | `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
+| `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, session PRs, merge order, and stop reason |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |
 

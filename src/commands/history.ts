@@ -5,13 +5,22 @@ import { readStageTelemetry } from '../lib/telemetry.js';
 import type { StageTelemetry } from '../lib/telemetry.js';
 import type { PipelineResult } from '../lib/pipeline.js';
 import type { EscalationEvent } from '../lib/escalation.js';
+import type { EpicQueueManifest, QueueSessionContext } from '../lib/epic-queue.js';
 
 type SessionManifest = {
   name: string;
   branch: string;
   completed: string;
   results: PipelineResult[];
+  queue?: QueueSessionContext;
   stages?: StageTelemetry[];
+};
+
+type QueueManifestRef = {
+  dir: string;
+  name: string;
+  timestamp: string;
+  manifest: EpicQueueManifest;
 };
 
 function formatDuration(seconds: number | undefined): string {
@@ -71,6 +80,55 @@ function findSessionDirs(sessionsRoot: string): Array<{ dir: string; name: strin
   return sessions;
 }
 
+function loadQueueManifest(filePath: string): EpicQueueManifest | null {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as EpicQueueManifest;
+    if (!manifest.queueId || !Array.isArray(manifest.epics)) return null;
+    return manifest;
+  } catch {
+    return null;
+  }
+}
+
+function queueTimestamp(queueId: string): string {
+  return queueId.startsWith('queue-') ? queueId.slice('queue-'.length) : queueId;
+}
+
+/**
+ * Find multi-epic queue manifests under .alpha-loop/sessions/queue-<timestamp>/queue.json.
+ */
+function findQueueManifests(sessionsRoot: string): QueueManifestRef[] {
+  if (!fs.existsSync(sessionsRoot)) return [];
+
+  const queues: QueueManifestRef[] = [];
+  for (const entry of fs.readdirSync(sessionsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('queue-')) continue;
+    const dir = path.join(sessionsRoot, entry.name);
+    const manifest = loadQueueManifest(path.join(dir, 'queue.json'));
+    if (!manifest) continue;
+    const name = manifest.queueId || entry.name;
+    queues.push({
+      dir,
+      name,
+      timestamp: queueTimestamp(name),
+      manifest,
+    });
+  }
+
+  queues.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  return queues;
+}
+
+function findQueueManifest(sessionsRoot: string, name: string): QueueManifestRef | undefined {
+  const wanted = name.trim();
+  if (!wanted) return undefined;
+  return findQueueManifests(sessionsRoot).find((queue) => (
+    queue.name === wanted ||
+    queue.timestamp === wanted ||
+    queue.name.endsWith(wanted)
+  ));
+}
+
 /**
  * Load session manifests from the learnings directory (checked into git, shared with team).
  * These are created during session finalization.
@@ -96,6 +154,7 @@ function loadManifests(projectDir?: string): Map<string, SessionManifest> {
 export function historyList(sessionsDir: string, projectDir?: string): void {
   const localSessions = findSessionDirs(sessionsDir);
   const manifests = loadManifests(projectDir);
+  const queues = findQueueManifests(sessionsDir);
 
   // Build a unified list: local sessions + manifests not covered by local data
   const seenNames = new Set(localSessions.map((s) => s.name));
@@ -129,42 +188,130 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
   // Sort newest first
   entries.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
-  if (entries.length === 0) {
+  if (entries.length === 0 && queues.length === 0) {
     console.log('No sessions found.');
     return;
   }
 
-  console.log('Sessions:');
-  console.log('');
+  if (entries.length > 0) {
+    console.log('Sessions:');
+    console.log('');
 
-  for (const entry of entries) {
-    const issueCount = entry.results.length;
-    const successCount = entry.results.filter((r) => r.status === 'success').length;
-    const failedCount = issueCount - successCount;
-    const totalDuration = entry.results.reduce((sum, r) => sum + r.duration, 0);
-    const durStr = formatDuration(totalDuration);
+    for (const entry of entries) {
+      const issueCount = entry.results.length;
+      const successCount = entry.results.filter((r) => r.status === 'success').length;
+      const failedCount = issueCount - successCount;
+      const totalDuration = entry.results.reduce((sum, r) => sum + r.duration, 0);
+      const durStr = formatDuration(totalDuration);
 
-    // Parse date from timestamp (YYYYMMDD-HHMMSS)
-    const ts = entry.timestamp;
-    const date = ts.length >= 8
-      ? `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`
-      : ts;
+      // Parse date from timestamp (YYYYMMDD-HHMMSS)
+      const ts = entry.timestamp;
+      const date = ts.length >= 8
+        ? `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`
+        : ts;
 
-    const issueWord = issueCount === 1 ? 'issue' : 'issues';
-    let statusParts = '';
-    if (successCount > 0) statusParts += `${successCount} \u2713`;
-    if (failedCount > 0) statusParts += ` ${failedCount} \u2717`;
-    if (issueCount === 0) statusParts = '(empty)';
+      const issueWord = issueCount === 1 ? 'issue' : 'issues';
+      let statusParts = '';
+      if (successCount > 0) statusParts += `${successCount} \u2713`;
+      if (failedCount > 0) statusParts += ` ${failedCount} \u2717`;
+      if (issueCount === 0) statusParts = '(empty)';
 
-    console.log(
-      `  ${entry.name.padEnd(30)} ${date}  ${String(issueCount).padStart(2)} ${issueWord.padEnd(7)} ${statusParts.padEnd(10)} ${durStr}`,
-    );
+      console.log(
+        `  ${entry.name.padEnd(30)} ${date}  ${String(issueCount).padStart(2)} ${issueWord.padEnd(7)} ${statusParts.padEnd(10)} ${durStr}`,
+      );
+    }
+  }
+
+  if (queues.length > 0) {
+    if (entries.length > 0) console.log('');
+    console.log('Queues:');
+    console.log('');
+    for (const queue of queues) {
+      const manifest = queue.manifest;
+      const epicCount = manifest.epics.length;
+      const successCount = manifest.epics.filter((entry) => entry.status === 'success').length;
+      const failedCount = manifest.epics.filter((entry) => entry.status === 'failure').length;
+      const pendingCount = manifest.epics.filter((entry) => entry.status === 'pending' || entry.status === 'running').length;
+      const startedAt = manifest.startedAt ?? '';
+      const date = startedAt.length >= 10 ? startedAt.slice(0, 10) : queue.timestamp;
+      const epicWord = epicCount === 1 ? 'epic' : 'epics';
+      const status = `${manifest.status}${manifest.stopReason ? `: ${manifest.stopReason}` : ''}`;
+      console.log(
+        `  ${queue.name.padEnd(30)} ${date}  ${String(epicCount).padStart(2)} ${epicWord.padEnd(6)} ${successCount} ok, ${failedCount} failed, ${pendingCount} pending  ${status}`,
+      );
+    }
   }
 }
 
-export function historyDetail(sessionsDir: string, sessionName: string): void {
+function formatQueueEpicStatus(status: string): string {
+  if (status === 'success') return 'success';
+  if (status === 'failure') return 'failed';
+  if (status === 'skipped') return 'skipped';
+  if (status === 'running') return 'running';
+  return 'pending';
+}
+
+function printQueueManifestDetail(queue: QueueManifestRef, projectDir?: string): void {
+  const root = projectDir ?? process.cwd();
+  const manifest = queue.manifest;
+  const manifestPath = path.relative(root, path.join(queue.dir, 'queue.json'));
+
+  console.log(`Queue:       ${manifest.queueId}`);
+  console.log(`Status:      ${manifest.status}`);
+  console.log(`Branch mode: ${manifest.branchAncestryMode}`);
+  console.log(`Started:     ${manifest.startedAt}`);
+  if (manifest.endedAt) console.log(`Ended:       ${manifest.endedAt}`);
+  if (manifest.stopReason) console.log(`Stop reason: ${manifest.stopReason}`);
+  console.log(`Manifest:    ${manifestPath}`);
+  console.log('');
+
+  console.log('Epics:');
+  for (const entry of manifest.epics) {
+    console.log(`  ${entry.queueIndex}/${entry.queueTotal} #${entry.epicNumber} ${entry.title} — ${formatQueueEpicStatus(entry.status)}`);
+    if (entry.sessionName) console.log(`           Session: ${entry.sessionName}`);
+    if (entry.sessionBranch) console.log(`           Branch:  ${entry.sessionBranch}`);
+    if (entry.sessionPrUrl) console.log(`           PR:      ${entry.sessionPrUrl}`);
+    if (entry.branchedFromBranch) console.log(`           From:    ${entry.branchedFromBranch}`);
+    if (entry.dependsOnSessionBranch) {
+      const pr = entry.dependsOnSessionPrUrl ? ` (${entry.dependsOnSessionPrUrl})` : '';
+      console.log(`           Depends: ${entry.dependsOnSessionBranch}${pr}`);
+    }
+    if (entry.rebaseOntoBranch) console.log(`           Rebase:  ${entry.sessionBranch ?? 'this branch'} onto ${entry.rebaseOntoBranch} after the dependency PR lands`);
+    for (const warning of entry.dependencyWarnings ?? []) console.log(`           Dependency: ${warning}`);
+    for (const warning of entry.overlapWarnings ?? []) console.log(`           File overlap: ${warning}`);
+    for (const failure of entry.failures ?? []) console.log(`           Failure: ${failure.code} — ${failure.message}`);
+  }
+}
+
+function printSessionQueueSummary(queue: QueueSessionContext): void {
+  console.log('');
+  console.log('Queue:');
+  console.log(`  ID:        ${queue.queueId}`);
+  console.log(`  Position:  ${queue.queueIndex} of ${queue.queueTotal}`);
+  console.log(`  Epic:      #${queue.currentEpic.number} ${queue.currentEpic.title}`);
+  console.log(`  Mode:      ${queue.branchAncestryMode}`);
+  console.log(`  From:      ${queue.branchedFromBranch}`);
+  if (queue.dependsOnSessionBranch) {
+    const pr = queue.dependsOnSessionPrUrl ? ` (${queue.dependsOnSessionPrUrl})` : '';
+    console.log(`  Depends:   ${queue.dependsOnSessionBranch}${pr}`);
+  }
+  if (queue.rebaseOntoBranch) {
+    console.log(`  Rebase:    onto ${queue.rebaseOntoBranch} after the dependency PR lands`);
+  }
+}
+
+export function historyDetail(sessionsDir: string, sessionName: string, projectDir?: string): void {
+  const queue = findQueueManifest(sessionsDir, sessionName);
+  if (queue) {
+    printQueueManifestDetail(queue, projectDir);
+    return;
+  }
+
   let results: PipelineResult[] = [];
   let sessionDir: string | undefined;
+  let manifest: SessionManifest | undefined;
+  const root = projectDir ?? process.cwd();
+  const manifests = loadManifests(root);
 
   // Try local session directories first
   const localDir = path.join(sessionsDir, sessionName);
@@ -182,14 +329,16 @@ export function historyDetail(sessionsDir: string, sessionName: string): void {
 
   // Fall back to manifest from learnings (checked-in data from teammates)
   if (results.length === 0) {
-    const manifests = loadManifests();
-    const manifest = manifests.get(sessionName)
+    manifest = manifests.get(sessionName)
       ?? [...manifests.values()].find((m) => m.name.endsWith(sessionName));
     if (manifest) {
       results = manifest.results;
       sessionName = manifest.name;
     }
   }
+
+  manifest ??= manifests.get(sessionName)
+    ?? [...manifests.values()].find((m) => m.name === sessionName || m.name.endsWith(sessionName));
 
   if (results.length === 0) {
     log.error(`Session not found: ${sessionName}`);
@@ -204,6 +353,11 @@ export function historyDetail(sessionsDir: string, sessionName: string): void {
   console.log(`Issues:   ${results.length} (${successCount} succeeded, ${results.length - successCount} failed)`);
   console.log(`Duration: ${formatDuration(totalDuration)}`);
   console.log('');
+
+  if (manifest?.queue) {
+    printSessionQueueSummary(manifest.queue);
+    console.log('');
+  }
 
   // Stage-revert banner: if any issue in this session has an active revert event, flag it.
   const activeReverts = new Set<string>();
@@ -284,7 +438,7 @@ export function historyDetail(sessionsDir: string, sessionName: string): void {
   }
 
   // Check for session summary in learnings
-  const learningsDir = path.join(process.cwd(), '.alpha-loop', 'learnings');
+  const learningsDir = path.join(root, '.alpha-loop', 'learnings');
   const summaryName = `session-summary-${sessionName.replace(/\//g, '-')}.md`;
   const summaryPath = path.join(learningsDir, summaryName);
   if (fs.existsSync(summaryPath)) {
