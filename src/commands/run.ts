@@ -31,15 +31,20 @@ import { spawnAgent } from '../lib/agent.js';
 import { buildSessionReviewPrompt, type EpicPromptContext } from '../lib/prompts.js';
 import { writeTraceToSubdir } from '../lib/traces.js';
 import { readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
-import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, type ValidationReport } from '../lib/validation.js';
+import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, parseDependencies, type ValidationReport } from '../lib/validation.js';
 import {
   createEpicQueueManifest,
   createEpicQueueValidationFailureManifest,
   parseEpicQueue,
   validateEpicQueue,
   writeQueueManifest,
+  type BranchAncestryMode,
   type EpicQueueManifest,
+  type EpicQueueManifestEntry,
   type EpicQueueManifestFailure,
+  type QueueEpicLink,
+  type QueueSessionContext,
+  type ValidatedEpicQueueEntry,
 } from '../lib/epic-queue.js';
 
 export type RunOptions = {
@@ -60,6 +65,8 @@ export type RunOptions = {
   epic?: number;
   /** Process multiple epics in the provided comma-separated order. */
   epics?: string;
+  /** Branch ancestry mode for multi-epic queues. */
+  queueBranchMode?: BranchAncestryMode;
   /** Skip the epic picker entirely, use flat/milestone flow. */
   skipEpic?: boolean;
   /** Run only the verification pass on an existing epic. */
@@ -108,7 +115,7 @@ type EpicVerificationFlowResult = {
 };
 
 type SessionExecutionTarget =
-  | { type: 'epic'; epicNum: number; epicTitle?: string; epicIssue: Issue }
+  | { type: 'epic'; epicNum: number; epicTitle?: string; epicIssue: Issue; queue?: QueueSessionContext }
   | { type: 'flat'; activeMilestone: string };
 
 type SessionExecutionResult = {
@@ -611,6 +618,7 @@ async function runIssueSession(
   const activeEpic = target.type === 'epic' ? target.epicNum : undefined;
   const activeEpicTitle = target.type === 'epic' ? target.epicTitle : undefined;
   const activeEpicIssue = target.type === 'epic' ? target.epicIssue : undefined;
+  const queueContext = target.type === 'epic' ? target.queue : undefined;
   const activeMilestone = target.type === 'flat' ? target.activeMilestone : '';
   const failures: EpicExecutionFailure[] = [];
   let verificationClosedEpic = false;
@@ -626,6 +634,7 @@ async function runIssueSession(
     milestone: activeMilestone || undefined,
     epicNum: activeEpic,
     epicTitle: activeEpicTitle,
+    queue: queueContext,
   });
 
   // Print startup banner
@@ -1247,6 +1256,7 @@ export async function runSingleEpicExecution(args: {
   epicNumber: number;
   epicIssue?: Issue;
   options?: RunOptions;
+  queue?: QueueSessionContext;
 }): Promise<EpicExecutionResult> {
   const { config, epicNumber } = args;
   const options = args.options ?? {};
@@ -1283,6 +1293,7 @@ export async function runSingleEpicExecution(args: {
     epicNum: epic.number,
     epicTitle: epic.title,
     epicIssue: epic,
+    queue: args.queue,
   });
 
   return {
@@ -1347,6 +1358,12 @@ function printDryRunEpicQueue(entries: ReturnType<typeof validateEpicQueue>['ent
   }
 }
 
+function normalizeQueueBranchMode(value: BranchAncestryMode | undefined): BranchAncestryMode {
+  if (value === undefined) return 'stacked';
+  if (value === 'stacked' || value === 'independent') return value;
+  throw new Error(`Invalid queue branch mode: ${value}. Expected "stacked" or "independent".`);
+}
+
 function toManifestFailures(failures: EpicExecutionFailure[]): EpicQueueManifestFailure[] {
   return failures.map((failure) => ({
     code: failure.code,
@@ -1370,6 +1387,129 @@ function stopReasonForEpicResult(result: EpicExecutionResult): string {
   return `Epic #${result.epicNumber} stopped: ${reason}`;
 }
 
+type QueueRiskMap = Map<number, { dependencyWarnings: string[]; overlapWarnings: string[] }>;
+
+function queueEpicLink(entry: ValidatedEpicQueueEntry | EpicQueueManifestEntry | undefined): QueueEpicLink | null {
+  if (!entry) return null;
+  const link: QueueEpicLink = {
+    number: entry.epicNumber,
+    title: entry.title,
+  };
+  if ('sessionBranch' in entry) link.sessionBranch = entry.sessionBranch;
+  if ('sessionPrUrl' in entry) link.sessionPrUrl = entry.sessionPrUrl;
+  return link;
+}
+
+function addQueueDependencyNote(risks: QueueRiskMap, epicNumber: number, note: string): void {
+  const entry = risks.get(epicNumber);
+  if (!entry || entry.dependencyWarnings.includes(note)) return;
+  entry.dependencyWarnings.push(note);
+}
+
+function addQueueOverlapNote(risks: QueueRiskMap, epicNumber: number, note: string): void {
+  const entry = risks.get(epicNumber);
+  if (!entry || entry.overlapWarnings.includes(note)) return;
+  entry.overlapWarnings.push(note);
+}
+
+function buildQueueRiskMap(entries: ValidatedEpicQueueEntry[]): QueueRiskMap {
+  const risks: QueueRiskMap = new Map(entries.map((entry) => [
+    entry.epicNumber,
+    { dependencyWarnings: [], overlapWarnings: [] },
+  ]));
+  const queuedEpicNumbers = new Set(entries.map((entry) => entry.epicNumber));
+
+  for (const entry of entries) {
+    for (const dep of parseDependencies(entry.issue.body).filter((num) => queuedEpicNumbers.has(num))) {
+      addQueueDependencyNote(
+        risks,
+        entry.epicNumber,
+        `Epic #${entry.epicNumber} declares a dependency on queued epic #${dep}.`,
+      );
+      addQueueDependencyNote(
+        risks,
+        dep,
+        `Later queued epic #${entry.epicNumber} declares a dependency on this epic.`,
+      );
+    }
+  }
+
+  const report = validateIssueQueue(
+    entries.map((entry) => ({ number: entry.epicNumber, title: entry.title, body: entry.issue.body })),
+    0,
+  );
+  for (const warning of report.dependencyWarnings) {
+    const note = `Queue order warning: ${warning.reason}.`;
+    addQueueDependencyNote(risks, warning.issueNum, note);
+    addQueueDependencyNote(risks, warning.dependsOn, note);
+  }
+  for (const warning of report.overlapWarnings) {
+    const note = `Epics #${warning.issueA} and #${warning.issueB} both mention ${warning.sharedFiles.join(', ')}.`;
+    addQueueOverlapNote(risks, warning.issueA, note);
+    addQueueOverlapNote(risks, warning.issueB, note);
+  }
+
+  return risks;
+}
+
+function buildQueueSessionContext(args: {
+  manifest: EpicQueueManifest;
+  entries: ValidatedEpicQueueEntry[];
+  currentIndex: number;
+  branchAncestryMode: BranchAncestryMode;
+  baseBranch: string;
+  previousSessionBranch: string | null;
+  previousSessionPrUrl: string | null;
+  risks: QueueRiskMap;
+}): QueueSessionContext {
+  const currentEntry = args.entries[args.currentIndex];
+  const manifestEntry = args.manifest.epics.find((entry) => entry.epicNumber === currentEntry.epicNumber);
+  const previousManifestEntry = args.currentIndex > 0 ? args.manifest.epics[args.currentIndex - 1] : undefined;
+  const nextManifestEntry = args.currentIndex < args.manifest.epics.length - 1
+    ? args.manifest.epics[args.currentIndex + 1]
+    : undefined;
+  const dependsOnSessionBranch = args.branchAncestryMode === 'stacked' ? args.previousSessionBranch : null;
+  const dependsOnSessionPrUrl = dependsOnSessionBranch ? args.previousSessionPrUrl : null;
+  const risk = args.risks.get(currentEntry.epicNumber) ?? { dependencyWarnings: [], overlapWarnings: [] };
+
+  return {
+    queueId: args.manifest.queueId,
+    queueIndex: args.currentIndex + 1,
+    queueTotal: args.entries.length,
+    currentEpic: {
+      number: currentEntry.epicNumber,
+      title: currentEntry.title,
+      sessionBranch: manifestEntry?.sessionBranch ?? null,
+      sessionPrUrl: manifestEntry?.sessionPrUrl ?? null,
+    },
+    previousEpic: queueEpicLink(previousManifestEntry),
+    nextEpic: queueEpicLink(nextManifestEntry),
+    previousSessionBranch: args.previousSessionBranch,
+    previousSessionPrUrl: args.previousSessionPrUrl,
+    branchAncestryMode: args.branchAncestryMode,
+    branchedFromBranch: dependsOnSessionBranch ?? args.baseBranch,
+    dependsOnSessionBranch,
+    dependsOnSessionPrUrl,
+    rebaseOntoBranch: dependsOnSessionBranch ? args.baseBranch : null,
+    dependencyWarnings: risk.dependencyWarnings,
+    overlapWarnings: risk.overlapWarnings,
+  };
+}
+
+function applyQueueContextToManifestEntry(entry: EpicQueueManifestEntry, queue: QueueSessionContext): void {
+  entry.queueIndex = queue.queueIndex;
+  entry.queueTotal = queue.queueTotal;
+  entry.previousEpic = queue.previousEpic;
+  entry.nextEpic = queue.nextEpic;
+  entry.branchAncestryMode = queue.branchAncestryMode;
+  entry.branchedFromBranch = queue.branchedFromBranch;
+  entry.dependsOnSessionBranch = queue.dependsOnSessionBranch;
+  entry.dependsOnSessionPrUrl = queue.dependsOnSessionPrUrl;
+  entry.rebaseOntoBranch = queue.rebaseOntoBranch;
+  entry.dependencyWarnings = queue.dependencyWarnings;
+  entry.overlapWarnings = queue.overlapWarnings;
+}
+
 function writeQueueManifestUpdate(manifest: EpicQueueManifest): void {
   const manifestPath = writeQueueManifest(process.cwd(), manifest);
   log.info(`Queue manifest saved: ${manifestPath}`);
@@ -1387,6 +1527,15 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
     return;
   }
 
+  let branchAncestryMode: BranchAncestryMode;
+  try {
+    branchAncestryMode = normalizeQueueBranchMode(options.queueBranchMode);
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+    return;
+  }
+
   const validation = validateEpicQueue(config.repo, epicNumbers, undefined, {
     allowMissingEpicLabel: config.dryRun,
   });
@@ -1395,7 +1544,7 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
       log.error(error.message);
     }
     if (!config.dryRun) {
-      writeQueueManifestUpdate(createEpicQueueValidationFailureManifest(epicNumbers, validation.errors));
+      writeQueueManifestUpdate(createEpicQueueValidationFailureManifest(epicNumbers, validation.errors, new Date(), branchAncestryMode));
     }
     process.exit(1);
     return;
@@ -1406,7 +1555,8 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
     return;
   }
 
-  const manifest = createEpicQueueManifest(validation.entries);
+  const manifest = createEpicQueueManifest(validation.entries, new Date(), branchAncestryMode);
+  const queueRisks = buildQueueRiskMap(validation.entries);
   writeQueueManifestUpdate(manifest);
 
   const queueConfig: Config = {
@@ -1422,7 +1572,12 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
     stopOnPartialEpic: true,
   };
 
-  for (const validatedEntry of validation.entries) {
+  let previousSessionBranch: string | null = null;
+  let previousSessionPrUrl: string | null = null;
+  let previousSessionManifestEntry: EpicQueueManifestEntry | null = null;
+
+  for (let index = 0; index < validation.entries.length; index++) {
+    const validatedEntry = validation.entries[index];
     const manifestEntry = manifest.epics.find((entry) => entry.epicNumber === validatedEntry.epicNumber);
     if (!manifestEntry) continue;
 
@@ -1431,6 +1586,17 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
       continue;
     }
 
+    const queueContext = buildQueueSessionContext({
+      manifest,
+      entries: validation.entries,
+      currentIndex: index,
+      branchAncestryMode,
+      baseBranch: config.baseBranch,
+      previousSessionBranch,
+      previousSessionPrUrl,
+      risks: queueRisks,
+    });
+    applyQueueContextToManifestEntry(manifestEntry, queueContext);
     manifestEntry.status = 'running';
     manifestEntry.startedAt = new Date().toISOString();
     writeQueueManifestUpdate(manifest);
@@ -1442,6 +1608,7 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
           epicNumber: validatedEntry.epicNumber,
           epicIssue: validatedEntry.issue,
           options: queueOptions,
+          queue: queueContext,
         });
       } catch (err) {
         return buildEpicFailureResult(validatedEntry.epicNumber, {
@@ -1470,6 +1637,13 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
     }
 
     writeQueueManifestUpdate(manifest);
+    if (previousSessionManifestEntry) {
+      previousSessionManifestEntry.nextSessionBranch = result.sessionBranch;
+      previousSessionManifestEntry.nextSessionPrUrl = result.sessionPrUrl;
+    }
+    previousSessionBranch = result.sessionBranch;
+    previousSessionPrUrl = result.sessionPrUrl;
+    previousSessionManifestEntry = manifestEntry;
   }
 
   manifest.status = 'success';

@@ -2,6 +2,33 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getIssueWithComments, type Issue } from './github.js';
 
+export type BranchAncestryMode = 'stacked' | 'independent';
+
+export type QueueEpicLink = {
+  number: number;
+  title: string;
+  sessionBranch?: string | null;
+  sessionPrUrl?: string | null;
+};
+
+export type QueueSessionContext = {
+  queueId: string;
+  queueIndex: number;
+  queueTotal: number;
+  currentEpic: QueueEpicLink;
+  previousEpic: QueueEpicLink | null;
+  nextEpic: QueueEpicLink | null;
+  previousSessionBranch: string | null;
+  previousSessionPrUrl: string | null;
+  branchAncestryMode: BranchAncestryMode;
+  branchedFromBranch: string;
+  dependsOnSessionBranch: string | null;
+  dependsOnSessionPrUrl: string | null;
+  rebaseOntoBranch: string | null;
+  dependencyWarnings: string[];
+  overlapWarnings: string[];
+};
+
 export type EpicQueueValidationErrorCode =
   | 'duplicate-epic'
   | 'epic-not-found'
@@ -47,10 +74,23 @@ export type EpicQueueManifestFailure = {
 export type EpicQueueManifestEntry = {
   epicNumber: number;
   title: string;
+  queueIndex: number;
+  queueTotal: number;
+  previousEpic: QueueEpicLink | null;
+  nextEpic: QueueEpicLink | null;
   status: EpicQueueManifestEntryStatus;
   sessionName: string | null;
   sessionBranch: string | null;
   sessionPrUrl: string | null;
+  nextSessionBranch: string | null;
+  nextSessionPrUrl: string | null;
+  branchAncestryMode: BranchAncestryMode;
+  branchedFromBranch: string | null;
+  dependsOnSessionBranch: string | null;
+  dependsOnSessionPrUrl: string | null;
+  rebaseOntoBranch: string | null;
+  dependencyWarnings: string[];
+  overlapWarnings: string[];
   startedAt: string | null;
   endedAt: string | null;
   skipReason?: string;
@@ -60,6 +100,7 @@ export type EpicQueueManifestEntry = {
 export type EpicQueueManifest = {
   queueId: string;
   epicIds: number[];
+  branchAncestryMode: BranchAncestryMode;
   status: EpicQueueManifestStatus;
   startedAt: string;
   endedAt: string | null;
@@ -209,23 +250,43 @@ export function validateEpicQueue(
 export function createEpicQueueManifest(
   entries: ValidatedEpicQueueEntry[],
   now: Date = new Date(),
+  branchAncestryMode: BranchAncestryMode = 'stacked',
 ): EpicQueueManifest {
   const startedAt = now.toISOString();
+  const queueTotal = entries.length;
 
   return {
     queueId: `queue-${formatQueueTimestamp(now)}`,
     epicIds: entries.map((entry) => entry.epicNumber),
+    branchAncestryMode,
     status: 'running',
     startedAt,
     endedAt: null,
     stopReason: null,
-    epics: entries.map((entry) => ({
+    epics: entries.map((entry, index) => ({
       epicNumber: entry.epicNumber,
       title: entry.title,
+      queueIndex: index + 1,
+      queueTotal,
+      previousEpic: index > 0
+        ? { number: entries[index - 1].epicNumber, title: entries[index - 1].title }
+        : null,
+      nextEpic: index < entries.length - 1
+        ? { number: entries[index + 1].epicNumber, title: entries[index + 1].title }
+        : null,
       status: entry.status === 'already-complete' ? 'skipped' : 'pending',
       sessionName: null,
       sessionBranch: null,
       sessionPrUrl: null,
+      nextSessionBranch: null,
+      nextSessionPrUrl: null,
+      branchAncestryMode,
+      branchedFromBranch: null,
+      dependsOnSessionBranch: null,
+      dependsOnSessionPrUrl: null,
+      rebaseOntoBranch: null,
+      dependencyWarnings: [],
+      overlapWarnings: [],
       startedAt: null,
       endedAt: entry.status === 'already-complete' ? startedAt : null,
       skipReason: entry.skipReason,
@@ -238,27 +299,43 @@ export function createEpicQueueValidationFailureManifest(
   epicNumbers: number[],
   errors: EpicQueueValidationError[],
   now: Date = new Date(),
+  branchAncestryMode: BranchAncestryMode = 'stacked',
 ): EpicQueueManifest {
   const startedAt = now.toISOString();
+  const queueTotal = epicNumbers.length;
 
   return {
     queueId: `queue-${formatQueueTimestamp(now)}`,
     epicIds: epicNumbers,
+    branchAncestryMode,
     status: 'stopped',
     startedAt,
     endedAt: startedAt,
     stopReason: 'queue-validation-failed',
-    epics: epicNumbers.map((epicNumber) => {
+    epics: epicNumbers.map((epicNumber, index) => {
       const failures = errors
         .filter((error) => error.epicNumber === epicNumber)
         .map((error) => ({ code: error.code, message: error.message }));
       return {
         epicNumber,
         title: '',
+        queueIndex: index + 1,
+        queueTotal,
+        previousEpic: index > 0 ? { number: epicNumbers[index - 1], title: '' } : null,
+        nextEpic: index < epicNumbers.length - 1 ? { number: epicNumbers[index + 1], title: '' } : null,
         status: failures.length > 0 ? 'failure' : 'pending',
         sessionName: null,
         sessionBranch: null,
         sessionPrUrl: null,
+        nextSessionBranch: null,
+        nextSessionPrUrl: null,
+        branchAncestryMode,
+        branchedFromBranch: null,
+        dependsOnSessionBranch: null,
+        dependsOnSessionPrUrl: null,
+        rebaseOntoBranch: null,
+        dependencyWarnings: [],
+        overlapWarnings: [],
         startedAt: null,
         endedAt: failures.length > 0 ? startedAt : null,
         failures,
