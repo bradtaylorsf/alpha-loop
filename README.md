@@ -48,8 +48,9 @@ For planned feature work, use epics as the unit you schedule and ship:
 1. `alpha-loop triage` reviews open issues, proposes cleanup, and groups related ready issues into parent epics with ordered child checklists.
 2. `alpha-loop roadmap` schedules parent epic issues into milestones, while still scheduling standalone issues that are not part of an epic.
 3. `alpha-loop run --epic <N>` ships the epic's child issues in checklist order. Agents working on each child issue receive the parent epic goal, acceptance criteria, and sibling checklist as context.
-4. `alpha-loop run --epics <A,B,C>` runs several parent epics back-to-back in that exact order, with a separate session branch and PR for each epic.
-5. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
+4. `alpha-loop roadmap --queue` recommends the next ordered epic queue, explains blockers and risks, and prints the exact `alpha-loop run --epics ...` command.
+5. `alpha-loop run --epics <A,B,C>` runs several parent epics back-to-back in that exact order, with a separate session branch and PR for each epic.
+6. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
 
 Milestones answer "when should this epic ship?" The epic checklist answers "what child issues ship, and in what order?"
 
@@ -311,6 +312,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop triage --dry-run` | Display cleanup findings and epic proposals without making changes |
 | `alpha-loop triage --yes` | Non-interactive mode: apply AI-selected cleanup actions and epic proposals |
 | `alpha-loop roadmap` | Schedule parent epics and standalone issues into milestones using AI analysis |
+| `alpha-loop roadmap --queue` | Recommend the next ordered epic run queue without making changes |
+| `alpha-loop roadmap --queue --milestone <name>` | Recommend an epic run queue within a release or sprint milestone |
 | `alpha-loop roadmap --dry-run` | Display proposed epic/standalone milestone assignments without making changes |
 | `alpha-loop roadmap --yes` | Non-interactive mode: apply all AI-recommended epic and standalone assignments |
 
@@ -599,6 +602,15 @@ alpha-loop run --epic 165
 ```
 
 `alpha-loop run --milestone "v1.0"` checks for open epics assigned to that milestone before fetching flat issues. One scheduled epic is processed automatically, multiple scheduled epics require `--epic <N>`, and no scheduled epics falls back to ready non-epic issues in that milestone. `--epic` always wins over `--milestone`; `--skip-epic` disables epic discovery and preserves the flat milestone flow.
+
+To ask Alpha Loop what to run next, use queue planning:
+
+```bash
+alpha-loop roadmap --queue
+alpha-loop roadmap --queue --milestone "v1.0"
+```
+
+Queue planning is read-only. It inspects open `epic` issues, milestone assignments, checklist progress, child readiness labels, dependency phrases such as `depends on #N`, and likely file overlap. When a runnable queue exists, it prints an executable command like `alpha-loop run --epics 205,166,214`; blocked epics stay out of the command and are listed with their blockers.
 
 To run several epics unattended while keeping review scope separate, pass an explicit queue:
 

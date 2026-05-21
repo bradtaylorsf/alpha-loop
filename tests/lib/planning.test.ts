@@ -31,11 +31,13 @@ import {
   formatIssueTable,
   formatTriageFindings,
   formatEpicGroupProposals,
+  formatEpicQueuePlan,
   formatRoadmapTable,
   normalizeMilestoneTitles,
   normalizePlanMilestones,
   normalizeRoadmapMilestones,
   normalizeRoadmapPlan,
+  planEpicQueue,
   readSeedFiles,
   buildPlanningContext,
   savePlanDraft,
@@ -45,6 +47,7 @@ import {
   type ProposedEpicGroup,
   type PlanDraft,
 } from '../../src/lib/planning';
+import type { Issue, Milestone, RoadmapEpicContext } from '../../src/lib/github';
 import { getVisionContext } from '../../src/lib/vision';
 import { getProjectContext } from '../../src/lib/context';
 import { pollIssues } from '../../src/lib/github';
@@ -685,5 +688,176 @@ describe('formatRoadmapTable', () => {
     expect(output.indexOf('#195  Epic: Scheduling')).toBeLessThan(output.indexOf('#15  User dashboard'));
     expect(output).toContain('[EXISTS]');
     expect(output).toContain('[NEW]');
+  });
+});
+
+// ── epic queue planning ─────────────────────────────────────────────────────
+
+const milestone = (title: string, number: number): Milestone => ({
+  number,
+  title,
+  description: '',
+  openIssues: 0,
+  closedIssues: 0,
+  dueOn: null,
+  state: 'open',
+});
+
+const openIssue = (number: number, labels: string[] = ['ready']): Issue => ({
+  number,
+  title: `Issue ${number}`,
+  body: '',
+  labels,
+  state: 'OPEN',
+});
+
+const epicContext = (overrides: Partial<RoadmapEpicContext> = {}): RoadmapEpicContext => ({
+  issueNum: 100,
+  title: 'Epic: Queue item',
+  bodySummary: 'Ship queue work.',
+  currentMilestone: '001 - Core',
+  completedChildCount: 0,
+  totalChildCount: 1,
+  openChildCount: 1,
+  children: [
+    {
+      issueNum: 10,
+      title: 'Ready child',
+      bodySummary: 'Implement `src/lib/queue.ts`.',
+      checked: false,
+      labels: ['ready'],
+      state: 'OPEN',
+      milestone: '001 - Core',
+    },
+  ],
+  ...overrides,
+});
+
+describe('planEpicQueue', () => {
+  it('handles no open epics', () => {
+    const plan = planEpicQueue([], { labelReady: 'ready', openIssues: [] });
+
+    expect(plan.orderedEpics).toEqual([]);
+    expect(plan.blockedEpics).toEqual([]);
+    expect(plan.command).toBeNull();
+    expect(formatEpicQueuePlan(plan)).toContain('No open epics found');
+  });
+
+  it('recommends a single ready epic and emits the run command', () => {
+    const plan = planEpicQueue([epicContext({ issueNum: 101 })], {
+      labelReady: 'ready',
+      openIssues: [openIssue(101, ['epic']), openIssue(10)],
+    });
+
+    expect(plan.orderedEpics.map((epic) => epic.issueNum)).toEqual([101]);
+    expect(plan.blockedEpics).toEqual([]);
+    expect(plan.command).toBe('alpha-loop run --epics 101');
+    expect(plan.orderedEpics[0].rationale.join('\n')).toContain('Child readiness: 1 ready');
+  });
+
+  it('orders multiple independent epics by milestone order and reports file overlap risk', () => {
+    const epics = [
+      epicContext({
+        issueNum: 205,
+        title: 'Epic: Later',
+        currentMilestone: '002 - UI',
+        children: [{
+          issueNum: 20,
+          title: 'Later child',
+          bodySummary: 'Update `src/lib/shared.ts`.',
+          checked: false,
+          labels: ['ready'],
+          state: 'OPEN',
+          milestone: '002 - UI',
+        }],
+      }),
+      epicContext({
+        issueNum: 166,
+        title: 'Epic: Earlier',
+        currentMilestone: '001 - Core',
+        children: [{
+          issueNum: 16,
+          title: 'Earlier child',
+          bodySummary: 'Update `src/lib/shared.ts`.',
+          checked: false,
+          labels: ['ready'],
+          state: 'OPEN',
+          milestone: '001 - Core',
+        }],
+      }),
+    ];
+
+    const plan = planEpicQueue(epics, {
+      labelReady: 'ready',
+      milestones: [milestone('001 - Core', 1), milestone('002 - UI', 2)],
+      openIssues: [openIssue(205, ['epic']), openIssue(166, ['epic']), openIssue(20), openIssue(16)],
+    });
+
+    expect(plan.orderedEpics.map((epic) => epic.issueNum)).toEqual([166, 205]);
+    expect(plan.command).toBe('alpha-loop run --epics 166,205');
+    expect(plan.orderedEpics[0].risks.join('\n')).toContain('Likely file overlap with #205');
+    expect(plan.orderedEpics[1].risks.join('\n')).toContain('Likely file overlap with #166');
+  });
+
+  it('orders explicit dependencies before dependents', () => {
+    const plan = planEpicQueue([
+      epicContext({ issueNum: 214, title: 'Epic: Dependent', bodySummary: 'Requires #205 first.' }),
+      epicContext({ issueNum: 205, title: 'Epic: Foundation', bodySummary: 'Foundation work.' }),
+    ], {
+      labelReady: 'ready',
+      openIssues: [openIssue(214, ['epic']), openIssue(205, ['epic']), openIssue(10)],
+    });
+
+    expect(plan.orderedEpics.map((epic) => epic.issueNum)).toEqual([205, 214]);
+    expect(plan.orderedEpics.find((epic) => epic.issueNum === 214)?.queueDependencies).toEqual([205]);
+    expect(plan.command).toBe('alpha-loop run --epics 205,214');
+  });
+
+  it('blocks epics with not-ready children or open dependencies outside the queue', () => {
+    const notReady = epicContext({
+      issueNum: 300,
+      title: 'Epic: Needs child readiness',
+      children: [{
+        issueNum: 30,
+        title: 'Missing ready label',
+        bodySummary: 'Needs grooming.',
+        checked: false,
+        labels: ['triage'],
+        state: 'OPEN',
+        milestone: '001 - Core',
+      }],
+    });
+    const externalDependency = epicContext({
+      issueNum: 301,
+      title: 'Epic: Needs outside dependency',
+      bodySummary: 'Depends on #999 before this can run.',
+    });
+
+    const plan = planEpicQueue([notReady, externalDependency], {
+      labelReady: 'ready',
+      openIssues: [openIssue(300, ['epic']), openIssue(301, ['epic']), openIssue(30, ['triage']), openIssue(999)],
+    });
+
+    expect(plan.orderedEpics).toEqual([]);
+    expect(plan.command).toBeNull();
+    expect(plan.blockedEpics.map((epic) => epic.issueNum).sort()).toEqual([300, 301]);
+    expect(plan.blockedEpics.find((epic) => epic.issueNum === 300)?.blockers.join('\n')).toContain("Missing 'ready' label");
+    expect(plan.blockedEpics.find((epic) => epic.issueNum === 301)?.blockers.join('\n')).toContain('Open dependency #999 is outside');
+  });
+
+  it('filters queue planning to a requested milestone', () => {
+    const plan = planEpicQueue([
+      epicContext({ issueNum: 400, currentMilestone: '001 - Core' }),
+      epicContext({ issueNum: 401, currentMilestone: '002 - Later' }),
+    ], {
+      labelReady: 'ready',
+      milestone: '002 - Later',
+      openIssues: [openIssue(400, ['epic']), openIssue(401, ['epic']), openIssue(10)],
+    });
+
+    expect(plan.milestoneFilter).toBe('002 - Later');
+    expect(plan.consideredEpicCount).toBe(1);
+    expect(plan.orderedEpics.map((epic) => epic.issueNum)).toEqual([401]);
+    expect(formatEpicQueuePlan(plan)).toContain('Scope: milestone "002 - Later"');
   });
 });

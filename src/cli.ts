@@ -132,6 +132,8 @@ program
 program
   .command('roadmap')
   .description('Schedule parent epics and standalone issues into milestones using AI analysis')
+  .option('--queue', 'Recommend the next ordered epic run queue without making changes')
+  .option('--milestone <name>', 'Limit queue recommendations to epics in a milestone')
   .option('--dry-run', 'Display proposed epic/standalone milestone assignments without making changes')
   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .action(async (options) => {

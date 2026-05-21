@@ -33,6 +33,7 @@ describe('epic-first workflow docs and help text', () => {
     expect(cli).toContain('Analyze open issues, clean up backlog noise, and propose/apply epic groups');
     expect(cli).toContain('Display cleanup findings and epic proposals without making changes');
     expect(cli).toContain('Schedule parent epics and standalone issues into milestones using AI analysis');
+    expect(cli).toContain('Recommend the next ordered epic run queue without making changes');
     expect(cli).toContain('Display proposed epic/standalone milestone assignments without making changes');
   });
 });
