@@ -121,6 +121,58 @@ alpha-loop run --skip-epic --milestone "v1.1"
 
 Skips epic discovery entirely and uses the flat milestone issue flow. Useful when you want to work on standalone issues in a milestone that also has scheduled parent epics.
 
+## Multi-Epic Queues
+
+Use one epic when the work has one integrated goal, one parent acceptance-criteria set, and one verification pass. Use a multi-epic queue when you want a long unattended run across several parent epics while keeping review scope separate. Each epic in the queue still produces its own session branch and session PR.
+
+There are two ways to build a queue:
+
+```bash
+alpha-loop roadmap --queue
+alpha-loop roadmap --queue --milestone "v1.1"
+```
+
+`roadmap --queue` is read-only. It inspects open epics, milestone order, child readiness, dependency phrases such as `depends on #N`, and likely file overlap. When at least one epic is runnable, it prints a command like:
+
+```bash
+alpha-loop run --epics 205,166,214
+```
+
+You can also provide the queue explicitly:
+
+```bash
+alpha-loop run --epics 205,166,214
+```
+
+Explicit queues are processed exactly in the order provided. Before any session starts, Alpha Loop validates that each issue exists, is labeled `epic`, is not duplicated, and is open unless already closed as completed. `--dry-run` performs the same validation and prints the queue without creating branches, PRs, GitHub comments, or queue manifests.
+
+### Execution Model
+
+For a non-dry-run queue, Alpha Loop writes:
+
+```text
+.alpha-loop/sessions/queue-<timestamp>/queue.json
+```
+
+The manifest records queue status, epic order, branch ancestry mode, per-epic session branch/PR URLs, dependency and overlap notes, failures, and the stop reason if the queue halts. `alpha-loop history` lists queue manifests alongside sessions, and `alpha-loop history queue-<timestamp>` prints the manifest details. If a queue stops, inspect that detail view to find the failed epic and the still-pending epics.
+
+Queue execution is fail-stop by default. Alpha Loop stops at the first epic that fails, remains incomplete after eligible children run, hits an epic checklist consistency error, fails verification, or encounters a transient agent/rate-limit stop. Earlier successful epic PRs stay available for review. Pending epics remain `pending` in `queue.json`; rerun them with a new explicit queue once the failure is resolved.
+
+If the process crashes inside a child issue before its branch has a PR, run `alpha-loop resume` to recover stranded `agent/issue-*` branches. Then inspect the queue manifest and continue with the remaining epic IDs.
+
+### Branch Ancestry Modes
+
+Queued epics always create separate session PRs that target the configured base branch. The branch ancestry controls where later session branches start.
+
+| Mode | Command | Branch behavior | When to use |
+|------|---------|-----------------|-------------|
+| `stacked` | `alpha-loop run --epics 205,166,214` | The first session branch starts from the base branch. Each later session branch starts from the previous successful session branch. | Related epics where later work may build on earlier queue changes. This is the default. |
+| `independent` | `alpha-loop run --epics 205,166,214 --queue-branch-mode independent` | Every session branch starts from the base branch. | Unrelated epics that only need queue order for scheduling or review coordination. |
+
+Stacked queue PRs include merge and rebase guidance. Merge the first session PR first. After it lands on the base branch, rebase the next stacked session branch onto the base branch before final review/merge, then repeat for the rest of the queue. Independent queue PRs should still be reviewed in queue order, but they can merge independently once ready because no branch ancestry dependency was created.
+
+Session PR bodies include an `Execution Queue` section with the queue ID, position, parent epic, previous/next epic, branch ancestry mode, dependency PR link, and risk notes. Dependency notes come from queued epic references such as `depends on #205`; overlap notes come from likely shared file paths mentioned in epic context.
+
 ## Sub-Issue Ordering
 
 Sub-issues are processed in the order they appear in the epic's task-list — **not** by issue number. To reorder, edit the epic body and rearrange the `- [ ] #N` lines.

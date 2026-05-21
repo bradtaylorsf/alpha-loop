@@ -395,8 +395,8 @@ describe('runCommand', () => {
     }) as any);
 
     const issues = new Map([
-      [205, { number: 205, title: 'First Epic', body: '- [ ] #305 First child', labels: ['epic'], state: 'OPEN' }],
-      [166, { number: 166, title: 'Second Epic', body: '- [ ] #266 Second child', labels: ['epic'], state: 'OPEN' }],
+      [205, { number: 205, title: 'First Epic', body: 'Touches `src/lib/session.ts`.\n- [ ] #305 First child', labels: ['epic'], state: 'OPEN' }],
+      [166, { number: 166, title: 'Second Epic', body: 'Depends on #205. Also touches `src/lib/session.ts`.\n- [ ] #266 Second child', labels: ['epic'], state: 'OPEN' }],
       [214, { number: 214, title: 'Third Epic', body: '- [ ] #314 Third child', labels: ['epic'], state: 'OPEN' }],
       [305, { number: 305, title: 'First child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
       [266, { number: 266, title: 'Second child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
@@ -443,6 +443,8 @@ describe('runCommand', () => {
         branchAncestryMode: 'stacked',
         branchedFromBranch: 'master',
         dependsOnSessionBranch: null,
+        dependencyWarnings: expect.arrayContaining(['Later queued epic #166 declares a dependency on this epic.']),
+        overlapWarnings: expect.arrayContaining(['Epics #205 and #166 both mention src/lib/session.ts.']),
       }),
       expect.objectContaining({
         queueIndex: 2,
@@ -454,6 +456,8 @@ describe('runCommand', () => {
         branchedFromBranch: 'session/epic-205',
         dependsOnSessionBranch: 'session/epic-205',
         rebaseOntoBranch: 'master',
+        dependencyWarnings: expect.arrayContaining(['Epic #166 declares a dependency on queued epic #205.']),
+        overlapWarnings: expect.arrayContaining(['Epics #205 and #166 both mention src/lib/session.ts.']),
       }),
       expect.objectContaining({
         queueIndex: 3,
@@ -523,6 +527,15 @@ describe('runCommand', () => {
         nextSessionPrUrl: null,
       },
     ]);
+    expect(manifest.epics[0].dependencyWarnings).toEqual(expect.arrayContaining([
+      'Later queued epic #166 declares a dependency on this epic.',
+    ]));
+    expect(manifest.epics[1].dependencyWarnings).toEqual(expect.arrayContaining([
+      'Epic #166 declares a dependency on queued epic #205.',
+    ]));
+    expect(manifest.epics[1].overlapWarnings).toEqual(expect.arrayContaining([
+      'Epics #205 and #166 both mention src/lib/session.ts.',
+    ]));
     expect(mockFinalizeSession.mock.calls.map((call) => (call[0] as any).queue?.queueIndex)).toEqual([1, 2, 3]);
     expect(mockExit).not.toHaveBeenCalled();
   });

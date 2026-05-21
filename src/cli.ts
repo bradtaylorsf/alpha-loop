@@ -51,7 +51,7 @@ program
 
 program
   .command('history [session]')
-  .description('View session history')
+  .description('View session and queue history')
   .option('--qa', 'Show QA checklist for session')
   .option('--clean', 'Remove old session data')
   .option('--telemetry', 'Show per-stage telemetry for a session')
