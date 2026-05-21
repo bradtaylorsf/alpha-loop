@@ -32,6 +32,15 @@ import { buildSessionReviewPrompt, type EpicPromptContext } from '../lib/prompts
 import { writeTraceToSubdir } from '../lib/traces.js';
 import { readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, type ValidationReport } from '../lib/validation.js';
+import {
+  createEpicQueueManifest,
+  createEpicQueueValidationFailureManifest,
+  parseEpicQueue,
+  validateEpicQueue,
+  writeQueueManifest,
+  type EpicQueueManifest,
+  type EpicQueueManifestFailure,
+} from '../lib/epic-queue.js';
 
 export type RunOptions = {
   dryRun?: boolean;
@@ -49,10 +58,14 @@ export type RunOptions = {
   fix?: boolean;
   /** Force a specific epic by number, skip picker. */
   epic?: number;
+  /** Process multiple epics in the provided comma-separated order. */
+  epics?: string;
   /** Skip the epic picker entirely, use flat/milestone flow. */
   skipEpic?: boolean;
   /** Run only the verification pass on an existing epic. */
   verifyOnly?: number;
+  /** Internal queue mode: treat an unfinished epic as a queue-stopping failure. */
+  stopOnPartialEpic?: boolean;
 };
 
 export type EpicExecutionFailureCode =
@@ -64,7 +77,10 @@ export type EpicExecutionFailureCode =
   | 'issue-processing-error'
   | 'batch-processing-error'
   | 'pipeline-failure'
-  | 'epic-verification-failed';
+  | 'transient-stop'
+  | 'epic-verification-failed'
+  | 'epic-incomplete'
+  | 'epic-run-error';
 
 export type EpicExecutionFailure = {
   code: EpicExecutionFailureCode;
@@ -654,8 +670,10 @@ async function runIssueSession(
     process.exit(0);
   };
 
-  process.on('SIGINT', () => { void cleanup(); });
-  process.on('SIGTERM', () => { void cleanup(); });
+  const handleSigint = () => { void cleanup(); };
+  const handleSigterm = () => { void cleanup(); };
+  process.on('SIGINT', handleSigint);
+  process.on('SIGTERM', handleSigterm);
 
   // Sync agent assets to all configured harnesses before starting the loop
   const syncResult = syncAgentAssets(resolveHarnesses(config.harnesses, config.agent));
@@ -992,7 +1010,16 @@ async function runIssueSession(
           });
         }
       } else {
-        log.info(`Epic #${activeEpic}: ${remaining.length} sub-issue(s) still open — verification deferred`);
+        const message = `Epic #${activeEpic}: ${remaining.length} sub-issue(s) still open — verification deferred`;
+        log.info(message);
+        const hasFailedIssueResult = session.results.some((result) => result.status === 'failure');
+        if (options.stopOnPartialEpic && !hasFailedIssueResult) {
+          failures.push({
+            code: 'epic-incomplete',
+            message,
+            issueNum: activeEpic,
+          });
+        }
       }
     } catch (err) {
       const message = `Epic completion check failed: ${err instanceof Error ? err.message : err}`;
@@ -1003,9 +1030,12 @@ async function runIssueSession(
 
   for (const result of session.results) {
     if (result.status === 'failure') {
+      const transient = result.failureReason === 'transient';
       failures.push({
-        code: 'pipeline-failure',
-        message: `Issue #${result.issueNum} failed during processing`,
+        code: transient ? 'transient-stop' : 'pipeline-failure',
+        message: transient
+          ? `Issue #${result.issueNum} stopped due to a transient agent or rate-limit failure`
+          : `Issue #${result.issueNum} failed during processing`,
         issueNum: result.issueNum,
       });
     }
@@ -1189,6 +1219,8 @@ async function runIssueSession(
 
   const successCount = session.results.filter((r) => r.status === 'success').length;
   log.info(`Session complete: ${successCount}/${session.results.length} issues succeeded`);
+  process.off('SIGINT', handleSigint);
+  process.off('SIGTERM', handleSigterm);
 
   return {
     session,
@@ -1287,6 +1319,165 @@ function buildConfigOverrides(options: RunOptions): Partial<Config> {
   return overrides;
 }
 
+function rejectIncompatibleEpicQueueOptions(options: RunOptions): boolean {
+  const incompatible: string[] = [];
+  if (options.epic !== undefined) incompatible.push('--epic');
+  if (options.verifyOnly !== undefined) incompatible.push('--verify-only');
+  if (options.milestone) incompatible.push('--milestone');
+  if (options.skipEpic) incompatible.push('--skip-epic');
+  if (options.mergeTo) incompatible.push('--merge-to');
+
+  if (incompatible.length === 0) return false;
+
+  log.error(`--epics cannot be combined with ${incompatible.join(', ')}`);
+  process.exit(1);
+  return true;
+}
+
+function printDryRunEpicQueue(entries: ReturnType<typeof validateEpicQueue>['entries']): void {
+  log.dry(`Validated epic queue (${entries.length} epic${entries.length === 1 ? '' : 's'}):`);
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    const suffixes = [
+      entry.status === 'already-complete' ? 'already complete; will skip' : '',
+      entry.validationWarning ? `warning: ${entry.validationWarning}` : '',
+    ].filter(Boolean);
+    const suffix = suffixes.length > 0 ? ` (${suffixes.join('; ')})` : '';
+    log.dry(`  ${index + 1}. #${entry.epicNumber} ${entry.title}${suffix}`);
+  }
+}
+
+function toManifestFailures(failures: EpicExecutionFailure[]): EpicQueueManifestFailure[] {
+  return failures.map((failure) => ({
+    code: failure.code,
+    message: failure.message,
+    ...(failure.issueNum !== undefined ? { issueNum: failure.issueNum } : {}),
+    ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
+  }));
+}
+
+function stopReasonForEpicResult(result: EpicExecutionResult): string {
+  const firstFailure = result.failures[0];
+  if (!firstFailure) return `Epic #${result.epicNumber} stopped without a reported failure`;
+
+  const reasonByCode: Partial<Record<EpicExecutionFailureCode, string>> = {
+    'checklist-update-failed': 'checklist-consistency-error',
+    'epic-verification-failed': 'epic-verification-failed',
+    'epic-incomplete': 'epic-incomplete',
+    'transient-stop': 'transient-agent-stop',
+  };
+  const reason = reasonByCode[firstFailure.code] ?? firstFailure.code;
+  return `Epic #${result.epicNumber} stopped: ${reason}`;
+}
+
+function writeQueueManifestUpdate(manifest: EpicQueueManifest): void {
+  const manifestPath = writeQueueManifest(process.cwd(), manifest);
+  log.info(`Queue manifest saved: ${manifestPath}`);
+}
+
+async function runEpicQueue(config: Config, options: RunOptions): Promise<void> {
+  if (rejectIncompatibleEpicQueueOptions(options)) return;
+
+  let epicNumbers: number[];
+  try {
+    epicNumbers = parseEpicQueue(options.epics ?? '');
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+    return;
+  }
+
+  const validation = validateEpicQueue(config.repo, epicNumbers, undefined, {
+    allowMissingEpicLabel: config.dryRun,
+  });
+  if (validation.errors.length > 0) {
+    for (const error of validation.errors) {
+      log.error(error.message);
+    }
+    if (!config.dryRun) {
+      writeQueueManifestUpdate(createEpicQueueValidationFailureManifest(epicNumbers, validation.errors));
+    }
+    process.exit(1);
+    return;
+  }
+
+  if (config.dryRun) {
+    printDryRunEpicQueue(validation.entries);
+    return;
+  }
+
+  const manifest = createEpicQueueManifest(validation.entries);
+  writeQueueManifestUpdate(manifest);
+
+  const queueConfig: Config = {
+    ...config,
+    autoMerge: true,
+    mergeTo: '',
+  };
+  const queueOptions: RunOptions = {
+    ...options,
+    autoMerge: true,
+    mergeTo: undefined,
+    epics: undefined,
+    stopOnPartialEpic: true,
+  };
+
+  for (const validatedEntry of validation.entries) {
+    const manifestEntry = manifest.epics.find((entry) => entry.epicNumber === validatedEntry.epicNumber);
+    if (!manifestEntry) continue;
+
+    if (manifestEntry.status === 'skipped') {
+      log.info(`Skipping epic #${validatedEntry.epicNumber}: ${manifestEntry.skipReason}`);
+      continue;
+    }
+
+    manifestEntry.status = 'running';
+    manifestEntry.startedAt = new Date().toISOString();
+    writeQueueManifestUpdate(manifest);
+
+    const result = await (async (): Promise<EpicExecutionResult> => {
+      try {
+        return await runSingleEpicExecution({
+          config: queueConfig,
+          epicNumber: validatedEntry.epicNumber,
+          epicIssue: validatedEntry.issue,
+          options: queueOptions,
+        });
+      } catch (err) {
+        return buildEpicFailureResult(validatedEntry.epicNumber, {
+          code: 'epic-run-error',
+          message: `Epic #${validatedEntry.epicNumber} failed with an unhandled error: ${err instanceof Error ? err.message : err}`,
+          issueNum: validatedEntry.epicNumber,
+        });
+      }
+    })();
+
+    manifestEntry.sessionName = result.sessionName;
+    manifestEntry.sessionBranch = result.sessionBranch;
+    manifestEntry.sessionPrUrl = result.sessionPrUrl;
+    manifestEntry.failures = toManifestFailures(result.failures);
+    manifestEntry.endedAt = new Date().toISOString();
+    manifestEntry.status = result.status === 'success' ? 'success' : 'failure';
+
+    if (result.status === 'failure') {
+      manifest.status = 'stopped';
+      manifest.stopReason = stopReasonForEpicResult(result);
+      manifest.endedAt = manifestEntry.endedAt;
+      writeQueueManifestUpdate(manifest);
+      log.error(manifest.stopReason);
+      process.exit(1);
+      return;
+    }
+
+    writeQueueManifestUpdate(manifest);
+  }
+
+  manifest.status = 'success';
+  manifest.endedAt = new Date().toISOString();
+  writeQueueManifestUpdate(manifest);
+  log.success(`Epic queue complete: ${manifest.epics.length} epic${manifest.epics.length === 1 ? '' : 's'}`);
+}
+
 /**
  * Run the main loop: poll issues, process them, finalize session.
  */
@@ -1296,6 +1487,11 @@ export async function runCommand(options: RunOptions): Promise<void> {
   if (!config.repo) {
     log.error('No repository configured. Run "alpha-loop init" or set repo in .alpha-loop.yaml');
     process.exit(1);
+    return;
+  }
+
+  if (options.epics !== undefined) {
+    await runEpicQueue(config, options);
     return;
   }
 

@@ -23,6 +23,7 @@ alpha-loop run           # Run the loop continuously
 alpha-loop run --once    # Process one issue and exit
 alpha-loop run --dry-run # Dry run (preview, no changes)
 alpha-loop run --epic <N>        # Process an epic (sub-issues in checklist order, auto-verify on completion)
+alpha-loop run --epics <ids>     # Process multiple epics in order, one session PR per epic
 alpha-loop run --verify-only <N> # Run just the epic verification pass
 alpha-loop scan          # Generate/refresh project context
 alpha-loop plan          # Generate project scope (milestones + issues) from seed inputs
