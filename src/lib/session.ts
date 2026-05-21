@@ -20,6 +20,7 @@ export type SessionContext = {
   logsDir: string;
   results: PipelineResult[];
   sessionReviewFindings?: GateResult;
+  sessionPrUrl?: string;
   /** When set, this session processes sub-issues of the given epic. */
   epic?: number;
 };
@@ -62,6 +63,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
   const projectDir = process.cwd();
   const resultsDir = join(projectDir, '.alpha-loop', 'sessions', name);
   const logsDir = join(resultsDir, 'logs');
+  let sessionPrUrl: string | undefined;
 
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(logsDir, { recursive: true });
@@ -105,6 +107,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
           }**Branch:** ${branch}\n**Started:** ${new Date().toISOString()}\n\nThis PR will be updated as issues are processed.\n\n---\n*Automated by alpha-loop*`,
           cwd: projectDir,
         });
+        sessionPrUrl = draftPR;
         log.success(`Session PR (draft): ${draftPR}`);
       } catch {
         // Non-fatal — PR can be created later during finalization
@@ -144,6 +147,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
             body: `## Session In Progress\n\n${milestone ? `**Milestone:** ${milestone}\n` : ''}**Branch:** ${branch}\n**Started:** ${new Date().toISOString()}\n\nThis PR will be updated as issues are processed.\n\n---\n*Automated by alpha-loop*`,
             cwd: projectDir,
           });
+          sessionPrUrl = draftPR;
           log.success(`Session PR (draft): ${draftPR}`);
         } catch {
           log.warn('Could not create draft session PR — will create during finalization');
@@ -154,7 +158,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
     }
   }
 
-  return { name, branch, resultsDir, logsDir, results: [], epic: epicNum };
+  return { name, branch, resultsDir, logsDir, results: [], sessionPrUrl, epic: epicNum };
 }
 
 /**
@@ -366,6 +370,7 @@ export async function finalizeSession(
       body: prBody,
       cwd: projectDir,
     });
+    session.sessionPrUrl = prUrl;
     log.success(`Session PR: ${prUrl}`);
 
     // Mark successful issues on the project board
@@ -388,8 +393,10 @@ export async function finalizeSession(
         { cwd: projectDir }, true,
       );
       if (fallback.exitCode === 0 && fallback.stdout.trim()) {
-        log.success(`Session PR (fallback): ${fallback.stdout.trim()}`);
-        return fallback.stdout.trim();
+        const fallbackPrUrl = fallback.stdout.trim();
+        session.sessionPrUrl = fallbackPrUrl;
+        log.success(`Session PR (fallback): ${fallbackPrUrl}`);
+        return fallbackPrUrl;
       }
     } catch {
       // Fall through
