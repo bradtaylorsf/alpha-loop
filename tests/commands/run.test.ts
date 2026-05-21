@@ -1,4 +1,4 @@
-import { formatEpicPickerMeta, formatMilestonePickerMeta, runCommand } from '../../src/commands/run';
+import { formatEpicPickerMeta, formatMilestonePickerMeta, runCommand, runSingleEpicExecution } from '../../src/commands/run';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
@@ -37,11 +37,21 @@ jest.mock('../../src/lib/github', () => ({
 jest.mock('../../src/lib/pipeline', () => ({
   processIssue: jest.fn(),
   processBatch: jest.fn(),
+  readGateResult: jest.fn(() => ({ passed: true, summary: '', findings: [] })),
+  formatGateFindings: jest.fn(() => ''),
 }));
 
 jest.mock('../../src/lib/session', () => ({
   createSession: jest.fn(),
   finalizeSession: jest.fn(),
+}));
+
+jest.mock('../../src/lib/verify-epic', () => ({
+  verifyEpic: jest.fn().mockResolvedValue({
+    verdict: 'pass',
+    comment: 'Epic verified',
+    parsed: { verdict: 'pass', summary: 'Epic verified', findings: [] },
+  }),
 }));
 
 jest.mock('../../src/lib/worktree', () => ({
@@ -75,11 +85,14 @@ jest.mock('../../src/commands/sync', () => ({
 jest.mock('node:fs', () => ({
   existsSync: jest.fn().mockReturnValue(false),
   readFileSync: jest.fn(),
+  mkdirSync: jest.fn(),
+  renameSync: jest.fn(),
+  unlinkSync: jest.fn(),
 }));
 
 import { exec } from '../../src/lib/shell';
 import { loadConfig } from '../../src/lib/config';
-import { pollIssues, listEpics, getIssueWithComments, updateEpicChecklist } from '../../src/lib/github';
+import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist } from '../../src/lib/github';
 import { processIssue, processBatch } from '../../src/lib/pipeline';
 import { createSession, finalizeSession } from '../../src/lib/session';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
@@ -88,6 +101,7 @@ const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>;
 const mockPollIssues = pollIssues as jest.MockedFunction<typeof pollIssues>;
 const mockListEpics = listEpics as jest.MockedFunction<typeof listEpics>;
+const mockGetEpicSubIssues = getEpicSubIssues as jest.MockedFunction<typeof getEpicSubIssues>;
 const mockGetIssueWithComments = getIssueWithComments as jest.MockedFunction<typeof getIssueWithComments>;
 const mockUpdateEpicChecklist = updateEpicChecklist as jest.MockedFunction<typeof updateEpicChecklist>;
 const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue>;
@@ -166,6 +180,7 @@ beforeEach(() => {
   mockFinalizeSession.mockResolvedValue(null);
   mockPollIssues.mockReturnValue([]);
   mockListEpics.mockReturnValue([]);
+  mockGetEpicSubIssues.mockReturnValue([]);
   mockGetIssueWithComments.mockReturnValue(null);
   mockProcessBatch.mockResolvedValue([]);
 });
@@ -197,6 +212,122 @@ describe('runCommand', () => {
 
     expect(formatEpicPickerMeta(epic)).toBe('1/2 done · milestone Sprint 1');
     expect(formatMilestonePickerMeta(milestone, [epic])).toBe('3 open, 2/5 done · due 2026-06-01 · 1 scheduled epic');
+  });
+
+  test('runSingleEpicExecution returns structured success with session branch and PR URL', async () => {
+    const config = makeConfig({
+      autoMerge: true,
+      skipPostSessionReview: true,
+    }) as any;
+
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) {
+        return { number: 195, title: 'Parent Epic', body: '- [ ] #201 Build child', labels: ['epic'] };
+      }
+      if (issueNum === 201) {
+        return { number: 201, title: 'Build child', body: 'Child body', labels: ['ready'] };
+      }
+      return null;
+    });
+    mockGetEpicSubIssues.mockReturnValue([{ number: 201, checked: true, lineIndex: 0 }]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 201,
+      title: 'Build child',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+    mockFinalizeSession.mockResolvedValue('https://github.com/owner/repo/pull/500');
+
+    const result = await runSingleEpicExecution({ config, epicNumber: 195 });
+
+    expect(result).toEqual(expect.objectContaining({
+      epicNumber: 195,
+      sessionName: 'session/20260330-143000',
+      sessionBranch: 'session/20260330-143000',
+      sessionPrUrl: 'https://github.com/owner/repo/pull/500',
+      status: 'success',
+      failures: [],
+      verificationClosedEpic: true,
+    }));
+    expect(mockUpdateEpicChecklist).toHaveBeenCalledWith('owner/repo', 195, 201, true);
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('runSingleEpicExecution returns invalid epic number failure without exiting', async () => {
+    const result = await runSingleEpicExecution({
+      config: makeConfig() as any,
+      epicNumber: 0,
+    });
+
+    expect(result.status).toBe('failure');
+    expect(result.failures).toEqual([
+      expect.objectContaining({ code: 'invalid-epic-number', exitCode: 1 }),
+    ]);
+    expect(mockGetIssueWithComments).not.toHaveBeenCalled();
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('runSingleEpicExecution returns missing epic label failure without exiting', async () => {
+    const result = await runSingleEpicExecution({
+      config: makeConfig() as any,
+      epicNumber: 195,
+      epicIssue: { number: 195, title: 'Tracker', body: '- [ ] #201', labels: ['ready'] },
+    });
+
+    expect(result.status).toBe('failure');
+    expect(result.failures).toEqual([
+      expect.objectContaining({ code: 'missing-epic-label', issueNum: 195, exitCode: 1 }),
+    ]);
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('runSingleEpicExecution reports no eligible child issues without exiting', async () => {
+    const config = makeConfig({ skipPostSessionReview: true }) as any;
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) {
+        return { number: 195, title: 'Parent Epic', body: '- [ ] #201 Blocked child', labels: ['epic'] };
+      }
+      if (issueNum === 201) {
+        return { number: 201, title: 'Blocked child', body: 'Child body', labels: ['blocked'] };
+      }
+      return null;
+    });
+
+    const result = await runSingleEpicExecution({ config, epicNumber: 195 });
+
+    expect(result.status).toBe('failure');
+    expect(result.sessionBranch).toBe('session/20260330-143000');
+    expect(result.failures).toEqual([
+      expect.objectContaining({ code: 'no-eligible-child-issues', issueNum: 195 }),
+    ]);
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('--verify-only bypasses normal session creation and issue processing', async () => {
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) {
+        return { number: 195, title: 'Parent Epic', body: '- [x] #201 Build child', labels: ['epic'] };
+      }
+      if (issueNum === 201) {
+        return { number: 201, title: 'Build child', body: 'Child body', labels: ['ready'] };
+      }
+      return null;
+    });
+    mockGetEpicSubIssues.mockReturnValue([{ number: 201, checked: true, lineIndex: 0 }]);
+
+    await runCommand({ verifyOnly: 195 });
+
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+    expect(mockGetEpicSubIssues).toHaveBeenCalledWith('owner/repo', 195);
   });
 
   test('processes all matching issues and exits', async () => {
