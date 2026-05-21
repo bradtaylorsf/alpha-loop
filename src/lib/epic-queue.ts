@@ -22,11 +22,16 @@ export type ValidatedEpicQueueEntry = {
   issue: Issue;
   status: EpicQueueEntryStatus;
   skipReason?: string;
+  validationWarning?: string;
 };
 
 export type EpicQueueValidationResult = {
   entries: ValidatedEpicQueueEntry[];
   errors: EpicQueueValidationError[];
+};
+
+export type EpicQueueValidationOptions = {
+  allowMissingEpicLabel?: boolean;
 };
 
 export type EpicQueueManifestStatus = 'running' | 'success' | 'stopped';
@@ -126,6 +131,7 @@ export function validateEpicQueue(
   repo: string,
   epicNumbers: number[],
   fetchIssue: FetchIssue = getIssueWithComments,
+  options: EpicQueueValidationOptions = {},
 ): EpicQueueValidationResult {
   const entries: ValidatedEpicQueueEntry[] = [];
   const errors: EpicQueueValidationError[] = [];
@@ -153,7 +159,8 @@ export function validateEpicQueue(
       continue;
     }
 
-    if (!hasEpicLabel(issue)) {
+    const missingEpicLabel = !hasEpicLabel(issue);
+    if (missingEpicLabel && !options.allowMissingEpicLabel) {
       errors.push({
         code: 'missing-epic-label',
         epicNumber,
@@ -161,6 +168,10 @@ export function validateEpicQueue(
       });
       continue;
     }
+
+    const validationWarning = missingEpicLabel
+      ? `Issue #${epicNumber} is not labeled 'epic'; non-dry-run queue execution will reject it`
+      : undefined;
 
     if (isClosed(issue) && !isCompleted(issue)) {
       errors.push({
@@ -178,6 +189,7 @@ export function validateEpicQueue(
         issue,
         status: 'already-complete',
         skipReason: 'Epic is already closed as completed',
+        validationWarning,
       });
       continue;
     }
@@ -187,6 +199,7 @@ export function validateEpicQueue(
       title: issue.title,
       issue,
       status: 'pending',
+      validationWarning,
     });
   }
 

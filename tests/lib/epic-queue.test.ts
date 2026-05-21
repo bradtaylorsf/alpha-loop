@@ -73,6 +73,28 @@ describe('epic queue helpers', () => {
     ]);
   });
 
+  test('validateEpicQueue can keep non-epic issues for dry-run preview warnings', () => {
+    const issues = new Map<number, Issue>([
+      [214, issue({ number: 214, title: 'Missing label', labels: ['ready'] })],
+    ]);
+
+    const result = validateEpicQueue(
+      'owner/repo',
+      [214],
+      (_repo, issueNum) => issues.get(issueNum) ?? null,
+      { allowMissingEpicLabel: true },
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.entries).toEqual([
+      expect.objectContaining({
+        epicNumber: 214,
+        status: 'pending',
+        validationWarning: expect.stringContaining('not labeled'),
+      }),
+    ]);
+  });
+
   test('writeQueueManifest writes queue.json under the queue session directory', () => {
     const projectDir = mkdtempSync(join(tmpdir(), 'alpha-loop-queue-'));
     try {

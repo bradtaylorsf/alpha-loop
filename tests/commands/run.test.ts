@@ -344,6 +344,25 @@ describe('runCommand', () => {
     expect(mockExit).not.toHaveBeenCalled();
   });
 
+  test('--epics dry-run previews non-epic labels as warnings without mutating', async () => {
+    const issues = new Map([
+      [205, { number: 205, title: 'First Epic', body: '- [ ] #305', labels: ['epic'], state: 'OPEN' }],
+      [214, { number: 214, title: 'Not Yet Labeled', body: '- [ ] #314', labels: ['ready'], state: 'OPEN' }],
+    ]);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (issues.get(issueNum) as any) ?? null);
+
+    await runCommand({ epics: '205,214', dryRun: true });
+
+    expect(mockLog.dry).toHaveBeenCalledWith('  1. #205 First Epic');
+    expect(mockLog.dry).toHaveBeenCalledWith(expect.stringContaining('  2. #214 Not Yet Labeled (warning: Issue #214 is not labeled'));
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockUpdateEpicChecklist).not.toHaveBeenCalled();
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
   test('--epics rejects incompatible targeting flags before processing', async () => {
     await runCommand({ epics: '205,166', epic: 205, dryRun: true });
 
@@ -494,6 +513,58 @@ describe('runCommand', () => {
     ]);
     expect(manifest.epics[1].failures).toEqual([
       expect.objectContaining({ code: 'transient-stop', issueNum: 266 }),
+    ]);
+  });
+
+  test('--epics stops when an epic remains incomplete after processing eligible children', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      skipPostSessionReview: true,
+      ...overrides,
+    }) as any);
+
+    const issues = new Map([
+      [205, { number: 205, title: 'First Epic', body: '- [ ] #305 Ready child\n- [ ] #306 Blocked child', labels: ['epic'], state: 'OPEN' }],
+      [166, { number: 166, title: 'Second Epic', body: '- [ ] #266 Second child', labels: ['epic'], state: 'OPEN' }],
+      [305, { number: 305, title: 'Ready child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
+      [306, { number: 306, title: 'Blocked child', body: 'Body', labels: ['blocked'], state: 'OPEN' }],
+      [266, { number: 266, title: 'Second child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
+    ]);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (issues.get(issueNum) as any) ?? null);
+    mockCreateSession.mockImplementation((_config: any, options: any = {}) => ({
+      name: `session/epic-${options.epicNum}`,
+      branch: `session/epic-${options.epicNum}`,
+      resultsDir: `/tmp/sessions/epic-${options.epicNum}`,
+      logsDir: `/tmp/sessions/epic-${options.epicNum}/logs`,
+      results: [],
+      epic: options.epicNum,
+    }));
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 305,
+      title: 'Ready child',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+    mockFinalizeSession.mockImplementation(async (session: any) => `https://github.com/owner/repo/pull/${session.epic}`);
+
+    await runCommand({ epics: '205,166' });
+
+    expect(mockProcessIssue.mock.calls.map((call) => call[0])).toEqual([305]);
+    expect(mockCreateSession.mock.calls.map((call) => call[1]?.epicNum)).toEqual([205]);
+    expect(mockExit).toHaveBeenCalledWith(1);
+
+    const manifest = JSON.parse(String(mockWriteFileSync.mock.calls.at(-1)?.[1]));
+    expect(manifest.status).toBe('stopped');
+    expect(manifest.stopReason).toBe('Epic #205 stopped: epic-incomplete');
+    expect(manifest.epics.map((entry: any) => [entry.epicNumber, entry.status])).toEqual([
+      [205, 'failure'],
+      [166, 'pending'],
+    ]);
+    expect(manifest.epics[0].failures).toEqual([
+      expect.objectContaining({ code: 'epic-incomplete', issueNum: 205 }),
     ]);
   });
 
