@@ -48,7 +48,8 @@ For planned feature work, use epics as the unit you schedule and ship:
 1. `alpha-loop triage` reviews open issues, proposes cleanup, and groups related ready issues into parent epics with ordered child checklists.
 2. `alpha-loop roadmap` schedules parent epic issues into milestones, while still scheduling standalone issues that are not part of an epic.
 3. `alpha-loop run --epic <N>` ships the epic's child issues in checklist order. Agents working on each child issue receive the parent epic goal, acceptance criteria, and sibling checklist as context.
-4. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
+4. `alpha-loop run --epics <A,B,C>` runs several parent epics back-to-back in that exact order, with a separate session branch and PR for each epic.
+5. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
 
 Milestones answer "when should this epic ship?" The epic checklist answers "what child issues ship, and in what order?"
 
@@ -269,6 +270,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run` | Fetch matching issues, process them all, then exit |
 | `alpha-loop run --dry-run` | Preview without making changes |
 | `alpha-loop run --epic <N>` | Process an epic — its sub-issues in checklist order, auto-verify on completion (see [docs/epics.md](docs/epics.md)) |
+| `alpha-loop run --epics <ids>` | Process an ordered comma-separated queue of epics, one session branch and PR per epic |
 | `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
 | `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
@@ -329,6 +331,7 @@ Options:
   --batch             Batch mode: process multiple issues per agent call (faster, fewer tokens)
   --batch-size <n>    Issues per batch (default: 5)
   --epic <n>          Process a specific epic by issue number (skips the picker)
+  --epics <ids>       Process multiple epics in order (comma-separated)
   --skip-epic         Skip epic discovery, use flat/milestone flow
   --verify-only <n>   Run only the verification pass on an existing epic
 ```
@@ -594,6 +597,14 @@ alpha-loop run --epic 165
 ```
 
 `alpha-loop run --milestone "v1.0"` checks for open epics assigned to that milestone before fetching flat issues. One scheduled epic is processed automatically, multiple scheduled epics require `--epic <N>`, and no scheduled epics falls back to ready non-epic issues in that milestone. `--epic` always wins over `--milestone`; `--skip-epic` disables epic discovery and preserves the flat milestone flow.
+
+To run several epics unattended while keeping review scope separate, pass an explicit queue:
+
+```bash
+alpha-loop run --epics 205,166,214
+```
+
+The queue is validated before any work starts. Each listed issue must exist, be labeled `epic`, not be duplicated, and be open unless it is already closed as completed. Alpha Loop processes the epics in the given order, creates/finalizes one session branch and PR per epic, and stops on the first epic failure, verification gap, checklist consistency error, or transient agent/rate-limit stop. Non-dry-run queue attempts write `.alpha-loop/sessions/queue-<timestamp>/queue.json`; `--dry-run` prints the validated queue without mutating GitHub or git state.
 
 Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
 

@@ -511,7 +511,7 @@ describe('epic issue helpers', () => {
       checked: false,
     });
     expect(mockExec).toHaveBeenCalledWith(
-      'gh issue view 7 --repo "owner/repo" --json number,title,body,labels,comments',
+      'gh issue view 7 --repo "owner/repo" --json number,title,body,labels,comments,state,stateReason',
     );
   });
 
@@ -567,7 +567,7 @@ describe('epic issue helpers', () => {
 
     expect(body).toBe('## Ordered Work\n\n- [ ] #1');
     expect(mockExec).toHaveBeenCalledWith(
-      'gh issue view 99 --repo "owner/repo" --json number,title,body,labels,comments',
+      'gh issue view 99 --repo "owner/repo" --json number,title,body,labels,comments,state,stateReason',
     );
   });
 

@@ -19,6 +19,7 @@ jest.mock('../../src/lib/logger', () => ({
 jest.mock('../../src/lib/config', () => ({
   loadConfig: jest.fn(),
   assertSafeShellArg: jest.fn((value: string) => value),
+  resolveStepConfig: jest.fn((config: any) => ({ agent: config.agent, model: config.model })),
 }));
 
 jest.mock('../../src/lib/github', () => ({
@@ -77,6 +78,11 @@ jest.mock('../../src/lib/preflight', () => ({
   runPortCheck: jest.fn().mockReturnValue([]),
 }));
 
+jest.mock('../../src/lib/eval', () => ({
+  saveCapturedCase: jest.fn(),
+  detectFailureStep: jest.fn(() => 'implement'),
+}));
+
 jest.mock('../../src/commands/sync', () => ({
   syncAgentAssets: jest.fn().mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] }),
   resolveHarnesses: jest.fn((harnesses: string[], _agent: string) => harnesses),
@@ -85,19 +91,23 @@ jest.mock('../../src/commands/sync', () => ({
 jest.mock('node:fs', () => ({
   existsSync: jest.fn().mockReturnValue(false),
   readFileSync: jest.fn(),
+  writeFileSync: jest.fn(),
   mkdirSync: jest.fn(),
   renameSync: jest.fn(),
   unlinkSync: jest.fn(),
 }));
 
 import { exec } from '../../src/lib/shell';
+import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist } from '../../src/lib/github';
 import { processIssue, processBatch } from '../../src/lib/pipeline';
 import { createSession, finalizeSession } from '../../src/lib/session';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
+import { writeFileSync } from 'node:fs';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
+const mockLog = log as jest.Mocked<typeof log>;
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>;
 const mockPollIssues = pollIssues as jest.MockedFunction<typeof pollIssues>;
 const mockListEpics = listEpics as jest.MockedFunction<typeof listEpics>;
@@ -110,6 +120,7 @@ const mockCreateSession = createSession as jest.MockedFunction<typeof createSess
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
+const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -308,6 +319,182 @@ describe('runCommand', () => {
     ]);
     expect(mockProcessIssue).not.toHaveBeenCalled();
     expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('--epics dry-run validates the full queue in order without creating sessions or manifests', async () => {
+    const issues = new Map([
+      [205, { number: 205, title: 'First Epic', body: '- [ ] #305', labels: ['epic'], state: 'OPEN' }],
+      [166, { number: 166, title: 'Second Epic', body: '- [ ] #266', labels: ['epic'], state: 'OPEN' }],
+      [214, { number: 214, title: 'Third Epic', body: '- [ ] #314', labels: ['epic'], state: 'OPEN' }],
+    ]);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (issues.get(issueNum) as any) ?? null);
+
+    await runCommand({ epics: '205,166,214', dryRun: true });
+
+    expect(mockGetIssueWithComments.mock.calls.map((call) => call[1])).toEqual([205, 166, 214]);
+    expect(mockLog.dry).toHaveBeenCalledWith('Validated epic queue (3 epics):');
+    expect(mockLog.dry).toHaveBeenCalledWith('  1. #205 First Epic');
+    expect(mockLog.dry).toHaveBeenCalledWith('  2. #166 Second Epic');
+    expect(mockLog.dry).toHaveBeenCalledWith('  3. #214 Third Epic');
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockUpdateEpicChecklist).not.toHaveBeenCalled();
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('--epics rejects incompatible targeting flags before processing', async () => {
+    await runCommand({ epics: '205,166', epic: 205, dryRun: true });
+
+    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(mockGetIssueWithComments).not.toHaveBeenCalled();
+    expect(mockCreateSession).not.toHaveBeenCalled();
+  });
+
+  test('--epics rejects invalid queued issues before processing the first epic', async () => {
+    mockGetIssueWithComments.mockReturnValue({
+      number: 205,
+      title: 'Not an epic',
+      body: '- [ ] #305',
+      labels: ['ready'],
+      state: 'OPEN',
+    });
+
+    await runCommand({ epics: '205' });
+
+    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+  });
+
+  test('--epics processes each epic sequentially and writes a successful queue manifest', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      skipPostSessionReview: true,
+      autoMerge: false,
+      ...overrides,
+    }) as any);
+
+    const issues = new Map([
+      [205, { number: 205, title: 'First Epic', body: '- [ ] #305 First child', labels: ['epic'], state: 'OPEN' }],
+      [166, { number: 166, title: 'Second Epic', body: '- [ ] #266 Second child', labels: ['epic'], state: 'OPEN' }],
+      [214, { number: 214, title: 'Third Epic', body: '- [ ] #314 Third child', labels: ['epic'], state: 'OPEN' }],
+      [305, { number: 305, title: 'First child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
+      [266, { number: 266, title: 'Second child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
+      [314, { number: 314, title: 'Third child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
+    ]);
+    const childByEpic = new Map([[205, 305], [166, 266], [214, 314]]);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (issues.get(issueNum) as any) ?? null);
+    mockGetEpicSubIssues.mockImplementation((_repo: string, epicNum: number) => [{
+      number: childByEpic.get(epicNum) ?? 0,
+      checked: true,
+      lineIndex: 0,
+    }]);
+    mockCreateSession.mockImplementation((_config: any, options: any = {}) => ({
+      name: `session/epic-${options.epicNum}`,
+      branch: `session/epic-${options.epicNum}`,
+      resultsDir: `/tmp/sessions/epic-${options.epicNum}`,
+      logsDir: `/tmp/sessions/epic-${options.epicNum}/logs`,
+      results: [],
+      epic: options.epicNum,
+    }));
+    mockProcessIssue.mockImplementation(async (issueNum: number, title: string) => ({
+      issueNum,
+      title,
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    }));
+    mockFinalizeSession.mockImplementation(async (session: any) => `https://github.com/owner/repo/pull/${session.epic}`);
+
+    await runCommand({ epics: '205,166,214' });
+
+    expect(mockCreateSession.mock.calls.map((call) => call[1]?.epicNum)).toEqual([205, 166, 214]);
+    expect(mockCreateSession.mock.calls.map((call) => call[0])).toEqual([
+      expect.objectContaining({ autoMerge: true, mergeTo: '' }),
+      expect.objectContaining({ autoMerge: true, mergeTo: '' }),
+      expect.objectContaining({ autoMerge: true, mergeTo: '' }),
+    ]);
+    expect(mockProcessIssue.mock.calls.map((call) => call[0])).toEqual([305, 266, 314]);
+    expect(mockFinalizeSession).toHaveBeenCalledTimes(3);
+
+    const manifest = JSON.parse(String(mockWriteFileSync.mock.calls.at(-1)?.[1]));
+    expect(manifest).toEqual(expect.objectContaining({
+      epicIds: [205, 166, 214],
+      status: 'success',
+      stopReason: null,
+    }));
+    expect(manifest.epics.map((entry: any) => ({
+      epicNumber: entry.epicNumber,
+      status: entry.status,
+      sessionBranch: entry.sessionBranch,
+      sessionPrUrl: entry.sessionPrUrl,
+    }))).toEqual([
+      { epicNumber: 205, status: 'success', sessionBranch: 'session/epic-205', sessionPrUrl: 'https://github.com/owner/repo/pull/205' },
+      { epicNumber: 166, status: 'success', sessionBranch: 'session/epic-166', sessionPrUrl: 'https://github.com/owner/repo/pull/166' },
+      { epicNumber: 214, status: 'success', sessionBranch: 'session/epic-214', sessionPrUrl: 'https://github.com/owner/repo/pull/214' },
+    ]);
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('--epics stops on the first failed epic and records the stop reason in the manifest', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      skipPostSessionReview: true,
+      autoCapture: false,
+      ...overrides,
+    }) as any);
+
+    const issues = new Map([
+      [205, { number: 205, title: 'First Epic', body: '- [ ] #305 First child', labels: ['epic'], state: 'OPEN' }],
+      [166, { number: 166, title: 'Second Epic', body: '- [ ] #266 Second child', labels: ['epic'], state: 'OPEN' }],
+      [214, { number: 214, title: 'Third Epic', body: '- [ ] #314 Third child', labels: ['epic'], state: 'OPEN' }],
+      [305, { number: 305, title: 'First child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
+      [266, { number: 266, title: 'Second child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
+      [314, { number: 314, title: 'Third child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
+    ]);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (issues.get(issueNum) as any) ?? null);
+    mockGetEpicSubIssues.mockReturnValue([{ number: 305, checked: true, lineIndex: 0 }]);
+    mockCreateSession.mockImplementation((_config: any, options: any = {}) => ({
+      name: `session/epic-${options.epicNum}`,
+      branch: `session/epic-${options.epicNum}`,
+      resultsDir: `/tmp/sessions/epic-${options.epicNum}`,
+      logsDir: `/tmp/sessions/epic-${options.epicNum}/logs`,
+      results: [],
+      epic: options.epicNum,
+    }));
+    mockProcessIssue.mockImplementation(async (issueNum: number, title: string) => ({
+      issueNum,
+      title,
+      status: issueNum === 266 ? 'failure' : 'success',
+      testsPassing: issueNum !== 266,
+      verifyPassing: issueNum !== 266,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+      ...(issueNum === 266 ? { failureReason: 'transient' as const } : {}),
+    }));
+    mockFinalizeSession.mockImplementation(async (session: any) => `https://github.com/owner/repo/pull/${session.epic}`);
+
+    await runCommand({ epics: '205,166,214' });
+
+    expect(mockProcessIssue.mock.calls.map((call) => call[0])).toEqual([305, 266]);
+    expect(mockCreateSession.mock.calls.map((call) => call[1]?.epicNum)).toEqual([205, 166]);
+    expect(mockExit).toHaveBeenCalledWith(1);
+
+    const manifest = JSON.parse(String(mockWriteFileSync.mock.calls.at(-1)?.[1]));
+    expect(manifest.status).toBe('stopped');
+    expect(manifest.stopReason).toBe('Epic #166 stopped: transient-agent-stop');
+    expect(manifest.epics.map((entry: any) => [entry.epicNumber, entry.status])).toEqual([
+      [205, 'success'],
+      [166, 'failure'],
+      [214, 'pending'],
+    ]);
+    expect(manifest.epics[1].failures).toEqual([
+      expect.objectContaining({ code: 'transient-stop', issueNum: 266 }),
+    ]);
   });
 
   test('--verify-only bypasses normal session creation and issue processing', async () => {
