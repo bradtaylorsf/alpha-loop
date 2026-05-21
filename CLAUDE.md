@@ -37,7 +37,8 @@ alpha-loop resume        # Resume stranded work from crashed sessions
 alpha-loop resume --issue 34     # Resume a specific issue
 alpha-loop review        # Analyze learnings, propose agent/skill improvements
 alpha-loop review --apply        # Apply improvements and create draft PR
-alpha-loop history       # View session history
+alpha-loop history       # View session and queue history
+alpha-loop history queue-<timestamp> # Inspect a multi-epic queue manifest
 alpha-loop history <name> --qa    # Show QA checklist for session
 alpha-loop history --clean        # Remove old session data
 pnpm test               # Run all tests

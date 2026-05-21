@@ -226,6 +226,7 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
     if (entries.length > 0) console.log('');
     console.log('Queues:');
     console.log('');
+
     for (const queue of queues) {
       const manifest = queue.manifest;
       const epicCount = manifest.epics.length;
@@ -236,6 +237,7 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
       const date = startedAt.length >= 10 ? startedAt.slice(0, 10) : queue.timestamp;
       const epicWord = epicCount === 1 ? 'epic' : 'epics';
       const status = `${manifest.status}${manifest.stopReason ? `: ${manifest.stopReason}` : ''}`;
+
       console.log(
         `  ${queue.name.padEnd(30)} ${date}  ${String(epicCount).padStart(2)} ${epicWord.padEnd(6)} ${successCount} ok, ${failedCount} failed, ${pendingCount} pending  ${status}`,
       );
@@ -267,7 +269,7 @@ function printQueueManifestDetail(queue: QueueManifestRef, projectDir?: string):
 
   console.log('Epics:');
   for (const entry of manifest.epics) {
-    console.log(`  ${entry.queueIndex}/${entry.queueTotal} #${entry.epicNumber} ${entry.title} — ${formatQueueEpicStatus(entry.status)}`);
+    console.log(`  ${entry.queueIndex}/${entry.queueTotal} #${entry.epicNumber} ${entry.title} - ${formatQueueEpicStatus(entry.status)}`);
     if (entry.sessionName) console.log(`           Session: ${entry.sessionName}`);
     if (entry.sessionBranch) console.log(`           Branch:  ${entry.sessionBranch}`);
     if (entry.sessionPrUrl) console.log(`           PR:      ${entry.sessionPrUrl}`);
@@ -276,10 +278,12 @@ function printQueueManifestDetail(queue: QueueManifestRef, projectDir?: string):
       const pr = entry.dependsOnSessionPrUrl ? ` (${entry.dependsOnSessionPrUrl})` : '';
       console.log(`           Depends: ${entry.dependsOnSessionBranch}${pr}`);
     }
-    if (entry.rebaseOntoBranch) console.log(`           Rebase:  ${entry.sessionBranch ?? 'this branch'} onto ${entry.rebaseOntoBranch} after the dependency PR lands`);
+    if (entry.rebaseOntoBranch) {
+      console.log(`           Rebase:  ${entry.sessionBranch ?? 'this branch'} onto ${entry.rebaseOntoBranch} after the dependency PR lands`);
+    }
     for (const warning of entry.dependencyWarnings ?? []) console.log(`           Dependency: ${warning}`);
     for (const warning of entry.overlapWarnings ?? []) console.log(`           File overlap: ${warning}`);
-    for (const failure of entry.failures ?? []) console.log(`           Failure: ${failure.code} — ${failure.message}`);
+    for (const failure of entry.failures ?? []) console.log(`           Failure: ${failure.code} - ${failure.message}`);
   }
 }
 
@@ -442,7 +446,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   const summaryName = `session-summary-${sessionName.replace(/\//g, '-')}.md`;
   const summaryPath = path.join(learningsDir, summaryName);
   if (fs.existsSync(summaryPath)) {
-    console.log(`Summary:      ${path.relative(process.cwd(), summaryPath)}`);
+    console.log(`Summary:      ${path.relative(root, summaryPath)}`);
   }
 }
 
