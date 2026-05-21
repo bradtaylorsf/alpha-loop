@@ -12,6 +12,7 @@ import { readStageTelemetry } from './telemetry.js';
 import { runDir } from './traces.js';
 import type { Config } from './config.js';
 import type { PipelineResult, GateResult } from './pipeline.js';
+import type { QueueEpicLink, QueueSessionContext } from './epic-queue.js';
 
 export type SessionContext = {
   name: string;
@@ -23,6 +24,8 @@ export type SessionContext = {
   sessionPrUrl?: string;
   /** When set, this session processes sub-issues of the given epic. */
   epic?: number;
+  /** Queue metadata for multi-epic queue sessions. */
+  queue?: QueueSessionContext;
 };
 
 export type CreateSessionOptions = {
@@ -31,10 +34,130 @@ export type CreateSessionOptions = {
   epicNum?: number;
   /** Title of the epic, used to form a human-readable session slug. */
   epicTitle?: string;
+  /** Queue metadata when this session belongs to an ordered epic queue. */
+  queue?: QueueSessionContext;
 };
 
 function slugify(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+function draftSessionPrTitle(name: string, milestone: string | undefined, epicNum: number | undefined, epicTitle: string | undefined): string {
+  if (epicNum !== undefined) {
+    return `Epic #${epicNum}${epicTitle ? `: ${epicTitle}` : ''}`;
+  }
+  return milestone ? `Milestone: ${milestone}` : `Session: ${name}`;
+}
+
+function formatEpicLink(epic: QueueEpicLink | null): string {
+  if (!epic) return 'None';
+  const title = epic.title ? ` - ${epic.title}` : '';
+  const pr = epic.sessionPrUrl ? ` ([session PR](${epic.sessionPrUrl}))` : '';
+  const branch = !epic.sessionPrUrl && epic.sessionBranch ? ` (${epic.sessionBranch})` : '';
+  return `#${epic.number}${title}${pr}${branch}`;
+}
+
+function previousPrLabel(queue: QueueSessionContext): string {
+  if (queue.dependsOnSessionPrUrl) {
+    return `[the previous session PR](${queue.dependsOnSessionPrUrl})`;
+  }
+  if (queue.previousSessionPrUrl) {
+    return `[the previous session PR](${queue.previousSessionPrUrl})`;
+  }
+  if (queue.previousEpic) {
+    return `the previous session PR for #${queue.previousEpic.number}`;
+  }
+  return 'the previous session PR';
+}
+
+function buildQueueSection(queue: QueueSessionContext, branch: string, baseBranch: string): string[] {
+  const lines: string[] = [
+    '## Execution Queue',
+    '',
+    `**Queue:** ${queue.queueId}`,
+    `**Position:** ${queue.queueIndex} of ${queue.queueTotal}`,
+    `**Parent epic:** ${formatEpicLink(queue.currentEpic)}`,
+    `**Previous queued epic:** ${formatEpicLink(queue.previousEpic)}`,
+    `**Next queued epic:** ${formatEpicLink(queue.nextEpic)}`,
+    `**Branch ancestry:** ${queue.branchAncestryMode}`,
+  ];
+
+  if (queue.branchAncestryMode === 'stacked') {
+    if (queue.dependsOnSessionBranch) {
+      lines.push(`**Branched from:** ${queue.dependsOnSessionBranch}`);
+      lines.push(`**Depends on:** ${queue.dependsOnSessionPrUrl ? `[${queue.dependsOnSessionBranch}](${queue.dependsOnSessionPrUrl})` : queue.dependsOnSessionBranch}`);
+    } else {
+      lines.push(`**Branched from:** ${queue.branchedFromBranch}`);
+      lines.push('**Depends on:** None - this is the first queued session branch.');
+    }
+  } else {
+    lines.push(`**Branched from:** ${queue.branchedFromBranch}`);
+    lines.push('**Depends on:** None - no branch ancestry dependency was created.');
+  }
+
+  lines.push('');
+  lines.push('### Merge Order');
+  lines.push('');
+
+  if (queue.branchAncestryMode === 'stacked' && queue.dependsOnSessionBranch) {
+    const rebaseTarget = queue.rebaseOntoBranch ?? baseBranch;
+    lines.push(`- Merge ${previousPrLabel(queue)} first; after it lands on ${rebaseTarget}, rebase \`${branch}\` onto \`${rebaseTarget}\` before final review/merge.`);
+    lines.push(`- This PR still targets \`${baseBranch}\`, but its branch was created from \`${queue.dependsOnSessionBranch}\`.`);
+  } else if (queue.branchAncestryMode === 'stacked') {
+    lines.push(`- This is the first queued session PR. Merge it before later queued session PRs.`);
+    if (queue.nextEpic) {
+      lines.push(`- Later queued sessions may be branched from \`${branch}\`; review ${formatEpicLink(queue.nextEpic)} after this PR.`);
+    }
+  } else {
+    lines.push(`- Review this PR in queue order, but it can merge independently once ready.`);
+    lines.push(`- No branch ancestry dependency was created; this branch starts from \`${queue.branchedFromBranch}\`.`);
+  }
+
+  lines.push('');
+  lines.push('### Dependency And Overlap Notes');
+  lines.push('');
+  const riskLines = [
+    ...queue.dependencyWarnings.map((warning) => `- Dependency: ${warning}`),
+    ...queue.overlapWarnings.map((warning) => `- File overlap: ${warning}`),
+  ];
+  if (riskLines.length > 0) {
+    lines.push(...riskLines);
+  } else {
+    lines.push('- No queued dependency or file-overlap risks detected.');
+  }
+
+  return lines;
+}
+
+function buildDraftSessionPrBody(args: {
+  branch: string;
+  startedAt: string;
+  milestone?: string;
+  epicNum?: number;
+  epicTitle?: string;
+  queue?: QueueSessionContext;
+  baseBranch: string;
+}): string {
+  const lines: string[] = ['## Session In Progress', ''];
+  if (args.epicNum !== undefined) {
+    lines.push(`**Epic:** #${args.epicNum}${args.epicTitle ? ` — ${args.epicTitle}` : ''}`);
+  } else if (args.milestone) {
+    lines.push(`**Milestone:** ${args.milestone}`);
+  }
+  lines.push(`**Branch:** ${args.branch}`);
+  lines.push(`**Started:** ${args.startedAt}`);
+  lines.push('');
+
+  if (args.queue) {
+    lines.push(...buildQueueSection(args.queue, args.branch, args.baseBranch));
+    lines.push('');
+  }
+
+  lines.push('This PR will be updated as issues are processed.');
+  lines.push('');
+  lines.push('---');
+  lines.push('*Automated by alpha-loop*');
+  return lines.join('\n');
 }
 
 /**
@@ -47,6 +170,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
   const milestone = options?.milestone;
   const epicNum = options?.epicNum;
   const epicTitle = options?.epicTitle;
+  const queue = options?.queue;
 
   let slug: string;
   if (epicNum !== undefined) {
@@ -64,6 +188,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
   const resultsDir = join(projectDir, '.alpha-loop', 'sessions', name);
   const logsDir = join(resultsDir, 'logs');
   let sessionPrUrl: string | undefined;
+  const branchSource = queue?.branchedFromBranch ?? config.baseBranch;
 
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(logsDir, { recursive: true });
@@ -75,13 +200,13 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
 
     const branchExists = exec(`git rev-parse --verify "${branch}"`, { cwd: projectDir });
     if (branchExists.exitCode !== 0) {
-      // Create from remote base branch first, fall back to local
+      // Create from the queue ancestry branch (or base branch) first, fall back to local.
       const fromRemote = exec(
-        `git checkout -b "${branch}" "origin/${config.baseBranch}"`,
+        `git checkout -b "${branch}" "origin/${branchSource}"`,
         { cwd: projectDir },
       );
       if (fromRemote.exitCode !== 0) {
-        exec(`git checkout -b "${branch}" "${config.baseBranch}"`, { cwd: projectDir });
+        exec(`git checkout -b "${branch}" "${branchSource}"`, { cwd: projectDir });
       }
       // Create an initial commit so the branch has a diff from base (required for PR creation)
       exec(`git commit --allow-empty -m "chore: start session ${name}"`, { cwd: projectDir });
@@ -97,14 +222,16 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
           repo: config.repo,
           base: config.baseBranch,
           head: branch,
-          title: epicNum !== undefined
-            ? `Epic #${epicNum}${epicTitle ? `: ${epicTitle}` : ''}`
-            : milestone ? `Milestone: ${milestone}` : `Session: ${name}`,
-          body: `## Session In Progress\n\n${
-            epicNum !== undefined
-              ? `**Epic:** #${epicNum}${epicTitle ? ` — ${epicTitle}` : ''}\n`
-              : milestone ? `**Milestone:** ${milestone}\n` : ''
-          }**Branch:** ${branch}\n**Started:** ${new Date().toISOString()}\n\nThis PR will be updated as issues are processed.\n\n---\n*Automated by alpha-loop*`,
+          title: draftSessionPrTitle(name, milestone, epicNum, epicTitle),
+          body: buildDraftSessionPrBody({
+            branch,
+            startedAt: new Date().toISOString(),
+            milestone,
+            epicNum,
+            epicTitle,
+            queue,
+            baseBranch: config.baseBranch,
+          }),
           cwd: projectDir,
         });
         sessionPrUrl = draftPR;
@@ -117,17 +244,17 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
       // Ensure session branch exists on remote (may have been deleted after a previous merge)
       const remoteCheck = exec(`git ls-remote --heads origin "${branch}"`, { cwd: projectDir });
       if (!remoteCheck.stdout.trim()) {
-        log.warn(`Session branch "${branch}" exists locally but not on remote — recreating from ${config.baseBranch}`);
+        log.warn(`Session branch "${branch}" exists locally but not on remote — recreating from ${branchSource}`);
         // Ensure we're not on the branch we're about to delete
-        exec(`git checkout "${config.baseBranch}"`, { cwd: projectDir });
+        exec(`git checkout "${branchSource}"`, { cwd: projectDir });
         // Delete stale local branch and recreate from current base (the old one is behind after merge)
         exec(`git branch -D "${branch}"`, { cwd: projectDir });
         const fromRemote = exec(
-          `git checkout -b "${branch}" "origin/${config.baseBranch}"`,
+          `git checkout -b "${branch}" "origin/${branchSource}"`,
           { cwd: projectDir },
         );
         if (fromRemote.exitCode !== 0) {
-          exec(`git checkout -b "${branch}" "${config.baseBranch}"`, { cwd: projectDir });
+          exec(`git checkout -b "${branch}" "${branchSource}"`, { cwd: projectDir });
         }
         exec(`git commit --allow-empty -m "chore: start session ${name}"`, { cwd: projectDir });
         const pushResult = exec(`git push origin "${branch}"`, { cwd: projectDir });
@@ -143,8 +270,16 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
             repo: config.repo,
             base: config.baseBranch,
             head: branch,
-            title: milestone ? `Milestone: ${milestone}` : `Session: ${name}`,
-            body: `## Session In Progress\n\n${milestone ? `**Milestone:** ${milestone}\n` : ''}**Branch:** ${branch}\n**Started:** ${new Date().toISOString()}\n\nThis PR will be updated as issues are processed.\n\n---\n*Automated by alpha-loop*`,
+            title: draftSessionPrTitle(name, milestone, epicNum, epicTitle),
+            body: buildDraftSessionPrBody({
+              branch,
+              startedAt: new Date().toISOString(),
+              milestone,
+              epicNum,
+              epicTitle,
+              queue,
+              baseBranch: config.baseBranch,
+            }),
             cwd: projectDir,
           });
           sessionPrUrl = draftPR;
@@ -158,7 +293,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
     }
   }
 
-  return { name, branch, resultsDir, logsDir, results: [], sessionPrUrl, epic: epicNum };
+  return { name, branch, resultsDir, logsDir, results: [], sessionPrUrl, epic: epicNum, queue };
 }
 
 /**
@@ -267,6 +402,9 @@ export async function finalizeSession(
       filesChanged: r.filesChanged,
     })),
   };
+  if (session.queue) {
+    manifest.queue = session.queue;
+  }
   if (stageEntries.length > 0) {
     manifest.stages = stageEntries;
   }
@@ -306,6 +444,11 @@ export async function finalizeSession(
     `**Completed:** ${new Date().toISOString()}`,
     '',
   ];
+
+  if (session.queue) {
+    prLines.push(...buildQueueSection(session.queue, session.branch, config.baseBranch));
+    prLines.push('');
+  }
 
   // Successes — the main content
   if (successes.length > 0) {

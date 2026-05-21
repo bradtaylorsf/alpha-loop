@@ -416,6 +416,7 @@ describe('runCommand', () => {
       logsDir: `/tmp/sessions/epic-${options.epicNum}/logs`,
       results: [],
       epic: options.epicNum,
+      queue: options.queue,
     }));
     mockProcessIssue.mockImplementation(async (issueNum: number, title: string) => ({
       issueNum,
@@ -432,6 +433,37 @@ describe('runCommand', () => {
     await runCommand({ epics: '205,166,214' });
 
     expect(mockCreateSession.mock.calls.map((call) => call[1]?.epicNum)).toEqual([205, 166, 214]);
+    const queueContexts = mockCreateSession.mock.calls.map((call) => (call[1] as any)?.queue);
+    expect(queueContexts).toEqual([
+      expect.objectContaining({
+        queueIndex: 1,
+        queueTotal: 3,
+        currentEpic: expect.objectContaining({ number: 205, title: 'First Epic' }),
+        nextEpic: expect.objectContaining({ number: 166, title: 'Second Epic' }),
+        branchAncestryMode: 'stacked',
+        branchedFromBranch: 'master',
+        dependsOnSessionBranch: null,
+      }),
+      expect.objectContaining({
+        queueIndex: 2,
+        previousEpic: expect.objectContaining({ number: 205, title: 'First Epic', sessionPrUrl: 'https://github.com/owner/repo/pull/205' }),
+        nextEpic: expect.objectContaining({ number: 214, title: 'Third Epic' }),
+        previousSessionBranch: 'session/epic-205',
+        previousSessionPrUrl: 'https://github.com/owner/repo/pull/205',
+        branchAncestryMode: 'stacked',
+        branchedFromBranch: 'session/epic-205',
+        dependsOnSessionBranch: 'session/epic-205',
+        rebaseOntoBranch: 'master',
+      }),
+      expect.objectContaining({
+        queueIndex: 3,
+        previousSessionBranch: 'session/epic-166',
+        previousSessionPrUrl: 'https://github.com/owner/repo/pull/166',
+        branchAncestryMode: 'stacked',
+        branchedFromBranch: 'session/epic-166',
+        dependsOnSessionBranch: 'session/epic-166',
+      }),
+    ]);
     expect(mockCreateSession.mock.calls.map((call) => call[0])).toEqual([
       expect.objectContaining({ autoMerge: true, mergeTo: '' }),
       expect.objectContaining({ autoMerge: true, mergeTo: '' }),
@@ -451,11 +483,138 @@ describe('runCommand', () => {
       status: entry.status,
       sessionBranch: entry.sessionBranch,
       sessionPrUrl: entry.sessionPrUrl,
+      branchAncestryMode: entry.branchAncestryMode,
+      branchedFromBranch: entry.branchedFromBranch,
+      dependsOnSessionBranch: entry.dependsOnSessionBranch,
+      dependsOnSessionPrUrl: entry.dependsOnSessionPrUrl,
+      nextSessionPrUrl: entry.nextSessionPrUrl,
     }))).toEqual([
-      { epicNumber: 205, status: 'success', sessionBranch: 'session/epic-205', sessionPrUrl: 'https://github.com/owner/repo/pull/205' },
-      { epicNumber: 166, status: 'success', sessionBranch: 'session/epic-166', sessionPrUrl: 'https://github.com/owner/repo/pull/166' },
-      { epicNumber: 214, status: 'success', sessionBranch: 'session/epic-214', sessionPrUrl: 'https://github.com/owner/repo/pull/214' },
+      {
+        epicNumber: 205,
+        status: 'success',
+        sessionBranch: 'session/epic-205',
+        sessionPrUrl: 'https://github.com/owner/repo/pull/205',
+        branchAncestryMode: 'stacked',
+        branchedFromBranch: 'master',
+        dependsOnSessionBranch: null,
+        dependsOnSessionPrUrl: null,
+        nextSessionPrUrl: 'https://github.com/owner/repo/pull/166',
+      },
+      {
+        epicNumber: 166,
+        status: 'success',
+        sessionBranch: 'session/epic-166',
+        sessionPrUrl: 'https://github.com/owner/repo/pull/166',
+        branchAncestryMode: 'stacked',
+        branchedFromBranch: 'session/epic-205',
+        dependsOnSessionBranch: 'session/epic-205',
+        dependsOnSessionPrUrl: 'https://github.com/owner/repo/pull/205',
+        nextSessionPrUrl: 'https://github.com/owner/repo/pull/214',
+      },
+      {
+        epicNumber: 214,
+        status: 'success',
+        sessionBranch: 'session/epic-214',
+        sessionPrUrl: 'https://github.com/owner/repo/pull/214',
+        branchAncestryMode: 'stacked',
+        branchedFromBranch: 'session/epic-166',
+        dependsOnSessionBranch: 'session/epic-166',
+        dependsOnSessionPrUrl: 'https://github.com/owner/repo/pull/166',
+        nextSessionPrUrl: null,
+      },
     ]);
+    expect(mockFinalizeSession.mock.calls.map((call) => (call[0] as any).queue?.queueIndex)).toEqual([1, 2, 3]);
+    expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('--epics can run independent queue branches without ancestry dependencies', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      skipPostSessionReview: true,
+      autoMerge: false,
+      ...overrides,
+    }) as any);
+
+    const issues = new Map([
+      [205, { number: 205, title: 'First Epic', body: '- [ ] #305 First child', labels: ['epic'], state: 'OPEN' }],
+      [166, { number: 166, title: 'Second Epic', body: '- [ ] #266 Second child', labels: ['epic'], state: 'OPEN' }],
+      [305, { number: 305, title: 'First child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
+      [266, { number: 266, title: 'Second child', body: 'Body', labels: ['ready'], state: 'OPEN' }],
+    ]);
+    const childByEpic = new Map([[205, 305], [166, 266]]);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (issues.get(issueNum) as any) ?? null);
+    mockGetEpicSubIssues.mockImplementation((_repo: string, epicNum: number) => [{
+      number: childByEpic.get(epicNum) ?? 0,
+      checked: true,
+      lineIndex: 0,
+    }]);
+    mockCreateSession.mockImplementation((_config: any, options: any = {}) => ({
+      name: `session/epic-${options.epicNum}`,
+      branch: `session/epic-${options.epicNum}`,
+      resultsDir: `/tmp/sessions/epic-${options.epicNum}`,
+      logsDir: `/tmp/sessions/epic-${options.epicNum}/logs`,
+      results: [],
+      epic: options.epicNum,
+      queue: options.queue,
+    }));
+    mockProcessIssue.mockImplementation(async (issueNum: number, title: string) => ({
+      issueNum,
+      title,
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    }));
+    mockFinalizeSession.mockImplementation(async (session: any) => `https://github.com/owner/repo/pull/${session.epic}`);
+
+    await runCommand({ epics: '205,166', queueBranchMode: 'independent' });
+
+    const queueContexts = mockCreateSession.mock.calls.map((call) => (call[1] as any)?.queue);
+    expect(queueContexts).toEqual([
+      expect.objectContaining({
+        queueIndex: 1,
+        branchAncestryMode: 'independent',
+        branchedFromBranch: 'master',
+        dependsOnSessionBranch: null,
+        previousSessionBranch: null,
+      }),
+      expect.objectContaining({
+        queueIndex: 2,
+        branchAncestryMode: 'independent',
+        branchedFromBranch: 'master',
+        dependsOnSessionBranch: null,
+        dependsOnSessionPrUrl: null,
+        previousSessionBranch: 'session/epic-205',
+        previousSessionPrUrl: 'https://github.com/owner/repo/pull/205',
+      }),
+    ]);
+
+    const manifest = JSON.parse(String(mockWriteFileSync.mock.calls.at(-1)?.[1]));
+    expect(manifest.branchAncestryMode).toBe('independent');
+    expect(manifest.epics.map((entry: any) => ({
+      epicNumber: entry.epicNumber,
+      branchAncestryMode: entry.branchAncestryMode,
+      branchedFromBranch: entry.branchedFromBranch,
+      dependsOnSessionBranch: entry.dependsOnSessionBranch,
+      dependsOnSessionPrUrl: entry.dependsOnSessionPrUrl,
+    }))).toEqual([
+      {
+        epicNumber: 205,
+        branchAncestryMode: 'independent',
+        branchedFromBranch: 'master',
+        dependsOnSessionBranch: null,
+        dependsOnSessionPrUrl: null,
+      },
+      {
+        epicNumber: 166,
+        branchAncestryMode: 'independent',
+        branchedFromBranch: 'master',
+        dependsOnSessionBranch: null,
+        dependsOnSessionPrUrl: null,
+      },
+    ]);
+    expect(mockFinalizeSession.mock.calls.map((call) => (call[0] as any).queue?.branchAncestryMode)).toEqual(['independent', 'independent']);
     expect(mockExit).not.toHaveBeenCalled();
   });
 
