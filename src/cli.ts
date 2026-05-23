@@ -39,6 +39,8 @@ program
   .option('--fix', 'Auto-fix validation issues (reorder deps, comment on incomplete issues)')
   .option('--verbose', 'Stream live agent output to terminal')
   .option('--epic <n>', 'Process a specific epic by issue number (skips the picker)', parseInt)
+  .option('--epics <ids>', 'Process multiple epics in order (comma-separated issue numbers)')
+  .option('--queue-branch-mode <mode>', 'Branch mode for --epics: stacked or independent')
   .option('--skip-epic', 'Skip epic discovery, use flat/milestone flow')
   .option('--verify-only <n>', 'Run only the verification pass on an existing epic', parseInt)
   .action(async (options) => {
@@ -49,7 +51,7 @@ program
 
 program
   .command('history [session]')
-  .description('View session history')
+  .description('View session and queue history')
   .option('--qa', 'Show QA checklist for session')
   .option('--clean', 'Remove old session data')
   .option('--telemetry', 'Show per-stage telemetry for a session')
@@ -130,6 +132,8 @@ program
 program
   .command('roadmap')
   .description('Schedule parent epics and standalone issues into milestones using AI analysis')
+  .option('--queue', 'Recommend the next ordered epic run queue without making changes')
+  .option('--milestone <name>', 'Limit queue recommendations to epics in a milestone')
   .option('--dry-run', 'Display proposed epic/standalone milestone assignments without making changes')
   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .action(async (options) => {
@@ -139,7 +143,7 @@ program
 
 program
   .command('resume')
-  .description('Resume stranded work — push branches, run review, open PRs')
+  .description('Resume stranded work — push branches, run review, open WIP PRs')
   .option('--issue <num>', 'Only resume a specific issue number')
   .option('--session <name>', 'Resume from a specific session directory')
   .action(async (options) => {

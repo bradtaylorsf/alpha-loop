@@ -48,7 +48,9 @@ For planned feature work, use epics as the unit you schedule and ship:
 1. `alpha-loop triage` reviews open issues, proposes cleanup, and groups related ready issues into parent epics with ordered child checklists.
 2. `alpha-loop roadmap` schedules parent epic issues into milestones, while still scheduling standalone issues that are not part of an epic.
 3. `alpha-loop run --epic <N>` ships the epic's child issues in checklist order. Agents working on each child issue receive the parent epic goal, acceptance criteria, and sibling checklist as context.
-4. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
+4. `alpha-loop roadmap --queue` recommends the next ordered epic queue, explains blockers and risks, and prints the exact `alpha-loop run --epics ...` command.
+5. `alpha-loop run --epics <A,B,C>` runs several parent epics back-to-back in that exact order, with a separate session branch and PR for each epic.
+6. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
 
 Milestones answer "when should this epic ship?" The epic checklist answers "what child issues ship, and in what order?"
 
@@ -253,7 +255,9 @@ If the loop hangs or crashes mid-session, work can be stranded on local branches
 1. Scans for local `agent/issue-*` branches with commits but no open PR
 2. Pushes each branch to origin
 3. Runs code review
-4. Creates PRs and updates issue status
+4. Creates WIP PRs, marks issues `In Review`, and updates the session PR with a verification caveat
+
+Recovered PRs are not marked complete. `resume` does not rerun the project test suite or final smoke tests, so verify recovered work before merging.
 
 Use `--issue <N>` to resume a specific issue.
 
@@ -269,18 +273,21 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run` | Fetch matching issues, process them all, then exit |
 | `alpha-loop run --dry-run` | Preview without making changes |
 | `alpha-loop run --epic <N>` | Process an epic — its sub-issues in checklist order, auto-verify on completion (see [docs/epics.md](docs/epics.md)) |
+| `alpha-loop run --epics <ids>` | Process an ordered comma-separated queue of epics, one session branch and PR per epic |
+| `alpha-loop run --epics <ids> --queue-branch-mode independent` | Run queued epics without stacking later session branches on earlier ones |
 | `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
 | `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
 | `alpha-loop auth` | Save authenticated browser state for verification |
-| `alpha-loop history` | View session history |
+| `alpha-loop history` | View session and queue history |
 | `alpha-loop history <name>` | View a specific session |
+| `alpha-loop history queue-<timestamp>` | Inspect a multi-epic queue manifest, including stopped/pending epics |
 | `alpha-loop history <name> --qa` | Show QA checklist for session |
 | `alpha-loop history <name> --telemetry` | Show per-stage telemetry table (see [docs/telemetry.md](docs/telemetry.md)) |
 | `alpha-loop history --clean` | Remove old session data |
 | `alpha-loop report routing` | Aggregate per-stage telemetry + cost-per-issue across sessions |
 | `alpha-loop sync` | Sync templates to configured harnesses (Claude, Codex, Cursor, etc.) |
-| `alpha-loop resume` | Resume stranded work — push branches, review, open PRs |
+| `alpha-loop resume` | Resume stranded work — push branches, review, open WIP PRs |
 | `alpha-loop resume --issue <N>` | Resume a specific issue |
 | `alpha-loop review` | Analyze learnings and propose self-improvements |
 | `alpha-loop review --apply` | Apply proposed improvements and create a draft PR |
@@ -308,6 +315,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop triage --dry-run` | Display cleanup findings and epic proposals without making changes |
 | `alpha-loop triage --yes` | Non-interactive mode: apply AI-selected cleanup actions and epic proposals |
 | `alpha-loop roadmap` | Schedule parent epics and standalone issues into milestones using AI analysis |
+| `alpha-loop roadmap --queue` | Recommend the next ordered epic run queue without making changes |
+| `alpha-loop roadmap --queue --milestone <name>` | Recommend an epic run queue within a release or sprint milestone |
 | `alpha-loop roadmap --dry-run` | Display proposed epic/standalone milestone assignments without making changes |
 | `alpha-loop roadmap --yes` | Non-interactive mode: apply all AI-recommended epic and standalone assignments |
 
@@ -329,6 +338,8 @@ Options:
   --batch             Batch mode: process multiple issues per agent call (faster, fewer tokens)
   --batch-size <n>    Issues per batch (default: 5)
   --epic <n>          Process a specific epic by issue number (skips the picker)
+  --epics <ids>       Process multiple epics in order (comma-separated)
+  --queue-branch-mode <mode>  Branch mode for --epics: stacked or independent
   --skip-epic         Skip epic discovery, use flat/milestone flow
   --verify-only <n>   Run only the verification pass on an existing epic
 ```
@@ -595,6 +606,23 @@ alpha-loop run --epic 165
 
 `alpha-loop run --milestone "v1.0"` checks for open epics assigned to that milestone before fetching flat issues. One scheduled epic is processed automatically, multiple scheduled epics require `--epic <N>`, and no scheduled epics falls back to ready non-epic issues in that milestone. `--epic` always wins over `--milestone`; `--skip-epic` disables epic discovery and preserves the flat milestone flow.
 
+To ask Alpha Loop what to run next, use queue planning:
+
+```bash
+alpha-loop roadmap --queue
+alpha-loop roadmap --queue --milestone "v1.0"
+```
+
+Queue planning is read-only. It inspects open `epic` issues, milestone assignments, checklist progress, child readiness labels, dependency phrases such as `depends on #N`, and likely file overlap. When a runnable queue exists, it prints an executable command like `alpha-loop run --epics 205,166,214`; blocked epics stay out of the command and are listed with their blockers.
+
+To run several epics unattended while keeping review scope separate, pass an explicit queue:
+
+```bash
+alpha-loop run --epics 205,166,214
+```
+
+The queue is validated before any work starts. Each listed issue must exist, be labeled `epic`, not be duplicated, and be open unless it is already closed as completed. Alpha Loop processes the epics in the given order, creates/finalizes one session branch and PR per epic, and stops on the first epic failure, verification gap, checklist consistency error, or transient agent/rate-limit stop. By default, queue sessions use `stacked` ancestry: later epic session branches start from the previous successful session branch while their PRs still target the configured base branch. Use `--queue-branch-mode independent` for unrelated epics that should all branch from the base branch. Non-dry-run queue attempts write `.alpha-loop/sessions/queue-<timestamp>/queue.json`; `alpha-loop history` lists those manifests and `alpha-loop history queue-<timestamp>` prints stopped/pending epics, session PRs, and rebase notes. `--dry-run` prints the validated queue without mutating GitHub or git state.
+
 Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
 
 See [docs/epics.md](docs/epics.md) for the full feature reference, including `--verify-only`, the `prefer_epics` config option, skip rules, and safety rails.
@@ -639,6 +667,7 @@ What needs to be done.
 | `.alpha-loop/evals/` | Yes | Eval cases (YAML) and score history (`scores.jsonl`) |
 | `.alpha-loop/traces/` | No (gitignored) | Meta-Harness style execution traces per session |
 | `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
+| `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, session PRs, merge order, and stop reason |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |
 

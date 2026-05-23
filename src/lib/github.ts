@@ -30,6 +30,8 @@ export type Issue = {
   labels: string[];
   comments?: Comment[];
   milestone?: string | null;
+  state?: string;
+  stateReason?: string | null;
 };
 
 export type RoadmapEpicChildContext = {
@@ -37,6 +39,9 @@ export type RoadmapEpicChildContext = {
   title: string;
   bodySummary: string;
   checked: boolean;
+  labels?: string[];
+  state?: string;
+  milestone?: string | null;
 };
 
 export type RoadmapEpicContext = {
@@ -730,6 +735,9 @@ export function listRoadmapEpics(repo: string, knownOpenIssues: Issue[] = []): R
         title: child?.title ?? '(issue details unavailable)',
         bodySummary: child ? summarizeBody(child.body, 220) : '',
         checked: ref.checked,
+        labels: child?.labels ?? [],
+        state: child?.state ?? (child ? 'OPEN' : undefined),
+        milestone: child?.milestone ?? null,
       };
     });
 
@@ -815,7 +823,7 @@ export function getIssueComments(repo: string, issueNum: number): Comment[] {
  */
 export function getIssueWithComments(repo: string, issueNum: number): Issue | null {
   const result = ghExec(
-    `gh issue view ${issueNum} --repo "${repo}" --json number,title,body,labels,comments`,
+    `gh issue view ${issueNum} --repo "${repo}" --json number,title,body,labels,comments,state,stateReason,milestone`,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to fetch issue #${issueNum}: ${result.stderr}`);
@@ -828,8 +836,11 @@ export function getIssueWithComments(repo: string, issueNum: number): Issue | nu
       body: string;
       labels: Array<{ name: string }>;
       comments: Array<{ author: { login: string }; body: string; createdAt: string }>;
+      state?: string;
+      stateReason?: string | null;
+      milestone?: unknown;
     };
-    return {
+    const issue: Issue = {
       number: data.number,
       title: data.title,
       body: data.body ?? '',
@@ -840,6 +851,10 @@ export function getIssueWithComments(repo: string, issueNum: number): Issue | nu
         createdAt: c.createdAt ?? '',
       })),
     };
+    if (data.state !== undefined) issue.state = data.state;
+    if (data.stateReason !== undefined) issue.stateReason = data.stateReason;
+    if (data.milestone !== undefined) issue.milestone = milestoneTitle(data.milestone);
+    return issue;
   } catch {
     log.warn(`Failed to parse issue #${issueNum}`);
     return null;

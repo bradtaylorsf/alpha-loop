@@ -31,7 +31,21 @@ import { spawnAgent } from '../lib/agent.js';
 import { buildSessionReviewPrompt, type EpicPromptContext } from '../lib/prompts.js';
 import { writeTraceToSubdir } from '../lib/traces.js';
 import { readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
-import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, type ValidationReport } from '../lib/validation.js';
+import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, parseDependencies, type ValidationReport } from '../lib/validation.js';
+import {
+  createEpicQueueManifest,
+  createEpicQueueValidationFailureManifest,
+  parseEpicQueue,
+  validateEpicQueue,
+  writeQueueManifest,
+  type BranchAncestryMode,
+  type EpicQueueManifest,
+  type EpicQueueManifestEntry,
+  type EpicQueueManifestFailure,
+  type QueueEpicLink,
+  type QueueSessionContext,
+  type ValidatedEpicQueueEntry,
+} from '../lib/epic-queue.js';
 
 export type RunOptions = {
   dryRun?: boolean;
@@ -49,10 +63,66 @@ export type RunOptions = {
   fix?: boolean;
   /** Force a specific epic by number, skip picker. */
   epic?: number;
+  /** Process multiple epics in the provided comma-separated order. */
+  epics?: string;
+  /** Branch ancestry mode for multi-epic queues. */
+  queueBranchMode?: BranchAncestryMode;
   /** Skip the epic picker entirely, use flat/milestone flow. */
   skipEpic?: boolean;
   /** Run only the verification pass on an existing epic. */
   verifyOnly?: number;
+  /** Internal queue mode: treat an unfinished epic as a queue-stopping failure. */
+  stopOnPartialEpic?: boolean;
+};
+
+export type EpicExecutionFailureCode =
+  | 'invalid-epic-number'
+  | 'epic-not-found'
+  | 'missing-epic-label'
+  | 'no-eligible-child-issues'
+  | 'checklist-update-failed'
+  | 'issue-processing-error'
+  | 'batch-processing-error'
+  | 'pipeline-failure'
+  | 'transient-stop'
+  | 'epic-verification-failed'
+  | 'epic-incomplete'
+  | 'epic-run-error';
+
+export type EpicExecutionFailure = {
+  code: EpicExecutionFailureCode;
+  message: string;
+  issueNum?: number;
+  exitCode?: number;
+};
+
+export type EpicExecutionResult = {
+  epicNumber: number;
+  sessionName: string | null;
+  sessionBranch: string | null;
+  sessionPrUrl: string | null;
+  status: 'success' | 'failure';
+  failures: EpicExecutionFailure[];
+  verificationClosedEpic: boolean;
+};
+
+type EpicVerificationFlowResult = {
+  epicNumber: number;
+  status: 'pass' | 'needs-human-input' | 'skipped' | 'failure';
+  closedEpic: boolean;
+  verdict?: string;
+  failure?: EpicExecutionFailure;
+};
+
+type SessionExecutionTarget =
+  | { type: 'epic'; epicNum: number; epicTitle?: string; epicIssue: Issue; queue?: QueueSessionContext }
+  | { type: 'flat'; activeMilestone: string };
+
+type SessionExecutionResult = {
+  session: SessionContext;
+  sessionPrUrl: string | null;
+  failures: EpicExecutionFailure[];
+  verificationClosedEpic: boolean;
 };
 
 /**
@@ -276,32 +346,6 @@ async function pickTarget(
 async function resolveRunTarget(config: Config, options: RunOptions): Promise<ResolvedRunTarget | null> {
   let activeMilestone = config.milestone;
 
-  // --epic <N> overrides everything except --verify-only
-  if (options.epic !== undefined) {
-    if (typeof options.epic !== 'number' || !Number.isFinite(options.epic) || options.epic <= 0) {
-      log.error('--epic requires a positive integer issue number (e.g. --epic 165)');
-      process.exit(1);
-      return null;
-    }
-    const epic = getIssueWithComments(config.repo, options.epic);
-    if (!epic) {
-      log.error(`Could not fetch epic #${options.epic}`);
-      process.exit(1);
-      return null;
-    }
-    if (!hasEpicLabel(epic)) {
-      log.error(`Issue #${options.epic} is not labeled 'epic'. Add the epic label before running --epic.`);
-      process.exit(1);
-      return null;
-    }
-    return {
-      activeEpic: epic.number,
-      activeEpicTitle: epic.title,
-      activeEpicIssue: epic,
-      activeMilestone: '',
-    };
-  }
-
   if (activeMilestone && options.skipEpic !== true) {
     const scheduledEpics = listEpics(config.repo, { milestone: activeMilestone });
 
@@ -362,21 +406,32 @@ async function runEpicVerificationFlow(
   epicNum: number,
   config: Config,
   session: SessionContext | null,
-): Promise<void> {
+): Promise<EpicVerificationFlowResult> {
   const epic = getIssueWithComments(config.repo, epicNum);
   if (!epic) {
-    log.error(`Could not fetch epic #${epicNum}`);
-    return;
+    const message = `Could not fetch epic #${epicNum}`;
+    log.error(message);
+    return {
+      epicNumber: epicNum,
+      status: 'failure',
+      closedEpic: false,
+      failure: { code: 'epic-not-found', message },
+    };
   }
   if (!hasEpicLabel(epic)) {
-    log.error(`Issue #${epicNum} is not labeled 'epic'. Add the epic label before running epic verification.`);
-    process.exit(1);
-    return;
+    const message = `Issue #${epicNum} is not labeled 'epic'. Add the epic label before running epic verification.`;
+    log.error(message);
+    return {
+      epicNumber: epicNum,
+      status: 'failure',
+      closedEpic: false,
+      failure: { code: 'missing-epic-label', message, issueNum: epicNum, exitCode: 1 },
+    };
   }
   const refs = getEpicSubIssues(config.repo, epicNum);
   if (refs.length === 0) {
     log.warn(`Epic #${epicNum} has no sub-issues in its checklist — nothing to verify`);
-    return;
+    return { epicNumber: epicNum, status: 'skipped', closedEpic: false };
   }
 
   const subIssues: Issue[] = [];
@@ -401,16 +456,33 @@ async function runEpicVerificationFlow(
   if (config.dryRun) {
     log.dry(`[verify-only] Would post comment on #${epicNum} (verdict=${result.verdict})`);
     console.error(result.comment);
-    return;
+    return {
+      epicNumber: epicNum,
+      status: result.verdict === 'pass' ? 'pass' : 'needs-human-input',
+      closedEpic: false,
+      verdict: result.verdict,
+    };
   }
 
   commentIssue(config.repo, epicNum, result.comment);
   if (result.verdict === 'pass') {
     closeIssue(config.repo, epicNum, 'completed');
     log.success(`Epic #${epicNum} verified and closed`);
+    return {
+      epicNumber: epicNum,
+      status: 'pass',
+      closedEpic: true,
+      verdict: result.verdict,
+    };
   } else {
     labelIssue(config.repo, epicNum, 'needs-human-input');
     log.warn(`Epic #${epicNum} needs human review: verdict=${result.verdict}`);
+    return {
+      epicNumber: epicNum,
+      status: 'needs-human-input',
+      closedEpic: false,
+      verdict: result.verdict,
+    };
   }
 }
 
@@ -538,49 +610,18 @@ function markEpicChecklistItem(
   if (contextItem) contextItem.checked = checked;
 }
 
-/**
- * Run the main loop: poll for issues, process them, finalize session.
- */
-export async function runCommand(options: RunOptions): Promise<void> {
-  // Build config from YAML + env + CLI flags
-  const overrides: Partial<Config> = {};
-  if (options.dryRun) overrides.dryRun = true;
-  if (options.model) overrides.model = options.model;
-  if (options.skipTests) overrides.skipTests = true;
-  if (options.skipReview) overrides.skipReview = true;
-  if (options.skipLearn) overrides.skipLearn = true;
-  if (options.milestone) overrides.milestone = options.milestone;
-  if (options.autoMerge) overrides.autoMerge = true;
-  if (options.mergeTo) overrides.mergeTo = options.mergeTo;
-  if (options.batch) overrides.batch = true;
-  if (options.batchSize) overrides.batchSize = options.batchSize;
-  if (options.verbose) overrides.verbose = true;
-
-  const config = loadConfig(overrides);
-
-  if (!config.repo) {
-    log.error('No repository configured. Run "alpha-loop init" or set repo in .alpha-loop.yaml');
-    process.exit(1);
-  }
-
-  // --- Verify-only path: bypass the normal loop entirely ---
-  if (options.verifyOnly !== undefined) {
-    if (!Number.isFinite(options.verifyOnly) || options.verifyOnly <= 0) {
-      log.error('--verify-only requires a positive integer issue number (e.g. --verify-only 165)');
-      process.exit(1);
-    }
-    log.step(`Running verify-only pass for epic #${options.verifyOnly}`);
-    await runEpicVerificationFlow(options.verifyOnly, config, null);
-    return;
-  }
-
-  // --- Target selection (epic or milestone) — must happen before session creation ---
-  const target = await resolveRunTarget(config, options);
-  if (!target) return;
-  let activeEpic = target.activeEpic;
-  let activeEpicTitle = target.activeEpicTitle;
-  let activeEpicIssue = target.activeEpicIssue;
-  const activeMilestone = target.activeMilestone;
+async function runIssueSession(
+  config: Config,
+  options: RunOptions,
+  target: SessionExecutionTarget,
+): Promise<SessionExecutionResult> {
+  const activeEpic = target.type === 'epic' ? target.epicNum : undefined;
+  const activeEpicTitle = target.type === 'epic' ? target.epicTitle : undefined;
+  const activeEpicIssue = target.type === 'epic' ? target.epicIssue : undefined;
+  const queueContext = target.type === 'epic' ? target.queue : undefined;
+  const activeMilestone = target.type === 'flat' ? target.activeMilestone : '';
+  const failures: EpicExecutionFailure[] = [];
+  let verificationClosedEpic = false;
 
   if (activeEpic !== undefined) {
     log.info(`Processing epic #${activeEpic}${activeEpicTitle ? ': ' + activeEpicTitle : ''}`);
@@ -593,6 +634,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
     milestone: activeMilestone || undefined,
     epicNum: activeEpic,
     epicTitle: activeEpicTitle,
+    queue: queueContext,
   });
 
   // Print startup banner
@@ -637,8 +679,10 @@ export async function runCommand(options: RunOptions): Promise<void> {
     process.exit(0);
   };
 
-  process.on('SIGINT', () => { void cleanup(); });
-  process.on('SIGTERM', () => { void cleanup(); });
+  const handleSigint = () => { void cleanup(); };
+  const handleSigterm = () => { void cleanup(); };
+  process.on('SIGINT', handleSigint);
+  process.on('SIGTERM', handleSigterm);
 
   // Sync agent assets to all configured harnesses before starting the loop
   const syncResult = syncAgentAssets(resolveHarnesses(config.harnesses, config.agent));
@@ -708,37 +752,34 @@ export async function runCommand(options: RunOptions): Promise<void> {
   let epicPromptContext: EpicPromptContext | undefined;
   if (activeEpic !== undefined) {
     log.info(`Fetching sub-issues of epic #${activeEpic} in checklist order...`);
-    if (!activeEpicIssue) {
-      const epic = getIssueWithComments(config.repo, activeEpic);
-      if (!epic) {
-        log.error(`Could not fetch epic #${activeEpic}`);
-        process.exit(1);
+    const epicIssue = activeEpicIssue;
+    if (!epicIssue) {
+      const message = `Could not fetch epic #${activeEpic}`;
+      failures.push({ code: 'epic-not-found', message, issueNum: activeEpic, exitCode: 1 });
+      issues = [];
+    } else {
+      epicChecklist = parseEpicChecklistForPrompt(epicIssue.body);
+      issues = [];
+      for (const ref of epicChecklist) {
+        if (ref.checked) continue; // already done
+        const sub = getIssueWithComments(config.repo, ref.issueNum);
+        if (!sub) {
+          log.warn(`Sub-issue #${ref.issueNum} skipped: could not fetch`);
+          continue;
+        }
+        ref.title = ref.title ?? sub.title;
+        if (hasEpicLabel(sub)) {
+          log.warn(`Sub-issue #${sub.number} skipped: is itself an epic (nested epics unsupported in v1)`);
+          continue;
+        }
+        if (!sub.labels.includes(config.labelReady)) {
+          log.warn(`Sub-issue #${sub.number} skipped: not labeled '${config.labelReady}'`);
+          continue;
+        }
+        issues.push(sub);
       }
-      activeEpicIssue = epic;
-      activeEpicTitle = epic.title;
+      epicPromptContext = buildEpicPromptContextFromIssue(epicIssue, epicChecklist);
     }
-
-    epicChecklist = parseEpicChecklistForPrompt(activeEpicIssue.body);
-    issues = [];
-    for (const ref of epicChecklist) {
-      if (ref.checked) continue; // already done
-      const sub = getIssueWithComments(config.repo, ref.issueNum);
-      if (!sub) {
-        log.warn(`Sub-issue #${ref.issueNum} skipped: could not fetch`);
-        continue;
-      }
-      ref.title = ref.title ?? sub.title;
-      if (hasEpicLabel(sub)) {
-        log.warn(`Sub-issue #${sub.number} skipped: is itself an epic (nested epics unsupported in v1)`);
-        continue;
-      }
-      if (!sub.labels.includes(config.labelReady)) {
-        log.warn(`Sub-issue #${sub.number} skipped: not labeled '${config.labelReady}'`);
-        continue;
-      }
-      issues.push(sub);
-    }
-    epicPromptContext = buildEpicPromptContextFromIssue(activeEpicIssue, epicChecklist);
   } else {
     const milestoneMsg = activeMilestone ? ` in milestone '${activeMilestone}'` : '';
     log.info(`Fetching issues${milestoneMsg}...`);
@@ -754,6 +795,14 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
   if (issues.length === 0) {
     log.info('No issues found. Nothing to do.');
+    const uncheckedEpicItems = epicChecklist.filter((item) => !item.checked).length;
+    if (activeEpic !== undefined && (epicChecklist.length === 0 || uncheckedEpicItems > 0)) {
+      failures.push({
+        code: 'no-eligible-child-issues',
+        message: `Epic #${activeEpic} has no eligible child issues to process`,
+        issueNum: activeEpic,
+      });
+    }
   } else {
     const issueLimit = config.maxIssues > 0 ? Math.min(issues.length, config.maxIssues) : issues.length;
     let issuesToProcess = issues.slice(0, issueLimit);
@@ -845,7 +894,9 @@ export async function runCommand(options: RunOptions): Promise<void> {
                 updateEpicChecklist(config.repo, activeEpic, r.issueNum, true);
                 markEpicChecklistItem(epicChecklist, epicPromptContext, r.issueNum, true);
               } catch (err) {
-                log.error(`Epic #${activeEpic} checklist update failed for sub-issue #${r.issueNum}: ${err instanceof Error ? err.message : err}`);
+                const message = `Epic #${activeEpic} checklist update failed for sub-issue #${r.issueNum}: ${err instanceof Error ? err.message : err}`;
+                log.error(message);
+                failures.push({ code: 'checklist-update-failed', message, issueNum: r.issueNum });
                 // One-agent-per-epic contract — halt further processing on body inconsistency
                 epicAbort = true;
                 checklistError = true;
@@ -870,7 +921,9 @@ export async function runCommand(options: RunOptions): Promise<void> {
             break;
           }
         } catch (err) {
-          log.error(`Failed to process batch ${batchIdx + 1}: ${err}`);
+          const message = `Failed to process batch ${batchIdx + 1}: ${err}`;
+          log.error(message);
+          failures.push({ code: 'batch-processing-error', message });
         }
 
         activeIssueNum = null;
@@ -920,7 +973,9 @@ export async function runCommand(options: RunOptions): Promise<void> {
               updateEpicChecklist(config.repo, activeEpic, issue.number, true);
               markEpicChecklistItem(epicChecklist, epicPromptContext, issue.number, true);
             } catch (err) {
-              log.error(`Epic #${activeEpic} checklist update failed for sub-issue #${issue.number}: ${err instanceof Error ? err.message : err}`);
+              const message = `Epic #${activeEpic} checklist update failed for sub-issue #${issue.number}: ${err instanceof Error ? err.message : err}`;
+              log.error(message);
+              failures.push({ code: 'checklist-update-failed', message, issueNum: issue.number });
               // One-agent-per-epic contract — halt further processing on body inconsistency
               epicAbort = true;
               activeIssueNum = null;
@@ -936,7 +991,9 @@ export async function runCommand(options: RunOptions): Promise<void> {
             break;
           }
         } catch (err) {
-          log.error(`Failed to process issue #${issue.number}: ${err}`);
+          const message = `Failed to process issue #${issue.number}: ${err}`;
+          log.error(message);
+          failures.push({ code: 'issue-processing-error', message, issueNum: issue.number });
         }
 
         activeIssueNum = null;
@@ -950,12 +1007,46 @@ export async function runCommand(options: RunOptions): Promise<void> {
       const remaining = epicChecklist.filter((r) => !r.checked);
       if (remaining.length === 0) {
         log.step(`All sub-issues of epic #${activeEpic} are complete — running verification pass`);
-        await runEpicVerificationFlow(activeEpic, config, session);
+        const verification = await runEpicVerificationFlow(activeEpic, config, session);
+        verificationClosedEpic = verification.closedEpic;
+        if (verification.failure) {
+          failures.push(verification.failure);
+        } else if (verification.status === 'needs-human-input') {
+          failures.push({
+            code: 'epic-verification-failed',
+            message: `Epic #${activeEpic} verification needs human review: verdict=${verification.verdict ?? 'unknown'}`,
+            issueNum: activeEpic,
+          });
+        }
       } else {
-        log.info(`Epic #${activeEpic}: ${remaining.length} sub-issue(s) still open — verification deferred`);
+        const message = `Epic #${activeEpic}: ${remaining.length} sub-issue(s) still open — verification deferred`;
+        log.info(message);
+        const hasFailedIssueResult = session.results.some((result) => result.status === 'failure');
+        if (options.stopOnPartialEpic && !hasFailedIssueResult) {
+          failures.push({
+            code: 'epic-incomplete',
+            message,
+            issueNum: activeEpic,
+          });
+        }
       }
     } catch (err) {
-      log.warn(`Epic completion check failed: ${err instanceof Error ? err.message : err}`);
+      const message = `Epic completion check failed: ${err instanceof Error ? err.message : err}`;
+      log.warn(message);
+      failures.push({ code: 'epic-verification-failed', message, issueNum: activeEpic });
+    }
+  }
+
+  for (const result of session.results) {
+    if (result.status === 'failure') {
+      const transient = result.failureReason === 'transient';
+      failures.push({
+        code: transient ? 'transient-stop' : 'pipeline-failure',
+        message: transient
+          ? `Issue #${result.issueNum} stopped due to a transient agent or rate-limit failure`
+          : `Issue #${result.issueNum} failed during processing`,
+        issueNum: result.issueNum,
+      });
     }
   }
 
@@ -1132,8 +1223,495 @@ export async function runCommand(options: RunOptions): Promise<void> {
   }
 
   // Finalize session
-  await finalizeSession(session, config);
+  const finalizedPrUrl = await finalizeSession(session, config);
+  const sessionPrUrl = finalizedPrUrl ?? session.sessionPrUrl ?? null;
 
   const successCount = session.results.filter((r) => r.status === 'success').length;
   log.info(`Session complete: ${successCount}/${session.results.length} issues succeeded`);
+  process.off('SIGINT', handleSigint);
+  process.off('SIGTERM', handleSigterm);
+
+  return {
+    session,
+    sessionPrUrl,
+    failures,
+    verificationClosedEpic,
+  };
+}
+
+function buildEpicFailureResult(epicNumber: number, failure: EpicExecutionFailure): EpicExecutionResult {
+  return {
+    epicNumber,
+    sessionName: null,
+    sessionBranch: null,
+    sessionPrUrl: null,
+    status: 'failure',
+    failures: [failure],
+    verificationClosedEpic: false,
+  };
+}
+
+export async function runSingleEpicExecution(args: {
+  config: Config;
+  epicNumber: number;
+  epicIssue?: Issue;
+  options?: RunOptions;
+  queue?: QueueSessionContext;
+}): Promise<EpicExecutionResult> {
+  const { config, epicNumber } = args;
+  const options = args.options ?? {};
+
+  if (typeof epicNumber !== 'number' || !Number.isFinite(epicNumber) || epicNumber <= 0) {
+    return buildEpicFailureResult(epicNumber, {
+      code: 'invalid-epic-number',
+      message: '--epic requires a positive integer issue number (e.g. --epic 165)',
+      exitCode: 1,
+    });
+  }
+
+  const epic = args.epicIssue ?? getIssueWithComments(config.repo, epicNumber);
+  if (!epic) {
+    return buildEpicFailureResult(epicNumber, {
+      code: 'epic-not-found',
+      message: `Could not fetch epic #${epicNumber}`,
+      issueNum: epicNumber,
+      exitCode: 1,
+    });
+  }
+
+  if (!hasEpicLabel(epic)) {
+    return buildEpicFailureResult(epicNumber, {
+      code: 'missing-epic-label',
+      message: `Issue #${epicNumber} is not labeled 'epic'. Add the epic label before running --epic.`,
+      issueNum: epicNumber,
+      exitCode: 1,
+    });
+  }
+
+  const sessionResult = await runIssueSession(config, options, {
+    type: 'epic',
+    epicNum: epic.number,
+    epicTitle: epic.title,
+    epicIssue: epic,
+    queue: args.queue,
+  });
+
+  return {
+    epicNumber: epic.number,
+    sessionName: sessionResult.session.name,
+    sessionBranch: sessionResult.session.branch,
+    sessionPrUrl: sessionResult.sessionPrUrl,
+    status: sessionResult.failures.length > 0 ? 'failure' : 'success',
+    failures: sessionResult.failures,
+    verificationClosedEpic: sessionResult.verificationClosedEpic,
+  };
+}
+
+function exitForCliEpicValidationFailure(result: EpicExecutionResult): void {
+  const failure = result.failures.find((entry) => entry.exitCode !== undefined);
+  if (!failure) return;
+  log.error(failure.message);
+  process.exit(failure.exitCode ?? 1);
+}
+
+function buildConfigOverrides(options: RunOptions): Partial<Config> {
+  const overrides: Partial<Config> = {};
+  if (options.dryRun) overrides.dryRun = true;
+  if (options.model) overrides.model = options.model;
+  if (options.skipTests) overrides.skipTests = true;
+  if (options.skipReview) overrides.skipReview = true;
+  if (options.skipLearn) overrides.skipLearn = true;
+  if (options.milestone) overrides.milestone = options.milestone;
+  if (options.autoMerge) overrides.autoMerge = true;
+  if (options.mergeTo) overrides.mergeTo = options.mergeTo;
+  if (options.batch) overrides.batch = true;
+  if (options.batchSize) overrides.batchSize = options.batchSize;
+  if (options.verbose) overrides.verbose = true;
+  return overrides;
+}
+
+function rejectIncompatibleEpicQueueOptions(options: RunOptions): boolean {
+  const incompatible: string[] = [];
+  if (options.epic !== undefined) incompatible.push('--epic');
+  if (options.verifyOnly !== undefined) incompatible.push('--verify-only');
+  if (options.milestone) incompatible.push('--milestone');
+  if (options.skipEpic) incompatible.push('--skip-epic');
+  if (options.mergeTo) incompatible.push('--merge-to');
+
+  if (incompatible.length === 0) return false;
+
+  log.error(`--epics cannot be combined with ${incompatible.join(', ')}`);
+  process.exit(1);
+  return true;
+}
+
+function printDryRunEpicQueue(entries: ReturnType<typeof validateEpicQueue>['entries']): void {
+  log.dry(`Validated epic queue (${entries.length} epic${entries.length === 1 ? '' : 's'}):`);
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    const suffixes = [
+      entry.status === 'already-complete' ? 'already complete; will skip' : '',
+      entry.validationWarning ? `warning: ${entry.validationWarning}` : '',
+    ].filter(Boolean);
+    const suffix = suffixes.length > 0 ? ` (${suffixes.join('; ')})` : '';
+    log.dry(`  ${index + 1}. #${entry.epicNumber} ${entry.title}${suffix}`);
+  }
+}
+
+function normalizeQueueBranchMode(value: BranchAncestryMode | undefined): BranchAncestryMode {
+  if (value === undefined) return 'stacked';
+  if (value === 'stacked' || value === 'independent') return value;
+  throw new Error(`Invalid queue branch mode: ${value}. Expected "stacked" or "independent".`);
+}
+
+function toManifestFailures(failures: EpicExecutionFailure[]): EpicQueueManifestFailure[] {
+  return failures.map((failure) => ({
+    code: failure.code,
+    message: failure.message,
+    ...(failure.issueNum !== undefined ? { issueNum: failure.issueNum } : {}),
+    ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
+  }));
+}
+
+function stopReasonForEpicResult(result: EpicExecutionResult): string {
+  const firstFailure = result.failures[0];
+  if (!firstFailure) return `Epic #${result.epicNumber} stopped without a reported failure`;
+
+  const reasonByCode: Partial<Record<EpicExecutionFailureCode, string>> = {
+    'checklist-update-failed': 'checklist-consistency-error',
+    'epic-verification-failed': 'epic-verification-failed',
+    'epic-incomplete': 'epic-incomplete',
+    'transient-stop': 'transient-agent-stop',
+  };
+  const reason = reasonByCode[firstFailure.code] ?? firstFailure.code;
+  return `Epic #${result.epicNumber} stopped: ${reason}`;
+}
+
+type QueueRiskMap = Map<number, { dependencyWarnings: string[]; overlapWarnings: string[] }>;
+
+function queueEpicLink(entry: ValidatedEpicQueueEntry | EpicQueueManifestEntry | undefined): QueueEpicLink | null {
+  if (!entry) return null;
+  const link: QueueEpicLink = {
+    number: entry.epicNumber,
+    title: entry.title,
+  };
+  if ('sessionBranch' in entry) link.sessionBranch = entry.sessionBranch;
+  if ('sessionPrUrl' in entry) link.sessionPrUrl = entry.sessionPrUrl;
+  return link;
+}
+
+function addQueueDependencyNote(risks: QueueRiskMap, epicNumber: number, note: string): void {
+  const entry = risks.get(epicNumber);
+  if (!entry || entry.dependencyWarnings.includes(note)) return;
+  entry.dependencyWarnings.push(note);
+}
+
+function addQueueOverlapNote(risks: QueueRiskMap, epicNumber: number, note: string): void {
+  const entry = risks.get(epicNumber);
+  if (!entry || entry.overlapWarnings.includes(note)) return;
+  entry.overlapWarnings.push(note);
+}
+
+function buildQueueRiskMap(entries: ValidatedEpicQueueEntry[]): QueueRiskMap {
+  const risks: QueueRiskMap = new Map(entries.map((entry) => [
+    entry.epicNumber,
+    { dependencyWarnings: [], overlapWarnings: [] },
+  ]));
+  const queuedEpicNumbers = new Set(entries.map((entry) => entry.epicNumber));
+
+  for (const entry of entries) {
+    for (const dep of parseDependencies(entry.issue.body).filter((num) => queuedEpicNumbers.has(num))) {
+      addQueueDependencyNote(
+        risks,
+        entry.epicNumber,
+        `Epic #${entry.epicNumber} declares a dependency on queued epic #${dep}.`,
+      );
+      addQueueDependencyNote(
+        risks,
+        dep,
+        `Later queued epic #${entry.epicNumber} declares a dependency on this epic.`,
+      );
+    }
+  }
+
+  const report = validateIssueQueue(
+    entries.map((entry) => ({ number: entry.epicNumber, title: entry.title, body: entry.issue.body })),
+    0,
+  );
+  for (const warning of report.dependencyWarnings) {
+    const note = `Queue order warning: ${warning.reason}.`;
+    addQueueDependencyNote(risks, warning.issueNum, note);
+    addQueueDependencyNote(risks, warning.dependsOn, note);
+  }
+  for (const warning of report.overlapWarnings) {
+    const note = `Epics #${warning.issueA} and #${warning.issueB} both mention ${warning.sharedFiles.join(', ')}.`;
+    addQueueOverlapNote(risks, warning.issueA, note);
+    addQueueOverlapNote(risks, warning.issueB, note);
+  }
+
+  return risks;
+}
+
+function buildQueueSessionContext(args: {
+  manifest: EpicQueueManifest;
+  entries: ValidatedEpicQueueEntry[];
+  currentIndex: number;
+  branchAncestryMode: BranchAncestryMode;
+  baseBranch: string;
+  previousSessionBranch: string | null;
+  previousSessionPrUrl: string | null;
+  risks: QueueRiskMap;
+}): QueueSessionContext {
+  const currentEntry = args.entries[args.currentIndex];
+  const manifestEntry = args.manifest.epics.find((entry) => entry.epicNumber === currentEntry.epicNumber);
+  const previousManifestEntry = args.currentIndex > 0 ? args.manifest.epics[args.currentIndex - 1] : undefined;
+  const nextManifestEntry = args.currentIndex < args.manifest.epics.length - 1
+    ? args.manifest.epics[args.currentIndex + 1]
+    : undefined;
+  const dependsOnSessionBranch = args.branchAncestryMode === 'stacked' ? args.previousSessionBranch : null;
+  const dependsOnSessionPrUrl = dependsOnSessionBranch ? args.previousSessionPrUrl : null;
+  const risk = args.risks.get(currentEntry.epicNumber) ?? { dependencyWarnings: [], overlapWarnings: [] };
+
+  return {
+    queueId: args.manifest.queueId,
+    queueIndex: args.currentIndex + 1,
+    queueTotal: args.entries.length,
+    currentEpic: {
+      number: currentEntry.epicNumber,
+      title: currentEntry.title,
+      sessionBranch: manifestEntry?.sessionBranch ?? null,
+      sessionPrUrl: manifestEntry?.sessionPrUrl ?? null,
+    },
+    previousEpic: queueEpicLink(previousManifestEntry),
+    nextEpic: queueEpicLink(nextManifestEntry),
+    previousSessionBranch: args.previousSessionBranch,
+    previousSessionPrUrl: args.previousSessionPrUrl,
+    branchAncestryMode: args.branchAncestryMode,
+    branchedFromBranch: dependsOnSessionBranch ?? args.baseBranch,
+    dependsOnSessionBranch,
+    dependsOnSessionPrUrl,
+    rebaseOntoBranch: dependsOnSessionBranch ? args.baseBranch : null,
+    dependencyWarnings: risk.dependencyWarnings,
+    overlapWarnings: risk.overlapWarnings,
+  };
+}
+
+function applyQueueContextToManifestEntry(entry: EpicQueueManifestEntry, queue: QueueSessionContext): void {
+  entry.queueIndex = queue.queueIndex;
+  entry.queueTotal = queue.queueTotal;
+  entry.previousEpic = queue.previousEpic;
+  entry.nextEpic = queue.nextEpic;
+  entry.branchAncestryMode = queue.branchAncestryMode;
+  entry.branchedFromBranch = queue.branchedFromBranch;
+  entry.dependsOnSessionBranch = queue.dependsOnSessionBranch;
+  entry.dependsOnSessionPrUrl = queue.dependsOnSessionPrUrl;
+  entry.rebaseOntoBranch = queue.rebaseOntoBranch;
+  entry.dependencyWarnings = queue.dependencyWarnings;
+  entry.overlapWarnings = queue.overlapWarnings;
+}
+
+function writeQueueManifestUpdate(manifest: EpicQueueManifest): void {
+  const manifestPath = writeQueueManifest(process.cwd(), manifest);
+  log.info(`Queue manifest saved: ${manifestPath}`);
+}
+
+async function runEpicQueue(config: Config, options: RunOptions): Promise<void> {
+  if (rejectIncompatibleEpicQueueOptions(options)) return;
+
+  let epicNumbers: number[];
+  try {
+    epicNumbers = parseEpicQueue(options.epics ?? '');
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+    return;
+  }
+
+  let branchAncestryMode: BranchAncestryMode;
+  try {
+    branchAncestryMode = normalizeQueueBranchMode(options.queueBranchMode);
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+    return;
+  }
+
+  const validation = validateEpicQueue(config.repo, epicNumbers, undefined, {
+    allowMissingEpicLabel: config.dryRun,
+  });
+  if (validation.errors.length > 0) {
+    for (const error of validation.errors) {
+      log.error(error.message);
+    }
+    if (!config.dryRun) {
+      writeQueueManifestUpdate(createEpicQueueValidationFailureManifest(epicNumbers, validation.errors, new Date(), branchAncestryMode));
+    }
+    process.exit(1);
+    return;
+  }
+
+  if (config.dryRun) {
+    printDryRunEpicQueue(validation.entries);
+    return;
+  }
+
+  const manifest = createEpicQueueManifest(validation.entries, new Date(), branchAncestryMode);
+  const queueRisks = buildQueueRiskMap(validation.entries);
+  writeQueueManifestUpdate(manifest);
+
+  const queueConfig: Config = {
+    ...config,
+    autoMerge: true,
+    mergeTo: '',
+  };
+  const queueOptions: RunOptions = {
+    ...options,
+    autoMerge: true,
+    mergeTo: undefined,
+    epics: undefined,
+    stopOnPartialEpic: true,
+  };
+
+  let previousSessionBranch: string | null = null;
+  let previousSessionPrUrl: string | null = null;
+  let previousSessionManifestEntry: EpicQueueManifestEntry | null = null;
+
+  for (let index = 0; index < validation.entries.length; index++) {
+    const validatedEntry = validation.entries[index];
+    const manifestEntry = manifest.epics.find((entry) => entry.epicNumber === validatedEntry.epicNumber);
+    if (!manifestEntry) continue;
+
+    if (manifestEntry.status === 'skipped') {
+      log.info(`Skipping epic #${validatedEntry.epicNumber}: ${manifestEntry.skipReason}`);
+      continue;
+    }
+
+    const queueContext = buildQueueSessionContext({
+      manifest,
+      entries: validation.entries,
+      currentIndex: index,
+      branchAncestryMode,
+      baseBranch: config.baseBranch,
+      previousSessionBranch,
+      previousSessionPrUrl,
+      risks: queueRisks,
+    });
+    applyQueueContextToManifestEntry(manifestEntry, queueContext);
+    manifestEntry.status = 'running';
+    manifestEntry.startedAt = new Date().toISOString();
+    writeQueueManifestUpdate(manifest);
+
+    const result = await (async (): Promise<EpicExecutionResult> => {
+      try {
+        return await runSingleEpicExecution({
+          config: queueConfig,
+          epicNumber: validatedEntry.epicNumber,
+          epicIssue: validatedEntry.issue,
+          options: queueOptions,
+          queue: queueContext,
+        });
+      } catch (err) {
+        return buildEpicFailureResult(validatedEntry.epicNumber, {
+          code: 'epic-run-error',
+          message: `Epic #${validatedEntry.epicNumber} failed with an unhandled error: ${err instanceof Error ? err.message : err}`,
+          issueNum: validatedEntry.epicNumber,
+        });
+      }
+    })();
+
+    manifestEntry.sessionName = result.sessionName;
+    manifestEntry.sessionBranch = result.sessionBranch;
+    manifestEntry.sessionPrUrl = result.sessionPrUrl;
+    manifestEntry.failures = toManifestFailures(result.failures);
+    manifestEntry.endedAt = new Date().toISOString();
+    manifestEntry.status = result.status === 'success' ? 'success' : 'failure';
+
+    if (result.status === 'failure') {
+      manifest.status = 'stopped';
+      manifest.stopReason = stopReasonForEpicResult(result);
+      manifest.endedAt = manifestEntry.endedAt;
+      writeQueueManifestUpdate(manifest);
+      log.error(manifest.stopReason);
+      process.exit(1);
+      return;
+    }
+
+    writeQueueManifestUpdate(manifest);
+    if (previousSessionManifestEntry) {
+      previousSessionManifestEntry.nextSessionBranch = result.sessionBranch;
+      previousSessionManifestEntry.nextSessionPrUrl = result.sessionPrUrl;
+    }
+    previousSessionBranch = result.sessionBranch;
+    previousSessionPrUrl = result.sessionPrUrl;
+    previousSessionManifestEntry = manifestEntry;
+  }
+
+  manifest.status = 'success';
+  manifest.endedAt = new Date().toISOString();
+  writeQueueManifestUpdate(manifest);
+  log.success(`Epic queue complete: ${manifest.epics.length} epic${manifest.epics.length === 1 ? '' : 's'}`);
+}
+
+/**
+ * Run the main loop: poll issues, process them, finalize session.
+ */
+export async function runCommand(options: RunOptions): Promise<void> {
+  const config = loadConfig(buildConfigOverrides(options));
+
+  if (!config.repo) {
+    log.error('No repository configured. Run "alpha-loop init" or set repo in .alpha-loop.yaml');
+    process.exit(1);
+    return;
+  }
+
+  if (options.epics !== undefined) {
+    await runEpicQueue(config, options);
+    return;
+  }
+
+  // --- Verify-only path: bypass the normal loop entirely ---
+  if (options.verifyOnly !== undefined) {
+    if (!Number.isFinite(options.verifyOnly) || options.verifyOnly <= 0) {
+      log.error('--verify-only requires a positive integer issue number (e.g. --verify-only 165)');
+      process.exit(1);
+      return;
+    }
+    log.step(`Running verify-only pass for epic #${options.verifyOnly}`);
+    const verification = await runEpicVerificationFlow(options.verifyOnly, config, null);
+    if (verification.failure?.exitCode !== undefined) {
+      process.exit(verification.failure.exitCode);
+    }
+    return;
+  }
+
+  // --epic <N> overrides everything except --verify-only.
+  if (options.epic !== undefined) {
+    const result = await runSingleEpicExecution({
+      config,
+      epicNumber: options.epic,
+      options,
+    });
+    exitForCliEpicValidationFailure(result);
+    return;
+  }
+
+  // --- Target selection (epic or milestone) — must happen before session creation ---
+  const target = await resolveRunTarget(config, options);
+  if (!target) return;
+
+  if (target.activeEpic !== undefined) {
+    const result = await runSingleEpicExecution({
+      config,
+      epicNumber: target.activeEpic,
+      epicIssue: target.activeEpicIssue,
+      options,
+    });
+    exitForCliEpicValidationFailure(result);
+    return;
+  }
+
+  await runIssueSession(config, options, {
+    type: 'flat',
+    activeMilestone: target.activeMilestone,
+  });
 }

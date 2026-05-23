@@ -57,8 +57,17 @@ jest.mock('../../src/lib/rate-limit', () => ({
 
 jest.mock('../../src/lib/planning', () => ({
   extractJsonFromResponse: jest.fn(),
+  formatEpicQueuePlan: jest.fn(() => 'FORMATTED QUEUE PLAN'),
   formatRoadmapTable: jest.fn(() => 'FORMATTED ROADMAP'),
   normalizeRoadmapPlan: jest.requireActual('../../src/lib/planning').normalizeRoadmapPlan,
+  planEpicQueue: jest.fn(() => ({
+    milestoneFilter: null,
+    totalEpicCount: 0,
+    consideredEpicCount: 0,
+    orderedEpics: [],
+    blockedEpics: [],
+    command: null,
+  })),
   buildPlanningContext: jest.fn(() => ({
     visionContext: null,
     projectContext: null,
@@ -79,7 +88,7 @@ import { checkbox, confirm } from '@inquirer/prompts';
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { buildRoadmapPrompt } from '../../src/lib/prompts';
-import { extractJsonFromResponse } from '../../src/lib/planning';
+import { extractJsonFromResponse, formatEpicQueuePlan, planEpicQueue } from '../../src/lib/planning';
 import {
   listOpenIssues,
   listRoadmapEpics,
@@ -94,6 +103,8 @@ const mockConfirm = confirm as jest.MockedFunction<typeof confirm>;
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockBuildRoadmapPrompt = buildRoadmapPrompt as jest.MockedFunction<typeof buildRoadmapPrompt>;
 const mockExtractJson = extractJsonFromResponse as jest.MockedFunction<typeof extractJsonFromResponse>;
+const mockFormatEpicQueuePlan = formatEpicQueuePlan as jest.MockedFunction<typeof formatEpicQueuePlan>;
+const mockPlanEpicQueue = planEpicQueue as jest.MockedFunction<typeof planEpicQueue>;
 const mockListOpenIssues = listOpenIssues as jest.MockedFunction<typeof listOpenIssues>;
 const mockListRoadmapEpics = listRoadmapEpics as jest.MockedFunction<typeof listRoadmapEpics>;
 const mockListMilestones = listMilestones as jest.MockedFunction<typeof listMilestones>;
@@ -153,6 +164,15 @@ describe('roadmap command', () => {
     jest.clearAllMocks();
     mockBuildRoadmapPrompt.mockReturnValue('ROADMAP PROMPT');
     mockListRoadmapEpics.mockReturnValue([]);
+    mockFormatEpicQueuePlan.mockReturnValue('FORMATTED QUEUE PLAN');
+    mockPlanEpicQueue.mockReturnValue({
+      milestoneFilter: null,
+      totalEpicCount: 0,
+      consideredEpicCount: 0,
+      orderedEpics: [],
+      blockedEpics: [],
+      command: null,
+    });
   });
 
   afterEach(() => {
@@ -167,6 +187,124 @@ describe('roadmap command', () => {
     expect(log.info).toHaveBeenCalledWith(expect.stringContaining('No open issues'));
     expect(mockExec).not.toHaveBeenCalled();
     expect(mockCreateMilestone).not.toHaveBeenCalled();
+    expect(mockSetIssueMilestone).not.toHaveBeenCalled();
+  });
+
+  it('prints an epic queue recommendation without invoking AI or mutating GitHub', async () => {
+    const { loadConfig } = require('../../src/lib/config');
+    const milestones = [
+      { number: 4, title: '001 - Existing Core', description: 'Core', openIssues: 0, closedIssues: 0, dueOn: null, state: 'open' },
+    ];
+    mockListOpenIssues.mockReturnValue([
+      { number: 195, title: 'Epic: Scheduling', body: 'Epic body', labels: ['epic'], milestone: '001 - Existing Core' },
+      { number: 7, title: 'Create API endpoints', body: 'REST API', labels: ['ready'] },
+    ]);
+    mockListRoadmapEpics.mockReturnValue(SAMPLE_EPIC_CONTEXT);
+    mockListMilestones.mockReturnValue(milestones);
+    mockFormatEpicQueuePlan.mockReturnValue('FORMATTED QUEUE PLAN');
+
+    await roadmapCommand({ queue: true, milestone: '001 - Existing Core' });
+
+    expect(mockListOpenIssues).toHaveBeenCalledWith('owner/repo', 1000);
+    expect(loadConfig).toHaveBeenCalledWith({
+      dryRun: true,
+      milestone: '001 - Existing Core',
+    });
+    expect(mockPlanEpicQueue).toHaveBeenCalledWith(SAMPLE_EPIC_CONTEXT, {
+      labelReady: 'ready',
+      milestone: '001 - Existing Core',
+      openIssues: expect.arrayContaining([
+        expect.objectContaining({ number: 195 }),
+        expect.objectContaining({ number: 7 }),
+      ]),
+      milestones,
+    });
+    expect(consoleSpy).toHaveBeenCalledWith('FORMATTED QUEUE PLAN');
+    expect(log.dry).toHaveBeenCalledWith(expect.stringContaining('Queue planning only'));
+    expect(mockBuildRoadmapPrompt).not.toHaveBeenCalled();
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(mockCheckbox).not.toHaveBeenCalled();
+    expect(mockCreateMilestone).not.toHaveBeenCalled();
+    expect(mockSetIssueMilestone).not.toHaveBeenCalled();
+    expect(mockAddIssueToProject).not.toHaveBeenCalled();
+  });
+
+  it('prints runnable command text and blocked epic notes for planned queue output', async () => {
+    const actualPlanning = jest.requireActual('../../src/lib/planning');
+    mockFormatEpicQueuePlan.mockImplementation(actualPlanning.formatEpicQueuePlan);
+    mockListOpenIssues.mockReturnValue([
+      { number: 205, title: 'Epic: Foundation', body: 'Epic body', labels: ['epic'], milestone: '001 - Existing Core' },
+      { number: 214, title: 'Epic: Follow-up', body: 'Depends on #205', labels: ['epic'], milestone: '001 - Existing Core' },
+      { number: 300, title: 'Epic: Blocked', body: 'Depends on #999', labels: ['epic'], milestone: '001 - Existing Core' },
+      { number: 305, title: 'Ready child', body: 'Child body', labels: ['ready'] },
+    ]);
+    mockListRoadmapEpics.mockReturnValue(SAMPLE_EPIC_CONTEXT);
+    mockListMilestones.mockReturnValue([
+      { number: 4, title: '001 - Existing Core', description: 'Core', openIssues: 0, closedIssues: 0, dueOn: null, state: 'open' },
+    ]);
+    mockPlanEpicQueue.mockReturnValue({
+      milestoneFilter: '001 - Existing Core',
+      totalEpicCount: 3,
+      consideredEpicCount: 3,
+      orderedEpics: [
+        {
+          issueNum: 205,
+          title: 'Epic: Foundation',
+          status: 'runnable',
+          readyChildCount: 1,
+          completedChildCount: 0,
+          blockedChildCount: 0,
+          totalChildCount: 1,
+          queueDependencies: [],
+          rationale: ['Child readiness: 1 ready'],
+          blockers: [],
+          risks: ['Likely file overlap with #214: src/lib/session.ts'],
+        },
+        {
+          issueNum: 214,
+          title: 'Epic: Follow-up',
+          status: 'runnable',
+          readyChildCount: 1,
+          completedChildCount: 0,
+          blockedChildCount: 0,
+          totalChildCount: 1,
+          queueDependencies: [205],
+          rationale: ['Queue dependencies: #205'],
+          blockers: [],
+          risks: ['Likely file overlap with #205: src/lib/session.ts'],
+        },
+      ],
+      blockedEpics: [
+        {
+          issueNum: 300,
+          title: 'Epic: Blocked',
+          status: 'blocked',
+          readyChildCount: 0,
+          completedChildCount: 0,
+          blockedChildCount: 1,
+          totalChildCount: 1,
+          queueDependencies: [],
+          rationale: [],
+          blockers: ['Open dependency #999 is outside the planned epic queue'],
+          risks: [],
+        },
+      ],
+      command: 'alpha-loop run --epics 205,214',
+    } as any);
+
+    await roadmapCommand({ queue: true, milestone: '001 - Existing Core' });
+
+    const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+    expect(output).toContain('Epic Queue Recommendation');
+    expect(output).toContain('Scope: milestone "001 - Existing Core"');
+    expect(output).toContain('Runnable Queue (2)');
+    expect(output).toContain('#205 Epic: Foundation');
+    expect(output).toContain('#214 Epic: Follow-up');
+    expect(output).toContain('Blocked Epics (1)');
+    expect(output).toContain('Open dependency #999 is outside the planned epic queue');
+    expect(output).toContain('alpha-loop run --epics 205,214');
+    expect(mockBuildRoadmapPrompt).not.toHaveBeenCalled();
+    expect(mockExec).not.toHaveBeenCalled();
     expect(mockSetIssueMilestone).not.toHaveBeenCalled();
   });
 

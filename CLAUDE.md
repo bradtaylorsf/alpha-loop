@@ -23,19 +23,22 @@ alpha-loop run           # Run the loop continuously
 alpha-loop run --once    # Process one issue and exit
 alpha-loop run --dry-run # Dry run (preview, no changes)
 alpha-loop run --epic <N>        # Process an epic (sub-issues in checklist order, auto-verify on completion)
+alpha-loop run --epics <ids>     # Process multiple epics in order, one session PR per epic
 alpha-loop run --verify-only <N> # Run just the epic verification pass
 alpha-loop scan          # Generate/refresh project context
 alpha-loop plan          # Generate project scope (milestones + issues) from seed inputs
 alpha-loop add           # Create a new issue from a free-form description using AI
 alpha-loop triage        # Analyze and improve existing issues
 alpha-loop roadmap       # Organize open issues into milestones
+alpha-loop roadmap --queue       # Recommend the next ordered epic run queue
 alpha-loop vision        # (deprecated) Use "alpha-loop plan" instead
 alpha-loop auth          # Save authenticated browser state
 alpha-loop resume        # Resume stranded work from crashed sessions
 alpha-loop resume --issue 34     # Resume a specific issue
 alpha-loop review        # Analyze learnings, propose agent/skill improvements
 alpha-loop review --apply        # Apply improvements and create draft PR
-alpha-loop history       # View session history
+alpha-loop history       # View session and queue history
+alpha-loop history queue-<timestamp> # Inspect a multi-epic queue manifest
 alpha-loop history <name> --qa    # Show QA checklist for session
 alpha-loop history --clean        # Remove old session data
 pnpm test               # Run all tests

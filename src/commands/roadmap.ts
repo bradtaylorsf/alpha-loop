@@ -14,8 +14,10 @@ import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
 import {
   extractJsonFromResponse,
+  formatEpicQueuePlan,
   formatRoadmapTable,
   normalizeRoadmapPlan,
+  planEpicQueue,
   buildPlanningContext,
   type RoadmapPlan,
 } from '../lib/planning.js';
@@ -31,19 +33,28 @@ import {
 export type RoadmapOptions = {
   dryRun?: boolean;
   yes?: boolean;
+  queue?: boolean;
+  milestone?: string;
 };
 
 /** Truncate issue bodies to stay within agent context limits. */
 const MAX_BODY_CHARS = 500;
 
 export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
-  const config = loadConfig({ dryRun: options.dryRun });
+  const configOverrides: NonNullable<Parameters<typeof loadConfig>[0]> = {};
+  if (options.queue) {
+    configOverrides.dryRun = true;
+    if (options.milestone) configOverrides.milestone = options.milestone;
+  } else if (options.dryRun !== undefined) {
+    configOverrides.dryRun = options.dryRun;
+  }
+  const config = loadConfig(configOverrides);
 
   // ── Fetch open issues ──────────────────────────────────────────────────────
   log.step('Fetching open issues...');
-  const issues = listOpenIssues(config.repo);
+  const issues = options.queue ? listOpenIssues(config.repo, 1000) : listOpenIssues(config.repo);
 
-  if (issues.length === 0) {
+  if (issues.length === 0 && !options.queue) {
     log.info('No open issues found. Nothing to organize.');
     return;
   }
@@ -58,6 +69,20 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
   log.step('Fetching existing milestones...');
   const existingMilestones = listMilestones(config.repo);
   log.info(`Found ${existingMilestones.length} existing milestone(s)`);
+
+  if (options.queue) {
+    const plan = planEpicQueue(epics, {
+      labelReady: config.labelReady,
+      milestone: options.milestone ?? null,
+      openIssues: issues,
+      milestones: existingMilestones,
+    });
+    console.log('');
+    console.log(formatEpicQueuePlan(plan));
+    console.log('');
+    log.dry('Queue planning only — no changes will be made.');
+    return;
+  }
 
   const epicIssueNums = new Set(epics.map((epic) => epic.issueNum));
   const epicChildIssueNums = new Set(epics.flatMap((epic) => epic.children.map((child) => child.issueNum)));

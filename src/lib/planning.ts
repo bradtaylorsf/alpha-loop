@@ -7,8 +7,9 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'n
 import { join, relative } from 'node:path';
 import { getVisionContext } from './vision.js';
 import { getProjectContext } from './context.js';
-import { pollIssues, type Issue } from './github.js';
+import { pollIssues, type Issue, type Milestone, type RoadmapEpicContext } from './github.js';
 import type { Config } from './config.js';
+import { extractFilePaths, parseDependencies } from './validation.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -86,6 +87,57 @@ export type RoadmapAssignmentGroups = {
 
 export type RoadmapPlan = RoadmapAssignmentGroups & {
   milestones: PlannedMilestone[];
+};
+
+export type EpicQueueChildStatus = 'complete' | 'ready' | 'not_ready' | 'blocked';
+
+export type EpicQueueChildReadiness = {
+  issueNum: number;
+  title: string;
+  checked: boolean;
+  labels: string[];
+  state: string | null;
+  milestone: string | null;
+  status: EpicQueueChildStatus;
+  reason: string;
+};
+
+export type EpicQueuePlanItemStatus = 'runnable' | 'blocked';
+
+export type EpicQueuePlanItem = {
+  issueNum: number;
+  title: string;
+  milestone: string | null;
+  status: EpicQueuePlanItemStatus;
+  childReadiness: EpicQueueChildReadiness[];
+  completedChildCount: number;
+  readyChildCount: number;
+  blockedChildCount: number;
+  totalChildCount: number;
+  explicitDependencies: number[];
+  queueDependencies: number[];
+  externalOpenDependencies: number[];
+  resolvedDependencies: number[];
+  filePaths: string[];
+  rationale: string[];
+  blockers: string[];
+  risks: string[];
+};
+
+export type EpicQueuePlan = {
+  milestoneFilter: string | null;
+  totalEpicCount: number;
+  consideredEpicCount: number;
+  orderedEpics: EpicQueuePlanItem[];
+  blockedEpics: EpicQueuePlanItem[];
+  command: string | null;
+};
+
+export type EpicQueuePlanOptions = {
+  labelReady: string;
+  milestone?: string | null;
+  openIssues?: Issue[];
+  milestones?: Milestone[];
 };
 
 // ── ANSI Colors ──────────────────────────────────────────────────────────────
@@ -679,6 +731,417 @@ function formatRoadmapAssignmentSection(
         : `${GRAY}[currently: unassigned]${NC}`;
       lines.push(`  #${a.issueNum}  ${a.title}  ${current}`);
     }
+  }
+
+  return lines.join('\n');
+}
+
+function normalizeLabel(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function hasLabel(labels: string[] | undefined, label: string): boolean {
+  const wanted = normalizeLabel(label);
+  return (labels ?? []).some((candidate) => normalizeLabel(candidate) === wanted);
+}
+
+function normalizeIssueState(value: string | undefined): string | null {
+  return value ? value.toLowerCase() : null;
+}
+
+function childReadiness(
+  child: RoadmapEpicContext['children'][number],
+  labelReady: string,
+): EpicQueueChildReadiness {
+  const labels = child.labels ?? [];
+  const state = normalizeIssueState(child.state);
+  const milestone = child.milestone ?? null;
+
+  if (child.checked) {
+    return {
+      issueNum: child.issueNum,
+      title: child.title,
+      checked: child.checked,
+      labels,
+      state,
+      milestone,
+      status: 'complete',
+      reason: 'Checklist item is already complete',
+    };
+  }
+
+  if (!child.title || child.title === '(issue details unavailable)') {
+    return {
+      issueNum: child.issueNum,
+      title: child.title,
+      checked: child.checked,
+      labels,
+      state,
+      milestone,
+      status: 'blocked',
+      reason: 'Issue details could not be fetched',
+    };
+  }
+
+  if (state && state !== 'open') {
+    return {
+      issueNum: child.issueNum,
+      title: child.title,
+      checked: child.checked,
+      labels,
+      state,
+      milestone,
+      status: 'blocked',
+      reason: `Issue is ${state}`,
+    };
+  }
+
+  if (hasLabel(labels, 'epic')) {
+    return {
+      issueNum: child.issueNum,
+      title: child.title,
+      checked: child.checked,
+      labels,
+      state,
+      milestone,
+      status: 'blocked',
+      reason: 'Nested epic child issues are not supported',
+    };
+  }
+
+  if (!hasLabel(labels, labelReady)) {
+    return {
+      issueNum: child.issueNum,
+      title: child.title,
+      checked: child.checked,
+      labels,
+      state,
+      milestone,
+      status: 'not_ready',
+      reason: `Missing '${labelReady}' label`,
+    };
+  }
+
+  return {
+    issueNum: child.issueNum,
+    title: child.title,
+    checked: child.checked,
+    labels,
+    state,
+    milestone,
+    status: 'ready',
+    reason: `Open and labeled '${labelReady}'`,
+  };
+}
+
+function collectEpicText(epic: RoadmapEpicContext): string {
+  return [
+    epic.title,
+    epic.bodySummary,
+    ...epic.children.map((child) => child.bodySummary),
+  ].filter(Boolean).join('\n');
+}
+
+function uniqueSorted(values: number[]): number[] {
+  return [...new Set(values)].sort((a, b) => a - b);
+}
+
+function collectEpicDependencies(epic: RoadmapEpicContext): number[] {
+  const childIssueNums = new Set(epic.children.map((child) => child.issueNum));
+  return uniqueSorted(parseDependencies(collectEpicText(epic)))
+    .filter((issueNum) => issueNum !== epic.issueNum && !childIssueNums.has(issueNum));
+}
+
+function collectEpicFiles(epic: RoadmapEpicContext): string[] {
+  return [...new Set(extractFilePaths(collectEpicText(epic)))].sort();
+}
+
+function milestoneSortIndex(milestones: Milestone[] | undefined, milestone: string | null): number {
+  if (!milestone) return Number.MAX_SAFE_INTEGER - 1;
+  const index = (milestones ?? []).findIndex((candidate) => candidate.title === milestone);
+  return index === -1 ? Number.MAX_SAFE_INTEGER - 2 : index;
+}
+
+function sortEpicsForPlanning(
+  epics: RoadmapEpicContext[],
+  milestones: Milestone[] | undefined,
+): RoadmapEpicContext[] {
+  return [...epics].sort((a, b) => {
+    const milestoneDelta = milestoneSortIndex(milestones, a.currentMilestone ?? null) -
+      milestoneSortIndex(milestones, b.currentMilestone ?? null);
+    if (milestoneDelta !== 0) return milestoneDelta;
+    return a.issueNum - b.issueNum;
+  });
+}
+
+function topologicalOrderEpicItems(items: EpicQueuePlanItem[]): {
+  ordered: EpicQueuePlanItem[];
+  cycleIssueNums: number[];
+} {
+  const itemMap = new Map(items.map((item) => [item.issueNum, item]));
+  const originalIndex = new Map(items.map((item, index) => [item.issueNum, index]));
+  const dependents = new Map<number, number[]>();
+  const remainingDeps = new Map<number, Set<number>>();
+
+  for (const item of items) {
+    const deps = item.queueDependencies.filter((dep) => itemMap.has(dep));
+    remainingDeps.set(item.issueNum, new Set(deps));
+    for (const dep of deps) {
+      if (!dependents.has(dep)) dependents.set(dep, []);
+      dependents.get(dep)!.push(item.issueNum);
+    }
+  }
+
+  const ready = items
+    .filter((item) => (remainingDeps.get(item.issueNum)?.size ?? 0) === 0)
+    .map((item) => item.issueNum)
+    .sort((a, b) => (originalIndex.get(a) ?? 0) - (originalIndex.get(b) ?? 0));
+  const ordered: EpicQueuePlanItem[] = [];
+
+  while (ready.length > 0) {
+    const current = ready.shift()!;
+    const item = itemMap.get(current);
+    if (!item) continue;
+    ordered.push(item);
+
+    for (const dependent of dependents.get(current) ?? []) {
+      const deps = remainingDeps.get(dependent);
+      if (!deps) continue;
+      deps.delete(current);
+      if (deps.size === 0) {
+        ready.push(dependent);
+        ready.sort((a, b) => (originalIndex.get(a) ?? 0) - (originalIndex.get(b) ?? 0));
+      }
+    }
+  }
+
+  if (ordered.length === items.length) {
+    return { ordered, cycleIssueNums: [] };
+  }
+
+  const orderedSet = new Set(ordered.map((item) => item.issueNum));
+  return {
+    ordered,
+    cycleIssueNums: items
+      .map((item) => item.issueNum)
+      .filter((issueNum) => !orderedSet.has(issueNum)),
+  };
+}
+
+function addFileOverlapRisks(items: EpicQueuePlanItem[]): void {
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      const left = items[i];
+      const right = items[j];
+      const shared = left.filePaths.filter((file) => right.filePaths.includes(file));
+      if (shared.length === 0) continue;
+      const files = shared.slice(0, 5).join(', ');
+      const suffix = shared.length > 5 ? `, +${shared.length - 5} more` : '';
+      left.risks.push(`Likely file overlap with #${right.issueNum}: ${files}${suffix}`);
+      right.risks.push(`Likely file overlap with #${left.issueNum}: ${files}${suffix}`);
+    }
+  }
+}
+
+function buildEpicQueuePlanItem(
+  epic: RoadmapEpicContext,
+  options: Required<Pick<EpicQueuePlanOptions, 'labelReady'>> & EpicQueuePlanOptions,
+  candidateNums: Set<number>,
+  openIssueNums: Set<number>,
+): EpicQueuePlanItem {
+  const childSignals = epic.children.map((child) => childReadiness(child, options.labelReady));
+  const completedChildCount = childSignals.filter((child) => child.status === 'complete').length;
+  const readyChildCount = childSignals.filter((child) => child.status === 'ready').length;
+  const blockedChildren = childSignals.filter((child) => child.status === 'blocked' || child.status === 'not_ready');
+  const explicitDependencies = collectEpicDependencies(epic);
+  const queueDependencies = explicitDependencies.filter((issueNum) => candidateNums.has(issueNum));
+  const externalOpenDependencies = explicitDependencies.filter((issueNum) => (
+    !candidateNums.has(issueNum) && openIssueNums.has(issueNum)
+  ));
+  const resolvedDependencies = explicitDependencies.filter((issueNum) => (
+    !candidateNums.has(issueNum) && !openIssueNums.has(issueNum)
+  ));
+  const filePaths = collectEpicFiles(epic);
+  const blockers: string[] = [];
+
+  if (epic.children.length === 0) {
+    blockers.push('No child issues found in the epic checklist');
+  }
+  for (const child of blockedChildren) {
+    blockers.push(`Child #${child.issueNum} ${child.title}: ${child.reason}`);
+  }
+  for (const dep of externalOpenDependencies) {
+    blockers.push(`Open dependency #${dep} is outside the planned epic queue`);
+  }
+
+  const rationale = [
+    epic.currentMilestone ? `Milestone: ${epic.currentMilestone}` : 'Milestone: unassigned',
+    `Child readiness: ${readyChildCount} ready, ${completedChildCount} complete, ${blockedChildren.length} blocked/not ready`,
+  ];
+  if (queueDependencies.length > 0) {
+    rationale.push(`Queue dependencies: ${queueDependencies.map((dep) => `#${dep}`).join(', ')}`);
+  } else {
+    rationale.push('Queue dependencies: none');
+  }
+  if (resolvedDependencies.length > 0) {
+    rationale.push(`Dependencies not open: ${resolvedDependencies.map((dep) => `#${dep}`).join(', ')} (assumed complete)`);
+  }
+
+  return {
+    issueNum: epic.issueNum,
+    title: epic.title,
+    milestone: epic.currentMilestone ?? null,
+    status: blockers.length > 0 ? 'blocked' : 'runnable',
+    childReadiness: childSignals,
+    completedChildCount,
+    readyChildCount,
+    blockedChildCount: blockedChildren.length,
+    totalChildCount: epic.children.length,
+    explicitDependencies,
+    queueDependencies,
+    externalOpenDependencies,
+    resolvedDependencies,
+    filePaths,
+    rationale,
+    blockers,
+    risks: [],
+  };
+}
+
+/**
+ * Analyze open roadmap epics and recommend a safe ordered `run --epics` queue.
+ *
+ * The helper is intentionally pure: it only consumes already-fetched GitHub
+ * context and never mutates issues, milestones, projects, branches, or sessions.
+ */
+export function planEpicQueue(
+  epics: RoadmapEpicContext[],
+  options: EpicQueuePlanOptions,
+): EpicQueuePlan {
+  const milestoneFilter = options.milestone?.trim() || null;
+  const considered = milestoneFilter
+    ? epics.filter((epic) => epic.currentMilestone === milestoneFilter)
+    : epics;
+  const sortedEpics = sortEpicsForPlanning(considered, options.milestones);
+  const candidateNums = new Set(sortedEpics.map((epic) => epic.issueNum));
+  const openIssueNums = new Set((options.openIssues ?? []).map((issue) => issue.number));
+  const items = sortedEpics.map((epic) => buildEpicQueuePlanItem(epic, options, candidateNums, openIssueNums));
+  const itemMap = new Map(items.map((item) => [item.issueNum, item]));
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const item of items) {
+      if (item.status === 'blocked') continue;
+      const blockedDeps = item.queueDependencies.filter((dep) => itemMap.get(dep)?.status === 'blocked');
+      if (blockedDeps.length === 0) continue;
+      for (const dep of blockedDeps) {
+        item.blockers.push(`Depends on blocked epic #${dep}`);
+      }
+      item.status = 'blocked';
+      changed = true;
+    }
+  }
+
+  const runnableCandidates = items.filter((item) => item.status === 'runnable');
+  const topo = topologicalOrderEpicItems(runnableCandidates);
+  if (topo.cycleIssueNums.length > 0) {
+    for (const issueNum of topo.cycleIssueNums) {
+      const item = itemMap.get(issueNum);
+      if (!item) continue;
+      item.status = 'blocked';
+      item.blockers.push('Cyclic dependency with another runnable epic');
+    }
+  }
+
+  const orderedEpics = topo.cycleIssueNums.length > 0
+    ? topologicalOrderEpicItems(items.filter((item) => item.status === 'runnable')).ordered
+    : topo.ordered;
+  const blockedEpics = items.filter((item) => item.status === 'blocked');
+
+  addFileOverlapRisks([...orderedEpics, ...blockedEpics]);
+
+  return {
+    milestoneFilter,
+    totalEpicCount: epics.length,
+    consideredEpicCount: considered.length,
+    orderedEpics,
+    blockedEpics,
+    command: orderedEpics.length > 0
+      ? `alpha-loop run --epics ${orderedEpics.map((item) => item.issueNum).join(',')}`
+      : null,
+  };
+}
+
+function formatPlanList(values: string[], empty: string): string[] {
+  return values.length > 0
+    ? values.map((value) => `     - ${value}`)
+    : [`     - ${empty}`];
+}
+
+function formatEpicQueuePlanItem(item: EpicQueuePlanItem, index?: number): string[] {
+  const prefix = index === undefined ? '-' : `${index + 1}.`;
+  const lines = [
+    `  ${prefix} #${item.issueNum} ${item.title}`,
+    `     Readiness: ${item.readyChildCount} ready, ${item.completedChildCount} complete, ${item.blockedChildCount} blocked/not ready (${item.totalChildCount} total)`,
+    '     Rationale:',
+    ...formatPlanList(item.rationale, 'No rationale signals found'),
+    '     Blockers:',
+    ...formatPlanList(item.blockers, 'None'),
+    '     Risks:',
+    ...formatPlanList(item.risks, 'None detected'),
+  ];
+  return lines;
+}
+
+export function formatEpicQueuePlan(plan: EpicQueuePlan): string {
+  const scope = plan.milestoneFilter
+    ? `milestone "${plan.milestoneFilter}"`
+    : 'all open epics';
+  const lines = [
+    `${BOLD}${CYAN}Epic Queue Recommendation${NC}`,
+    `Scope: ${scope}`,
+    `Open epics considered: ${plan.consideredEpicCount}/${plan.totalEpicCount}`,
+    '',
+  ];
+
+  if (plan.totalEpicCount === 0) {
+    lines.push('No open epics found.');
+    return lines.join('\n');
+  }
+
+  if (plan.consideredEpicCount === 0) {
+    lines.push('No open epics matched the requested scope.');
+    return lines.join('\n');
+  }
+
+  if (plan.orderedEpics.length > 0) {
+    lines.push(`${BOLD}Runnable Queue (${plan.orderedEpics.length})${NC}`);
+    plan.orderedEpics.forEach((item, index) => {
+      lines.push(...formatEpicQueuePlanItem(item, index));
+    });
+  } else {
+    lines.push(`${BOLD}Runnable Queue (0)${NC}`);
+    lines.push('  No runnable epic queue found.');
+  }
+
+  lines.push('');
+  if (plan.blockedEpics.length > 0) {
+    lines.push(`${BOLD}Blocked Epics (${plan.blockedEpics.length})${NC}`);
+    for (const item of plan.blockedEpics) {
+      lines.push(...formatEpicQueuePlanItem(item));
+    }
+  } else {
+    lines.push(`${BOLD}Blocked Epics (0)${NC}`);
+    lines.push('  None');
+  }
+
+  lines.push('');
+  lines.push(`${BOLD}Command${NC}`);
+  if (plan.command) {
+    lines.push(`  ${plan.command}`);
+  } else {
+    lines.push('  No executable queue command because no runnable epics were found.');
   }
 
   return lines.join('\n');

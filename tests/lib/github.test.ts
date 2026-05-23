@@ -463,8 +463,24 @@ describe('epic issue helpers', () => {
       totalChildCount: 2,
       openChildCount: 1,
       children: [
-        { issueNum: 3, title: 'Set up database schema', bodySummary: 'Create tables for roadmap data.', checked: true },
-        { issueNum: 7, title: 'Create API endpoints', bodySummary: 'REST API for scheduling.', checked: false },
+        {
+          issueNum: 3,
+          title: 'Set up database schema',
+          bodySummary: 'Create tables for roadmap data.',
+          checked: true,
+          labels: [],
+          state: 'OPEN',
+          milestone: null,
+        },
+        {
+          issueNum: 7,
+          title: 'Create API endpoints',
+          bodySummary: 'REST API for scheduling.',
+          checked: false,
+          labels: [],
+          state: 'OPEN',
+          milestone: null,
+        },
       ],
     }]);
     expect(mockExec).toHaveBeenCalledWith(
@@ -509,9 +525,12 @@ describe('epic issue helpers', () => {
       title: 'Create API endpoints',
       bodySummary: 'REST API for scheduling.',
       checked: false,
+      labels: [],
+      state: 'OPEN',
+      milestone: null,
     });
     expect(mockExec).toHaveBeenCalledWith(
-      'gh issue view 7 --repo "owner/repo" --json number,title,body,labels,comments',
+      'gh issue view 7 --repo "owner/repo" --json number,title,body,labels,comments,state,stateReason,milestone',
     );
   });
 
@@ -567,7 +586,7 @@ describe('epic issue helpers', () => {
 
     expect(body).toBe('## Ordered Work\n\n- [ ] #1');
     expect(mockExec).toHaveBeenCalledWith(
-      'gh issue view 99 --repo "owner/repo" --json number,title,body,labels,comments',
+      'gh issue view 99 --repo "owner/repo" --json number,title,body,labels,comments,state,stateReason,milestone',
     );
   });
 

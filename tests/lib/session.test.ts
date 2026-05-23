@@ -1,5 +1,6 @@
 import { createSession, saveResult, getPreviousResult, finalizeSession } from '../../src/lib/session';
 import type { PipelineResult } from '../../src/lib/pipeline';
+import type { BranchAncestryMode, QueueSessionContext } from '../../src/lib/epic-queue';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
@@ -101,6 +102,37 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
   };
 }
 
+function makeQueueContext(overrides: Partial<QueueSessionContext> = {}): QueueSessionContext {
+  const mode: BranchAncestryMode = overrides.branchAncestryMode ?? 'stacked';
+  const previousSessionBranch = overrides.previousSessionBranch ?? 'session/epic-205-first';
+  const dependsOnSessionBranch = overrides.dependsOnSessionBranch
+    ?? (mode === 'stacked' ? previousSessionBranch : null);
+
+  return {
+    queueId: 'queue-20260521T101112Z',
+    queueIndex: 2,
+    queueTotal: 3,
+    currentEpic: { number: 166, title: 'Second Epic' },
+    previousEpic: {
+      number: 205,
+      title: 'First Epic',
+      sessionBranch: 'session/epic-205-first',
+      sessionPrUrl: 'https://github.com/owner/repo/pull/205',
+    },
+    nextEpic: { number: 214, title: 'Third Epic' },
+    previousSessionBranch,
+    previousSessionPrUrl: 'https://github.com/owner/repo/pull/205',
+    branchAncestryMode: mode,
+    branchedFromBranch: mode === 'stacked' ? 'session/epic-205-first' : 'master',
+    dependsOnSessionBranch,
+    dependsOnSessionPrUrl: mode === 'stacked' ? 'https://github.com/owner/repo/pull/205' : null,
+    rebaseOntoBranch: mode === 'stacked' ? 'master' : null,
+    dependencyWarnings: ['Epic #166 declares a dependency on queued epic #205.'],
+    overlapWarnings: ['Epics #166 and #214 both mention src/lib/session.ts.'],
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
@@ -193,6 +225,59 @@ describe('createSession', () => {
         title: 'Epic #165: Hybrid Routing',
       }),
     );
+  });
+
+  test('creates stacked queue session branch from the previous session branch and annotates draft PR body', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --verify')) return { stdout: '', stderr: '', exitCode: 1 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/166');
+
+    createSession(makeConfig({ autoMerge: true }), {
+      epicNum: 166,
+      epicTitle: 'Second Epic',
+      queue: makeQueueContext(),
+    });
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'git checkout -b "session/epic-166-second-epic" "origin/session/epic-205-first"',
+      expect.any(Object),
+    );
+    const body = mockCreatePR.mock.calls[0][0].body;
+    expect(body).toContain('## Execution Queue');
+    expect(body).toContain('**Position:** 2 of 3');
+    expect(body).toContain('**Previous queued epic:** #205 - First Epic ([session PR](https://github.com/owner/repo/pull/205))');
+    expect(body).toContain('Merge [the previous session PR](https://github.com/owner/repo/pull/205) first; after it lands on master, rebase `session/epic-166-second-epic` onto `master` before final review/merge.');
+  });
+
+  test('creates independent queue session branch from base branch and explains no ancestry dependency in draft PR body', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --verify')) return { stdout: '', stderr: '', exitCode: 1 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/166');
+
+    createSession(makeConfig({ autoMerge: true }), {
+      epicNum: 166,
+      epicTitle: 'Second Epic',
+      queue: makeQueueContext({
+        branchAncestryMode: 'independent',
+        branchedFromBranch: 'master',
+        dependsOnSessionBranch: null,
+        dependsOnSessionPrUrl: null,
+        rebaseOntoBranch: null,
+      }),
+    });
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'git checkout -b "session/epic-166-second-epic" "origin/master"',
+      expect.any(Object),
+    );
+    const body = mockCreatePR.mock.calls[0][0].body;
+    expect(body).toContain('**Branch ancestry:** independent');
+    expect(body).toContain('**Depends on:** None - no branch ancestry dependency was created.');
+    expect(body).toContain('No branch ancestry dependency was created; this branch starts from `master`.');
   });
 });
 
@@ -313,6 +398,91 @@ describe('finalizeSession', () => {
       title: expect.stringContaining('Session:'),
       body: expect.stringContaining('#1: First issue'),
     }));
+    expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.not.stringContaining('## Execution Queue'),
+    }));
+  });
+
+  test('adds merge order and queue risk notes to final stacked queue session PR body', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('diff --cached --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/166');
+
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(makeConfig(), {
+      epicNum: 166,
+      epicTitle: 'Second Epic',
+      queue: makeQueueContext(),
+    });
+    session.results.push({
+      issueNum: 266,
+      title: 'Second child',
+      status: 'success',
+      prUrl: 'https://github.com/owner/repo/pull/266',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 120,
+      filesChanged: 4,
+    });
+
+    await finalizeSession(session, config);
+
+    const body = mockCreatePR.mock.calls[0][0].body;
+    expect(body).toContain('## Execution Queue');
+    expect(body).toContain('**Queue:** queue-20260521T101112Z');
+    expect(body).toContain('**Parent epic:** #166 - Second Epic');
+    expect(body).toContain('**Next queued epic:** #214 - Third Epic');
+    expect(body).toContain('Merge [the previous session PR](https://github.com/owner/repo/pull/205) first; after it lands on master, rebase `session/epic-166-second-epic` onto `master` before final review/merge.');
+    expect(body).toContain('Dependency: Epic #166 declares a dependency on queued epic #205.');
+    expect(body).toContain('File overlap: Epics #166 and #214 both mention src/lib/session.ts.');
+    expect(body).toContain('Closes #266');
+  });
+
+  test('adds independent branch guidance to final queue session PR body', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('diff --cached --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/166');
+
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(makeConfig(), {
+      epicNum: 166,
+      epicTitle: 'Second Epic',
+      queue: makeQueueContext({
+        branchAncestryMode: 'independent',
+        branchedFromBranch: 'master',
+        dependsOnSessionBranch: null,
+        dependsOnSessionPrUrl: null,
+        rebaseOntoBranch: null,
+      }),
+    });
+    session.results.push({
+      issueNum: 266,
+      title: 'Second child',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 120,
+      filesChanged: 4,
+    });
+
+    await finalizeSession(session, config);
+
+    const body = mockCreatePR.mock.calls[0][0].body;
+    expect(body).toContain('**Branch ancestry:** independent');
+    expect(body).toContain('Review this PR in queue order, but it can merge independently once ready.');
+    expect(body).toContain('No branch ancestry dependency was created; this branch starts from `master`.');
   });
 
   test('puts failed issues in collapsed details section', async () => {

@@ -35,6 +35,97 @@ function createSession(
   }
 }
 
+function createQueueManifest(sessionsDir: string): void {
+  const queueDir = path.join(sessionsDir, 'queue-20260521T101112Z');
+  fs.mkdirSync(queueDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(queueDir, 'queue.json'),
+    JSON.stringify({
+      queueId: 'queue-20260521T101112Z',
+      epicIds: [205, 166, 214],
+      branchAncestryMode: 'stacked',
+      status: 'stopped',
+      startedAt: '2026-05-21T10:11:12.000Z',
+      endedAt: '2026-05-21T10:45:00.000Z',
+      stopReason: 'Epic #166 stopped: transient-agent-stop',
+      epics: [
+        {
+          epicNumber: 205,
+          title: 'First Epic',
+          queueIndex: 1,
+          queueTotal: 3,
+          previousEpic: null,
+          nextEpic: { number: 166, title: 'Second Epic' },
+          status: 'success',
+          sessionName: 'session/epic-205-first-epic',
+          sessionBranch: 'session/epic-205-first-epic',
+          sessionPrUrl: 'https://github.com/owner/repo/pull/205',
+          nextSessionBranch: 'session/epic-166-second-epic',
+          nextSessionPrUrl: null,
+          branchAncestryMode: 'stacked',
+          branchedFromBranch: 'master',
+          dependsOnSessionBranch: null,
+          dependsOnSessionPrUrl: null,
+          rebaseOntoBranch: null,
+          dependencyWarnings: ['Later queued epic #166 declares a dependency on this epic.'],
+          overlapWarnings: [],
+          startedAt: '2026-05-21T10:11:12.000Z',
+          endedAt: '2026-05-21T10:30:00.000Z',
+          failures: [],
+        },
+        {
+          epicNumber: 166,
+          title: 'Second Epic',
+          queueIndex: 2,
+          queueTotal: 3,
+          previousEpic: { number: 205, title: 'First Epic', sessionPrUrl: 'https://github.com/owner/repo/pull/205' },
+          nextEpic: { number: 214, title: 'Third Epic' },
+          status: 'failure',
+          sessionName: 'session/epic-166-second-epic',
+          sessionBranch: 'session/epic-166-second-epic',
+          sessionPrUrl: 'https://github.com/owner/repo/pull/166',
+          nextSessionBranch: null,
+          nextSessionPrUrl: null,
+          branchAncestryMode: 'stacked',
+          branchedFromBranch: 'session/epic-205-first-epic',
+          dependsOnSessionBranch: 'session/epic-205-first-epic',
+          dependsOnSessionPrUrl: 'https://github.com/owner/repo/pull/205',
+          rebaseOntoBranch: 'master',
+          dependencyWarnings: ['Epic #166 declares a dependency on queued epic #205.'],
+          overlapWarnings: ['Epics #166 and #214 both mention src/lib/session.ts.'],
+          startedAt: '2026-05-21T10:30:00.000Z',
+          endedAt: '2026-05-21T10:45:00.000Z',
+          failures: [{ code: 'transient-stop', message: 'Agent rate limit', issueNum: 266 }],
+        },
+        {
+          epicNumber: 214,
+          title: 'Third Epic',
+          queueIndex: 3,
+          queueTotal: 3,
+          previousEpic: { number: 166, title: 'Second Epic' },
+          nextEpic: null,
+          status: 'pending',
+          sessionName: null,
+          sessionBranch: null,
+          sessionPrUrl: null,
+          nextSessionBranch: null,
+          nextSessionPrUrl: null,
+          branchAncestryMode: 'stacked',
+          branchedFromBranch: null,
+          dependsOnSessionBranch: null,
+          dependsOnSessionPrUrl: null,
+          rebaseOntoBranch: null,
+          dependencyWarnings: [],
+          overlapWarnings: [],
+          startedAt: null,
+          endedAt: null,
+          failures: [],
+        },
+      ],
+    }, null, 2),
+  );
+}
+
 describe('history', () => {
   let tmpDir: string;
   let consoleSpy: jest.SpyInstance;
@@ -98,6 +189,20 @@ describe('history', () => {
       expect(output).toContain('\u2717');
       expect(output).toContain('5m 00s');
     });
+
+    it('lists multi-epic queue manifests with status and pending counts', () => {
+      const sessionsDir = path.join(tmpDir, '.alpha-loop', 'sessions');
+      createQueueManifest(sessionsDir);
+
+      historyList(sessionsDir, tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Queues:');
+      expect(output).toContain('queue-20260521T101112Z');
+      expect(output).toContain('3 epics');
+      expect(output).toContain('1 ok, 1 failed, 1 pending');
+      expect(output).toContain('Epic #166 stopped: transient-agent-stop');
+    });
   });
 
   describe('historyDetail', () => {
@@ -125,6 +230,78 @@ describe('history', () => {
       const errorOutput = errorSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
       expect(errorOutput).toContain('Session not found');
       errorSpy.mockRestore();
+    });
+
+    it('shows queue manifest detail for stopped multi-epic queues', () => {
+      const sessionsDir = path.join(tmpDir, '.alpha-loop', 'sessions');
+      createQueueManifest(sessionsDir);
+
+      historyDetail(sessionsDir, 'queue-20260521T101112Z', tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Queue:       queue-20260521T101112Z');
+      expect(output).toContain('Status:      stopped');
+      expect(output).toContain('Branch mode: stacked');
+      expect(output).toContain('Manifest:    .alpha-loop/sessions/queue-20260521T101112Z/queue.json');
+      expect(output).toContain('Stop reason: Epic #166 stopped: transient-agent-stop');
+      expect(output).toContain('2/3 #166 Second Epic');
+      expect(output).toContain('Depends: session/epic-205-first-epic (https://github.com/owner/repo/pull/205)');
+      expect(output).toContain('Rebase:  session/epic-166-second-epic onto master after the dependency PR lands');
+      expect(output).toContain('Dependency: Epic #166 declares a dependency on queued epic #205.');
+      expect(output).toContain('File overlap: Epics #166 and #214 both mention src/lib/session.ts.');
+      expect(output).toContain('Failure: transient-stop');
+      expect(output).toContain('3/3 #214 Third Epic');
+      expect(output).toContain('pending');
+    });
+
+    it('shows queue metadata from checked-in session manifests', () => {
+      const sessionsDir = path.join(tmpDir, '.alpha-loop', 'sessions');
+      const learningsDir = path.join(tmpDir, '.alpha-loop', 'learnings');
+      fs.mkdirSync(learningsDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(learningsDir, 'session-session-epic-166-second-epic.json'),
+        JSON.stringify({
+          name: 'session/epic-166-second-epic',
+          branch: 'session/epic-166-second-epic',
+          completed: '2026-05-21T10:45:00.000Z',
+          results: [{
+            issueNum: 266,
+            title: 'Second child',
+            status: 'success',
+            testsPassing: true,
+            verifyPassing: true,
+            duration: 60,
+            filesChanged: 2,
+          }],
+          queue: {
+            queueId: 'queue-20260521T101112Z',
+            queueIndex: 2,
+            queueTotal: 3,
+            currentEpic: { number: 166, title: 'Second Epic' },
+            previousEpic: { number: 205, title: 'First Epic' },
+            nextEpic: { number: 214, title: 'Third Epic' },
+            previousSessionBranch: 'session/epic-205-first-epic',
+            previousSessionPrUrl: 'https://github.com/owner/repo/pull/205',
+            branchAncestryMode: 'stacked',
+            branchedFromBranch: 'session/epic-205-first-epic',
+            dependsOnSessionBranch: 'session/epic-205-first-epic',
+            dependsOnSessionPrUrl: 'https://github.com/owner/repo/pull/205',
+            rebaseOntoBranch: 'master',
+            dependencyWarnings: [],
+            overlapWarnings: [],
+          },
+        }, null, 2),
+      );
+
+      historyDetail(sessionsDir, 'session/epic-166-second-epic', tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Session:  session/epic-166-second-epic');
+      expect(output).toContain('Queue:');
+      expect(output).toContain('ID:        queue-20260521T101112Z');
+      expect(output).toContain('Position:  2 of 3');
+      expect(output).toContain('Depends:   session/epic-205-first-epic (https://github.com/owner/repo/pull/205)');
+      expect(output).toContain('Rebase:    onto master after the dependency PR lands');
     });
   });
 
