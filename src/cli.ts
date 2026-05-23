@@ -143,7 +143,7 @@ program
 
 program
   .command('resume')
-  .description('Resume stranded work — push branches, run review, open PRs')
+  .description('Resume stranded work — push branches, run review, open WIP PRs')
   .option('--issue <num>', 'Only resume a specific issue number')
   .option('--session <name>', 'Resume from a specific session directory')
   .action(async (options) => {

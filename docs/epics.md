@@ -158,7 +158,7 @@ The manifest records queue status, epic order, branch ancestry mode, per-epic se
 
 Queue execution is fail-stop by default. Alpha Loop stops at the first epic that fails, remains incomplete after eligible children run, hits an epic checklist consistency error, fails verification, or encounters a transient agent/rate-limit stop. Earlier successful epic PRs stay available for review. Pending epics remain `pending` in `queue.json`; rerun them with a new explicit queue once the failure is resolved.
 
-If the process crashes inside a child issue before its branch has a PR, run `alpha-loop resume` to recover stranded `agent/issue-*` branches. Then inspect the queue manifest and continue with the remaining epic IDs.
+If the process crashes inside a child issue before its branch has a PR, run `alpha-loop resume` to recover stranded `agent/issue-*` branches as WIP PRs. Recovered PRs are not marked complete; run the project tests and final verification before merging, then inspect the queue manifest and continue with the remaining epic IDs.
 
 ### Branch Ancestry Modes
 

@@ -255,7 +255,9 @@ If the loop hangs or crashes mid-session, work can be stranded on local branches
 1. Scans for local `agent/issue-*` branches with commits but no open PR
 2. Pushes each branch to origin
 3. Runs code review
-4. Creates PRs and updates issue status
+4. Creates WIP PRs, marks issues `In Review`, and updates the session PR with a verification caveat
+
+Recovered PRs are not marked complete. `resume` does not rerun the project test suite or final smoke tests, so verify recovered work before merging.
 
 Use `--issue <N>` to resume a specific issue.
 
@@ -285,7 +287,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop history --clean` | Remove old session data |
 | `alpha-loop report routing` | Aggregate per-stage telemetry + cost-per-issue across sessions |
 | `alpha-loop sync` | Sync templates to configured harnesses (Claude, Codex, Cursor, etc.) |
-| `alpha-loop resume` | Resume stranded work — push branches, review, open PRs |
+| `alpha-loop resume` | Resume stranded work — push branches, review, open WIP PRs |
 | `alpha-loop resume --issue <N>` | Resume a specific issue |
 | `alpha-loop review` | Analyze learnings and propose self-improvements |
 | `alpha-loop review --apply` | Apply proposed improvements and create a draft PR |

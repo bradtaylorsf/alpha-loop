@@ -179,7 +179,7 @@ function printStrandedSummary(item: StrandedBranch): void {
 async function resumeBranch(
   item: StrandedBranch,
   config: ReturnType<typeof loadConfig>,
-): Promise<{ issueNum: number; prUrl: string; title: string } | null> {
+): Promise<{ issueNum: number; prUrl: string; title: string; filesChanged: number } | null> {
   const { branch, issueNum } = item;
   const repo = config.repo;
   const baseBranch = config.baseBranch;
@@ -244,10 +244,15 @@ async function resumeBranch(
     }
   }
 
-  // Build PR body
+  // Build PR body. Resume recovers stranded work; it does not prove the issue
+  // is complete, so every recovered PR carries an explicit verification caveat.
+  const resumeCaveat = `## Resume Caveat
+
+This PR was recovered by \`alpha-loop resume\`. Resume creates the PR and runs best-effort review only; it does not rerun the project test suite or final verification smoke tests. Treat this PR as WIP until those checks pass.`;
+
   const prBody = reviewOutput
-    ? `## Code Review\n\n${reviewOutput}`
-    : `Resumes stranded work for issue #${issueNum}.`;
+    ? `${resumeCaveat}\n\n## Code Review\n\n${reviewOutput}`
+    : `${resumeCaveat}\n\nResumes stranded work for issue #${issueNum}.`;
 
   // Create PR (createPR handles push internally as well; that is idempotent)
   log.step(`Creating PR for #${issueNum}...`);
@@ -270,19 +275,19 @@ async function resumeBranch(
   // Update issue labels: add in-review, remove in-progress
   labelIssue(repo, issueNum, 'in-review', 'in-progress');
 
-  // Update project board status to Done
+  // Recovered PRs still need review and verification; do not mark them Done.
   if (config.project && config.project > 0) {
-    updateProjectStatus(repo, config.project, config.repoOwner, issueNum, 'Done');
+    updateProjectStatus(repo, config.project, config.repoOwner, issueNum, 'In Review');
   }
 
   // Comment on the issue with the PR link
   commentIssue(
     repo,
     issueNum,
-    `Resumed by alpha-loop. PR ready for review: ${prUrl}`,
+    `Resumed by alpha-loop. PR opened for review: ${prUrl}\n\nFinal tests and verification were not run by resume; treat the PR as WIP until they pass.`,
   );
 
-  return { issueNum, prUrl, title };
+  return { issueNum, prUrl, title, filesChanged: item.filesChanged.length };
 }
 
 /**
@@ -330,6 +335,15 @@ function saveResumedResult(
   const filePath = join(sessionDir, `result-${result.issueNum}.json`);
   writeFileSync(filePath, JSON.stringify(result, null, 2) + '\n');
   log.info(`Session result saved: ${filePath}`);
+}
+
+function isRecoveredUnverified(result: PipelineResult): boolean {
+  return Boolean(result.prUrl) && result.verifySkipped && !result.verifyPassing;
+}
+
+function formatSessionIssueStatus(result: PipelineResult): string {
+  if (isRecoveredUnverified(result)) return 'RECOVERED - VERIFY SKIPPED';
+  return result.status === 'success' ? 'SUCCESS' : 'FAILURE';
 }
 
 /**
@@ -381,6 +395,14 @@ function updateSessionPR(
 
   const successCount = results.filter((r) => r.status === 'success').length;
   const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+  const recoveredUnverifiedCount = results.filter(isRecoveredUnverified).length;
+  const resumeCaveat = recoveredUnverifiedCount > 0
+    ? `
+### Resume Caveat
+
+${recoveredUnverifiedCount} recovered PR(s) were not counted as succeeded because \`alpha-loop resume\` does not rerun tests or final verification smoke tests.
+`
+    : '';
 
   const title = `Session: ${sessionName} — ${successCount}/${results.length} succeeded`;
   const body = `## Session Summary
@@ -389,9 +411,10 @@ function updateSessionPR(
 **Issues processed:** ${results.length} (${successCount} succeeded, ${results.length - successCount} failed)
 **Total duration:** ${Math.round(totalDuration / 60)} minutes
 **Updated:** ${new Date().toISOString()}
+${resumeCaveat}
 
 ### Issues
-${results.map((r) => `- #${r.issueNum}: ${r.title} — ${r.status === 'success' ? 'SUCCESS' : 'FAILURE'}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
+${results.map((r) => `- #${r.issueNum}: ${r.title} — ${formatSessionIssueStatus(r)}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
 
 ---
 This PR collects all changes from this session for final review before merging to ${baseBranch}.
@@ -450,7 +473,7 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
   }
 
   // Process each stranded branch
-  const results: Array<{ issueNum: number; prUrl: string; title: string }> = [];
+  const results: Array<{ issueNum: number; prUrl: string; title: string; filesChanged: number }> = [];
   const failed: number[] = [];
 
   for (const item of withoutPR) {
@@ -469,13 +492,14 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
       const pipelineResult: PipelineResult = {
         issueNum: r.issueNum,
         title: r.title,
-        status: 'success',
+        status: 'failure',
+        failureReason: 'transient',
         prUrl: r.prUrl,
-        testsPassing: true,
+        testsPassing: false,
         verifyPassing: false, // verification was skipped/crashed
         verifySkipped: true,
         duration: 0,
-        filesChanged: 0,
+        filesChanged: r.filesChanged,
       };
       saveResumedResult(session.sessionDir, pipelineResult);
       updateSessionPR(config.repo, session.sessionName, session.sessionDir, config.baseBranch);
