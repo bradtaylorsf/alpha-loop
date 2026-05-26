@@ -58,8 +58,9 @@ export function isNonUiChange(diffStat: string): boolean {
  * Useful for CLI verification, boot tests, and custom validation scripts.
  */
 export function runScriptVerify(command: string, cwd: string, timeout = 60_000): VerifyResult {
-  log.info(`Running script verification: ${command}`);
-  const result = exec(command, { cwd, timeout });
+  const normalizedCommand = command.replace(/\\"/g, '"');
+  log.info(`Running script verification: ${normalizedCommand}`);
+  const result = exec(normalizedCommand, { cwd, timeout });
 
   if (result.exitCode === 0) {
     log.success('Script verification PASSED');

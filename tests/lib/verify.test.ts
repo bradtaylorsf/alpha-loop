@@ -379,6 +379,18 @@ describe('runScriptVerify', () => {
     expect(result.passed).toBe(false);
     expect(result.skipped).toBe(false);
   });
+
+  it('normalizes JSON-double-escaped quotes before running shell verification', () => {
+    exec.mockReturnValue({ exitCode: 0, stdout: '1.8.0', stderr: '' });
+
+    const result = runScriptVerify('ACTUAL=$(node dist/cli.js --version); EXPECTED=$(node -p \\"require(\'./package.json\').version\\"); test "$ACTUAL" = "$EXPECTED"', '/tmp');
+
+    expect(result.passed).toBe(true);
+    expect(exec).toHaveBeenCalledWith(
+      'ACTUAL=$(node dist/cli.js --version); EXPECTED=$(node -p "require(\'./package.json\').version"); test "$ACTUAL" = "$EXPECTED"',
+      expect.objectContaining({ cwd: '/tmp' }),
+    );
+  });
 });
 
 describe('runBootVerify', () => {
