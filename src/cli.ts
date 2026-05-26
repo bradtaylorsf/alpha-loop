@@ -92,6 +92,7 @@ program
   .command('sync')
   .description('Sync .alpha-loop/templates/ to all configured harnesses')
   .option('--check', 'Check for drift without syncing (exits non-zero if drift found)')
+  .option('--prune', 'Remove target-only harness files that are not present in templates')
   .action(syncCommand);
 
 program

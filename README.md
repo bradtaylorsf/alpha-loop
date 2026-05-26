@@ -286,7 +286,9 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop history <name> --telemetry` | Show per-stage telemetry table (see [docs/telemetry.md](docs/telemetry.md)) |
 | `alpha-loop history --clean` | Remove old session data |
 | `alpha-loop report routing` | Aggregate per-stage telemetry + cost-per-issue across sessions |
-| `alpha-loop sync` | Sync templates to configured harnesses (Claude, Codex, Cursor, etc.) |
+| `alpha-loop sync` | Add/update templated assets in configured harnesses without deleting harness-only files |
+| `alpha-loop sync --check` | Check for drift, including target-only harness files, without writing changes |
+| `alpha-loop sync --prune` | Sync templates and remove target-only harness files after logging each pruned path |
 | `alpha-loop resume` | Resume stranded work — push branches, review, open WIP PRs |
 | `alpha-loop resume --issue <N>` | Resume a specific issue |
 | `alpha-loop review` | Analyze learnings and propose self-improvements |
@@ -498,6 +500,8 @@ harnesses:
   - codex
   - claude  # also sync to Claude for teammates using it
 ```
+
+Sync is additive by default: `alpha-loop sync` copies new or changed files from `.alpha-loop/templates/` into each harness path, but it leaves harness-only skills and support files in place. Use `alpha-loop sync --check` to detect strict drift, including target-only files, and `alpha-loop sync --prune` only when you explicitly want to remove files from harness paths that are not present in templates.
 
 ### Per-Step Pipeline Config
 
