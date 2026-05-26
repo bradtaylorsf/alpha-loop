@@ -489,6 +489,49 @@ describe('finalizeSession', () => {
     }));
   });
 
+  test('lists auto-committed issues in final session PR body and manifest', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('diff --cached --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config);
+    session.results.push({
+      issueNum: 229,
+      title: 'Surface auto commit fallback',
+      status: 'success',
+      prUrl: 'https://github.com/owner/repo/pull/229',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 2,
+      autoCommittedByPipeline: true,
+      autoCommittedPaths: ['src/lib/pipeline.ts', 'tests/lib/pipeline.test.ts'],
+    });
+
+    await finalizeSession(session, config);
+
+    const body = mockCreatePR.mock.calls.at(-1)![0].body;
+    expect(body).toContain('### Auto-Committed By Pipeline');
+    expect(body).toContain('#229: Surface auto commit fallback ([PR](https://github.com/owner/repo/pull/229))');
+    expect(body).toContain('`src/lib/pipeline.ts`, `tests/lib/pipeline.test.ts`');
+
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('session-session-20260101-000000.json'),
+      expect.stringContaining('"autoCommittedByPipeline": true'),
+    );
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('session-session-20260101-000000.json'),
+      expect.stringContaining('"autoCommittedPaths"'),
+    );
+  });
+
   test('adds merge order and queue risk notes to final stacked queue session PR body', async () => {
     mockExistsSync.mockReturnValue(true);
     mockExec.mockImplementation((cmd: string) => {

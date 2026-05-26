@@ -330,6 +330,10 @@ export type PipelineResult = {
   status: 'success' | 'failure';
   /** Set when the result was synthesized after out-of-band recovery instead of produced by the normal pipeline. */
   recoveryMode?: PipelineRecoveryMode;
+  /** Set when the pipeline committed dirty work left behind by a successful implementation agent. */
+  autoCommittedByPipeline?: boolean;
+  /** Paths included in the pipeline-authored fallback commit. */
+  autoCommittedPaths?: string[];
   /** Why the issue failed — 'transient' means re-queue (e.g. usage limit), 'permanent' means label failed. */
   failureReason?: 'transient' | 'permanent';
   prUrl?: string;
@@ -376,6 +380,30 @@ function learningPathForCommit(worktreePath: string, learningFile: string): stri
   if (!relPath || relPath.startsWith('..') || relPath.startsWith('/')) return null;
   if (!relPath.startsWith('.alpha-loop/learnings/')) return null;
   return relPath;
+}
+
+function parseGitStatusPaths(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => {
+      const path = line.length > 3 ? line.slice(3) : line.trim();
+      const renameTarget = path.includes(' -> ') ? path.split(' -> ').at(-1) : path;
+      return renameTarget?.trim() ?? '';
+    })
+    .filter(Boolean);
+}
+
+function autoCommitDirtyWorktree(worktreePath: string, commitMessage: string): string[] {
+  const statusResult = exec('git status --porcelain', { cwd: worktreePath });
+  const paths = parseGitStatusPaths(statusResult.stdout);
+  if (paths.length === 0) return [];
+
+  log.warn(`Agent did not commit; auto-committing ${paths.length} files: ${paths.join(', ')}`);
+  exec('git add -A', { cwd: worktreePath });
+  exec(commitMessage, { cwd: worktreePath });
+  return paths;
 }
 
 function commitLearningFiles(worktreePath: string, learningFiles: Array<string | null>, message: string): void {
@@ -645,6 +673,7 @@ export async function processIssue(
     tracker,
     events: escalationEvents,
   });
+  let autoCommittedPaths: string[] = [];
 
   // Setup logging
   mkdirSync(session.logsDir, { recursive: true });
@@ -858,11 +887,10 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     }
 
     // Auto-commit if agent didn't
-    const statusResult = exec('git status --porcelain', { cwd: worktreePath });
-    if (statusResult.stdout.trim()) {
-      exec('git add -A', { cwd: worktreePath });
-      exec(`git commit -m "feat: implement issue #${issueNum} - ${title}"`, { cwd: worktreePath });
-    }
+    autoCommittedPaths = autoCommitDirtyWorktree(
+      worktreePath,
+      `git commit -m "feat: implement issue #${issueNum} - ${title}"`,
+    );
 
     stepsCompleted.push('implement');
 
@@ -1435,6 +1463,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     verifySkipped,
     duration,
     filesChanged,
+    autoCommittedByPipeline: autoCommittedPaths.length > 0 ? true : undefined,
+    autoCommittedPaths: autoCommittedPaths.length > 0 ? autoCommittedPaths : undefined,
     escalationEvents: escalationEvents.length > 0 ? escalationEvents : undefined,
   };
 
@@ -1470,6 +1500,7 @@ export async function processBatch(
   const stepsCompleted: string[] = [];
   const issueNums = issues.map((i) => i.number);
   const epicOption = epicPromptOption(options);
+  let autoCommittedPaths: string[] = [];
 
   mkdirSync(session.logsDir, { recursive: true });
   const logFile = join(session.logsDir, `batch-${issueNums.join('-')}.log`);
@@ -1657,12 +1688,11 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     }
 
     // Auto-commit if agent didn't
-    const statusResult = exec('git status --porcelain', { cwd: worktreePath });
-    if (statusResult.stdout.trim()) {
-      exec('git add -A', { cwd: worktreePath });
-      const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
-      exec(`git commit -m "feat: batch implement issues ${issueRefs}"`, { cwd: worktreePath });
-    }
+    const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
+    autoCommittedPaths = autoCommitDirtyWorktree(
+      worktreePath,
+      `git commit -m "feat: batch implement issues ${issueRefs}"`,
+    );
 
     stepsCompleted.push('implement');
 
@@ -1944,6 +1974,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       verifySkipped: true,
       duration: perIssueDuration,
       filesChanged,
+      autoCommittedByPipeline: autoCommittedPaths.length > 0 ? true : undefined,
+      autoCommittedPaths: autoCommittedPaths.length > 0 ? autoCommittedPaths : undefined,
     };
 
     results.push(result);
