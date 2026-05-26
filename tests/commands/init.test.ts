@@ -324,6 +324,49 @@ describe('init command', () => {
     expect(installedSkill).toBe(skillContent);
   });
 
+  it('seeds alpha-loop-issue-author from distribution templates', async () => {
+    const distTemplatesDir = join(tempDir, 'dist-templates');
+    const distSkillDir = join(distTemplatesDir, 'skills', 'alpha-loop-issue-author');
+    const skillContent = [
+      '---',
+      'name: alpha-loop-issue-author',
+      'auto_load: true',
+      'priority: high',
+      '---',
+      '# Alpha Loop Issue Author',
+      '',
+    ].join('\n');
+    mkdirSync(distSkillDir, { recursive: true });
+    writeFileSync(join(distSkillDir, 'SKILL.md'), skillContent);
+    mockedFindDistributionTemplatesDir.mockReturnValue(distTemplatesDir);
+    mockRecursiveCopyExec();
+
+    await initCommand({ yes: true });
+
+    const installedSkill = readFileSync(
+      join(tempDir, '.alpha-loop', 'templates', 'skills', 'alpha-loop-issue-author', 'SKILL.md'),
+      'utf-8',
+    );
+    expect(installedSkill).toBe(skillContent);
+  });
+
+  it('does not overwrite a customized alpha-loop-issue-author skill during init', async () => {
+    const distTemplatesDir = join(tempDir, 'dist-templates');
+    const distSkillDir = join(distTemplatesDir, 'skills', 'alpha-loop-issue-author');
+    const projectSkillDir = join(tempDir, '.alpha-loop', 'templates', 'skills', 'alpha-loop-issue-author');
+    const customContent = '# Custom Issue Author\n';
+    mkdirSync(distSkillDir, { recursive: true });
+    mkdirSync(projectSkillDir, { recursive: true });
+    writeFileSync(join(distSkillDir, 'SKILL.md'), '# Distribution Issue Author\n');
+    writeFileSync(join(projectSkillDir, 'SKILL.md'), customContent);
+    mockedFindDistributionTemplatesDir.mockReturnValue(distTemplatesDir);
+    mockRecursiveCopyExec();
+
+    await initCommand({ yes: true });
+
+    expect(readFileSync(join(projectSkillDir, 'SKILL.md'), 'utf-8')).toBe(customContent);
+  });
+
   it('does not overwrite a customized alpha-loop-runner skill during init', async () => {
     const distTemplatesDir = join(tempDir, 'dist-templates');
     const distSkillDir = join(distTemplatesDir, 'skills', 'alpha-loop-runner');
