@@ -1,0 +1,9 @@
+id: 006-docs-sync-history-command
+description: "Skill trigger: docs-sync catches src/commands/history.ts CLI docs drift"
+tags:
+  - skill
+  - docs-sync
+  - cli-docs
+  - regression
+  - issue-232
+source: manual
