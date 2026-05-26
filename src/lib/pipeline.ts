@@ -322,10 +322,14 @@ export function formatGateFindings(gate: GateResult, gateType: string): string {
   return lines.join('\n');
 }
 
+export type PipelineRecoveryMode = 'resume' | 'manual';
+
 export type PipelineResult = {
   issueNum: number;
   title: string;
   status: 'success' | 'failure';
+  /** Set when the result was synthesized after out-of-band recovery instead of produced by the normal pipeline. */
+  recoveryMode?: PipelineRecoveryMode;
   /** Why the issue failed — 'transient' means re-queue (e.g. usage limit), 'permanent' means label failed. */
   failureReason?: 'transient' | 'permanent';
   prUrl?: string;
@@ -337,6 +341,12 @@ export type PipelineResult = {
   /** Structured escalation events recorded while processing this issue. */
   escalationEvents?: EscalationEvent[];
 };
+
+export function isRecoveredResult<T extends { recoveryMode?: PipelineRecoveryMode }>(
+  result: T,
+): result is T & { recoveryMode: PipelineRecoveryMode } {
+  return result.recoveryMode !== undefined;
+}
 
 export type PipelineOptions = {
   epicContext?: EpicPromptContext;
@@ -1985,6 +1995,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       const scoreResults: PipelineResultForScores[] = results.map((r) => ({
         issueNum: r.issueNum,
         status: r.status,
+        recoveryMode: r.recoveryMode,
         testsPassing: r.testsPassing,
         verifyPassing: r.verifyPassing,
         verifySkipped: r.verifySkipped,

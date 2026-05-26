@@ -16,6 +16,7 @@ import { join, basename, relative } from 'node:path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { log } from './logger.js';
 import type { Config } from './config.js';
+import { isRecoveredResult } from './pipeline.js';
 import type { PipelineResult } from './pipeline.js';
 import { computeCompositeScore, appendScore, hashConfig } from './score.js';
 import type { CaseResult, ScoreEntry } from './score.js';
@@ -521,6 +522,7 @@ export type SaveCapturedCaseOptions = {
  * Detect which pipeline step failed from a PipelineResult.
  */
 export function detectFailureStep(result: PipelineResult): string {
+  if (isRecoveredResult(result)) return 'recovered';
   if (!result.testsPassing) {
     // If the issue's filesChanged > 0, the agent at least tried to implement;
     // multiple retries suggest a test-fix loop failure

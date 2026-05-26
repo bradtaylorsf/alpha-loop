@@ -4,6 +4,7 @@ import { log } from '../lib/logger.js';
 import { loadCrashMarkers, type CrashMarker } from '../lib/session.js';
 import { readStageTelemetry } from '../lib/telemetry.js';
 import type { StageTelemetry } from '../lib/telemetry.js';
+import { isRecoveredResult } from '../lib/pipeline.js';
 import type { PipelineResult } from '../lib/pipeline.js';
 import type { EscalationEvent } from '../lib/escalation.js';
 import type { EpicQueueManifest, QueueSessionContext } from '../lib/epic-queue.js';
@@ -214,9 +215,12 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
     for (const entry of entries) {
       const crashCount = uniqueCrashMarkers(entry.results, entry.crashes).length;
       const issueCount = entry.results.length + crashCount;
-      const successCount = entry.results.filter((r) => r.status === 'success').length;
-      const failedCount = entry.results.length - successCount;
-      const totalDuration = entry.results.reduce((sum, r) => sum + r.duration, 0);
+      const recoveredCount = entry.results.filter(isRecoveredResult).length;
+      const successCount = entry.results.filter((r) => r.status === 'success' && !isRecoveredResult(r)).length;
+      const failedCount = entry.results.filter((r) => r.status === 'failure' && !isRecoveredResult(r)).length;
+      const totalDuration = entry.results
+        .filter((r) => !isRecoveredResult(r))
+        .reduce((sum, r) => sum + r.duration, 0);
       const durStr = formatDuration(totalDuration);
 
       // Parse date from timestamp (YYYYMMDD-HHMMSS)
@@ -229,6 +233,7 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
       let statusParts = '';
       if (successCount > 0) statusParts += `${successCount} \u2713`;
       if (failedCount > 0) statusParts += ` ${failedCount} \u2717`;
+      if (recoveredCount > 0) statusParts += ` ${recoveredCount} recovered`;
       if (crashCount > 0) statusParts += ` ${crashCount} crashed`;
       if (issueCount === 0) statusParts = '(empty)';
 
@@ -371,13 +376,15 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
     return;
   }
 
-  const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
-  const successCount = results.filter((r) => r.status === 'success').length;
-  const failureCount = results.length - successCount;
+  const naturalResults = results.filter((r) => !isRecoveredResult(r));
+  const totalDuration = naturalResults.reduce((sum, r) => sum + r.duration, 0);
+  const successCount = naturalResults.filter((r) => r.status === 'success').length;
+  const failureCount = naturalResults.filter((r) => r.status === 'failure').length;
+  const recoveredCount = results.length - naturalResults.length;
   const issueCount = results.length + visibleCrashes.length;
 
   console.log(`Session:  ${sessionName}`);
-  console.log(`Issues:   ${issueCount} (${successCount} succeeded, ${failureCount} failed, ${visibleCrashes.length} crashed)`);
+  console.log(`Issues:   ${issueCount} (${successCount} succeeded, ${failureCount} failed, ${recoveredCount} recovered, ${visibleCrashes.length} crashed)`);
   console.log(`Duration: ${formatDuration(totalDuration)}`);
   console.log('');
 
@@ -403,10 +410,13 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
 
   console.log('Issues:');
   for (const result of results) {
-    const symbol = result.status === 'success' ? '\u2713' : '\u2717';
+    const recovered = isRecoveredResult(result);
+    const symbol = recovered ? '~' : result.status === 'success' ? '\u2713' : '\u2717';
     let statusText: string;
 
-    if (result.status === 'success' && result.prUrl) {
+    if (recovered) {
+      statusText = `RECOVERED:${result.recoveryMode.toUpperCase()}`;
+    } else if (result.status === 'success' && result.prUrl) {
       const prNum = result.prUrl.match(/(\d+)$/)?.[1] ?? '';
       statusText = `PR #${prNum}`;
     } else if (result.status === 'success') {

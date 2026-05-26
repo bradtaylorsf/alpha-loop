@@ -356,6 +356,23 @@ describe('aggregateRouting', () => {
     expect(agg.cells[0].cost_per_issue_shipped).toBeNull();
   });
 
+  it('excludes recovered session results from shipped issue counts', () => {
+    const items = [
+      { session: 'S', entries: [entry('implement', 'm', 0.5, 10, 1, 0)] },
+    ];
+    const manifests: SessionManifestLite[] = [{
+      name: 'S',
+      results: [
+        { issueNum: 1, status: 'success', filesChanged: 3 },
+        { issueNum: 2, status: 'success', recoveryMode: 'resume', filesChanged: 3 },
+      ],
+    }];
+
+    const agg = aggregateRouting(items, manifests);
+    expect(agg.total_issues_shipped).toBe(1);
+    expect(agg.cells[0].cost_per_issue_shipped).toBe(0.5);
+  });
+
   it('handles sessions without a matching manifest gracefully', () => {
     const items = [
       { session: 'S', entries: [entry('implement', 'm', 0.5, 10, 1, 0)] },

@@ -14,7 +14,7 @@ function createTempDir(): string {
 function createSession(
   sessionsDir: string,
   timestamp: string,
-  results: Array<{ issueNum: number; title: string; status: string; prUrl?: string; duration: number }>,
+  results: Array<{ issueNum: number; title: string; status: string; prUrl?: string; duration: number; recoveryMode?: 'resume' | 'manual' }>,
 ): void {
   const dir = path.join(sessionsDir, 'session', timestamp);
   fs.mkdirSync(dir, { recursive: true });
@@ -25,6 +25,7 @@ function createSession(
         issueNum: r.issueNum,
         title: r.title,
         status: r.status,
+        recoveryMode: r.recoveryMode,
         prUrl: r.prUrl,
         testsPassing: r.status === 'success',
         verifyPassing: r.status === 'success',
@@ -232,6 +233,22 @@ describe('history', () => {
       expect(output).toContain('1 crashed');
     });
 
+    it('shows recovered issue counts separately from success and failure counts', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createSession(sessionsDir, '20250115-100000', [
+        { issueNum: 1, title: 'Good issue', status: 'success', duration: 180 },
+        { issueNum: 2, title: 'Recovered issue', status: 'failure', recoveryMode: 'resume', duration: 0 },
+      ]);
+
+      historyList(sessionsDir, tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('2 issues');
+      expect(output).toContain('1 recovered');
+      expect(output).toContain('1 ✓');
+      expect(output).not.toContain('1 ✗');
+    });
+
     it('lists multi-epic queue manifests with status and pending counts', () => {
       const sessionsDir = path.join(tmpDir, '.alpha-loop', 'sessions');
       createQueueManifest(sessionsDir);
@@ -281,6 +298,20 @@ describe('history', () => {
       expect(output).toContain('#216  CRASHED during review');
       expect(output).toContain('branch agent/issue-216');
       expect(output).toContain('error: review log ended unexpectedly');
+    });
+
+    it('shows recovered issues distinctly in session detail', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createSession(sessionsDir, '20250115-103000', [
+        { issueNum: 216, title: 'Recovered branch', status: 'failure', prUrl: 'https://github.com/owner/repo/pull/216', recoveryMode: 'resume', duration: 0 },
+      ]);
+
+      historyDetail(sessionsDir, 'session/20250115-103000');
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('0 succeeded, 0 failed, 1 recovered');
+      expect(output).toContain('~ #216');
+      expect(output).toContain('RECOVERED:RESUME');
     });
 
     it('shows error for non-existent session', () => {

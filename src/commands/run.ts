@@ -126,6 +126,10 @@ type SessionExecutionResult = {
   verificationClosedEpic: boolean;
 };
 
+function isRecoveredRunResult(result: { recoveryMode?: unknown }): boolean {
+  return result.recoveryMode !== undefined;
+}
+
 /**
  * Check that required CLI tools are installed.
  * Also warns about optional tools (playwright-cli) that improve the pipeline.
@@ -675,7 +679,7 @@ async function runIssueSession(
     }
 
     const issueCount = session.results.length;
-    const successCount = session.results.filter((r) => r.status === 'success').length;
+    const successCount = session.results.filter((r) => r.status === 'success' && !isRecoveredRunResult(r)).length;
     log.info(`Session complete: ${successCount}/${issueCount} issues succeeded`);
     process.exit(0);
   };
@@ -898,7 +902,7 @@ async function runIssueSession(
           if (activeEpic !== undefined && !config.dryRun) {
             let checklistError = false;
             for (const r of results) {
-              if (r.status !== 'success') continue;
+              if (r.status !== 'success' || isRecoveredRunResult(r)) continue;
               try {
                 updateEpicChecklist(config.repo, activeEpic, r.issueNum, true);
                 markEpicChecklistItem(epicChecklist, epicPromptContext, r.issueNum, true);
@@ -918,14 +922,14 @@ async function runIssueSession(
             }
           } else if (activeEpic !== undefined && config.dryRun) {
             for (const r of results) {
-              if (r.status === 'success') {
+              if (r.status === 'success' && !isRecoveredRunResult(r)) {
                 log.dry(`Would flip epic #${activeEpic} checklist for sub-issue #${r.issueNum}`);
               }
             }
           }
 
           // Stop if any issue hit a transient error
-          if (results.some((r) => r.failureReason === 'transient')) {
+          if (results.some((r) => r.failureReason === 'transient' && !isRecoveredRunResult(r))) {
             log.warn('Agent hit a rate/usage limit — stopping session to avoid wasting cycles');
             break;
           }
@@ -977,7 +981,7 @@ async function runIssueSession(
           // Flip the epic checklist box when this sub-issue succeeded.
           // Skipped in dry-run: `processIssue` stubs tests in dry-run and returns success,
           // which would otherwise mutate the live epic body.
-          if (activeEpic !== undefined && result.status === 'success' && !config.dryRun) {
+          if (activeEpic !== undefined && result.status === 'success' && !isRecoveredRunResult(result) && !config.dryRun) {
             try {
               updateEpicChecklist(config.repo, activeEpic, issue.number, true);
               markEpicChecklistItem(epicChecklist, epicPromptContext, issue.number, true);
@@ -990,12 +994,12 @@ async function runIssueSession(
               activeIssueNum = null;
               break;
             }
-          } else if (activeEpic !== undefined && result.status === 'success' && config.dryRun) {
+          } else if (activeEpic !== undefined && result.status === 'success' && !isRecoveredRunResult(result) && config.dryRun) {
             log.dry(`Would flip epic #${activeEpic} checklist for sub-issue #${issue.number}`);
           }
 
           // Stop processing if agent hit a transient error (usage/rate limit)
-          if (result.failureReason === 'transient') {
+          if (result.failureReason === 'transient' && !isRecoveredRunResult(result)) {
             log.warn('Agent hit a rate/usage limit — stopping session to avoid wasting cycles');
             break;
           }
@@ -1030,7 +1034,7 @@ async function runIssueSession(
       } else {
         const message = `Epic #${activeEpic}: ${remaining.length} sub-issue(s) still open — verification deferred`;
         log.info(message);
-        const hasFailedIssueResult = session.results.some((result) => result.status === 'failure');
+        const hasFailedIssueResult = session.results.some((result) => result.status === 'failure' && !isRecoveredRunResult(result));
         if (options.stopOnPartialEpic && !hasFailedIssueResult) {
           failures.push({
             code: 'epic-incomplete',
@@ -1047,7 +1051,7 @@ async function runIssueSession(
   }
 
   for (const result of session.results) {
-    if (result.status === 'failure') {
+    if (result.status === 'failure' && !isRecoveredRunResult(result)) {
       const transient = result.failureReason === 'transient';
       failures.push({
         code: transient ? 'transient-stop' : 'pipeline-failure',
@@ -1061,7 +1065,7 @@ async function runIssueSession(
 
   // Auto-capture failures as eval case skeletons
   if (config.autoCapture && session.results.length > 0) {
-    const failures = session.results.filter((r) => r.status === 'failure');
+    const failures = session.results.filter((r) => r.status === 'failure' && !isRecoveredRunResult(r));
     if (failures.length > 0) {
       log.step(`Auto-capturing ${failures.length} failure(s) as eval cases...`);
       for (const failure of failures) {
@@ -1239,7 +1243,7 @@ async function runIssueSession(
   const finalizedPrUrl = await finalizeSession(session, config);
   const sessionPrUrl = finalizedPrUrl ?? session.sessionPrUrl ?? null;
 
-  const successCount = session.results.filter((r) => r.status === 'success').length;
+  const successCount = session.results.filter((r) => r.status === 'success' && !isRecoveredRunResult(r)).length;
   log.info(`Session complete: ${successCount}/${session.results.length} issues succeeded`);
   process.off('SIGINT', handleSigint);
   process.off('SIGTERM', handleSigterm);

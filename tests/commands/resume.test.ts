@@ -242,7 +242,8 @@ describe('resumeCommand', () => {
     }));
     expect(existsSync(join(sessionDir, 'crash-269.json'))).toBe(false);
     expect(existsSync(join(sessionDir, 'result-269.json'))).toBe(true);
-    expect(sessionPrBody).toContain('#269: Recover artifact exports — RECOVERED - VERIFY SKIPPED');
+    expect(sessionPrBody).toContain('### Recovered Issues');
+    expect(sessionPrBody).toContain('#269: Recover artifact exports — RECOVERED BY RESUME');
   });
 
   test('records recovered PRs as unverified WIP and updates the session PR without CommonJS require', async () => {
@@ -326,6 +327,7 @@ describe('resumeCommand', () => {
       issueNum: 269,
       title: 'Recover artifact exports',
       status: 'failure',
+      recoveryMode: 'resume',
       failureReason: 'transient',
       prUrl: 'https://github.com/owner/repo/pull/269',
       testsPassing: false,
@@ -335,13 +337,14 @@ describe('resumeCommand', () => {
     }));
 
     expect(mockGhExec).toHaveBeenCalledWith(
-      expect.stringContaining('gh pr edit 999 --repo "owner/repo" --title "Session: session/epic-123'),
+      expect.stringContaining('gh pr edit 999 --repo "owner/repo" --title "Session: session/epic-123 — 0 succeeded, 1 recovered"'),
       undefined,
       true,
     );
-    expect(sessionPrBody).toContain('0 succeeded, 1 failed');
+    expect(sessionPrBody).toContain('0 succeeded, 0 failed, 1 recovered');
     expect(sessionPrBody).toContain('Resume Caveat');
-    expect(sessionPrBody).toContain('#269: Recover artifact exports — RECOVERED - VERIFY SKIPPED');
+    expect(sessionPrBody).toContain('### Recovered Issues');
+    expect(sessionPrBody).toContain('#269: Recover artifact exports — RECOVERED BY RESUME');
     expect(sessionPrBody).toContain('https://github.com/owner/repo/pull/269');
   });
 

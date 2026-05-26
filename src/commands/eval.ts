@@ -67,6 +67,8 @@ import {
 } from '../lib/eval-matrix.js';
 import { renderMatrixMarkdown, renderMatrixCsv } from '../lib/eval-report.js';
 import { scanCaseDir, formatFindings } from '../lib/eval-secret-scan.js';
+import { isRecoveredResult } from '../lib/pipeline.js';
+import type { PipelineResult } from '../lib/pipeline.js';
 
 /** Canonical profiles the matrix run uses when --profiles isn't supplied. */
 const DEFAULT_MATRIX_PROFILES = ['all-frontier', 'hybrid-v1', 'all-local'];
@@ -477,7 +479,7 @@ type SessionFailure = {
   issueNum: number;
   title: string;
   file: string;
-  result: Record<string, unknown>;
+  result: PipelineResult & { issueBody?: unknown };
 };
 
 /** Collect failures from recent sessions. */
@@ -500,8 +502,8 @@ function collectSessionFailures(): SessionFailure[] {
 
     for (const file of resultFiles) {
       try {
-        const result = JSON.parse(readFileSync(join(sessionPath, file), 'utf-8'));
-        if (result.status === 'failure') {
+        const result = JSON.parse(readFileSync(join(sessionPath, file), 'utf-8')) as PipelineResult & { issueBody?: unknown };
+        if (result.status === 'failure' && !isRecoveredResult(result)) {
           failures.push({
             session: sessionDir,
             issueNum: result.issueNum,
@@ -531,7 +533,14 @@ function groupBySession(failures: SessionFailure[]): Map<string, SessionFailure[
 }
 
 /** Detect failure step from a raw session result object. */
-function detectFailureStepFromResult(result: Record<string, unknown>): string {
+function detectFailureStepFromResult(result: {
+  testsPassing?: unknown;
+  filesChanged?: unknown;
+  verifyPassing?: unknown;
+  verifySkipped?: unknown;
+  recoveryMode?: unknown;
+}): string {
+  if (result.recoveryMode) return 'recovered';
   if (!result.testsPassing) {
     return (typeof result.filesChanged === 'number' && result.filesChanged > 1) ? 'test-fix' : 'implement';
   }
@@ -550,6 +559,10 @@ async function captureSpecificIssue(issueNum: number, config: Config): Promise<v
     if (issues.includes(issueNum)) {
       const metadata = readTraceMetadata(session, issueNum);
       if (metadata) {
+        if (metadata.recoveryMode) {
+          log.warn(`Issue #${issueNum} was recovered by ${metadata.recoveryMode}; recovered runs are skipped by eval capture.`);
+          return;
+        }
         found = true;
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         try {
@@ -576,7 +589,11 @@ async function captureSpecificIssue(issueNum: number, config: Config): Promise<v
         const resultFile = join(sessionsDir, sessionDir, `result-${issueNum}.json`);
         if (existsSync(resultFile)) {
           found = true;
-          const result = JSON.parse(readFileSync(resultFile, 'utf-8'));
+          const result = JSON.parse(readFileSync(resultFile, 'utf-8')) as PipelineResult;
+          if (isRecoveredResult(result)) {
+            log.warn(`Issue #${issueNum} was recovered by ${result.recoveryMode}; recovered runs are skipped by eval capture.`);
+            return;
+          }
           const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
           try {
             await captureFailure(rl, {
@@ -648,7 +665,11 @@ async function captureFailure(
 ): Promise<void> {
   log.step(`\nCapturing: #${failure.issueNum} — ${failure.title}`);
 
-  const result = JSON.parse(readFileSync(failure.file, 'utf-8'));
+  const result = JSON.parse(readFileSync(failure.file, 'utf-8')) as PipelineResult;
+  if (isRecoveredResult(result)) {
+    log.warn(`Issue #${failure.issueNum} was recovered by ${result.recoveryMode}; recovered runs are skipped by eval capture.`);
+    return;
+  }
   const step = detectFailureStepFromResult(result);
 
   console.log(`  Failed at: ${step}`);
@@ -679,7 +700,7 @@ type SessionSuccess = {
   issueNum: number;
   title: string;
   file: string;
-  result: Record<string, unknown>;
+  result: PipelineResult & { issueBody?: unknown };
 };
 
 /** Collect successful results from recent sessions. */
@@ -706,8 +727,8 @@ function collectSessionSuccesses(sessionFilter?: string): SessionSuccess[] {
 
     for (const file of resultFiles) {
       try {
-        const result = JSON.parse(readFileSync(join(sessionPath, file), 'utf-8'));
-        if (result.status === 'success') {
+        const result = JSON.parse(readFileSync(join(sessionPath, file), 'utf-8')) as PipelineResult & { issueBody?: unknown };
+        if (result.status === 'success' && !isRecoveredResult(result)) {
           successes.push({
             session: sessionDir,
             issueNum: result.issueNum,

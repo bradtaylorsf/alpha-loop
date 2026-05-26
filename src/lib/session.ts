@@ -28,6 +28,12 @@ export type SessionContext = {
   queue?: QueueSessionContext;
 };
 
+function isRecoveredSessionResult(
+  result: PipelineResult,
+): result is PipelineResult & { recoveryMode: NonNullable<PipelineResult['recoveryMode']> } {
+  return result.recoveryMode !== undefined;
+}
+
 export type CrashMarker = {
   issueNum: number;
   step: string;
@@ -533,6 +539,7 @@ export async function finalizeSession(
       prUrl: r.prUrl,
       testsPassing: r.testsPassing,
       verifyPassing: r.verifyPassing,
+      recoveryMode: r.recoveryMode,
       duration: r.duration,
       filesChanged: r.filesChanged,
     })),
@@ -561,20 +568,25 @@ export async function finalizeSession(
   }
 
   // Create or update session PR
-  const successes = session.results.filter((r) => r.status === 'success');
-  const permanentFailures = session.results.filter((r) => r.status === 'failure' && r.failureReason !== 'transient');
-  const transientFailures = session.results.filter((r) => r.status === 'failure' && r.failureReason === 'transient');
-  const totalDuration = session.results.reduce((sum, r) => sum + r.duration, 0);
+  const recovered = session.results.filter(isRecoveredSessionResult);
+  const naturalResults = session.results.filter((r) => !isRecoveredSessionResult(r));
+  const successes = naturalResults.filter((r) => r.status === 'success');
+  const permanentFailures = naturalResults.filter((r) => r.status === 'failure' && r.failureReason !== 'transient');
+  const transientFailures = naturalResults.filter((r) => r.status === 'failure' && r.failureReason === 'transient');
+  const totalDuration = naturalResults.reduce((sum, r) => sum + r.duration, 0);
 
   // Only count completed issues (not transient failures that were re-queued)
   const completedCount = successes.length + permanentFailures.length;
-  const prTitle = `Session: ${session.name} — ${successes.length}/${completedCount} succeeded`;
+  const titleStatus = completedCount > 0
+    ? `${successes.length}/${completedCount} succeeded`
+    : `${successes.length} succeeded`;
+  const prTitle = `Session: ${session.name} — ${titleStatus}${recovered.length > 0 ? `, ${recovered.length} recovered` : ''}`;
 
   const prLines: string[] = [
     '## Session Summary',
     '',
     `**Branch:** ${session.branch}`,
-    `**Issues completed:** ${completedCount} (${successes.length} succeeded, ${permanentFailures.length} failed)`,
+    `**Issues processed:** ${session.results.length} (${successes.length} succeeded, ${permanentFailures.length} failed, ${recovered.length} recovered)`,
     `**Total duration:** ${Math.round(totalDuration / 60)} minutes`,
     `**Completed:** ${new Date().toISOString()}`,
     '',
@@ -593,6 +605,18 @@ export async function finalizeSession(
     }
     prLines.push('');
     prLines.push(...successes.map((r) => `Closes #${r.issueNum}`));
+    prLines.push('');
+  }
+
+  // Recovered issues — visible, but not natural successes/failures.
+  if (recovered.length > 0) {
+    prLines.push('### Recovered Issues');
+    for (const r of recovered) {
+      const mode = r.recoveryMode.toUpperCase();
+      prLines.push(`- #${r.issueNum}: ${r.title} — RECOVERED BY ${mode}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`);
+    }
+    prLines.push('');
+    prLines.push('*Recovered issues were not counted as succeeded or failed because recovery did not run the full pipeline verification path.*');
     prLines.push('');
   }
 
@@ -656,7 +680,7 @@ export async function finalizeSession(
     // When not auto-merging, individual PRs were already created, so mark as "Done"
     const boardStatus = config.autoMerge ? 'In Review' : 'Done';
     for (const r of session.results) {
-      if (r.status === 'success' && config.project > 0) {
+      if (r.status === 'success' && !isRecoveredSessionResult(r) && config.project > 0) {
         updateProjectStatus(config.repo, config.project, config.repoOwner, r.issueNum, boardStatus);
       }
     }
