@@ -1,20 +1,17 @@
 #!/usr/bin/env node
 import { program } from 'commander';
-import { createRequire } from 'node:module';
 import { historyCommand } from './commands/history.js';
 import { scanCommand } from './commands/scan.js';
 import { visionCommand } from './commands/vision.js';
 import { authCommand } from './commands/auth.js';
 import { syncCommand } from './commands/sync.js';
 import { normalizeScriptArgv } from './lib/cli-args.js';
-
-const require = createRequire(import.meta.url);
-const packageJson = require('../package.json') as { version: string };
+import { getPackageVersion } from './lib/package-version.js';
 
 program
   .name('alpha-loop')
   .description('Agent-agnostic automated development loop')
-  .version(packageJson.version);
+  .version(getPackageVersion());
 
 program
   .command('init')

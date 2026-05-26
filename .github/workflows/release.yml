@@ -55,7 +55,7 @@ jobs:
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
             # First release — use package.json version
-            NEW_VERSION=$(node -p "require('./package.json').version")
+            NEW_VERSION=$(node scripts/read-package-version.mjs)
             echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
             echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
