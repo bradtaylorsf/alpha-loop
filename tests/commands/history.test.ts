@@ -35,6 +35,34 @@ function createSession(
   }
 }
 
+function createCrashMarker(
+  sessionsDir: string,
+  timestamp: string,
+  issueNum: number,
+  overrides: Partial<{
+    step: string;
+    branch: string;
+    error: string;
+    markerTimestamp: string;
+    recoverable: boolean;
+  }> = {},
+): void {
+  const dir = path.join(sessionsDir, 'session', timestamp);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, `crash-${issueNum}.json`),
+    JSON.stringify({
+      issueNum,
+      step: overrides.step ?? 'review',
+      branch: overrides.branch ?? `agent/issue-${issueNum}`,
+      hasCommits: true,
+      error: overrides.error ?? 'review crashed',
+      timestamp: overrides.markerTimestamp ?? '2026-05-25T23:59:00.000Z',
+      recoverable: overrides.recoverable ?? true,
+    }, null, 2),
+  );
+}
+
 function createQueueManifest(sessionsDir: string): void {
   const queueDir = path.join(sessionsDir, 'queue-20260521T101112Z');
   fs.mkdirSync(queueDir, { recursive: true });
@@ -190,6 +218,20 @@ describe('history', () => {
       expect(output).toContain('5m 00s');
     });
 
+    it('shows crashed issue counts from crash markers', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createSession(sessionsDir, '20250115-100000', [
+        { issueNum: 1, title: 'Good issue', status: 'success', duration: 180 },
+      ]);
+      createCrashMarker(sessionsDir, '20250115-100000', 2);
+
+      historyList(sessionsDir, tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('2 issues');
+      expect(output).toContain('1 crashed');
+    });
+
     it('lists multi-epic queue manifests with status and pending counts', () => {
       const sessionsDir = path.join(tmpDir, '.alpha-loop', 'sessions');
       createQueueManifest(sessionsDir);
@@ -222,6 +264,23 @@ describe('history', () => {
       expect(output).toContain('Feature A');
       expect(output).toContain('Feature B');
       expect(output).toContain('2m 00s');
+    });
+
+    it('shows crashed issues distinctly in session detail', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createCrashMarker(sessionsDir, '20250115-103000', 216, {
+        step: 'review',
+        branch: 'agent/issue-216',
+        error: 'review log ended unexpectedly',
+      });
+
+      historyDetail(sessionsDir, 'session/20250115-103000');
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('1 crashed');
+      expect(output).toContain('#216  CRASHED during review');
+      expect(output).toContain('branch agent/issue-216');
+      expect(output).toContain('error: review log ended unexpectedly');
     });
 
     it('shows error for non-existent session', () => {

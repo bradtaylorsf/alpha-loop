@@ -186,6 +186,65 @@ describe('findStrandedBranches', () => {
 });
 
 describe('resumeCommand', () => {
+  test('prefers crash markers over branch walking and clears marker after saving recovered result', async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'alpha-loop-resume-marker-'));
+    process.chdir(tempDir);
+
+    const sessionDir = join(tempDir, '.alpha-loop', 'sessions', 'session', 'epic-226');
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, 'crash-269.json'), JSON.stringify({
+      issueNum: 269,
+      step: 'review',
+      branch: 'agent/issue-269',
+      hasCommits: true,
+      error: 'review crashed',
+      timestamp: '2026-05-25T23:59:00.000Z',
+      recoverable: true,
+    }, null, 2));
+
+    let sessionPrBody = '';
+    mockLoadConfig.mockReturnValue(baseConfig());
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git branch --list "agent/issue-*"') {
+        throw new Error('branch walking should not be used when a crash marker exists');
+      }
+      if (cmd === 'git log "origin/master..agent/issue-269" --oneline') return ok('abc123 recover stranded work\n');
+      if (cmd === 'git diff --name-only "origin/master...agent/issue-269"') return ok('src/lib/pipeline.ts\n');
+      if (cmd === 'git worktree list --porcelain') return ok('');
+      if (cmd === 'git rev-parse --show-toplevel') return ok(tempDir ?? '');
+      if (cmd === 'git checkout "agent/issue-269"') return ok('');
+      if (cmd === 'git status --porcelain -- ".alpha-loop/learnings"') return ok('');
+      if (cmd === 'git push -u origin "agent/issue-269"') return ok('');
+      return ok('');
+    });
+    mockGhExec.mockImplementation((cmd: string) => {
+      if (cmd === 'gh pr list --repo "owner/repo" --head "agent/issue-269" --state open --json number --limit 1') return ok('[]');
+      if (cmd === 'gh issue view 269 --repo "owner/repo" --json title') return ok('{"title":"Recover artifact exports"}');
+      if (cmd === 'gh pr list --repo "owner/repo" --head "session/epic-226" --state open --json number,url --limit 1') {
+        return ok('[{"number":999,"url":"https://github.com/owner/repo/pull/999"}]');
+      }
+      if (cmd.startsWith('gh pr edit 999 --repo "owner/repo" --body-file ')) {
+        const bodyFile = cmd.match(/--body-file "([^"]+)"/)?.[1];
+        if (bodyFile) sessionPrBody = readFileSync(bodyFile, 'utf-8');
+        return ok('');
+      }
+      if (cmd.startsWith('gh pr edit 999 --repo "owner/repo" --title ')) return ok('');
+      return ok('');
+    });
+
+    await resumeCommand({ issue: '269' });
+
+    expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
+      repo: 'owner/repo',
+      base: 'master',
+      head: 'agent/issue-269',
+      cwd: tempDir!,
+    }));
+    expect(existsSync(join(sessionDir, 'crash-269.json'))).toBe(false);
+    expect(existsSync(join(sessionDir, 'result-269.json'))).toBe(true);
+    expect(sessionPrBody).toContain('#269: Recover artifact exports — RECOVERED - VERIFY SKIPPED');
+  });
+
   test('records recovered PRs as unverified WIP and updates the session PR without CommonJS require', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'alpha-loop-resume-'));
     process.chdir(tempDir);

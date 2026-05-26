@@ -15,7 +15,7 @@ import {
   appendEscalationEventToTrace,
 } from './escalation.js';
 import type { EscalationEvent } from './escalation.js';
-import { setupWorktree, cleanupWorktree } from './worktree.js';
+import { setupWorktree, cleanupWorktree, worktreeHasCommits } from './worktree.js';
 import {
   assignIssue,
   labelIssue,
@@ -41,7 +41,7 @@ import {
 import { runTests } from './testing.js';
 import { runVerify } from './verify.js';
 import { extractLearnings, getLearningContext } from './learning.js';
-import { saveResult, getPreviousResult } from './session.js';
+import { saveResult, getPreviousResult, writeCrashMarker } from './session.js';
 import {
   writeTrace,
   writeTraceMetadata,
@@ -620,6 +620,7 @@ export async function processIssue(
   const stepCosts: StepCost[] = [];
   const stepsCompleted: string[] = [];
   const escalationEvents: EscalationEvent[] = [];
+  let currentStep = 'status';
   const { trackerOverride, options: pipelineOptions } = resolvePipelineOptions(trackerOrOptions, maybeOptions);
   const tracker = trackerOverride ?? new EscalationTracker({
     statePath: defaultEscalationStatePath(projectDir),
@@ -642,6 +643,7 @@ export async function processIssue(
   log.step(`Processing Issue #${issueNum}: ${title}`);
 
   // --- Step 1: Update status ---
+  currentStep = 'status';
   log.step('Step 1: Updating issue status');
   if (!config.dryRun) {
     updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In progress');
@@ -652,6 +654,7 @@ export async function processIssue(
   }
 
   // --- Step 2: Setup worktree ---
+  currentStep = 'worktree';
   log.step('Step 2: Setting up worktree');
   let worktreePath: string;
   let worktreeBranch: string;
@@ -680,7 +683,33 @@ export async function processIssue(
     return failureResult(issueNum, title, startTime);
   }
 
+  const writeRecoverableCrashMarker = (err: unknown, step = currentStep): void => {
+    if (config.dryRun) return;
+    let commitCount = 0;
+    try {
+      commitCount = worktreeHasCommits(worktreePath);
+    } catch {
+      commitCount = 0;
+    }
+    if (commitCount <= 0) return;
+
+    try {
+      writeCrashMarker(session, {
+        issueNum,
+        step,
+        branch: worktreeBranch,
+        hasCommits: true,
+        error: err instanceof Error ? err.message : String(err),
+        recoverable: true,
+      });
+    } catch (markerErr) {
+      log.warn(`Could not write crash marker for #${issueNum}: ${markerErr instanceof Error ? markerErr.message : markerErr}`);
+    }
+  };
+
+  try {
   // --- Step 3: Plan (structured JSON — controls test/verify steps) ---
+  currentStep = 'plan';
   log.step('Step 3: Planning');
   let plan: IssuePlan = DEFAULT_PLAN;
   // Write plan inside the worktree (agents sandbox to their CWD), then move to sessions dir
@@ -738,6 +767,7 @@ export async function processIssue(
   }
 
   // --- Step 3b: Fetch issue comments for full context ---
+  currentStep = 'context';
   let issueComments: Comment[] = [];
   if (!config.dryRun) {
     issueComments = getIssueComments(config.repo, issueNum);
@@ -747,6 +777,7 @@ export async function processIssue(
   }
 
   // --- Step 4: Implement ---
+  currentStep = 'implement';
   log.step('Step 4: Implementing');
   // Build resume context if worktree was recovered from a previous session
   const resumeNote = worktreeResumed
@@ -811,6 +842,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       log.error(`Implementation failed for issue #${issueNum}`);
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, 'Agent loop failed during implementation. See logs for details.');
+      writeRecoverableCrashMarker(new Error('Implementation failed after writing commits'), 'implement');
       await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
       return failureResult(issueNum, title, startTime, 'permanent');
     }
@@ -834,6 +866,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 5: Test + retry loop ---
+  currentStep = 'test';
   log.step('Step 5: Running tests');
   let testOutput = '';
   let testsPassing = false;
@@ -908,6 +941,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 6: Review gate (JSON-based) ---
+  currentStep = 'review';
   log.step('Step 6: Code review');
   let reviewOutput = '';
   let reviewGate: GateResult = DEFAULT_GATE;
@@ -1018,6 +1052,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 7: Verify gate (JSON-based) ---
+  currentStep = 'verify';
   log.step('Step 7: Live verification');
   let verifyOutput = '';
   let verifyPassing = false;
@@ -1136,6 +1171,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 7b: Smoke test (if configured) ---
   if (config.smokeTest && !config.dryRun) {
+    currentStep = 'smoke';
     log.step('Step 7b: Running smoke test');
     const smokeResult = exec(config.smokeTest, { cwd: worktreePath, timeout: 60_000 });
     if (smokeResult.exitCode === 0) {
@@ -1160,6 +1196,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     : `Review: ${reviewGate.summary || 'passed'}`;
 
   // --- Step 8: Extract learnings ---
+  currentStep = 'learn';
   log.step('Step 8: Extracting learnings');
   const learningFile = await extractLearnings({
     issueNum,
@@ -1189,6 +1226,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   stepsCompleted.push('learn');
 
   // --- Step 9: Create PR ---
+  currentStep = 'pr';
   log.step('Step 9: Creating PR');
   let prUrl: string | undefined;
 
@@ -1211,6 +1249,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       log.error(`Failed to create PR for issue #${issueNum}: ${err}`);
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, `Agent loop failed: could not create PR. Branch: ${worktreeBranch}`);
+      writeRecoverableCrashMarker(err, 'pr');
       log.warn(`Worktree preserved at ${worktreePath} — use "alpha-loop resume --issue ${issueNum}" to retry`);
       return failureResult(issueNum, title, startTime);
     }
@@ -1220,6 +1259,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 9b: Post assumptions/decisions comment ---
   if (!config.dryRun && prUrl) {
+    currentStep = 'assumptions';
     try {
       const reviewSummary = reviewGate.summary || 'No review findings';
       const assumptionsPrompt = buildAssumptionsPrompt({
@@ -1259,6 +1299,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 9c: Write full traces (Meta-Harness style) ---
+  currentStep = 'trace';
   const filesChanged = runDiff ? (runDiff.match(/^diff --git/gm) ?? []).length : 0;
 
   if (!config.dryRun) {
@@ -1313,6 +1354,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 10: Update issue status ---
+  currentStep = 'status';
   log.step('Step 10: Updating issue status');
   if (!config.dryRun) {
     const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
@@ -1332,6 +1374,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       log.warn('Skipping auto-merge: tests are not passing');
     } else {
       log.step('Step 11: Auto-merging PR');
+      currentStep = 'merge';
       try {
         mergePR(config.repo, worktreeBranch);
         mergeSucceeded = true;
@@ -1352,6 +1395,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 12: Cleanup ---
+  currentStep = 'cleanup';
   log.step('Step 12: Cleanup');
   if (!mergeSucceeded && config.autoMerge && prUrl) {
     // Merge was expected but didn't happen (tests failing or merge failed) — preserve worktree for recovery
@@ -1391,6 +1435,10 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   if (prUrl) log.info(`PR: ${prUrl}`);
 
   return result;
+  } catch (err) {
+    writeRecoverableCrashMarker(err);
+    throw err;
+  }
 }
 
 /**

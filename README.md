@@ -252,7 +252,7 @@ batch_size: 5
 
 If the loop hangs or crashes mid-session, work can be stranded on local branches with no PR. Run `alpha-loop resume` to recover:
 
-1. Scans for local `agent/issue-*` branches with commits but no open PR
+1. Reads session crash markers first, then falls back to scanning local `agent/issue-*` branches with commits but no open PR
 2. Pushes each branch to origin
 3. Runs code review
 4. Creates WIP PRs, marks issues `In Review`, and updates the session PR with a verification caveat
@@ -260,6 +260,8 @@ If the loop hangs or crashes mid-session, work can be stranded on local branches
 Recovered PRs are not marked complete. `resume` does not rerun the project test suite or final smoke tests, so verify recovered work before merging.
 
 Use `--issue <N>` to resume a specific issue.
+
+`alpha-loop history <session>` also shows `crash-<N>.json` markers for issues that crashed after writing commits but before a result file was saved.
 
 ### Screenshots
 
