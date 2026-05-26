@@ -113,4 +113,56 @@ describe('seeded alpha-loop skills', () => {
     expect(distSkill).toContain('Part of #<epic>');
     expect(distSkill).toContain('## Handoff');
   });
+
+  it('includes alpha-loop-learning-review in distribution and repo-local templates', () => {
+    const distSkillPath = join(repoRoot, 'templates', 'skills', 'alpha-loop-learning-review', 'SKILL.md');
+    const projectSkillPath = join(repoRoot, '.alpha-loop', 'templates', 'skills', 'alpha-loop-learning-review', 'SKILL.md');
+
+    expect(existsSync(distSkillPath)).toBe(true);
+    expect(existsSync(projectSkillPath)).toBe(true);
+
+    const distSkill = readFileSync(distSkillPath, 'utf-8');
+    const projectSkill = readFileSync(projectSkillPath, 'utf-8');
+
+    expect(projectSkill).toBe(distSkill);
+    expect(distSkill).toMatch(/^name: alpha-loop-learning-review$/m);
+    expect(distSkill).toMatch(/^description: Review accumulated alpha-loop learnings and propose skill\/agent improvements with independent harness research\./m);
+    expect(distSkill).toMatch(/^auto_load: true$/m);
+    expect(distSkill).toMatch(/^priority: high$/m);
+    expect(distSkill).toContain('## Trigger');
+    expect(distSkill).toContain('"review learnings"');
+    expect(distSkill).toContain('"improve the loop"');
+    expect(distSkill).toContain('"propose skill updates"');
+    expect(distSkill).toContain('"evolve skills"');
+    expect(distSkill).toContain('"run review"');
+    expect(distSkill).toContain('"audit recent runs"');
+    expect(distSkill).toContain('## Phase 1 - Run Alpha Loop Review Dry-Run');
+    expect(distSkill).toContain('<alpha-loop> review --dry-run');
+    expect(distSkill).toContain('.alpha-loop/learnings/proposed-updates/*-proposals.md');
+    expect(distSkill).toContain('success-rate, failure-rate, retry, or trend metrics');
+    expect(distSkill).toContain('The count of proposed changes');
+    expect(distSkill).toContain('## Phase 2 - Independent Harness Research');
+    expect(distSkill).toContain('Read at least the 10 most recent learning files');
+    expect(distSkill).toContain('read at least `N + 5` recent learning files');
+    expect(distSkill).toContain('gh pr view <N>');
+    expect(distSkill).toContain('git log -- <file>');
+    expect(distSkill).toContain('Counter-check for hallucinated, exaggerated, or truncated citations');
+    expect(distSkill).toContain('The reasoning generalizes beyond a single issue');
+    expect(distSkill).toContain('## Phase 3 - Walk The User Through Changes');
+    expect(distSkill).toContain('**What**: <file path> - <section or behavior touched>');
+    expect(distSkill).toContain('**Why (proposal)**: <verbatim rationale from the alpha-loop review proposal, or "N/A - harness-only">');
+    expect(distSkill).toContain('**Why (harness)**: <your independent rationale, evidence checked, and any disagreement with the proposal>');
+    expect(distSkill).toContain('**Risk**: <what could go wrong, what could be over-fit, and what to watch after applying>');
+    expect(distSkill).toContain('**Recommendation**: <apply | apply-with-edits | defer | reject> - <reasoning>');
+    expect(distSkill).toContain('harness-only');
+    expect(distSkill).toContain('## Phase 4 - Apply Selectively');
+    expect(distSkill).toContain('<alpha-loop> review --apply');
+    expect(distSkill).toContain('<alpha-loop> sync');
+    expect(distSkill).toContain('open a draft PR');
+    expect(distSkill).toContain('## Phase 5 - Meta-Learning');
+    expect(distSkill).toContain('.alpha-loop/learnings/review-cycles/<timestamp>.md');
+    expect(distSkill).toContain('Proposal items applied');
+    expect(distSkill).toContain('Harness-only additions applied');
+    expect(distSkill).toContain('proposal hallucinated citations');
+  });
 });
