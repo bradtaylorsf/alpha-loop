@@ -8,6 +8,7 @@ import {
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
+  shellQuote: (value: string) => `'${String(value).replace(/'/g, `'\\''`)}'`,
 }));
 
 jest.mock('../../src/lib/logger', () => ({
@@ -248,6 +249,33 @@ describe('createPR', () => {
     );
     expect(createCall).toBeDefined();
     expect(createCall?.[0]).toContain('--body-file');
+  });
+
+  test('shell-quotes PR title and branch values', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('git push')) {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr list')) {
+        return { stdout: '[]', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr create')) {
+        return { stdout: 'https://github.com/owner/repo/pull/1', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    createPR({
+      ...baseOptions,
+      head: "agent/issue-42-$(touch /tmp/pwned)'branch",
+      title: "feat: Add $(touch /tmp/pwned) 'quoted'",
+    });
+
+    const createCall = mockExec.mock.calls.find(
+      (call) => typeof call[0] === 'string' && call[0].includes('gh pr create'),
+    );
+    expect(createCall?.[0]).toContain("--head 'agent/issue-42-$(touch /tmp/pwned)'\\''branch'");
+    expect(createCall?.[0]).toContain("--title 'feat: Add $(touch /tmp/pwned) '\\''quoted'\\'''");
   });
 
   test('tries force push on initial push failure', () => {

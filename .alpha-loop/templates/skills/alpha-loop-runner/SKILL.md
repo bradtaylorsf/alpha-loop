@@ -1,6 +1,6 @@
 ---
 name: alpha-loop-runner
-description: Run and monitor alpha-loop sessions or epics safely. Use whenever the user asks to run alpha-loop, start the loop on an epic, prepare an epic run, monitor loop progress, verify an alpha-loop session, or validate completed epic issues. Performs dry-run validation, checks ready labels, syncs skills/agents, chooses batch/test/verify settings, and stops on skipped checklist items or missing pre-conditions.
+description: Run and monitor alpha-loop sessions or epics safely. Use whenever the user asks to run the loop, run alpha-loop, start the loop on an epic, prepare an epic run, monitor loop progress, verify an alpha-loop session, or validate completed epic issues. Performs dry-run validation, checks ready labels, syncs skills/agents, chooses batch/test/verify settings, and stops on skipped checklist items or missing pre-conditions.
 auto_load: true
 priority: high
 ---
@@ -82,7 +82,7 @@ git status --short
 
 Confirm the skill appears in every configured harness output directory from `.alpha-loop.yaml` (`.claude/skills/`, `.agents/skills/`, or another harness-specific path).
 
-Until issue #185 lands, `alpha-loop sync` can delete skills that exist only in generated harness directories. If sync removes a useful harness-only skill, recover it by restoring the file from git or shell history, copying it into `.alpha-loop/templates/skills/<name>/`, and running `<alpha-loop> sync` again. Never treat `.claude/skills/`, `.agents/skills/`, or other harness outputs as canonical.
+`alpha-loop sync` is **additive by default** (#185): it copies skills from `.alpha-loop/templates/skills/` into harness output dirs and updates files that differ, but it does NOT delete files in the harness output that aren't in the templates. Harness-only skills are left alone. Use `<alpha-loop> sync --check` to see what would change, or `<alpha-loop> sync --prune` if you explicitly want to remove anything not in the templates dir. Never treat `.claude/skills/`, `.agents/skills/`, or other harness outputs as canonical — `.alpha-loop/templates/skills/` is the source of truth.
 
 ## Repo-Specific Posture
 
@@ -160,7 +160,7 @@ Follow this ordered playbook for `alpha-loop run --epic <N>` work.
    git status --short
    ```
 
-   If sync deletes or mutates unexpected project-owned skill files, restore or report them before continuing.
+   Sync is additive by default. If you intend to remove untemplated entries from harness output dirs, run `<alpha-loop> sync --check` first to see what would be pruned, then `<alpha-loop> sync --prune` if the list looks right.
 
 6. Choose the run shape and explain it briefly before the dry run.
 
@@ -214,7 +214,7 @@ Interrupt the run, or stop before starting it, and report exact status if any of
 - Repeated verification failures indicate the issue needs new planning or human input instead of another retry.
 - A merge conflict, missing dependency, service startup failure, or auth failure prevents safe unattended progress.
 - A per-issue learning file is not written after an issue exits.
-- Sync deletes a useful harness-only skill and it has not been restored into `.alpha-loop/templates/skills/`.
+- A `<alpha-loop> sync --prune` run reports it would delete a skill the user actually wanted to keep (stop and confirm before re-running with `--prune`).
 - The user says stop, pause, wait, hold, or questions the queue order.
 
 When interrupted, pause any heartbeat automation, wait for Alpha Loop cleanup/finalization when safe, inspect `git status --short --branch`, and summarize the exact PRs, branches, issues, worktrees, and files touched.

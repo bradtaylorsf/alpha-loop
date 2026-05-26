@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { syncAgentAssets } from '../../src/commands/sync';
@@ -289,6 +289,29 @@ describe('syncAgentAssets', () => {
     expect(existsSync(join(dir, '.claude', 'skills', 'harness-only'))).toBe(false);
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining(join('.claude', 'skills', 'harness-only', 'SKILL.md')));
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining(join('.claude', 'skills', 'harness-only', 'references', 'guide.md')));
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('prune removes target-only symlinks without traversing their targets', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    const outsideDir = join(dir, 'outside-target');
+    mkdirSync(join(templatesBase, 'skills', 'a'), { recursive: true });
+    writeFileSync(join(templatesBase, 'skills', 'a', 'SKILL.md'), '# Same');
+    mkdirSync(join(dir, '.claude', 'skills', 'a'), { recursive: true });
+    writeFileSync(join(dir, '.claude', 'skills', 'a', 'SKILL.md'), '# Same');
+    mkdirSync(outsideDir, { recursive: true });
+    writeFileSync(join(outsideDir, 'keep.md'), '# Keep');
+    symlinkSync(outsideDir, join(dir, '.claude', 'skills', 'external-link'), 'dir');
+
+    const result = syncAgentAssets(['claude-code'], { projectDir: dir, prune: true });
+
+    expect(result.synced).toBe(true);
+    expect(existsSync(join(dir, '.claude', 'skills', 'external-link'))).toBe(false);
+    expect(readFileSync(join(outsideDir, 'keep.md'), 'utf-8')).toBe('# Keep');
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining(join('.claude', 'skills', 'external-link')));
+    expect(log.warn).not.toHaveBeenCalledWith(expect.stringContaining(join(outsideDir, 'keep.md')));
 
     rmSync(dir, { recursive: true, force: true });
   });

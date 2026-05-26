@@ -199,9 +199,19 @@ describe('buildOneShotCommand', () => {
     expect(cmd).toBe('codex exec --model gpt-5.4 --full-auto');
   });
 
+  test('builds codex text-only command with read-only sandbox', () => {
+    const cmd = buildOneShotCommand('codex', 'gpt-5.4', { textOnly: true });
+    expect(cmd).toBe('codex exec --model gpt-5.4 --sandbox read-only');
+  });
+
   test('builds codex command without model', () => {
     const cmd = buildOneShotCommand('codex', '');
     expect(cmd).toBe('codex exec --full-auto');
+  });
+
+  test('builds ollama text-only command with read-only sandbox', () => {
+    const cmd = buildOneShotCommand('ollama', 'llama3.1:70b', { textOnly: true });
+    expect(cmd).toBe('codex exec --model llama3.1:70b --sandbox read-only');
   });
 
   test('builds opencode command', () => {

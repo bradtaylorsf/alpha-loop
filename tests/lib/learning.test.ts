@@ -245,6 +245,8 @@ function learningFileContent(): string {
   return `---
 issue: 42
 status: success
+traces:
+  plan: .alpha-loop/sessions/session/test/traces/prompts/plan-issue-42.md
 ---
 ## What Worked
 - Good tests
@@ -639,6 +641,49 @@ describe('generateSessionSummary', () => {
     expect(prompt).toContain('Recovered issues are excluded from failure counts and success-rate calculations');
     expect(prompt).toContain('| Recovered issues | #216 (resume) |');
     expect(prompt).toContain('| Success rate | 100% |');
+  });
+
+  test('uses only learning artifacts from the requested session', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReaddirSync.mockReturnValue([
+      'issue-42-20260101-000000.md' as any,
+      'issue-42-20260102-000000.md' as any,
+    ]);
+    mockReadFileSync.mockImplementation((path) => {
+      const filePath = String(path);
+      if (filePath.endsWith('issue-42-20260101-000000.md')) {
+        return `---
+issue: 42
+traces:
+  plan: .alpha-loop/sessions/session/old/traces/prompts/plan-issue-42.md
+---
+## What Worked
+- Stale learning`;
+      }
+      return `---
+issue: 42
+traces:
+  plan: .alpha-loop/sessions/session/test/traces/prompts/plan-issue-42.md
+---
+## What Worked
+- Current session learning`;
+    });
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: codexSummaryTranscript(),
+      duration: 5000,
+    });
+
+    await generateSessionSummary({
+      sessionName: 'session/test',
+      results: [{ issueNum: 42, title: 'Test issue', status: 'success', duration: 120 }],
+      learningsDir: '/fake/learnings',
+      config: makeConfig({ agent: 'codex' }),
+    });
+
+    const prompt = mockSpawnAgent.mock.calls[0][0].prompt;
+    expect(prompt).toContain('Current session learning');
+    expect(prompt).not.toContain('Stale learning');
   });
 
   test('skips writing session summary when output is placeholder-only', async () => {

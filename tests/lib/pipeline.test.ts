@@ -4,6 +4,7 @@ import type { SessionContext } from '../../src/lib/session';
 // Mock all dependencies
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
+  shellQuote: (value: string) => `'${String(value).replace(/'/g, `'\\''`)}'`,
 }));
 
 jest.mock('../../src/lib/logger', () => ({
@@ -284,13 +285,29 @@ describe('processIssue', () => {
     );
     expect(mockExec).toHaveBeenCalledWith('git add -A', { cwd: '/tmp/worktree' });
     expect(mockExec).toHaveBeenCalledWith(
-      'git commit -m "feat: implement issue #42 - Test issue"',
+      "git commit -m 'feat: implement issue #42 - Test issue'",
       { cwd: '/tmp/worktree' },
     );
     expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       autoCommittedByPipeline: true,
       autoCommittedPaths: ['src/lib/pipeline.ts', 'tests/lib/pipeline.test.ts'],
     }));
+  });
+
+  test('shell-quotes issue titles in fallback auto-commit messages', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: ' M src/lib/pipeline.ts\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await processIssue(42, "Danger $(touch /tmp/pwned) 'quote'", 'Issue body', makeConfig(), makeSession());
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "git commit -m 'feat: implement issue #42 - Danger $(touch /tmp/pwned) '\\''quote'\\'''",
+      { cwd: '/tmp/worktree' },
+    );
   });
 
   test('extracts and commits the learning artifact in the worktree before creating the PR', async () => {
@@ -316,7 +333,7 @@ describe('processIssue', () => {
     }));
 
     const commitCallIndex = mockExec.mock.calls.findIndex(([cmd]) =>
-      String(cmd).startsWith('git commit -m "chore: add learning artifact for issue #42"'),
+      String(cmd).startsWith("git commit -m 'chore: add learning artifact for issue #42'"),
     );
     expect(commitCallIndex).toBeGreaterThanOrEqual(0);
     expect(mockExec.mock.calls[commitCallIndex][0]).toContain('.alpha-loop/learnings/issue-42-20260101-000000.md');
@@ -1032,7 +1049,7 @@ describe('processBatch', () => {
     }));
 
     const commitCallIndex = mockExec.mock.calls.findIndex(([cmd]) =>
-      String(cmd).startsWith('git commit -m "chore: add learning artifacts for issues #10, #11"'),
+      String(cmd).startsWith("git commit -m 'chore: add learning artifacts for issues #10, #11'"),
     );
     expect(commitCallIndex).toBeGreaterThanOrEqual(0);
     expect(mockExec.mock.calls[commitCallIndex][0]).toContain('issue-10-20260101-000000.md');

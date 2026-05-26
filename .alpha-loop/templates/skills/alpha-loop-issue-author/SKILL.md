@@ -1,6 +1,6 @@
 ---
 name: alpha-loop-issue-author
-description: Capture new features, changes, or bugs as well-formed GitHub issues optimized for alpha-loop. Use whenever the user describes something they want built or fixed, or says "add an issue", "file a feature", "let's build X". Searches existing issues/epics for duplicates, decides standalone vs epic-child vs new epic, drafts in the canonical alpha-loop body format, applies correct labels, sets dependencies, and links to parent epics.
+description: Capture new features, changes, or bugs as well-formed GitHub issues optimized for alpha-loop. Use whenever the user describes something they want built or fixed, or says "add a feature", "add an issue", "file a feature", "let's build X". Searches existing issues/epics for duplicates, decides standalone vs epic-child vs new epic, drafts in the canonical alpha-loop body format, applies correct labels, sets dependencies, and links to parent epics.
 auto_load: true
 priority: high
 ---
