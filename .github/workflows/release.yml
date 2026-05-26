@@ -11,6 +11,7 @@ on:
 permissions:
   contents: write
   id-token: write
+  pull-requests: write
 
 jobs:
   test:
@@ -141,23 +142,26 @@ jobs:
             --notes "$NOTES" \
             --latest
 
-      # Sync the stamped package.json back to master via PR (master is
-      # protected by a repo rule requiring PRs; direct push from CI is
-      # rejected). Without this, a fresh `git clone` + `node dist/cli.js
-      # --version` reports the stale value left over from before the
-      # last release.
+      # Sync the stamped package.json back to master via PR. Master is
+      # protected by a repo rule that requires changes go through PRs,
+      # so a direct push from CI is rejected. Without this step, a
+      # fresh `git clone` + `node dist/cli.js --version` would report
+      # the stale value left over from before the last release.
       #
-      # The PR is opened on a unique branch per release, then merged
-      # immediately via gh's --admin flag (which respects the repo
-      # rule semantically — PR existed before merge — while bypassing
-      # any review-required gates the bot can't satisfy). The `[skip ci]`
-      # marker on the merge commit prevents re-triggering this workflow.
+      # Flow: push a chore/release-bump-vX.Y.Z branch, open a PR,
+      # merge it. GitHub's recursive-trigger prevention means the
+      # GITHUB_TOKEN-merged push to master does NOT fire a new
+      # workflow run, so there is no infinite loop. continue-on-error
+      # keeps a hiccup here from failing the whole release once the
+      # npm publish + git tag have already succeeded.
       - name: Sync version bump back to master via PR
         if: steps.version.outputs.skip != 'true'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           NEW_VERSION: ${{ steps.version.outputs.new_version }}
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -169,13 +173,18 @@ jobs:
 
           BUMP_BRANCH="chore/release-bump-v$NEW_VERSION"
           git checkout -b "$BUMP_BRANCH"
-          git commit -m "chore(release): bump version to v$NEW_VERSION [skip ci]"
+          git commit -m "chore(release): bump version to v$NEW_VERSION"
           git push -u origin "$BUMP_BRANCH"
 
           gh pr create \
             --base master \
             --head "$BUMP_BRANCH" \
             --title "chore(release): bump version to v$NEW_VERSION" \
-            --body "Auto-generated after publishing v$NEW_VERSION to npm. Syncs source-of-truth package.json with the released version so \`alpha-loop --version\` on a fresh source clone matches what's on npm."
+            --body "Auto-generated after publishing v$NEW_VERSION to npm. Syncs source-of-truth package.json with the released version so the CLI reports the correct version on fresh source clones."
 
-          gh pr merge "$BUMP_BRANCH" --squash --admin --delete-branch
+          # No --admin: master's ruleset only requires changes go through a
+          # PR; it does not require approvals or status checks, so the bot
+          # can merge directly. If the user later adds those requirements,
+          # the merge fails loudly and continue-on-error keeps the release
+          # green so a human can take over the sync manually.
+          gh pr merge "$BUMP_BRANCH" --squash --delete-branch
