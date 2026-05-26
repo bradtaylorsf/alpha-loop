@@ -409,7 +409,7 @@ async function applyChanges(
   }
 
   // Sync skills to all configured harnesses so editor copies stay current
-  const syncResult = syncAgentAssets(config.harnesses, { projectDir });
+  const syncResult = syncAgentAssets(config.harnesses, { projectDir, prune: false });
   if (syncResult.synced) {
     log.success('Synced agent assets after applying changes');
   }

@@ -104,7 +104,7 @@ import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEp
 import { processIssue, processBatch } from '../../src/lib/pipeline';
 import { createSession, finalizeSession } from '../../src/lib/session';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
@@ -121,6 +121,8 @@ const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finali
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
 const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
+const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
+const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -179,6 +181,8 @@ const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined 
 beforeEach(() => {
   jest.clearAllMocks();
 
+  mockExistsSync.mockReturnValue(false);
+  mockReadFileSync.mockReturnValue('');
   mockExec.mockReturnValue({ stdout: '/usr/bin/tool', stderr: '', exitCode: 0 });
   mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig(overrides) as any);
   mockCreateSession.mockReturnValue({
@@ -319,6 +323,33 @@ describe('runCommand', () => {
     ]);
     expect(mockProcessIssue).not.toHaveBeenCalled();
     expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('skips generated-file auto-commit when refreshed context fails validation', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      skipPostSessionReview: true,
+      ...overrides,
+    }) as any);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain .alpha-loop/ AGENTS.md CLAUDE.md') {
+        return { stdout: ' M .alpha-loop/context.md\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '/usr/bin/tool', stderr: '', exitCode: 0 };
+    });
+    mockExistsSync.mockImplementation((filePath: any) => String(filePath).endsWith('.alpha-loop/context.md'));
+    mockReadFileSync.mockImplementation((filePath: any) => {
+      if (String(filePath).endsWith('.alpha-loop/context.md')) {
+        return 'Wrote `PROJECT_CONTEXT.md` summarizing the current codebase.';
+      }
+      return '';
+    });
+
+    await runCommand({});
+
+    expect(mockLog.warn).toHaveBeenCalledWith('Skipping generated context/instructions auto-commit because validation failed:');
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git add '))).toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git commit '))).toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git push '))).toBe(false);
   });
 
   test('--epics dry-run validates the full queue in order without creating sessions or manifests', async () => {

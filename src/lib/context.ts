@@ -2,13 +2,16 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { execAsync, type ExecResult } from './shell.js';
 import { log } from './logger.js';
+import { excerptForLog, validateProjectContextMarkdown } from './scan-validation.js';
 
 const CONTEXT_DIR = '.alpha-loop';
 const CONTEXT_FILE = join(CONTEXT_DIR, 'context.md');
 // Context expires after 4 hours
 const CONTEXT_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 
-const SCAN_PROMPT = `Analyze this codebase and produce a concise project context file. Read the key files (package.json, entry points, config files, README, CLAUDE.md) and output ONLY this markdown structure:
+const SCAN_PROMPT = `Analyze this codebase and produce a concise project context file. Read the key files (package.json, entry points, config files, README, CLAUDE.md) and output ONLY this markdown structure.
+
+Do NOT use tools. Do NOT create, edit, or write files. Output the full markdown content directly on stdout and nothing else.
 
 ## Architecture
 - Entry points and how they connect (e.g., "Express server in src/server/index.ts mounts routes from routes/*.ts")
@@ -56,7 +59,14 @@ export async function generateProjectContext(
     return;
   }
 
-  writeFileSync(contextFile, result.stdout, 'utf-8');
+  const validation = validateProjectContextMarkdown(result.stdout);
+  if (!validation.valid) {
+    log.warn(`Project context output rejected: ${validation.reason ?? 'invalid markdown structure'}`);
+    log.warn(`Agent stdout excerpt: ${excerptForLog(result.stdout)}`);
+    return;
+  }
+
+  writeFileSync(contextFile, result.stdout.trim() + '\n', 'utf-8');
 }
 
 /**

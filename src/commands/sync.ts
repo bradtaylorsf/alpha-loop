@@ -23,7 +23,7 @@ import {
   rmSync,
   renameSync,
 } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 import { log } from '../lib/logger.js';
 import { loadConfig } from '../lib/config.js';
 
@@ -103,39 +103,71 @@ const LEGACY_SKILLS_DIR = 'skills';
 const LEGACY_CLAUDE_AGENTS_DIR = '.claude/agents';
 
 // ---------------------------------------------------------------------------
-// Helper functions (kept exactly as before)
+// Helper functions
 // ---------------------------------------------------------------------------
 
+type SyncDirOptions = {
+  prune?: boolean;
+};
+
 /**
- * Recursively copy a directory, deleting files in target that don't exist in source.
+ * Return every file that will be removed when pruning a target-only path.
+ * Empty directories are included so every rmSync has a visible WARN line.
  */
-function syncDir(src: string, dest: string): void {
+function collectPrunedPaths(targetPath: string): string[] {
+  const stat = statSync(targetPath);
+  if (!stat.isDirectory()) return [targetPath];
+
+  const entries = readdirSync(targetPath);
+  if (entries.length === 0) return [targetPath];
+
+  return entries.flatMap((entry) => collectPrunedPaths(join(targetPath, entry)));
+}
+
+/**
+ * Recursively copy a directory from source to target.
+ *
+ * Default sync is additive: target-only files are preserved. Pass
+ * { prune: true } to remove target entries that do not exist in source.
+ */
+function syncDir(src: string, dest: string, options: SyncDirOptions = {}): boolean {
+  const destExists = existsSync(dest);
   mkdirSync(dest, { recursive: true });
+  let changed = !destExists;
 
   const srcEntries = new Set(readdirSync(src));
 
-  // Delete files in dest that don't exist in src
-  if (existsSync(dest)) {
+  // Delete files in dest that don't exist in src only when explicitly requested.
+  if (options.prune && existsSync(dest)) {
     for (const entry of readdirSync(dest)) {
       if (!srcEntries.has(entry)) {
         const destPath = join(dest, entry);
+        for (const prunedPath of collectPrunedPaths(destPath)) {
+          log.warn(`Pruning untemplated file: ${prunedPath}`);
+        }
         rmSync(destPath, { recursive: true, force: true });
+        changed = true;
       }
     }
   }
 
-  // Copy from src to dest
+  // Copy from src to dest when content is missing or out of date.
   for (const entry of srcEntries) {
     const srcPath = join(src, entry);
     const destPath = join(dest, entry);
     const stat = statSync(srcPath);
 
     if (stat.isDirectory()) {
-      syncDir(srcPath, destPath);
+      changed = syncDir(srcPath, destPath, options) || changed;
     } else {
-      copyFileSync(srcPath, destPath);
+      if (!filesMatch(srcPath, destPath)) {
+        copyFileSync(srcPath, destPath);
+        changed = true;
+      }
     }
   }
+
+  return changed;
 }
 
 /**
@@ -256,9 +288,9 @@ export type SyncResult = {
  */
 export function syncAgentAssets(
   harnesses: string[],
-  options: { check?: boolean; projectDir?: string } = {}
+  options: { check?: boolean; projectDir?: string; prune?: boolean } = {}
 ): SyncResult {
-  const { check = false, projectDir = process.cwd() } = options;
+  const { check = false, projectDir = process.cwd(), prune = false } = options;
   const result: SyncResult = { synced: false, docSynced: false, skillsDirs: [] };
 
   const sources = resolveTemplateSources(projectDir);
@@ -281,13 +313,16 @@ export function syncAgentAssets(
         if (check) {
           log.warn(`Drift [${harness}]: ${config.skillsDir} differs from template skills/`);
         } else {
-          syncDir(sources.skillsDir, targetSkills);
-          log.info(`Synced [${harness}] skills/ → ${config.skillsDir}`);
+          const changed = syncDir(sources.skillsDir, targetSkills, { prune });
+          if (changed) {
+            log.info(`Synced [${harness}] skills/ → ${config.skillsDir}`);
+            if (!result.skillsDirs.includes(config.skillsDir)) {
+              result.skillsDirs.push(config.skillsDir);
+            }
+            result.synced = true;
+          }
         }
-        if (!result.skillsDirs.includes(config.skillsDir)) {
-          result.skillsDirs.push(config.skillsDir);
-        }
-        result.synced = true;
+        if (check) result.synced = true;
       }
     }
 
@@ -298,10 +333,13 @@ export function syncAgentAssets(
         if (check) {
           log.warn(`Drift [${harness}]: ${config.agentsDir} differs from template agents/`);
         } else {
-          syncDir(sources.agentsDir, targetAgents);
-          log.info(`Synced [${harness}] agents/ → ${config.agentsDir}`);
+          const changed = syncDir(sources.agentsDir, targetAgents, { prune });
+          if (changed) {
+            log.info(`Synced [${harness}] agents/ → ${config.agentsDir}`);
+            result.synced = true;
+          }
         }
-        result.synced = true;
+        if (check) result.synced = true;
       }
     }
 
@@ -393,7 +431,7 @@ export function migrateToTemplates(projectDir: string = process.cwd()): void {
  * Reads harness list from the caller-supplied options (populated from
  * .alpha-loop.yaml) and delegates to syncAgentAssets.
  */
-export function syncCommand(options: { check?: boolean; harnesses?: string[] } = {}): void {
+export function syncCommand(options: { check?: boolean; prune?: boolean; harnesses?: string[] } = {}): void {
   const projectDir = process.cwd();
 
   // Load harnesses from options or fall back to config file, auto-deriving from agent if needed
@@ -418,12 +456,12 @@ export function syncCommand(options: { check?: boolean; harnesses?: string[] } =
     return;
   }
 
-  const result = syncAgentAssets(harnesses, { check: options.check, projectDir });
+  const result = syncAgentAssets(harnesses, { check: options.check, prune: options.prune, projectDir });
 
   if (!result.synced) {
     log.success('Agent assets are in sync.');
   } else if (options.check) {
-    log.error('Drift detected. Run "alpha-loop sync" to resolve.');
+    log.error('Drift detected. Run "alpha-loop sync" to update templated files or "alpha-loop sync --prune" to remove target-only files.');
     process.exit(1);
   } else {
     log.success('Agent assets synced.');

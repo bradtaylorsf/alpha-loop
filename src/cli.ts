@@ -6,11 +6,12 @@ import { visionCommand } from './commands/vision.js';
 import { authCommand } from './commands/auth.js';
 import { syncCommand } from './commands/sync.js';
 import { normalizeScriptArgv } from './lib/cli-args.js';
+import { getPackageVersion } from './lib/package-version.js';
 
 program
   .name('alpha-loop')
   .description('Agent-agnostic automated development loop')
-  .version('1.8.0');
+  .version(getPackageVersion());
 
 program
   .command('init')
@@ -92,6 +93,7 @@ program
   .command('sync')
   .description('Sync .alpha-loop/templates/ to all configured harnesses')
   .option('--check', 'Check for drift without syncing (exits non-zero if drift found)')
+  .option('--prune', 'Remove target-only harness files that are not present in templates')
   .action(syncCommand);
 
 program

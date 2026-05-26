@@ -178,8 +178,16 @@ describe('project metadata cache', () => {
     const cache2 = { projectId: 'p2', fieldId: 'f2', optionMap: new Map() };
     setProjectCache('owner1', 1, cache1);
     setProjectCache('owner2', 1, cache2);
-    expect(getProjectCache('owner1', 1)?.projectId).toBe('p1');
-    expect(getProjectCache('owner2', 1)?.projectId).toBe('p2');
+    expect(getProjectCache('owner1', 1)).toMatchObject({ projectId: 'p1' });
+    expect(getProjectCache('owner2', 1)).toMatchObject({ projectId: 'p2' });
+  });
+
+  it('stores and retrieves disabled project metadata', () => {
+    const cache = { disabled: true as const, reason: 'Could not resolve project Status field' };
+
+    setProjectCache('owner', 1, cache);
+
+    expect(getProjectCache('owner', 1)).toBe(cache);
   });
 
   it('clears all cached data', () => {

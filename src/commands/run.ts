@@ -30,6 +30,7 @@ import { readGateResult, formatGateFindings } from '../lib/pipeline.js';
 import { spawnAgent } from '../lib/agent.js';
 import { buildSessionReviewPrompt, type EpicPromptContext } from '../lib/prompts.js';
 import { writeTraceToSubdir } from '../lib/traces.js';
+import { validateGeneratedMarkdownForCommit } from '../lib/scan-validation.js';
 import { readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, parseDependencies, type ValidationReport } from '../lib/validation.js';
 import {
@@ -732,13 +733,21 @@ async function runIssueSession(
   if (!config.dryRun) {
     const statusResult = exec('git status --porcelain .alpha-loop/ AGENTS.md CLAUDE.md');
     if (statusResult.stdout.trim()) {
-      log.info('New files generated — committing so worktrees include them...');
-      exec('git add .alpha-loop/ AGENTS.md CLAUDE.md 2>/dev/null || true');
-      const diffCheck = exec('git diff --cached --quiet');
-      if (diffCheck.exitCode !== 0) {
-        exec('git commit -m "chore: add project vision and context for alpha-loop"');
-        exec(`git push origin "${config.baseBranch}"`);
-        log.success('Vision and context committed to ' + config.baseBranch);
+      const validation = validateGeneratedMarkdownForCommit(process.cwd(), statusResult.stdout);
+      if (!validation.valid) {
+        log.warn('Skipping generated context/instructions auto-commit because validation failed:');
+        for (const error of validation.errors) {
+          log.warn(`  ${error}`);
+        }
+      } else {
+        log.info('New files generated — committing so worktrees include them...');
+        exec('git add .alpha-loop/ AGENTS.md CLAUDE.md 2>/dev/null || true');
+        const diffCheck = exec('git diff --cached --quiet');
+        if (diffCheck.exitCode !== 0) {
+          exec('git commit -m "chore: add project vision and context for alpha-loop"');
+          exec(`git push origin "${config.baseBranch}"`);
+          log.success('Vision and context committed to ' + config.baseBranch);
+        }
       }
     }
   }
