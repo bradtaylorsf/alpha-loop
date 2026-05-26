@@ -50,6 +50,14 @@ describe('epic-first workflow docs and help text', () => {
     expect(epicsDoc).toContain('alpha-loop history queue-<timestamp>');
   });
 
+  it('documents excluding alpha-loop worktrees from custom test configs', () => {
+    const epicsDoc = read('docs/epics.md');
+
+    expect(epicsDoc).toContain('### Test Discovery');
+    expect(epicsDoc).toContain('custom Jest, Vitest, Mocha, or other test-runner config');
+    expect(epicsDoc).toContain('exclude `.worktrees/` from test discovery');
+  });
+
   it('CLI descriptions mention epic grouping and epic-aware roadmap scheduling', () => {
     const cli = read('src/cli.ts');
 

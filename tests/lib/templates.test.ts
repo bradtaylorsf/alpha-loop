@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { diffSkills, diffAgents } from '../../src/lib/templates';
@@ -165,5 +165,34 @@ describe('diffAgents', () => {
     expect(result).toHaveLength(0);
 
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('distribution test config templates', () => {
+  const repoRoot = process.cwd();
+
+  function findTestConfigTemplates(dir: string): string[] {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) return findTestConfigTemplates(path);
+      if (!entry.isFile()) return [];
+      return /(?:(?:jest|vitest|mocha)\.config\.|\.mocharc\.)(?:[cm]?[jt]s|json|ya?ml)$/.test(entry.name) ? [path] : [];
+    });
+  }
+
+  it('ships a Jest config template that ignores alpha-loop worktrees', () => {
+    const content = readFileSync(join(repoRoot, 'templates', 'jest.config.cjs'), 'utf-8');
+
+    expect(content).toContain('testPathIgnorePatterns');
+    expect(content).toContain("'/.worktrees/'");
+  });
+
+  it('keeps every shipped JS test-runner config template from discovering worktree tests', () => {
+    const configs = findTestConfigTemplates(join(repoRoot, 'templates'));
+
+    expect(configs).toContain(join(repoRoot, 'templates', 'jest.config.cjs'));
+    for (const config of configs) {
+      expect(readFileSync(config, 'utf-8')).toContain('.worktrees');
+    }
   });
 });
