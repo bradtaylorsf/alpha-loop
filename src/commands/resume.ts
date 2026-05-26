@@ -14,6 +14,7 @@ import { exec } from '../lib/shell.js';
 import { ghExec } from '../lib/rate-limit.js';
 import { spawnAgent } from '../lib/agent.js';
 import { buildReviewPrompt } from '../lib/prompts.js';
+import { repairSessionLearningArtifacts } from '../lib/learning.js';
 import {
   labelIssue,
   commentIssue,
@@ -60,6 +61,87 @@ function listAgentIssueBranches(): string[] {
   }
 
   return Array.from(branches).sort();
+}
+
+function worktreePathForBranch(branch: string): string | null {
+  const worktreeResult = exec('git worktree list --porcelain');
+  if (worktreeResult.exitCode !== 0) return null;
+
+  let currentWorktree: string | null = null;
+  for (const line of worktreeResult.stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('worktree ')) {
+      currentWorktree = trimmed.slice('worktree '.length);
+      continue;
+    }
+    if (trimmed === `branch refs/heads/${branch}`) {
+      return currentWorktree;
+    }
+  }
+
+  return null;
+}
+
+function checkoutBranchForResume(branch: string): string | null {
+  const existingWorktree = worktreePathForBranch(branch);
+  if (existingWorktree) return existingWorktree;
+
+  const toplevelResult = exec('git rev-parse --show-toplevel');
+  const cwd = toplevelResult.exitCode === 0 && toplevelResult.stdout
+    ? toplevelResult.stdout
+    : process.cwd();
+  const checkoutResult = exec(`git checkout ${JSON.stringify(branch)}`, { cwd });
+  if (checkoutResult.exitCode !== 0) {
+    log.error(`Could not check out ${branch}: ${checkoutResult.stderr || checkoutResult.stdout}`);
+    return null;
+  }
+  return cwd;
+}
+
+function changedLearningPaths(cwd: string, issueNum: number): string[] {
+  const statusResult = exec('git status --porcelain -- ".alpha-loop/learnings"', { cwd });
+  if (statusResult.exitCode !== 0 || !statusResult.stdout.trim()) return [];
+
+  return statusResult.stdout
+    .split('\n')
+    .map((line) => {
+      const path = line.slice(3).trim();
+      return path.includes(' -> ') ? path.split(' -> ').pop()!.trim() : path;
+    })
+    .filter((path) => path.startsWith(`.alpha-loop/learnings/issue-${issueNum}-`) && path.endsWith('.md'));
+}
+
+function commitChangedLearningArtifacts(cwd: string, issueNum: number): boolean {
+  const paths = changedLearningPaths(cwd, issueNum);
+  if (paths.length === 0) return false;
+
+  const pathspecs = paths.map((path) => JSON.stringify(path)).join(' ');
+  const addResult = exec(`git add -- ${pathspecs}`, { cwd });
+  if (addResult.exitCode !== 0) {
+    log.warn(`Could not stage learning artifact for #${issueNum}: ${addResult.stderr || addResult.stdout}`);
+    return false;
+  }
+
+  const stagedResult = exec(`git diff --cached --name-only -- ${pathspecs}`, { cwd });
+  if (stagedResult.exitCode !== 0 || !stagedResult.stdout.trim()) return false;
+
+  const stagedPaths = stagedResult.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => paths.includes(line));
+  if (stagedPaths.length === 0) return false;
+
+  const commitResult = exec(
+    `git commit -m ${JSON.stringify(`chore: add learning artifact for issue #${issueNum}`)} -- ${stagedPaths.map((path) => JSON.stringify(path)).join(' ')}`,
+    { cwd },
+  );
+  if (commitResult.exitCode !== 0) {
+    log.warn(`Could not commit learning artifact for #${issueNum}: ${commitResult.stderr || commitResult.stdout}`);
+    return false;
+  }
+
+  log.success(`Learning artifact committed for #${issueNum}`);
+  return true;
 }
 
 /**
@@ -187,14 +269,30 @@ async function resumeBranch(
   const title = getIssueTitle(repo, issueNum);
   log.step(`Resuming issue #${issueNum}: ${title}`);
 
+  const branchWorktree = checkoutBranchForResume(branch);
+  if (!branchWorktree) return null;
+
+  const session = findSessionForIssue(issueNum);
+  if (session && !config.skipLearn) {
+    repairSessionLearningArtifacts({
+      sessionName: session.sessionName,
+      issues: [{ issueNum, title, status: 'failure', duration: 0, retries: 0 }],
+      learningsDir: join(branchWorktree, '.alpha-loop', 'learnings'),
+      sessionLogsDir: join(session.sessionDir, 'logs'),
+    });
+    commitChangedLearningArtifacts(branchWorktree, issueNum);
+  } else if (config.skipLearn) {
+    log.info('Skipping learning artifact repair (skipLearn=true)');
+  }
+
   // Push the branch so createPR can work with it.
   // createPR also pushes internally, but we do it first here for explicit
   // feedback and to fail fast if the push is going to be a problem.
   log.info(`Pushing ${branch} to origin...`);
-  const pushResult = exec(`git push -u origin "${branch}"`);
+  const pushResult = exec(`git push -u origin "${branch}"`, { cwd: branchWorktree });
   if (pushResult.exitCode !== 0) {
     log.warn(`Push failed: ${pushResult.stderr}. Attempting force push...`);
-    const forceResult = exec(`git push -u origin "${branch}" --force`);
+    const forceResult = exec(`git push -u origin "${branch}" --force`, { cwd: branchWorktree });
     if (forceResult.exitCode !== 0) {
       log.error(`Could not push ${branch}: ${forceResult.stderr}`);
       return null;
@@ -217,19 +315,12 @@ async function resumeBranch(
       baseBranch,
     });
 
-    // Determine the cwd for the review — use the repo root (git toplevel).
-    const toplevelResult = exec('git rev-parse --show-toplevel');
-    const cwd = toplevelResult.exitCode === 0 ? toplevelResult.stdout : process.cwd();
-
-    // Switch to the branch so the agent can run git commands against it.
-    exec(`git checkout "${branch}"`);
-
     const reviewStep = resolveStepConfig(config, 'review');
     const reviewResult = await spawnAgent({
       agent: reviewStep.agent as typeof config.agent,
       model: reviewStep.model,
       prompt: reviewPrompt,
-      cwd,
+      cwd: branchWorktree,
       verbose: config.verbose,
       timeout: 10 * 60 * 1000, // 10 minutes for a review
       maxTurns: 20,
@@ -264,6 +355,7 @@ This PR was recovered by \`alpha-loop resume\`. Resume creates the PR and runs b
       head: branch,
       title: `feat: ${title} (closes #${issueNum})`,
       body: prBody,
+      cwd: branchWorktree,
     });
   } catch (err) {
     log.error(`Failed to create PR for #${issueNum}: ${String(err)}`);

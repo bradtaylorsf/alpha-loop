@@ -22,6 +22,8 @@ export type ExtractLearningsOptions = {
   verifyOutput: string;
   body: string;
   config: Config;
+  outputRoot?: string;
+  agentCwd?: string;
   sessionLogsDir?: string;
   sessionName?: string;
 };
@@ -469,17 +471,19 @@ export function repairSessionSummaryArtifact(options: {
  * only expected sections, and saves a concise learning file with trace pointers.
  * Raw agent output is saved separately to the traces directory.
  */
-export async function extractLearnings(options: ExtractLearningsOptions): Promise<void> {
+export async function extractLearnings(options: ExtractLearningsOptions): Promise<string | null> {
   const { config } = options;
 
   if (config.skipLearn) {
     log.info('Skipping learning extraction (skipLearn=true)');
-    return;
+    return null;
   }
 
   log.step('Extracting learnings from run...');
 
-  const learningsDir = join(process.cwd(), '.alpha-loop', 'learnings');
+  const outputRoot = options.outputRoot ?? process.cwd();
+  const agentCwd = options.agentCwd ?? outputRoot;
+  const learningsDir = join(outputRoot, '.alpha-loop', 'learnings');
   mkdirSync(learningsDir, { recursive: true });
 
   const timestamp = formatTimestamp(new Date());
@@ -500,7 +504,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
 
   if (config.dryRun) {
     log.dry(`Would extract learnings to ${learningFile}`);
-    return;
+    return null;
   }
 
   const learnStep = resolveStepConfig(config, 'learn');
@@ -508,13 +512,13 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
     agent: learnStep.agent as typeof config.agent,
     model: learnStep.model,
     prompt,
-    cwd: process.cwd(),
+    cwd: agentCwd,
     logFile: undefined,
   });
 
   if (result.exitCode !== 0 || !result.output.trim()) {
     log.warn(`Learning extraction failed (exit ${result.exitCode}, output ${result.output.length} chars), skipping`);
-    return;
+    return null;
   }
 
   const rawOutput = result.output.trim();
@@ -531,7 +535,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
   const { frontmatter: parsedFm, sections, hasMeaningfulSections } = parseLearningOutput(rawOutput);
   if (!hasMeaningfulSections || !sections.trim()) {
     log.warn(`Learning extraction output for issue #${options.issueNum} did not contain meaningful learning sections, skipping`);
-    return;
+    return null;
   }
 
   const today = new Date().toISOString().split('T')[0];
@@ -570,6 +574,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
 
   writeFileSync(learningFile, finalOutput + '\n');
   log.success(`Learning saved to ${learningFile}`);
+  return learningFile;
 }
 
 /**
