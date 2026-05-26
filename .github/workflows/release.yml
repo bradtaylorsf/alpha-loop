@@ -56,9 +56,25 @@ jobs:
       # Determine version from git tags (source of truth) + commit messages.
       # The stamped package.json is committed back to master after publish so
       # `--version` on a fresh source clone matches what's published on npm.
+      #
+      # Loop guard: if the latest commit on master IS the auto-generated
+      # release-bump-back commit, skip this run entirely. Otherwise the
+      # bump-PR's own merge would trigger another release, which would
+      # generate another bump-PR, in a perpetual chain.
       - name: Determine version
         id: version
         run: |
+          # Loop guard — skip when the latest commit is the bot's
+          # auto-bump merge. Match the squash-merged form too:
+          # "chore(release): bump version to v2.0.3 (#274)".
+          LATEST_MSG=$(git log -1 --format="%s")
+          if echo "$LATEST_MSG" | grep -qE '^chore\(release\): bump version to v[0-9]+\.[0-9]+\.[0-9]+( \(#[0-9]+\))?$'; then
+            echo "Latest commit is the bot's auto-bump — skipping this release to avoid an infinite loop."
+            echo "Subject: $LATEST_MSG"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Get latest tag — this is the source of truth, NOT package.json
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
