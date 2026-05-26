@@ -31,6 +31,102 @@ describe('syncAgentAssets', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test('syncs alpha-loop-runner skill into Claude and Codex harness dirs', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    const skillContent = [
+      '---',
+      'name: alpha-loop-runner',
+      'auto_load: true',
+      'priority: high',
+      '---',
+      '# Alpha Loop Runner',
+      '',
+    ].join('\n');
+    mkdirSync(join(templatesBase, 'skills', 'alpha-loop-runner'), { recursive: true });
+    writeFileSync(join(templatesBase, 'skills', 'alpha-loop-runner', 'SKILL.md'), skillContent);
+
+    const result = syncAgentAssets(['claude-code', 'codex'], { projectDir: dir });
+
+    expect(result.synced).toBe(true);
+    expect(readFileSync(join(dir, '.claude', 'skills', 'alpha-loop-runner', 'SKILL.md'), 'utf-8')).toBe(skillContent);
+    expect(readFileSync(join(dir, '.agents', 'skills', 'alpha-loop-runner', 'SKILL.md'), 'utf-8')).toBe(skillContent);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('syncs alpha-loop-setup skill into Claude and Codex harness dirs', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    const skillContent = [
+      '---',
+      'name: alpha-loop-setup',
+      'auto_load: false',
+      'priority: medium',
+      '---',
+      '# Alpha Loop Setup',
+      '',
+    ].join('\n');
+    mkdirSync(join(templatesBase, 'skills', 'alpha-loop-setup'), { recursive: true });
+    writeFileSync(join(templatesBase, 'skills', 'alpha-loop-setup', 'SKILL.md'), skillContent);
+
+    const result = syncAgentAssets(['claude-code', 'codex'], { projectDir: dir });
+
+    expect(result.synced).toBe(true);
+    expect(readFileSync(join(dir, '.claude', 'skills', 'alpha-loop-setup', 'SKILL.md'), 'utf-8')).toBe(skillContent);
+    expect(readFileSync(join(dir, '.agents', 'skills', 'alpha-loop-setup', 'SKILL.md'), 'utf-8')).toBe(skillContent);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('syncs alpha-loop-issue-author skill into Claude and Codex harness dirs', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    const skillContent = [
+      '---',
+      'name: alpha-loop-issue-author',
+      'auto_load: true',
+      'priority: high',
+      '---',
+      '# Alpha Loop Issue Author',
+      '',
+    ].join('\n');
+    mkdirSync(join(templatesBase, 'skills', 'alpha-loop-issue-author'), { recursive: true });
+    writeFileSync(join(templatesBase, 'skills', 'alpha-loop-issue-author', 'SKILL.md'), skillContent);
+
+    const result = syncAgentAssets(['claude-code', 'codex'], { projectDir: dir });
+
+    expect(result.synced).toBe(true);
+    expect(readFileSync(join(dir, '.claude', 'skills', 'alpha-loop-issue-author', 'SKILL.md'), 'utf-8')).toBe(skillContent);
+    expect(readFileSync(join(dir, '.agents', 'skills', 'alpha-loop-issue-author', 'SKILL.md'), 'utf-8')).toBe(skillContent);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('syncs alpha-loop-learning-review skill into Claude and Codex harness dirs', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    const skillContent = [
+      '---',
+      'name: alpha-loop-learning-review',
+      'auto_load: true',
+      'priority: high',
+      '---',
+      '# Alpha Loop Learning Review',
+      '',
+    ].join('\n');
+    mkdirSync(join(templatesBase, 'skills', 'alpha-loop-learning-review'), { recursive: true });
+    writeFileSync(join(templatesBase, 'skills', 'alpha-loop-learning-review', 'SKILL.md'), skillContent);
+
+    const result = syncAgentAssets(['claude-code', 'codex'], { projectDir: dir });
+
+    expect(result.synced).toBe(true);
+    expect(readFileSync(join(dir, '.claude', 'skills', 'alpha-loop-learning-review', 'SKILL.md'), 'utf-8')).toBe(skillContent);
+    expect(readFileSync(join(dir, '.agents', 'skills', 'alpha-loop-learning-review', 'SKILL.md'), 'utf-8')).toBe(skillContent);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   test('syncs agents from templates to .claude/agents/', () => {
     const dir = makeTmpDir();
     const templatesBase = join(dir, '.alpha-loop', 'templates');
