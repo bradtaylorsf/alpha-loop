@@ -19,7 +19,7 @@ import {
   repairSessionLearningArtifacts,
   repairSessionSummaryArtifact,
 } from '../lib/learning.js';
-import { clearCrashMarker, findCrashMarkers, type CrashMarkerRef } from '../lib/session.js';
+import { clearCrashMarker, findCrashMarkers, formatAutoCommittedResultsSection, type CrashMarkerRef } from '../lib/session.js';
 import {
   labelIssue,
   commentIssue,
@@ -587,6 +587,7 @@ ${recovered.length} recovered PR(s) were not counted as succeeded or failed beca
     ? `${successes.length}/${naturalResults.length} succeeded`
     : `${successes.length} succeeded`;
   const titleRecovery = recovered.length > 0 ? `, ${recovered.length} recovered` : '';
+  const autoCommittedSection = formatAutoCommittedResultsSection(results).join('\n');
 
   const title = `Session: ${sessionName} — ${titleStatus}${titleRecovery}`;
   const body = `## Session Summary
@@ -605,6 +606,7 @@ ${recovered.length > 0 ? `
 ### Recovered Issues
 ${recovered.map((r) => `- #${r.issueNum}: ${r.title} — ${formatSessionIssueStatus(r)}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
 ` : ''}
+${autoCommittedSection ? `\n${autoCommittedSection}` : ''}
 
 ---
 This PR collects all changes from this session for final review before merging to ${baseBranch}.

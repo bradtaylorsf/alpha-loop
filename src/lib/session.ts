@@ -96,6 +96,24 @@ function previousPrLabel(queue: QueueSessionContext): string {
   return 'the previous session PR';
 }
 
+function formatPathList(paths: string[] | undefined): string {
+  if (!paths || paths.length === 0) return '(paths unavailable)';
+  return paths.map((path) => `\`${path.replace(/`/g, '\\`')}\``).join(', ');
+}
+
+export function formatAutoCommittedResultsSection(results: PipelineResult[]): string[] {
+  const autoCommitted = results.filter((result) => result.autoCommittedByPipeline);
+  if (autoCommitted.length === 0) return [];
+
+  const lines = ['### Auto-Committed By Pipeline', ''];
+  for (const result of autoCommitted) {
+    const pr = result.prUrl ? ` ([PR](${result.prUrl}))` : '';
+    lines.push(`- #${result.issueNum}: ${result.title}${pr} — ${formatPathList(result.autoCommittedPaths)}`);
+  }
+  lines.push('');
+  return lines;
+}
+
 function crashMarkerPath(sessionDir: string, issueNum: number): string {
   return join(sessionDir, `crash-${issueNum}.json`);
 }
@@ -540,6 +558,8 @@ export async function finalizeSession(
       testsPassing: r.testsPassing,
       verifyPassing: r.verifyPassing,
       recoveryMode: r.recoveryMode,
+      autoCommittedByPipeline: r.autoCommittedByPipeline,
+      autoCommittedPaths: r.autoCommittedPaths,
       duration: r.duration,
       filesChanged: r.filesChanged,
     })),
@@ -619,6 +639,8 @@ export async function finalizeSession(
     prLines.push('*Recovered issues were not counted as succeeded or failed because recovery did not run the full pipeline verification path.*');
     prLines.push('');
   }
+
+  prLines.push(...formatAutoCommittedResultsSection(session.results));
 
   // Permanent failures — collapsed
   if (permanentFailures.length > 0) {

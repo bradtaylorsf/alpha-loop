@@ -110,6 +110,7 @@ jest.mock('node:fs', () => ({
 }));
 
 import { exec } from '../../src/lib/shell';
+import { log } from '../../src/lib/logger';
 import { spawnAgent } from '../../src/lib/agent';
 import { setupWorktree, cleanupWorktree, worktreeHasCommits } from '../../src/lib/worktree';
 import { labelIssue, commentIssue, createPR, mergePR, updateProjectStatus } from '../../src/lib/github';
@@ -122,6 +123,7 @@ import { writeTraceToSubdir } from '../../src/lib/traces';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
+const mockLog = log as jest.Mocked<typeof log>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
@@ -263,6 +265,32 @@ describe('processIssue', () => {
     expect(mockExtractLearnings).toHaveBeenCalled();
     expect(mockSaveResult).toHaveBeenCalled();
     expect(mockCleanupWorktree).toHaveBeenCalled();
+  });
+
+  test('sets auto-commit metadata when the agent leaves uncommitted work', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: ' M src/lib/pipeline.ts\n?? tests/lib/pipeline.test.ts\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(result.autoCommittedByPipeline).toBe(true);
+    expect(result.autoCommittedPaths).toEqual(['src/lib/pipeline.ts', 'tests/lib/pipeline.test.ts']);
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      'Agent did not commit; auto-committing 2 files: src/lib/pipeline.ts, tests/lib/pipeline.test.ts',
+    );
+    expect(mockExec).toHaveBeenCalledWith('git add -A', { cwd: '/tmp/worktree' });
+    expect(mockExec).toHaveBeenCalledWith(
+      'git commit -m "feat: implement issue #42 - Test issue"',
+      { cwd: '/tmp/worktree' },
+    );
+    expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      autoCommittedByPipeline: true,
+      autoCommittedPaths: ['src/lib/pipeline.ts', 'tests/lib/pipeline.test.ts'],
+    }));
   });
 
   test('extracts and commits the learning artifact in the worktree before creating the PR', async () => {
