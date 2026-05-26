@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { syncAgentAssets } from '../../src/commands/sync';
+import { log } from '../../src/lib/logger';
 
 jest.mock('../../src/lib/logger', () => ({
   log: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), success: jest.fn() },
@@ -14,6 +15,10 @@ function makeTmpDir(): string {
 }
 
 describe('syncAgentAssets', () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
   test('syncs skills from .alpha-loop/templates/ to harness paths', () => {
     const dir = makeTmpDir();
     const templatesBase = join(dir, '.alpha-loop', 'templates');
@@ -227,6 +232,63 @@ describe('syncAgentAssets', () => {
     const result = syncAgentAssets(['claude-code'], { projectDir: dir });
 
     expect(result.synced).toBe(false);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('preserves target-only harness files by default', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    mkdirSync(join(templatesBase, 'skills', 'a'), { recursive: true });
+    writeFileSync(join(templatesBase, 'skills', 'a', 'SKILL.md'), '# Same');
+    mkdirSync(join(dir, '.claude', 'skills', 'a'), { recursive: true });
+    writeFileSync(join(dir, '.claude', 'skills', 'a', 'SKILL.md'), '# Same');
+    mkdirSync(join(dir, '.claude', 'skills', 'harness-only'), { recursive: true });
+    writeFileSync(join(dir, '.claude', 'skills', 'harness-only', 'SKILL.md'), '# Harness Only');
+
+    const result = syncAgentAssets(['claude-code'], { projectDir: dir });
+
+    expect(result.synced).toBe(false);
+    expect(readFileSync(join(dir, '.claude', 'skills', 'harness-only', 'SKILL.md'), 'utf-8')).toBe('# Harness Only');
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('check mode reports target-only harness files as drift without deleting them', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    mkdirSync(join(templatesBase, 'skills', 'a'), { recursive: true });
+    writeFileSync(join(templatesBase, 'skills', 'a', 'SKILL.md'), '# Same');
+    mkdirSync(join(dir, '.claude', 'skills', 'a'), { recursive: true });
+    writeFileSync(join(dir, '.claude', 'skills', 'a', 'SKILL.md'), '# Same');
+    mkdirSync(join(dir, '.claude', 'skills', 'harness-only'), { recursive: true });
+    writeFileSync(join(dir, '.claude', 'skills', 'harness-only', 'SKILL.md'), '# Harness Only');
+
+    const result = syncAgentAssets(['claude-code'], { check: true, projectDir: dir });
+
+    expect(result.synced).toBe(true);
+    expect(readFileSync(join(dir, '.claude', 'skills', 'harness-only', 'SKILL.md'), 'utf-8')).toBe('# Harness Only');
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('removes target-only harness files only when prune is enabled', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    mkdirSync(join(templatesBase, 'skills', 'a'), { recursive: true });
+    writeFileSync(join(templatesBase, 'skills', 'a', 'SKILL.md'), '# Same');
+    mkdirSync(join(dir, '.claude', 'skills', 'a'), { recursive: true });
+    writeFileSync(join(dir, '.claude', 'skills', 'a', 'SKILL.md'), '# Same');
+    mkdirSync(join(dir, '.claude', 'skills', 'harness-only', 'references'), { recursive: true });
+    writeFileSync(join(dir, '.claude', 'skills', 'harness-only', 'SKILL.md'), '# Harness Only');
+    writeFileSync(join(dir, '.claude', 'skills', 'harness-only', 'references', 'guide.md'), '# Guide');
+
+    const result = syncAgentAssets(['claude-code'], { projectDir: dir, prune: true });
+
+    expect(result.synced).toBe(true);
+    expect(existsSync(join(dir, '.claude', 'skills', 'harness-only'))).toBe(false);
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining(join('.claude', 'skills', 'harness-only', 'SKILL.md')));
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining(join('.claude', 'skills', 'harness-only', 'references', 'guide.md')));
 
     rmSync(dir, { recursive: true, force: true });
   });
