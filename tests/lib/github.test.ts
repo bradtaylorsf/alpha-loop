@@ -3,7 +3,7 @@ import {
   createIssue, updateIssue, closeIssue, createMilestone,
   setIssueMilestone, listOpenIssues, addIssueToProject,
   getIssueBody, updateEpicIssueBody, commentChildEpicBacklink,
-  listRoadmapEpics, listEpics, getEpicSubIssues,
+  listRoadmapEpics, listEpics, getEpicSubIssues, updateProjectStatus,
 } from '../../src/lib/github';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -26,11 +26,20 @@ jest.mock('../../src/lib/logger', () => ({
 // Mock ghExec to delegate to the already-mocked exec from shell.ts
 jest.mock('../../src/lib/rate-limit', () => {
   const shell = require('../../src/lib/shell');
+  const projectCache = new Map<string, unknown>();
+  const projectKey = (owner: string, projectNum: number) => `${owner}/${projectNum}`;
+
   return {
     ghExec: jest.fn((cmd: string) => shell.exec(cmd)),
-    getProjectCache: jest.fn(() => null),
-    setProjectCache: jest.fn(),
-    clearProjectCache: jest.fn(),
+    getProjectCache: jest.fn(
+      (owner: string, projectNum: number) => projectCache.get(projectKey(owner, projectNum)) ?? null,
+    ),
+    setProjectCache: jest.fn((owner: string, projectNum: number, cache: unknown) => {
+      projectCache.set(projectKey(owner, projectNum), cache);
+    }),
+    clearProjectCache: jest.fn(() => {
+      projectCache.clear();
+    }),
     resetRateLimitState: jest.fn(),
     getRateLimitStatus: jest.fn(() => ({ remaining: 5000, limit: 5000, used: 0, resetAt: 0, ratio: 1 })),
     parseRateLimitHeaders: jest.fn(() => null),
@@ -44,6 +53,8 @@ const mockExec = exec as jest.MockedFunction<typeof exec>;
 
 beforeEach(() => {
   jest.clearAllMocks();
+  const { clearProjectCache } = require('../../src/lib/rate-limit');
+  clearProjectCache();
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
 });
 
@@ -308,6 +319,95 @@ describe('mergePR', () => {
     expect(mockLog.warn).toHaveBeenCalledWith(
       expect.stringContaining('No PR found'),
     );
+  });
+});
+
+describe('updateProjectStatus', () => {
+  test('returns without gh calls when project number is not configured', () => {
+    updateProjectStatus('owner/repo', 0, 'owner', 42, 'In progress');
+    updateProjectStatus('owner/repo', -1, 'owner', 42, 'In Review');
+
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  test('disables project board once when field list fails across epic transitions', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh project field-list')) {
+        return { stdout: '', stderr: 'missing project scope', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    for (let issueNum = 1; issueNum <= 5; issueNum += 1) {
+      updateProjectStatus('owner/repo', 2, 'owner', issueNum, 'In progress');
+      updateProjectStatus('owner/repo', 2, 'owner', issueNum, 'In Review');
+    }
+
+    const projectCalls = mockExec.mock.calls.filter(
+      ([cmd]) => typeof cmd === 'string' && cmd.includes('gh project'),
+    );
+    const fieldListCalls = mockExec.mock.calls.filter(
+      ([cmd]) => typeof cmd === 'string' && cmd.includes('gh project field-list'),
+    );
+    const { log: mockLog } = require('../../src/lib/logger');
+
+    expect(fieldListCalls).toHaveLength(1);
+    expect(projectCalls).toHaveLength(1);
+    expect(mockLog.warn).toHaveBeenCalledTimes(1);
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      'Project board #2 disabled for this session: Could not list project fields: missing project scope',
+    );
+  });
+
+  test('updates project item status when project metadata resolves', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh project field-list')) {
+        return {
+          stdout: JSON.stringify({
+            fields: [
+              {
+                id: 'field-id',
+                name: 'Status',
+                options: [
+                  { id: 'todo-id', name: 'Todo' },
+                  { id: 'progress-id', name: 'In progress' },
+                  { id: 'review-id', name: 'In Review' },
+                ],
+              },
+            ],
+          }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (cmd.includes('gh project view')) {
+        return { stdout: JSON.stringify({ id: 'project-id' }), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh project item-add')) {
+        return { stdout: JSON.stringify({ id: 'item-id' }), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh project item-edit')) {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 1 };
+    });
+
+    updateProjectStatus('owner/repo', 2, 'owner', 42, 'In progress');
+
+    const commands = mockExec.mock.calls.map(([cmd]) => cmd as string);
+    const { log: mockLog } = require('../../src/lib/logger');
+
+    expect(commands.some((cmd) => cmd.includes('gh project field-list 2'))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes('gh project view 2'))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes('gh project item-add 2'))).toBe(true);
+    expect(commands.some((cmd) => cmd.includes('gh project item-edit'))).toBe(true);
+    expect(commands.find((cmd) => cmd.includes('gh project item-edit'))).toContain('--project-id "project-id"');
+    expect(commands.find((cmd) => cmd.includes('gh project item-edit'))).toContain('--field-id "field-id"');
+    expect(commands.find((cmd) => cmd.includes('gh project item-edit'))).toContain(
+      '--single-select-option-id "progress-id"',
+    );
+    expect(mockLog.warn).not.toHaveBeenCalled();
+    expect(mockLog.info).toHaveBeenCalledWith('Project board: #42 -> In progress');
   });
 });
 

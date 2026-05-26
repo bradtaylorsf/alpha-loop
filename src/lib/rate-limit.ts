@@ -207,11 +207,19 @@ export function ghExec(
 
 // ── Project metadata cache ──────────────────────────────────────────────────
 
-type ProjectCache = {
+type ResolvedProjectCache = {
+  disabled?: false;
   projectId: string;
   fieldId: string;
   optionMap: Map<string, string>; // status name → option ID
 };
+
+type DisabledProjectCache = {
+  disabled: true;
+  reason: string;
+};
+
+type ProjectCache = ResolvedProjectCache | DisabledProjectCache;
 
 const projectCacheMap = new Map<string, ProjectCache>();
 
