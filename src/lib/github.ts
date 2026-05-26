@@ -4,7 +4,7 @@
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { exec } from './shell.js';
+import { exec, shellQuote } from './shell.js';
 import { ghExec, getProjectCache, setProjectCache } from './rate-limit.js';
 import { log } from './logger.js';
 import {
@@ -278,11 +278,12 @@ export function createPR(options: CreatePROptions): string {
   const { repo, base, head, title, body, cwd } = options;
 
   // Push the branch first
-  const pushResult = exec(`git push -u origin "${head}"`, { cwd });
+  const quotedHead = shellQuote(head);
+  const pushResult = exec(`git push -u origin ${quotedHead}`, { cwd });
   if (pushResult.exitCode !== 0) {
     // Try force push if branch exists from previous attempt
     log.warn('Push failed, trying force push...');
-    const forceResult = exec(`git push -u origin "${head}" --force`, { cwd });
+    const forceResult = exec(`git push -u origin ${quotedHead} --force`, { cwd });
     if (forceResult.exitCode !== 0) {
       throw new Error(`Failed to push branch ${head}: ${forceResult.stderr}`);
     }
@@ -296,7 +297,7 @@ export function createPR(options: CreatePROptions): string {
   try {
     // Check if PR already exists for this branch
     const existingResult = ghExec(
-      `gh pr list --repo "${repo}" --head "${head}" --json number,url --limit 1`,
+      `gh pr list --repo ${shellQuote(repo)} --head ${quotedHead} --json number,url --limit 1`,
     );
     if (existingResult.exitCode === 0 && existingResult.stdout) {
       try {
@@ -304,7 +305,7 @@ export function createPR(options: CreatePROptions): string {
         if (existing.length > 0) {
           const prUrl = existing[0].url;
           log.info(`PR already exists: ${prUrl}, updating...`);
-          ghExec(`gh pr edit ${existing[0].number} --repo "${repo}" --base "${base}" --title ${JSON.stringify(title)} --body-file "${bodyFile}"`, undefined, true);
+          ghExec(`gh pr edit ${existing[0].number} --repo ${shellQuote(repo)} --base ${shellQuote(base)} --title ${shellQuote(title)} --body-file ${shellQuote(bodyFile)}`, undefined, true);
           return prUrl;
         }
       } catch {
@@ -314,7 +315,7 @@ export function createPR(options: CreatePROptions): string {
 
     // Create new PR using --body-file to avoid shell escaping issues
     const createResult = ghExec(
-      `gh pr create --repo "${repo}" --base "${base}" --head "${head}" --title ${JSON.stringify(title)} --body-file "${bodyFile}"`,
+      `gh pr create --repo ${shellQuote(repo)} --base ${shellQuote(base)} --head ${quotedHead} --title ${shellQuote(title)} --body-file ${shellQuote(bodyFile)}`,
       undefined, true,
     );
     if (createResult.exitCode !== 0) {

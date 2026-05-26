@@ -16,6 +16,7 @@ describe('seeded alpha-loop skills', () => {
 
     expect(projectSkill).toBe(distSkill);
     expect(distSkill).toMatch(/^name: alpha-loop-runner$/m);
+    expect(distSkill).toMatch(/^description: .*run the loop.*run alpha-loop/m);
     expect(distSkill).toMatch(/^auto_load: true$/m);
     expect(distSkill).toMatch(/^priority: high$/m);
     expect(distSkill).toContain('## Trigger');
@@ -41,6 +42,7 @@ describe('seeded alpha-loop skills', () => {
 
     expect(projectSkill).toBe(distSkill);
     expect(distSkill).toMatch(/^name: alpha-loop-setup$/m);
+    expect(distSkill).toMatch(/^description: .*set up alpha-loop.*set up the loop/m);
     expect(distSkill).toMatch(/^auto_load: false$/m);
     expect(distSkill).toMatch(/^priority: medium$/m);
     expect(distSkill).toContain('## Trigger');
@@ -79,6 +81,7 @@ describe('seeded alpha-loop skills', () => {
 
     expect(projectSkill).toBe(distSkill);
     expect(distSkill).toMatch(/^name: alpha-loop-issue-author$/m);
+    expect(distSkill).toMatch(/^description: .*add a feature.*add an issue/m);
     expect(distSkill).toMatch(/^auto_load: true$/m);
     expect(distSkill).toMatch(/^priority: high$/m);
     expect(distSkill).toContain('## Trigger');

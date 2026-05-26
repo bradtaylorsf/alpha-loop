@@ -1,6 +1,6 @@
 ---
 name: alpha-loop-runner
-description: Run and monitor alpha-loop sessions or epics safely. Use whenever the user asks to run alpha-loop, start the loop on an epic, prepare an epic run, monitor loop progress, verify an alpha-loop session, or validate completed epic issues. Performs dry-run validation, checks ready labels, syncs skills/agents, chooses batch/test/verify settings, and stops on skipped checklist items or missing pre-conditions.
+description: Run and monitor alpha-loop sessions or epics safely. Use whenever the user asks to run the loop, run alpha-loop, start the loop on an epic, prepare an epic run, monitor loop progress, verify an alpha-loop session, or validate completed epic issues. Performs dry-run validation, checks ready labels, syncs skills/agents, chooses batch/test/verify settings, and stops on skipped checklist items or missing pre-conditions.
 auto_load: true
 priority: high
 ---

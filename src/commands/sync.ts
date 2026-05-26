@@ -19,6 +19,7 @@ import {
   mkdirSync,
   readdirSync,
   statSync,
+  lstatSync,
   readFileSync,
   rmSync,
   renameSync,
@@ -115,7 +116,7 @@ type SyncDirOptions = {
  * Empty directories are included so every rmSync has a visible WARN line.
  */
 function collectPrunedPaths(targetPath: string): string[] {
-  const stat = statSync(targetPath);
+  const stat = lstatSync(targetPath);
   if (!stat.isDirectory()) return [targetPath];
 
   const entries = readdirSync(targetPath);

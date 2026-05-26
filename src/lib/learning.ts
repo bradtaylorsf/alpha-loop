@@ -676,8 +676,7 @@ export async function generateSessionSummary(options: {
   const learningContents: string[] = [];
   if (!existsSync(learningsDir)) return null;
   for (const result of results) {
-    const files = readdirSync(learningsDir)
-      .filter((f) => f.startsWith(`issue-${result.issueNum}-`) && f.endsWith('.md'));
+    const files = learningFilesForSession(learningsDir, result.issueNum, sessionName);
     for (const file of files) {
       learningContents.push(readFileSync(join(learningsDir, file), 'utf-8'));
     }

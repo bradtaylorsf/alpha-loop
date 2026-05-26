@@ -14,6 +14,13 @@ export type ExecResult = {
 };
 
 /**
+ * Quote a value as a single POSIX shell argument.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
  * Execute a shell command synchronously and return structured result.
  * Does not throw on non-zero exit — returns exitCode instead.
  */

@@ -179,7 +179,8 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
 export type OneShotCommandOptions = {
   /**
    * Request a stdout-only response for prompts that must not create or edit
-   * files. Currently only Claude-family CLIs expose a tool allowlist flag.
+   * files. Claude-family CLIs use an empty tool allowlist; Codex-family CLIs
+   * use a read-only sandbox.
    */
   textOnly?: boolean;
 };
@@ -202,7 +203,11 @@ export function buildOneShotCommand(agent: AgentType, model: string, options: On
     case 'ollama': {
       const parts = ['codex', 'exec'];
       if (model) parts.push('--model', model);
-      parts.push('--full-auto');
+      if (options.textOnly) {
+        parts.push('--sandbox', 'read-only');
+      } else {
+        parts.push('--full-auto');
+      }
       return parts.join(' ');
     }
     case 'opencode': {

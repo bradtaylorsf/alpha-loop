@@ -4,7 +4,7 @@
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { log } from './logger.js';
-import { exec } from './shell.js';
+import { exec, shellQuote } from './shell.js';
 import { spawnAgent, buildEndpointEnv } from './agent.js';
 import type { AgentOptions } from './agent.js';
 import {
@@ -401,8 +401,16 @@ function autoCommitDirtyWorktree(worktreePath: string, commitMessage: string): s
   if (paths.length === 0) return [];
 
   log.warn(`Agent did not commit; auto-committing ${paths.length} files: ${paths.join(', ')}`);
-  exec('git add -A', { cwd: worktreePath });
-  exec(commitMessage, { cwd: worktreePath });
+  const addResult = exec('git add -A', { cwd: worktreePath });
+  if (addResult.exitCode !== 0) {
+    log.warn(`Could not stage fallback auto-commit paths: ${addResult.stderr || addResult.stdout}`);
+    return [];
+  }
+  const commitResult = exec(`git commit -m ${shellQuote(commitMessage)}`, { cwd: worktreePath });
+  if (commitResult.exitCode !== 0) {
+    log.warn(`Could not create fallback auto-commit: ${commitResult.stderr || commitResult.stdout}`);
+    return [];
+  }
   return paths;
 }
 
@@ -416,7 +424,7 @@ function commitLearningFiles(worktreePath: string, learningFiles: Array<string |
 
   if (paths.length === 0) return;
 
-  const pathspecs = paths.map((path) => JSON.stringify(path)).join(' ');
+  const pathspecs = paths.map((path) => shellQuote(path)).join(' ');
   const addResult = exec(`git add -- ${pathspecs}`, { cwd: worktreePath });
   if (addResult.exitCode !== 0) {
     log.warn(`Could not stage learning artifact(s): ${addResult.stderr || addResult.stdout}`);
@@ -436,7 +444,7 @@ function commitLearningFiles(worktreePath: string, learningFiles: Array<string |
   if (stagedPaths.length === 0) return;
 
   const commitResult = exec(
-    `git commit -m ${JSON.stringify(message)} -- ${stagedPaths.map((path) => JSON.stringify(path)).join(' ')}`,
+    `git commit -m ${shellQuote(message)} -- ${stagedPaths.map((path) => shellQuote(path)).join(' ')}`,
     { cwd: worktreePath },
   );
   if (commitResult.exitCode !== 0) {
@@ -889,7 +897,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     // Auto-commit if agent didn't
     autoCommittedPaths = autoCommitDirtyWorktree(
       worktreePath,
-      `git commit -m "feat: implement issue #${issueNum} - ${title}"`,
+      `feat: implement issue #${issueNum} - ${title}`,
     );
 
     stepsCompleted.push('implement');
@@ -1691,7 +1699,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
     autoCommittedPaths = autoCommitDirtyWorktree(
       worktreePath,
-      `git commit -m "feat: batch implement issues ${issueRefs}"`,
+      `feat: batch implement issues ${issueRefs}`,
     );
 
     stepsCompleted.push('implement');

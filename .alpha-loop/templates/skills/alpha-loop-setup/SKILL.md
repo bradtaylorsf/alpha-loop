@@ -1,6 +1,6 @@
 ---
 name: alpha-loop-setup
-description: Guide a user through setting up alpha-loop in a repo, or audit an existing setup. Use when the user asks to install alpha-loop, set up the loop, configure alpha-loop, audit alpha-loop config, or add new harnesses/skills. Detects installed CLI harnesses, inspects the codebase to suggest `.alpha-loop.yaml` settings, recommends matching seed skills, and verifies the setup with a dry-run.
+description: Guide a user through setting up alpha-loop in a repo, or audit an existing setup. Use when the user asks to install alpha-loop, set up alpha-loop, set up the loop, configure alpha-loop, audit alpha-loop config, or add new harnesses/skills. Detects installed CLI harnesses, inspects the codebase to suggest `.alpha-loop.yaml` settings, recommends matching seed skills, and verifies the setup with a dry-run.
 auto_load: false
 priority: medium
 ---
