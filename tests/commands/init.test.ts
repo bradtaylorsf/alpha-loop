@@ -225,6 +225,7 @@ describe('init command', () => {
     expect(gitignore).toContain('.alpha-loop/sessions/');
     expect(gitignore).toContain('.alpha-loop/auth/');
     expect(gitignore).toContain('.worktrees/');
+    expect(gitignore).toContain('plugins/');
     expect(gitignore).toContain('.alpha-loop/templates/*.bak');
   });
 

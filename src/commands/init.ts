@@ -525,6 +525,7 @@ const GITIGNORE_ENTRIES = [
   '.alpha-loop/auth/',
   '.alpha-loop/templates/*.bak',
   '.worktrees/',
+  'plugins/',
 ];
 
 function ensureGitignore(): void {
