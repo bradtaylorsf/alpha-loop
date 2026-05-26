@@ -350,15 +350,41 @@ describe('extractLearnings', () => {
       duration: 5000,
     });
 
-    await extractLearnings({ ...baseOptions, config: makeConfig() });
+    const result = await extractLearnings({ ...baseOptions, config: makeConfig() });
 
     expect(mockSpawnAgent).toHaveBeenCalledWith(expect.objectContaining({
       agent: 'claude',
       model: 'opus',
+      cwd: process.cwd(),
     }));
+    expect(result).toContain('issue-42-20260101-000000.md');
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       expect.stringContaining('issue-42-'),
       expect.stringContaining('## What Worked'),
+    );
+  });
+
+  test('writes learning artifacts under outputRoot and runs the learn agent there', async () => {
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: '## What Worked\n- Output root used',
+      duration: 5000,
+    });
+
+    const result = await extractLearnings({
+      ...baseOptions,
+      config: makeConfig(),
+      outputRoot: '/tmp/worktree',
+      agentCwd: '/tmp/worktree',
+    });
+
+    expect(mockSpawnAgent).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: '/tmp/worktree',
+    }));
+    expect(result).toBe('/tmp/worktree/.alpha-loop/learnings/issue-42-20260101-000000.md');
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      '/tmp/worktree/.alpha-loop/learnings/issue-42-20260101-000000.md',
+      expect.stringContaining('Output root used'),
     );
   });
 

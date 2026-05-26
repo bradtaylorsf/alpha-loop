@@ -66,16 +66,16 @@ Alpha Loop implements a 12-step pipeline for each issue:
 5. **Test + Retry** — Runs your test command; if tests fail, agent fixes and retries (up to `max_test_retries`)
 6. **Verify + Retry** — Starts your dev server, uses playwright-cli to test the feature like a real user, takes screenshots
 7. **Review** — A review agent reads the diff, checks for gaps, security issues, and missing wiring — fixes what it can
-8. **Create PR** — Opens a PR with test results, review summary, and verification status
-8b. **Assumptions** — Agent summarizes assumptions and decisions made, posts as a comment on the issue for user validation
-9. **Learn** — Extracts learnings (patterns, anti-patterns, what worked/failed) for future sessions
+8. **Learn** — Extracts learnings (patterns, anti-patterns, what worked/failed) and commits them in the issue worktree
+9. **Create PR** — Opens a PR with the implementation, learning artifact, test results, review summary, and verification status
+9b. **Assumptions** — Agent summarizes assumptions and decisions made, posts as a comment on the issue for user validation
 10. **Update Issue** — Posts results as a comment, updates labels
 11. **Auto-Merge** — Merges the PR to the session branch (if enabled)
 12. **Cleanup** — Removes the worktree
 
 After all issues are processed, Alpha Loop:
 1. **Auto-captures failures** as eval cases for regression testing
-2. Generates a **session summary** aggregating learnings across issues
+2. Generates a **session summary** aggregating learnings across issues when a session branch is being finalized
 3. Runs a **post-session code review** on the full session diff to catch cross-issue integration problems
 4. Creates the **session PR** with all findings included
 
@@ -106,7 +106,7 @@ When `auto_merge` is enabled (default), Alpha Loop creates a session branch (e.g
 
 ### Learnings
 
-Each completed issue produces a learning file in `.alpha-loop/learnings/` with:
+Each completed issue produces a learning file in `.alpha-loop/learnings/` that is committed with that issue's implementation PR. It includes:
 - What worked and what failed
 - Reusable patterns discovered
 - Anti-patterns to avoid

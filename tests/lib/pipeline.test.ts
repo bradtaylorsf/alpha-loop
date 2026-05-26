@@ -232,7 +232,7 @@ beforeEach(() => {
   mockRunTests.mockReturnValue({ passed: true, output: 'All tests passed' });
   mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/1');
   mockMergePR.mockReturnValue(undefined as any);
-  mockExtractLearnings.mockResolvedValue();
+  mockExtractLearnings.mockResolvedValue(null);
   mockGetLearningContext.mockReturnValue('');
   mockGetPreviousResult.mockReturnValue(null);
 });
@@ -258,6 +258,41 @@ describe('processIssue', () => {
     expect(mockExtractLearnings).toHaveBeenCalled();
     expect(mockSaveResult).toHaveBeenCalled();
     expect(mockCleanupWorktree).toHaveBeenCalled();
+  });
+
+  test('extracts and commits the learning artifact in the worktree before creating the PR', async () => {
+    const learningPath = '/tmp/worktree/.alpha-loop/learnings/issue-42-20260101-000000.md';
+    mockExtractLearnings.mockResolvedValueOnce(learningPath);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git diff "origin/master...HEAD"') {
+        return { stdout: 'diff --git a/src/foo.ts b/src/foo.ts', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith('git diff --cached --name-only --')) {
+        return { stdout: '.alpha-loop/learnings/issue-42-20260101-000000.md', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({
+      outputRoot: '/tmp/worktree',
+      agentCwd: '/tmp/worktree',
+      sessionLogsDir: '/tmp/sessions/session/20260330-143000/logs',
+      sessionName: 'session/20260330-143000',
+    }));
+
+    const commitCallIndex = mockExec.mock.calls.findIndex(([cmd]) =>
+      String(cmd).startsWith('git commit -m "chore: add learning artifact for issue #42"'),
+    );
+    expect(commitCallIndex).toBeGreaterThanOrEqual(0);
+    expect(mockExec.mock.calls[commitCallIndex][0]).toContain('.alpha-loop/learnings/issue-42-20260101-000000.md');
+    expect(mockExtractLearnings.mock.invocationCallOrder[0]).toBeLessThan(
+      mockExec.mock.invocationCallOrder[commitCallIndex],
+    );
+    expect(mockExec.mock.invocationCallOrder[commitCallIndex]).toBeLessThan(
+      mockCreatePR.mock.invocationCallOrder[0],
+    );
   });
 
   test('uses per-step pipeline agents for plan, implementation, and review', async () => {
@@ -889,6 +924,55 @@ describe('processBatch', () => {
     expect(mockBuildBatchPlanPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildBatchImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildBatchReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+  });
+
+  test('commits all batch learning artifacts before creating the batch PR', async () => {
+    mockExtractLearnings
+      .mockResolvedValueOnce('/tmp/worktree/.alpha-loop/learnings/issue-10-20260101-000000.md')
+      .mockResolvedValueOnce('/tmp/worktree/.alpha-loop/learnings/issue-11-20260101-000000.md');
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git diff "origin/master...HEAD"') {
+        return { stdout: 'diff --git a/src/foo.ts b/src/foo.ts', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith('git diff --cached --name-only --')) {
+        return {
+          stdout: [
+            '.alpha-loop/learnings/issue-10-20260101-000000.md',
+            '.alpha-loop/learnings/issue-11-20260101-000000.md',
+          ].join('\n'),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await processBatch(batchIssues, makeConfig({ batch: true }), makeSession());
+
+    expect(mockExtractLearnings).toHaveBeenCalledTimes(2);
+    expect(mockExtractLearnings).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      issueNum: 10,
+      outputRoot: '/tmp/worktree',
+      agentCwd: '/tmp/worktree',
+    }));
+    expect(mockExtractLearnings).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      issueNum: 11,
+      outputRoot: '/tmp/worktree',
+      agentCwd: '/tmp/worktree',
+    }));
+
+    const commitCallIndex = mockExec.mock.calls.findIndex(([cmd]) =>
+      String(cmd).startsWith('git commit -m "chore: add learning artifacts for issues #10, #11"'),
+    );
+    expect(commitCallIndex).toBeGreaterThanOrEqual(0);
+    expect(mockExec.mock.calls[commitCallIndex][0]).toContain('issue-10-20260101-000000.md');
+    expect(mockExec.mock.calls[commitCallIndex][0]).toContain('issue-11-20260101-000000.md');
+    expect(mockExtractLearnings.mock.invocationCallOrder[1]).toBeLessThan(
+      mockExec.mock.invocationCallOrder[commitCallIndex],
+    );
+    expect(mockExec.mock.invocationCallOrder[commitCallIndex]).toBeLessThan(
+      mockCreatePR.mock.invocationCallOrder[0],
+    );
   });
 
   test('skips auto-merge when tests are failing', async () => {

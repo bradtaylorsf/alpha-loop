@@ -813,6 +813,32 @@ describe('runCommand', () => {
       expect.any(Object),
       expect.any(Object),
     );
+    expect(mockRepairSessionLearningArtifacts).not.toHaveBeenCalled();
+    expect(mockRepairSessionSummaryArtifact).not.toHaveBeenCalled();
+    expect(mockLog.info).toHaveBeenCalledWith('Skipping parent learning artifact repair; issue learnings are committed in child PRs');
+    expect(mockFinalizeSession).toHaveBeenCalled();
+  });
+
+  test('repairs session learning artifacts only when auto-merge uses a session branch', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) =>
+      makeConfig({ ...overrides, autoMerge: true, skipPostSessionReview: true }) as any,
+    );
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Test issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({});
+
     expect(mockRepairSessionLearningArtifacts).toHaveBeenCalledWith(expect.objectContaining({
       sessionName: 'session/20260330-143000',
       sessionLogsDir: '/tmp/sessions/logs',

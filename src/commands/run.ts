@@ -1084,27 +1084,31 @@ async function runIssueSession(
   // Generate session summary (aggregates learnings across all issues)
   if (session.results.length > 0) {
     const learningsDir = join(process.cwd(), '.alpha-loop', 'learnings');
-    repairSessionLearningArtifacts({
-      sessionName: session.name,
-      issues: session.results.map((r) => ({
-        issueNum: r.issueNum,
-        title: r.title,
-        status: r.status,
-        duration: r.duration,
-      })),
-      learningsDir,
-      sessionLogsDir: session.logsDir,
-    });
-    await generateSessionSummary({
-      sessionName: session.name,
-      results: session.results,
-      learningsDir,
-      config,
-    });
-    repairSessionSummaryArtifact({
-      sessionName: session.name,
-      learningsDir,
-    });
+    if (config.autoMerge) {
+      repairSessionLearningArtifacts({
+        sessionName: session.name,
+        issues: session.results.map((r) => ({
+          issueNum: r.issueNum,
+          title: r.title,
+          status: r.status,
+          duration: r.duration,
+        })),
+        learningsDir,
+        sessionLogsDir: session.logsDir,
+      });
+      await generateSessionSummary({
+        sessionName: session.name,
+        results: session.results,
+        learningsDir,
+        config,
+      });
+      repairSessionSummaryArtifact({
+        sessionName: session.name,
+        learningsDir,
+      });
+    } else {
+      log.info('Skipping parent learning artifact repair; issue learnings are committed in child PRs');
+    }
   }
 
   // Post-session holistic code review

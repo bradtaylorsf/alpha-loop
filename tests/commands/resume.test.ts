@@ -26,6 +26,10 @@ jest.mock('../../src/lib/github', () => ({
   updateProjectStatus: jest.fn(),
 }));
 
+jest.mock('../../src/lib/learning', () => ({
+  repairSessionLearningArtifacts: jest.fn(),
+}));
+
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -35,6 +39,7 @@ import { createPR, labelIssue, commentIssue, updateProjectStatus } from '../../s
 import { ghExec } from '../../src/lib/rate-limit';
 import { spawnAgent } from '../../src/lib/agent';
 import { exec } from '../../src/lib/shell';
+import { repairSessionLearningArtifacts } from '../../src/lib/learning';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>;
@@ -45,6 +50,7 @@ const mockLabelIssue = labelIssue as jest.MockedFunction<typeof labelIssue>;
 const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue>;
 const mockUpdateProjectStatus = updateProjectStatus as jest.MockedFunction<typeof updateProjectStatus>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
+const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 
 const ok = (stdout = '') => ({ stdout, stderr: '', exitCode: 0 });
 const repoRoot = process.cwd();
@@ -56,6 +62,7 @@ beforeEach(() => {
   tempDir = undefined;
   mockResolveStepConfig.mockReturnValue({ agent: 'codex', model: 'gpt-5' });
   mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/269');
+  mockRepairSessionLearningArtifacts.mockReturnValue({ repaired: 0, created: 1, skipped: 0, failed: 0 });
 });
 
 afterEach(() => {
@@ -194,6 +201,18 @@ describe('resumeCommand', () => {
       if (cmd === 'git worktree list --porcelain') return ok('');
       if (cmd === 'git log "origin/master..agent/issue-269" --oneline') return ok('abc123 recover stranded work\n');
       if (cmd === 'git diff --name-only "origin/master...agent/issue-269"') return ok('reports/final.pdf\nslides/final.pptx\n');
+      if (cmd === 'git rev-parse --show-toplevel') return ok(tempDir ?? '');
+      if (cmd === 'git checkout "agent/issue-269"') return ok('');
+      if (cmd === 'git status --porcelain -- ".alpha-loop/learnings"') {
+        return ok('?? .alpha-loop/learnings/issue-269-20260101-000000.md\n');
+      }
+      if (cmd === 'git add -- ".alpha-loop/learnings/issue-269-20260101-000000.md"') return ok('');
+      if (cmd === 'git diff --cached --name-only -- ".alpha-loop/learnings/issue-269-20260101-000000.md"') {
+        return ok('.alpha-loop/learnings/issue-269-20260101-000000.md\n');
+      }
+      if (cmd === 'git commit -m "chore: add learning artifact for issue #269" -- ".alpha-loop/learnings/issue-269-20260101-000000.md"') {
+        return ok('');
+      }
       if (cmd === 'git push -u origin "agent/issue-269"') return ok('');
       return ok('');
     });
@@ -214,12 +233,23 @@ describe('resumeCommand', () => {
 
     await resumeCommand({ issue: '269' });
 
+    expect(mockRepairSessionLearningArtifacts).toHaveBeenCalledWith({
+      sessionName: 'session/epic-123',
+      issues: [{ issueNum: 269, title: 'Recover artifact exports', status: 'failure', duration: 0, retries: 0 }],
+      learningsDir: join(tempDir!, '.alpha-loop', 'learnings'),
+      sessionLogsDir: expect.stringContaining('.alpha-loop/sessions/session/epic-123/logs'),
+    });
+    expect(mockExec).toHaveBeenCalledWith(
+      'git commit -m "chore: add learning artifact for issue #269" -- ".alpha-loop/learnings/issue-269-20260101-000000.md"',
+      { cwd: tempDir! },
+    );
     expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
       repo: 'owner/repo',
       base: 'master',
       head: 'agent/issue-269',
       title: 'feat: Recover artifact exports (closes #269)',
       body: expect.stringContaining('Treat this PR as WIP until those checks pass.'),
+      cwd: tempDir!,
     }));
     expect(mockLabelIssue).toHaveBeenCalledWith('owner/repo', 269, 'in-review', 'in-progress');
     expect(mockUpdateProjectStatus).toHaveBeenCalledWith('owner/repo', 2, 'owner', 269, 'In Review');
