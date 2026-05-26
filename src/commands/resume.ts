@@ -15,6 +15,7 @@ import { ghExec } from '../lib/rate-limit.js';
 import { spawnAgent } from '../lib/agent.js';
 import { buildReviewPrompt } from '../lib/prompts.js';
 import { repairSessionLearningArtifacts } from '../lib/learning.js';
+import { clearCrashMarker, findCrashMarkers, type CrashMarkerRef } from '../lib/session.js';
 import {
   labelIssue,
   commentIssue,
@@ -33,6 +34,7 @@ type StrandedBranch = {
   issueNum: number;
   commits: string[];
   filesChanged: string[];
+  crashMarker?: CrashMarkerRef;
 };
 
 function normalizeGitBranchLine(line: string): string {
@@ -162,29 +164,71 @@ export function findStrandedBranches(baseBranch: string, filterIssue?: number): 
     // Apply --issue filter if provided
     if (filterIssue !== undefined && issueNum !== filterIssue) continue;
 
-    // Check if there are commits ahead of the base branch
-    const aheadResult = exec(
-      `git log "origin/${baseBranch}..${branch}" --oneline`,
-    );
-    if (aheadResult.exitCode !== 0 || !aheadResult.stdout.trim()) {
-      // No commits ahead — not stranded
-      continue;
-    }
+    const item = inspectStrandedBranch(baseBranch, branch, issueNum);
+    if (item) stranded.push(item);
+  }
 
-    const commits = aheadResult.stdout
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
+  return stranded;
+}
 
-    // Get files changed relative to base branch
-    const filesResult = exec(
-      `git diff --name-only "origin/${baseBranch}...${branch}"`,
-    );
-    const filesChanged = filesResult.exitCode === 0
-      ? filesResult.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
-      : [];
+function inspectStrandedBranch(
+  baseBranch: string,
+  branch: string,
+  issueNum: number,
+  crashMarker?: CrashMarkerRef,
+): StrandedBranch | null {
+  // Check if there are commits ahead of the base branch
+  const aheadResult = exec(
+    `git log "origin/${baseBranch}..${branch}" --oneline`,
+  );
+  if (aheadResult.exitCode !== 0 || !aheadResult.stdout.trim()) {
+    // No commits ahead — not stranded
+    return null;
+  }
 
-    stranded.push({ branch, issueNum, commits, filesChanged });
+  const commits = aheadResult.stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  // Get files changed relative to base branch
+  const filesResult = exec(
+    `git diff --name-only "origin/${baseBranch}...${branch}"`,
+  );
+  const filesChanged = filesResult.exitCode === 0
+    ? filesResult.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
+    : [];
+
+  return { branch, issueNum, commits, filesChanged, crashMarker };
+}
+
+function matchesSessionFilter(marker: CrashMarkerRef, sessionFilter?: string): boolean {
+  if (!sessionFilter) return true;
+  const wanted = sessionFilter.trim();
+  if (!wanted) return true;
+  const timestamp = marker.sessionName.split('/').pop() ?? marker.sessionName;
+  return marker.sessionName === wanted
+    || marker.sessionName.endsWith(wanted)
+    || timestamp === wanted;
+}
+
+function findStrandedBranchesFromCrashMarkers(
+  baseBranch: string,
+  filterIssue?: number,
+  sessionFilter?: string,
+): StrandedBranch[] {
+  const markers = findCrashMarkers()
+    .filter((marker) => marker.recoverable && marker.hasCommits)
+    .filter((marker) => filterIssue === undefined || marker.issueNum === filterIssue)
+    .filter((marker) => matchesSessionFilter(marker, sessionFilter));
+
+  const seenIssues = new Set<number>();
+  const stranded: StrandedBranch[] = [];
+  for (const marker of markers) {
+    if (seenIssues.has(marker.issueNum)) continue;
+    seenIssues.add(marker.issueNum);
+    const item = inspectStrandedBranch(baseBranch, marker.branch, marker.issueNum, marker);
+    if (item) stranded.push(item);
   }
 
   return stranded;
@@ -242,6 +286,10 @@ function getBranchDiff(baseBranch: string, branch: string): string {
 function printStrandedSummary(item: StrandedBranch): void {
   log.step(`Found stranded branch: ${item.branch}`);
   log.info(`  Issue:   #${item.issueNum}`);
+  if (item.crashMarker) {
+    log.info(`  Crash:   ${item.crashMarker.step} at ${item.crashMarker.timestamp}`);
+    log.info(`  Session: ${item.crashMarker.sessionName}`);
+  }
   log.info(`  Commits: ${item.commits.length}`);
   for (const commit of item.commits) {
     log.info(`    ${commit}`);
@@ -390,6 +438,13 @@ function findSessionForIssue(issueNum: number): { sessionDir: string; sessionNam
   const sessionsRoot = join(process.cwd(), '.alpha-loop', 'sessions');
   if (!existsSync(sessionsRoot)) return null;
 
+  const crashMarker = findCrashMarkers(sessionsRoot).find((marker) => (
+    marker.issueNum === issueNum && marker.recoverable
+  ));
+  if (crashMarker) {
+    return { sessionDir: crashMarker.sessionDir, sessionName: crashMarker.sessionName };
+  }
+
   // Walk all session directories, sorted newest first
   const sessionDirs: Array<{ dir: string; name: string }> = [];
   for (const a of readdirSync(sessionsRoot)) {
@@ -427,6 +482,7 @@ function saveResumedResult(
   const filePath = join(sessionDir, `result-${result.issueNum}.json`);
   writeFileSync(filePath, JSON.stringify(result, null, 2) + '\n');
   log.info(`Session result saved: ${filePath}`);
+  clearCrashMarker(sessionDir, result.issueNum);
 }
 
 function isRecoveredUnverified(result: PipelineResult): boolean {
@@ -544,8 +600,11 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
 
   log.step('Scanning for stranded branches...');
 
-  // Find local branches with unpushed/unreviewed work
-  const stranded = findStrandedBranches(config.baseBranch, filterIssue);
+  // Prefer explicit crash markers when present; fall back to branch walking for older sessions.
+  const markerStranded = findStrandedBranchesFromCrashMarkers(config.baseBranch, filterIssue, options.session);
+  const stranded = markerStranded.length > 0
+    ? markerStranded
+    : findStrandedBranches(config.baseBranch, filterIssue);
 
   // Filter out branches that already have an open PR
   const withoutPR = stranded.filter((item) => !prExists(config.repo, item.branch));

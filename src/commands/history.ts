@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { log } from '../lib/logger.js';
+import { loadCrashMarkers, type CrashMarker } from '../lib/session.js';
 import { readStageTelemetry } from '../lib/telemetry.js';
 import type { StageTelemetry } from '../lib/telemetry.js';
 import type { PipelineResult } from '../lib/pipeline.js';
@@ -50,6 +51,11 @@ function loadResults(sessionDir: string): PipelineResult[] {
     }
   } catch { /* directory not readable */ }
   return results;
+}
+
+function uniqueCrashMarkers(results: PipelineResult[], crashes: CrashMarker[]): CrashMarker[] {
+  const resultIssues = new Set(results.map((result) => result.issueNum));
+  return crashes.filter((marker) => !resultIssues.has(marker.issueNum));
 }
 
 /**
@@ -159,7 +165,13 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
   // Build a unified list: local sessions + manifests not covered by local data
   const seenNames = new Set(localSessions.map((s) => s.name));
 
-  type SessionEntry = { name: string; timestamp: string; results: PipelineResult[]; source: 'local' | 'manifest' };
+  type SessionEntry = {
+    name: string;
+    timestamp: string;
+    results: PipelineResult[];
+    crashes: CrashMarker[];
+    source: 'local' | 'manifest';
+  };
   const entries: SessionEntry[] = [];
 
   // Add local sessions
@@ -168,6 +180,7 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
       name: session.name,
       timestamp: session.timestamp,
       results: loadResults(session.dir),
+      crashes: loadCrashMarkers(session.dir),
       source: 'local',
     });
   }
@@ -181,6 +194,7 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
       name,
       timestamp: ts,
       results: manifest.results,
+      crashes: [],
       source: 'manifest',
     });
   }
@@ -198,9 +212,10 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
     console.log('');
 
     for (const entry of entries) {
-      const issueCount = entry.results.length;
+      const crashCount = uniqueCrashMarkers(entry.results, entry.crashes).length;
+      const issueCount = entry.results.length + crashCount;
       const successCount = entry.results.filter((r) => r.status === 'success').length;
-      const failedCount = issueCount - successCount;
+      const failedCount = entry.results.length - successCount;
       const totalDuration = entry.results.reduce((sum, r) => sum + r.duration, 0);
       const durStr = formatDuration(totalDuration);
 
@@ -214,6 +229,7 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
       let statusParts = '';
       if (successCount > 0) statusParts += `${successCount} \u2713`;
       if (failedCount > 0) statusParts += ` ${failedCount} \u2717`;
+      if (crashCount > 0) statusParts += ` ${crashCount} crashed`;
       if (issueCount === 0) statusParts = '(empty)';
 
       console.log(
@@ -312,6 +328,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   }
 
   let results: PipelineResult[] = [];
+  let crashMarkers: CrashMarker[] = [];
   let sessionDir: string | undefined;
   let manifest: SessionManifest | undefined;
   const root = projectDir ?? process.cwd();
@@ -322,17 +339,19 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   if (fs.existsSync(localDir)) {
     sessionDir = localDir;
     results = loadResults(localDir);
+    crashMarkers = loadCrashMarkers(localDir);
   } else {
     const all = findSessionDirs(sessionsDir);
     const match = all.find((s) => s.name === sessionName || s.timestamp === sessionName);
     if (match) {
       sessionDir = match.dir;
       results = loadResults(match.dir);
+      crashMarkers = loadCrashMarkers(match.dir);
     }
   }
 
   // Fall back to manifest from learnings (checked-in data from teammates)
-  if (results.length === 0) {
+  if (results.length === 0 && crashMarkers.length === 0) {
     manifest = manifests.get(sessionName)
       ?? [...manifests.values()].find((m) => m.name.endsWith(sessionName));
     if (manifest) {
@@ -344,7 +363,9 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   manifest ??= manifests.get(sessionName)
     ?? [...manifests.values()].find((m) => m.name === sessionName || m.name.endsWith(sessionName));
 
-  if (results.length === 0) {
+  const visibleCrashes = uniqueCrashMarkers(results, crashMarkers);
+
+  if (results.length === 0 && visibleCrashes.length === 0) {
     log.error(`Session not found: ${sessionName}`);
     process.exitCode = 1;
     return;
@@ -352,9 +373,11 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
 
   const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
   const successCount = results.filter((r) => r.status === 'success').length;
+  const failureCount = results.length - successCount;
+  const issueCount = results.length + visibleCrashes.length;
 
   console.log(`Session:  ${sessionName}`);
-  console.log(`Issues:   ${results.length} (${successCount} succeeded, ${results.length - successCount} failed)`);
+  console.log(`Issues:   ${issueCount} (${successCount} succeeded, ${failureCount} failed, ${visibleCrashes.length} crashed)`);
   console.log(`Duration: ${formatDuration(totalDuration)}`);
   console.log('');
 
@@ -420,6 +443,18 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
           );
         }
       }
+    }
+  }
+
+  for (const marker of visibleCrashes) {
+    console.log(
+      `  ! #${String(marker.issueNum).padEnd(4)} CRASHED during ${marker.step}`
+    );
+    console.log(
+      `           branch ${marker.branch}  recoverable ${marker.recoverable ? 'yes' : 'no'}  ${marker.timestamp}`
+    );
+    if (marker.error) {
+      console.log(`           error: ${marker.error}`);
     }
   }
 

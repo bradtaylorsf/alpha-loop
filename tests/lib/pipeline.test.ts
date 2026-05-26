@@ -26,6 +26,7 @@ jest.mock('../../src/lib/agent', () => ({
 jest.mock('../../src/lib/worktree', () => ({
   setupWorktree: jest.fn(),
   cleanupWorktree: jest.fn(),
+  worktreeHasCommits: jest.fn(),
 }));
 
 jest.mock('../../src/lib/github', () => ({
@@ -54,6 +55,7 @@ jest.mock('../../src/lib/learning', () => ({
 jest.mock('../../src/lib/session', () => ({
   saveResult: jest.fn(),
   getPreviousResult: jest.fn(),
+  writeCrashMarker: jest.fn(),
 }));
 
 jest.mock('../../src/lib/traces', () => ({
@@ -109,12 +111,12 @@ jest.mock('node:fs', () => ({
 
 import { exec } from '../../src/lib/shell';
 import { spawnAgent } from '../../src/lib/agent';
-import { setupWorktree, cleanupWorktree } from '../../src/lib/worktree';
+import { setupWorktree, cleanupWorktree, worktreeHasCommits } from '../../src/lib/worktree';
 import { labelIssue, commentIssue, createPR, mergePR, updateProjectStatus } from '../../src/lib/github';
 import { runTests } from '../../src/lib/testing';
 import { runVerify } from '../../src/lib/verify';
 import { extractLearnings, getLearningContext } from '../../src/lib/learning';
-import { saveResult, getPreviousResult } from '../../src/lib/session';
+import { saveResult, getPreviousResult, writeCrashMarker } from '../../src/lib/session';
 import { buildIssuePlanPrompt, buildImplementPrompt, buildReviewPrompt, buildBatchPlanPrompt, buildBatchImplementPrompt, buildBatchReviewPrompt } from '../../src/lib/prompts';
 import { writeTraceToSubdir } from '../../src/lib/traces';
 import type { Config } from '../../src/lib/config';
@@ -123,6 +125,7 @@ const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
+const mockWorktreeHasCommits = worktreeHasCommits as jest.MockedFunction<typeof worktreeHasCommits>;
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockMergePR = mergePR as jest.MockedFunction<typeof mergePR>;
 const mockRunTests = runTests as jest.MockedFunction<typeof runTests>;
@@ -131,6 +134,7 @@ const mockExtractLearnings = extractLearnings as jest.MockedFunction<typeof extr
 const mockGetLearningContext = getLearningContext as jest.MockedFunction<typeof getLearningContext>;
 const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGetPreviousResult = getPreviousResult as jest.MockedFunction<typeof getPreviousResult>;
+const mockWriteCrashMarker = writeCrashMarker as jest.MockedFunction<typeof writeCrashMarker>;
 const mockBuildIssuePlanPrompt = buildIssuePlanPrompt as jest.MockedFunction<typeof buildIssuePlanPrompt>;
 const mockBuildImplementPrompt = buildImplementPrompt as jest.MockedFunction<typeof buildImplementPrompt>;
 const mockBuildReviewPrompt = buildReviewPrompt as jest.MockedFunction<typeof buildReviewPrompt>;
@@ -228,6 +232,7 @@ beforeEach(() => {
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
   mockSetupWorktree.mockResolvedValue({ path: '/tmp/worktree', branch: 'agent/issue-42', resumed: false });
   mockCleanupWorktree.mockResolvedValue();
+  mockWorktreeHasCommits.mockReturnValue(0);
   mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: 'Agent output', duration: 5000 });
   mockRunTests.mockReturnValue({ passed: true, output: 'All tests passed' });
   mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/1');
@@ -613,6 +618,43 @@ describe('processIssue', () => {
     // Should re-queue (label back to ready) instead of marking as failed
     expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
     expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'Todo');
+  });
+
+  test('writes a recoverable crash marker when a post-commit pipeline step throws', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+    const session = makeSession();
+
+    mockExistsSync.mockImplementation((path: any) => String(path).includes('plan-issue-42.json'));
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).includes('plan-issue-42.json')) {
+        return JSON.stringify({
+          summary: 'Plan with live verification',
+          files: ['src/index.ts'],
+          implementation: 'Implement it',
+          testing: { needed: false, reason: 'Covered by verification' },
+          verification: { needed: true, method: 'playwright', instructions: 'Open app', reason: 'Runtime behavior' },
+        });
+      }
+      return '';
+    });
+    mockWorktreeHasCommits.mockReturnValue(1);
+    mockRunVerify.mockRejectedValueOnce(new Error('review browser crashed'));
+
+    await expect(
+      processIssue(42, 'Test issue', 'Body', makeConfig({ skipVerify: false }), session),
+    ).rejects.toThrow('review browser crashed');
+
+    expect(mockWriteCrashMarker).toHaveBeenCalledWith(session, expect.objectContaining({
+      issueNum: 42,
+      step: 'verify',
+      branch: 'agent/issue-42',
+      hasCommits: true,
+      error: 'review browser crashed',
+      recoverable: true,
+    }));
+    expect(mockSaveResult).not.toHaveBeenCalled();
   });
 
   test('creates PR with review report and test output', async () => {
