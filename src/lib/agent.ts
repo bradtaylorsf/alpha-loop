@@ -176,13 +176,26 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
  * Build a shell command string for one-shot agent prompts (scan, vision).
  * Reads prompt from stdin. Returns the command to pipe into.
  */
-export function buildOneShotCommand(agent: AgentType, model: string): string {
+export type OneShotCommandOptions = {
+  /**
+   * Request a stdout-only response for prompts that must not create or edit
+   * files. Currently only Claude-family CLIs expose a tool allowlist flag.
+   */
+  textOnly?: boolean;
+};
+
+export function buildOneShotCommand(agent: AgentType, model: string, options: OneShotCommandOptions = {}): string {
   switch (agent) {
     case 'claude':
     case 'lmstudio': {
       const parts = ['claude', '-p'];
       if (model) parts.push('--model', model);
-      parts.push('--dangerously-skip-permissions', '--output-format', 'text');
+      if (options.textOnly) {
+        parts.push('--allowedTools', '""');
+      } else {
+        parts.push('--dangerously-skip-permissions');
+      }
+      parts.push('--output-format', 'text');
       return parts.join(' ');
     }
     case 'codex':
