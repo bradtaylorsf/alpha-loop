@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, resolveStepConfig } from '../lib/config.js';
 import { log } from '../lib/logger.js';
-import { exec } from '../lib/shell.js';
+import { exec, shellQuote } from '../lib/shell.js';
 import { ghExec } from '../lib/rate-limit.js';
 import { spawnAgent } from '../lib/agent.js';
 import { buildReviewPrompt } from '../lib/prompts.js';
@@ -97,7 +97,7 @@ function checkoutBranchForResume(branch: string): string | null {
   const cwd = toplevelResult.exitCode === 0 && toplevelResult.stdout
     ? toplevelResult.stdout
     : process.cwd();
-  const checkoutResult = exec(`git checkout ${JSON.stringify(branch)}`, { cwd });
+  const checkoutResult = exec(`git checkout ${shellQuote(branch)}`, { cwd });
   if (checkoutResult.exitCode !== 0) {
     log.error(`Could not check out ${branch}: ${checkoutResult.stderr || checkoutResult.stdout}`);
     return null;
@@ -122,7 +122,7 @@ function commitChangedLearningArtifacts(cwd: string, issueNum: number): boolean 
   const paths = changedLearningPaths(cwd, issueNum);
   if (paths.length === 0) return false;
 
-  const pathspecs = paths.map((path) => JSON.stringify(path)).join(' ');
+  const pathspecs = paths.map((path) => shellQuote(path)).join(' ');
   const addResult = exec(`git add -- ${pathspecs}`, { cwd });
   if (addResult.exitCode !== 0) {
     log.warn(`Could not stage learning artifact for #${issueNum}: ${addResult.stderr || addResult.stdout}`);
@@ -139,7 +139,7 @@ function commitChangedLearningArtifacts(cwd: string, issueNum: number): boolean 
   if (stagedPaths.length === 0) return false;
 
   const commitResult = exec(
-    `git commit -m ${JSON.stringify(`chore: add learning artifact for issue #${issueNum}`)} -- ${stagedPaths.map((path) => JSON.stringify(path)).join(' ')}`,
+    `git commit -m ${shellQuote(`chore: add learning artifact for issue #${issueNum}`)} -- ${stagedPaths.map((path) => shellQuote(path)).join(' ')}`,
     { cwd },
   );
   if (commitResult.exitCode !== 0) {
@@ -183,8 +183,9 @@ function inspectStrandedBranch(
   crashMarker?: CrashMarkerRef,
 ): StrandedBranch | null {
   // Check if there are commits ahead of the base branch
+  const range = shellQuote(`origin/${baseBranch}..${branch}`);
   const aheadResult = exec(
-    `git log "origin/${baseBranch}..${branch}" --oneline`,
+    `git log ${range} --oneline`,
   );
   if (aheadResult.exitCode !== 0 || !aheadResult.stdout.trim()) {
     // No commits ahead — not stranded
@@ -198,7 +199,7 @@ function inspectStrandedBranch(
 
   // Get files changed relative to base branch
   const filesResult = exec(
-    `git diff --name-only "origin/${baseBranch}...${branch}"`,
+    `git diff --name-only ${shellQuote(`origin/${baseBranch}...${branch}`)}`,
   );
   const filesChanged = filesResult.exitCode === 0
     ? filesResult.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
@@ -244,7 +245,7 @@ function findStrandedBranchesFromCrashMarkers(
  */
 function prExists(repo: string, branch: string): boolean {
   const result = ghExec(
-    `gh pr list --repo "${repo}" --head "${branch}" --state open --json number --limit 1`,
+    `gh pr list --repo ${shellQuote(repo)} --head ${shellQuote(branch)} --state open --json number --limit 1`,
   );
   if (result.exitCode !== 0) return false;
   try {
@@ -260,7 +261,7 @@ function prExists(repo: string, branch: string): boolean {
  */
 function getIssueTitle(repo: string, issueNum: number): string {
   const result = ghExec(
-    `gh issue view ${issueNum} --repo "${repo}" --json title`,
+    `gh issue view ${issueNum} --repo ${shellQuote(repo)} --json title`,
   );
   if (result.exitCode !== 0) return `Issue #${issueNum}`;
   try {
@@ -275,7 +276,7 @@ function getIssueTitle(repo: string, issueNum: number): string {
  * Get the diff between the base branch and the given branch.
  */
 function getBranchDiff(baseBranch: string, branch: string): string {
-  const result = exec(`git diff "origin/${baseBranch}...${branch}"`);
+  const result = exec(`git diff ${shellQuote(`origin/${baseBranch}...${branch}`)}`);
   if (result.exitCode !== 0) return '';
   // Cap at 50k chars to avoid bloating the review prompt
   const MAX = 50_000;
@@ -342,10 +343,11 @@ async function resumeBranch(
   // createPR also pushes internally, but we do it first here for explicit
   // feedback and to fail fast if the push is going to be a problem.
   log.info(`Pushing ${branch} to origin...`);
-  const pushResult = exec(`git push -u origin "${branch}"`, { cwd: branchWorktree });
+  const quotedBranch = shellQuote(branch);
+  const pushResult = exec(`git push -u origin ${quotedBranch}`, { cwd: branchWorktree });
   if (pushResult.exitCode !== 0) {
     log.warn(`Push failed: ${pushResult.stderr}. Attempting force push...`);
-    const forceResult = exec(`git push -u origin "${branch}" --force`, { cwd: branchWorktree });
+    const forceResult = exec(`git push -u origin ${quotedBranch} --force`, { cwd: branchWorktree });
     if (forceResult.exitCode !== 0) {
       log.error(`Could not push ${branch}: ${forceResult.stderr}`);
       return null;
@@ -511,7 +513,7 @@ async function updateSessionPR(
 
   // Find the PR for this session branch
   const prResult = ghExec(
-    `gh pr list --repo "${repo}" --head "${sessionBranch}" --state open --json number,url --limit 1`,
+    `gh pr list --repo ${shellQuote(repo)} --head ${shellQuote(sessionBranch)} --state open --json number,url --limit 1`,
   );
   if (prResult.exitCode !== 0 || !prResult.stdout.trim()) {
     log.info('No session PR found to update');
@@ -613,12 +615,13 @@ This PR collects all changes from this session for final review before merging t
 
 *Automated by alpha-loop*`;
 
-  ghExec(`gh pr edit ${prNumber} --repo "${repo}" --title ${JSON.stringify(title)}`, undefined, true);
+  const quotedRepo = shellQuote(repo);
+  ghExec(`gh pr edit ${prNumber} --repo ${quotedRepo} --title ${shellQuote(title)}`, undefined, true);
 
   // Use --body-file to avoid escaping issues
   const bodyFile = join(tmpdir(), `alpha-loop-session-pr-${Date.now()}`);
   writeFileSync(bodyFile, body, 'utf-8');
-  ghExec(`gh pr edit ${prNumber} --repo "${repo}" --body-file "${bodyFile}"`, undefined, true);
+  ghExec(`gh pr edit ${prNumber} --repo ${quotedRepo} --body-file ${shellQuote(bodyFile)}`, undefined, true);
   try { unlinkSync(bodyFile); } catch { /* cleanup */ }
 
   log.success(`Session PR updated: ${prUrl}`);
@@ -645,10 +648,26 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
   log.step('Scanning for stranded branches...');
 
   // Prefer explicit crash markers when present; fall back to branch walking for older sessions.
+  //
+  // IMPORTANT: when --session is provided, ONLY trust crash markers. Branch walking has no
+  // session context and would silently resume work from unrelated sessions, defeating the
+  // filter. If the requested session has no recoverable markers, surface that explicitly
+  // rather than papering over it with cross-session results.
   const markerStranded = findStrandedBranchesFromCrashMarkers(config.baseBranch, filterIssue, options.session);
-  const stranded = markerStranded.length > 0
-    ? markerStranded
-    : findStrandedBranches(config.baseBranch, filterIssue);
+  let stranded: StrandedBranch[];
+  if (options.session) {
+    stranded = markerStranded;
+    if (stranded.length === 0) {
+      log.info(
+        `No recoverable crash markers matched --session ${options.session}. ` +
+        `Branch walking is skipped when --session is set to avoid resuming unrelated work.`,
+      );
+    }
+  } else {
+    stranded = markerStranded.length > 0
+      ? markerStranded
+      : findStrandedBranches(config.baseBranch, filterIssue);
+  }
 
   // Filter out branches that already have an open PR
   const withoutPR = stranded.filter((item) => !prExists(config.repo, item.branch));

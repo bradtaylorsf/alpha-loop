@@ -1,5 +1,6 @@
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
+  shellQuote: (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`,
 }));
 
 jest.mock('../../src/lib/config', () => ({
@@ -138,11 +139,11 @@ describe('findStrandedBranches', () => {
         return ok('  agent/issue-462\n+ agent/issue-466\n');
       }
       if (cmd === 'git worktree list --porcelain') return ok('');
-      if (cmd === 'git log "origin/master..agent/issue-462" --oneline') return ok('');
-      if (cmd === 'git log "origin/master..agent/issue-466" --oneline') {
+      if (cmd === `git log 'origin/master..agent/issue-462' --oneline`) return ok('');
+      if (cmd === `git log 'origin/master..agent/issue-466' --oneline`) {
         return ok('a3f214b fix(#466): address verification findings\n');
       }
-      if (cmd === 'git diff --name-only "origin/master...agent/issue-466"') {
+      if (cmd === `git diff --name-only 'origin/master...agent/issue-466'`) {
         return ok('src/lib/agent.ts\n');
       }
       return ok('');
@@ -173,10 +174,10 @@ describe('findStrandedBranches', () => {
           '',
         ].join('\n'));
       }
-      if (cmd === 'git log "origin/master..agent/issue-187" --oneline') {
+      if (cmd === `git log 'origin/master..agent/issue-187' --oneline`) {
         return ok('def456 fix(#187): recover after result\n');
       }
-      if (cmd === 'git diff --name-only "origin/master...agent/issue-187"') {
+      if (cmd === `git diff --name-only 'origin/master...agent/issue-187'`) {
         return ok('src/commands/resume.ts\n');
       }
       return ok('');
@@ -216,27 +217,27 @@ describe('resumeCommand', () => {
       if (cmd === 'git branch --list "agent/issue-*"') {
         throw new Error('branch walking should not be used when a crash marker exists');
       }
-      if (cmd === 'git log "origin/master..agent/issue-269" --oneline') return ok('abc123 recover stranded work\n');
-      if (cmd === 'git diff --name-only "origin/master...agent/issue-269"') return ok('src/lib/pipeline.ts\n');
+      if (cmd === `git log 'origin/master..agent/issue-269' --oneline`) return ok('abc123 recover stranded work\n');
+      if (cmd === `git diff --name-only 'origin/master...agent/issue-269'`) return ok('src/lib/pipeline.ts\n');
       if (cmd === 'git worktree list --porcelain') return ok('');
       if (cmd === 'git rev-parse --show-toplevel') return ok(tempDir ?? '');
-      if (cmd === 'git checkout "agent/issue-269"') return ok('');
+      if (cmd === `git checkout 'agent/issue-269'`) return ok('');
       if (cmd === 'git status --porcelain -- ".alpha-loop/learnings"') return ok('');
-      if (cmd === 'git push -u origin "agent/issue-269"') return ok('');
+      if (cmd === `git push -u origin 'agent/issue-269'`) return ok('');
       return ok('');
     });
     mockGhExec.mockImplementation((cmd: string) => {
-      if (cmd === 'gh pr list --repo "owner/repo" --head "agent/issue-269" --state open --json number --limit 1') return ok('[]');
-      if (cmd === 'gh issue view 269 --repo "owner/repo" --json title') return ok('{"title":"Recover artifact exports"}');
-      if (cmd === 'gh pr list --repo "owner/repo" --head "session/epic-226" --state open --json number,url --limit 1') {
+      if (cmd === `gh pr list --repo 'owner/repo' --head 'agent/issue-269' --state open --json number --limit 1`) return ok('[]');
+      if (cmd === `gh issue view 269 --repo 'owner/repo' --json title`) return ok('{"title":"Recover artifact exports"}');
+      if (cmd === `gh pr list --repo 'owner/repo' --head 'session/epic-226' --state open --json number,url --limit 1`) {
         return ok('[{"number":999,"url":"https://github.com/owner/repo/pull/999"}]');
       }
-      if (cmd.startsWith('gh pr edit 999 --repo "owner/repo" --body-file ')) {
-        const bodyFile = cmd.match(/--body-file "([^"]+)"/)?.[1];
+      if (cmd.startsWith(`gh pr edit 999 --repo 'owner/repo' --body-file `)) {
+        const bodyFile = cmd.match(/--body-file '([^']+)'/)?.[1];
         if (bodyFile) sessionPrBody = readFileSync(bodyFile, 'utf-8');
         return ok('');
       }
-      if (cmd.startsWith('gh pr edit 999 --repo "owner/repo" --title ')) return ok('');
+      if (cmd.startsWith(`gh pr edit 999 --repo 'owner/repo' --title `)) return ok('');
       return ok('');
     });
 
@@ -268,38 +269,38 @@ describe('resumeCommand', () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd === 'git branch --list "agent/issue-*"') return ok('  agent/issue-269\n');
       if (cmd === 'git worktree list --porcelain') return ok('');
-      if (cmd === 'git log "origin/master..agent/issue-269" --oneline') return ok('abc123 recover stranded work\n');
-      if (cmd === 'git diff --name-only "origin/master...agent/issue-269"') return ok('reports/final.pdf\nslides/final.pptx\n');
+      if (cmd === `git log 'origin/master..agent/issue-269' --oneline`) return ok('abc123 recover stranded work\n');
+      if (cmd === `git diff --name-only 'origin/master...agent/issue-269'`) return ok('reports/final.pdf\nslides/final.pptx\n');
       if (cmd === 'git rev-parse --show-toplevel') return ok(tempDir ?? '');
-      if (cmd === 'git checkout "agent/issue-269"') return ok('');
+      if (cmd === `git checkout 'agent/issue-269'`) return ok('');
       if (cmd === 'git status --porcelain -- ".alpha-loop/learnings"') {
         return ok('?? .alpha-loop/learnings/issue-269-20260101-000000.md\n');
       }
-      if (cmd === 'git add -- ".alpha-loop/learnings/issue-269-20260101-000000.md"') return ok('');
-      if (cmd === 'git diff --cached --name-only -- ".alpha-loop/learnings/issue-269-20260101-000000.md"') {
+      if (cmd === `git add -- '.alpha-loop/learnings/issue-269-20260101-000000.md'`) return ok('');
+      if (cmd === `git diff --cached --name-only -- '.alpha-loop/learnings/issue-269-20260101-000000.md'`) {
         return ok('.alpha-loop/learnings/issue-269-20260101-000000.md\n');
       }
-      if (cmd === 'git commit -m "chore: add learning artifact for issue #269" -- ".alpha-loop/learnings/issue-269-20260101-000000.md"') {
+      if (cmd === `git commit -m 'chore: add learning artifact for issue #269' -- '.alpha-loop/learnings/issue-269-20260101-000000.md'`) {
         return ok('');
       }
-      if (cmd === 'git push -u origin "agent/issue-269"') return ok('');
+      if (cmd === `git push -u origin 'agent/issue-269'`) return ok('');
       return ok('');
     });
     mockGhExec.mockImplementation((cmd: string) => {
-      if (cmd === 'gh pr list --repo "owner/repo" --head "agent/issue-269" --state open --json number --limit 1') return ok('[]');
-      if (cmd === 'gh issue view 269 --repo "owner/repo" --json title') return ok('{"title":"Recover artifact exports"}');
-      if (cmd === 'gh pr list --repo "owner/repo" --head "session/epic-123" --state open --json number,url --limit 1') {
+      if (cmd === `gh pr list --repo 'owner/repo' --head 'agent/issue-269' --state open --json number --limit 1`) return ok('[]');
+      if (cmd === `gh issue view 269 --repo 'owner/repo' --json title`) return ok('{"title":"Recover artifact exports"}');
+      if (cmd === `gh pr list --repo 'owner/repo' --head 'session/epic-123' --state open --json number,url --limit 1`) {
         return ok('[{"number":999,"url":"https://github.com/owner/repo/pull/999"}]');
       }
-      if (cmd.startsWith('gh pr edit 999 --repo "owner/repo" --body-file ')) {
-        const bodyFile = cmd.match(/--body-file "([^"]+)"/)?.[1];
+      if (cmd.startsWith(`gh pr edit 999 --repo 'owner/repo' --body-file `)) {
+        const bodyFile = cmd.match(/--body-file '([^']+)'/)?.[1];
         if (bodyFile) {
           sessionPrBodyFile = bodyFile;
           sessionPrBody = readFileSync(bodyFile, 'utf-8');
         }
         return ok('');
       }
-      if (cmd.startsWith('gh pr edit 999 --repo "owner/repo" --title ')) return ok('');
+      if (cmd.startsWith(`gh pr edit 999 --repo 'owner/repo' --title `)) return ok('');
       return ok('');
     });
 
@@ -312,7 +313,7 @@ describe('resumeCommand', () => {
       sessionLogsDir: expect.stringContaining('.alpha-loop/sessions/session/epic-123/logs'),
     });
     expect(mockExec).toHaveBeenCalledWith(
-      'git commit -m "chore: add learning artifact for issue #269" -- ".alpha-loop/learnings/issue-269-20260101-000000.md"',
+      `git commit -m 'chore: add learning artifact for issue #269' -- '.alpha-loop/learnings/issue-269-20260101-000000.md'`,
       { cwd: tempDir! },
     );
     expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
@@ -349,12 +350,12 @@ describe('resumeCommand', () => {
     }));
 
     expect(mockGhExec).toHaveBeenCalledWith(
-      expect.stringContaining('gh pr edit 999 --repo "owner/repo" --title "Session: session/epic-123 — 0 succeeded, 1 recovered"'),
+      expect.stringContaining(`gh pr edit 999 --repo 'owner/repo' --title 'Session: session/epic-123 — 0 succeeded, 1 recovered'`),
       undefined,
       true,
     );
     expect(mockGhExec).toHaveBeenCalledWith(
-      expect.stringMatching(/^gh pr edit 999 --repo "owner\/repo" --body-file ".+"/),
+      expect.stringMatching(/^gh pr edit 999 --repo 'owner\/repo' --body-file '.+'/),
       undefined,
       true,
     );
@@ -386,5 +387,134 @@ describe('resumeCommand', () => {
     const source = readFileSync(join(repoRoot, 'src', 'commands', 'resume.ts'), 'utf-8');
 
     expect(source).not.toMatch(/\brequire\s*\(/);
+  });
+
+  test('shell-quotes malicious repo/branch values so shell metachars cannot escape arguments', () => {
+    // Regression for the reviewer-flagged shell-injection risk in resume.ts.
+    // If repo or branch contains shell metacharacters (backticks, $(), ;, &&),
+    // they must be encoded as single-quoted POSIX literals, not interpolated raw.
+    mockLoadConfig.mockReturnValue(baseConfig({
+      repo: 'owner/repo;rm -rf /',
+      baseBranch: 'mas`whoami`ter',
+    }));
+
+    const observed: string[] = [];
+    mockExec.mockImplementation((cmd: string) => {
+      observed.push(cmd);
+      if (cmd === 'git branch --list "agent/issue-*"') return ok('  agent/issue-1$(curl evil)\n');
+      if (cmd === 'git worktree list --porcelain') return ok('');
+      return ok('');
+    });
+    mockGhExec.mockReturnValue(ok('[]'));
+
+    return resumeCommand({}).then(() => {
+      // Every dynamic value containing shell metachars must appear inside a
+      // single-quoted POSIX literal in the emitted commands.
+      const allCommands = observed.join('\n');
+      // Repo with `;rm -rf /` must be inside '...' so the semicolon stays literal
+      expect(allCommands).not.toMatch(/owner\/repo;rm -rf \//);
+      // Base branch with backticks must be inside '...'
+      expect(allCommands).not.toMatch(/mas`whoami`ter(?!')/);
+      // Specifically: shellQuote wraps the value in single quotes
+      const containsQuotedDirty = observed.some((c) =>
+        c.includes(`'owner/repo;rm -rf /'`)
+        || c.includes(`'mas\`whoami\`ter'`)
+        || c.includes(`'agent/issue-1$(curl evil)'`),
+      );
+      // At least one of the dynamic values should have been emitted, and when
+      // it was, it must have been quoted.
+      if (allCommands.includes('owner/repo')
+        || allCommands.includes('mas')
+        || allCommands.includes('agent/issue-1')) {
+        expect(containsQuotedDirty).toBe(true);
+      }
+    });
+  });
+
+  test('--session does NOT fall back to branch walking when no crash markers match', async () => {
+    // Regression: previously, if no crash marker matched --session, the resume
+    // command would fall through to findStrandedBranches() ignoring the session
+    // filter — potentially resuming unrelated work from other sessions.
+    tempDir = mkdtempSync(join(tmpdir(), 'alpha-loop-resume-session-'));
+    process.chdir(tempDir);
+
+    // Create a crash marker for a DIFFERENT session than the one filtered for.
+    const otherSessionDir = join(tempDir, '.alpha-loop', 'sessions', 'session', 'epic-aaa');
+    mkdirSync(otherSessionDir, { recursive: true });
+    writeFileSync(join(otherSessionDir, 'crash-100.json'), JSON.stringify({
+      issueNum: 100,
+      step: 'review',
+      branch: 'agent/issue-100',
+      hasCommits: true,
+      error: 'crashed',
+      timestamp: '2026-05-25T00:00:00.000Z',
+      recoverable: true,
+    }, null, 2));
+
+    mockLoadConfig.mockReturnValue(baseConfig());
+    mockExec.mockImplementation((cmd: string) => {
+      // Branch walking would normally find this branch — assert it is NOT called.
+      if (cmd === 'git branch --list "agent/issue-*"') {
+        throw new Error('branch walking must be skipped when --session is set and no markers match');
+      }
+      if (cmd === 'git worktree list --porcelain') return ok('');
+      return ok('');
+    });
+    mockGhExec.mockReturnValue(ok('[]'));
+
+    // Filter for a session that has NO matching crash marker.
+    await resumeCommand({ session: 'session/epic-does-not-exist' });
+
+    // Should complete cleanly without invoking branch walking; nothing to resume.
+    expect(mockCreatePR).not.toHaveBeenCalled();
+    expect(mockLabelIssue).not.toHaveBeenCalled();
+  });
+
+  test('--session resumes only branches whose crash marker matches the session', async () => {
+    // Positive complement: when --session DOES match a crash marker, resume
+    // proceeds for that issue and ignores other sessions' markers.
+    tempDir = mkdtempSync(join(tmpdir(), 'alpha-loop-resume-session-match-'));
+    process.chdir(tempDir);
+
+    const targetSessionDir = join(tempDir, '.alpha-loop', 'sessions', 'session', 'epic-bbb');
+    const otherSessionDir = join(tempDir, '.alpha-loop', 'sessions', 'session', 'epic-ccc');
+    mkdirSync(targetSessionDir, { recursive: true });
+    mkdirSync(otherSessionDir, { recursive: true });
+
+    writeFileSync(join(targetSessionDir, 'crash-200.json'), JSON.stringify({
+      issueNum: 200,
+      step: 'review',
+      branch: 'agent/issue-200',
+      hasCommits: true,
+      error: 'crashed',
+      timestamp: '2026-05-25T00:00:00.000Z',
+      recoverable: true,
+    }, null, 2));
+    writeFileSync(join(otherSessionDir, 'crash-300.json'), JSON.stringify({
+      issueNum: 300,
+      step: 'review',
+      branch: 'agent/issue-300',
+      hasCommits: true,
+      error: 'crashed',
+      timestamp: '2026-05-25T00:00:00.000Z',
+      recoverable: true,
+    }, null, 2));
+
+    mockLoadConfig.mockReturnValue(baseConfig({ skipReview: true, skipLearn: true }));
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git worktree list --porcelain') return ok('');
+      if (cmd === 'git rev-parse --show-toplevel') return ok(tempDir ?? '');
+      if (cmd === `git log 'origin/master..agent/issue-200' --oneline`) return ok('aaa target session work\n');
+      if (cmd === `git log 'origin/master..agent/issue-300' --oneline`) {
+        throw new Error('issue-300 belongs to other session and must NOT be inspected');
+      }
+      return ok('');
+    });
+    mockGhExec.mockReturnValue(ok('[]'));
+
+    await resumeCommand({ session: 'session/epic-bbb' });
+
+    // Other-session marker MUST NOT be touched.
+    expect(existsSync(join(otherSessionDir, 'crash-300.json'))).toBe(true);
   });
 });
