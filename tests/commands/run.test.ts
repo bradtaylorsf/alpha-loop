@@ -103,7 +103,7 @@ import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist } from '../../src/lib/github';
 import { processIssue, processBatch } from '../../src/lib/pipeline';
 import { createSession, finalizeSession } from '../../src/lib/session';
-import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
+import { generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
@@ -118,6 +118,7 @@ const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
+const mockGenerateSessionSummary = generateSessionSummary as jest.MockedFunction<typeof generateSessionSummary>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
 const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
@@ -180,6 +181,7 @@ const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined 
 
 beforeEach(() => {
   jest.clearAllMocks();
+  process.exitCode = undefined;
 
   mockExistsSync.mockReturnValue(false);
   mockReadFileSync.mockReturnValue('');
@@ -204,6 +206,7 @@ afterEach(() => {
   // Remove signal handlers to prevent test pollution
   process.removeAllListeners('SIGINT');
   process.removeAllListeners('SIGTERM');
+  process.exitCode = undefined;
 });
 
 describe('runCommand', () => {
@@ -397,7 +400,8 @@ describe('runCommand', () => {
   test('--epics rejects incompatible targeting flags before processing', async () => {
     await runCommand({ epics: '205,166', epic: 205, dryRun: true });
 
-    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(process.exitCode).toBe(1);
+    expect(mockExit).not.toHaveBeenCalled();
     expect(mockGetIssueWithComments).not.toHaveBeenCalled();
     expect(mockCreateSession).not.toHaveBeenCalled();
   });
@@ -413,7 +417,8 @@ describe('runCommand', () => {
 
     await runCommand({ epics: '205' });
 
-    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(process.exitCode).toBe(1);
+    expect(mockExit).not.toHaveBeenCalled();
     expect(mockCreateSession).not.toHaveBeenCalled();
     expect(mockProcessIssue).not.toHaveBeenCalled();
   });
@@ -704,7 +709,19 @@ describe('runCommand', () => {
 
     expect(mockProcessIssue.mock.calls.map((call) => call[0])).toEqual([305, 266]);
     expect(mockCreateSession.mock.calls.map((call) => call[1]?.epicNum)).toEqual([205, 166]);
-    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(process.exitCode).toBe(1);
+    expect(mockExit).not.toHaveBeenCalled();
+    expect(mockGenerateSessionSummary).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: 'session/epic-166',
+      results: [expect.objectContaining({ issueNum: 266, status: 'failure' })],
+    }));
+    expect(mockRepairSessionLearningArtifacts).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: 'session/epic-166',
+      issues: [expect.objectContaining({ issueNum: 266, status: 'failure' })],
+    }));
+    expect(mockRepairSessionSummaryArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: 'session/epic-166',
+    }));
 
     const manifest = JSON.parse(String(mockWriteFileSync.mock.calls.at(-1)?.[1]));
     expect(manifest.status).toBe('stopped');
@@ -757,7 +774,8 @@ describe('runCommand', () => {
 
     expect(mockProcessIssue.mock.calls.map((call) => call[0])).toEqual([305]);
     expect(mockCreateSession.mock.calls.map((call) => call[1]?.epicNum)).toEqual([205]);
-    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(process.exitCode).toBe(1);
+    expect(mockExit).not.toHaveBeenCalled();
 
     const manifest = JSON.parse(String(mockWriteFileSync.mock.calls.at(-1)?.[1]));
     expect(manifest.status).toBe('stopped');
@@ -904,7 +922,8 @@ describe('runCommand', () => {
 
     await runCommand({ milestone: 'Sprint 1', dryRun: true });
 
-    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(process.exitCode).toBe(1);
+    expect(mockExit).not.toHaveBeenCalled();
     expect(mockCreateSession).not.toHaveBeenCalled();
     expect(mockProcessIssue).not.toHaveBeenCalled();
   });
@@ -1015,7 +1034,8 @@ describe('runCommand', () => {
 
     await runCommand({ epic: 195, dryRun: true });
 
-    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(process.exitCode).toBe(1);
+    expect(mockExit).not.toHaveBeenCalled();
     expect(mockCreateSession).not.toHaveBeenCalled();
     expect(mockPollIssues).not.toHaveBeenCalled();
     expect(mockProcessIssue).not.toHaveBeenCalled();
@@ -1031,7 +1051,8 @@ describe('runCommand', () => {
 
     await runCommand({ verifyOnly: 195 });
 
-    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(process.exitCode).toBe(1);
+    expect(mockExit).not.toHaveBeenCalled();
     expect(mockCreateSession).not.toHaveBeenCalled();
     expect(mockProcessIssue).not.toHaveBeenCalled();
   });
@@ -1068,7 +1089,8 @@ describe('runCommand', () => {
 
     await runCommand({});
 
-    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(process.exitCode).toBe(1);
+    expect(mockExit).not.toHaveBeenCalled();
   });
 
   test('checks prerequisites before fetching issues', async () => {
