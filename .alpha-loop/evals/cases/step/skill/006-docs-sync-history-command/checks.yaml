@@ -1,0 +1,34 @@
+type: step
+step: skill
+eval_method: llm-judge
+status: ready
+checks:
+  - type: keyword_present
+    keywords:
+      - docs-sync
+      - CLAUDE.md
+      - README.md
+      - --help
+      - alpha-loop history queue-<timestamp>
+  - type: contains_any
+    values:
+      - src/commands/history.ts
+      - src/commands/*.ts
+  - type: llm_judge
+    model: claude-haiku-4-5
+    rubric: |
+      Evaluate whether the output correctly handles a review/learn-stage regression where a
+      diff changes src/commands/history.ts but command docs are stale.
+
+      Score 1-5:
+      - Score 5: Explicitly invokes docs-sync, identifies src/commands/history.ts as a CLI
+        command-handler trigger, says to compare actual alpha-loop/help text against both
+        CLAUDE.md and README.md, and proposes documenting alpha-loop history
+        queue-<timestamp> in both docs.
+      - Score 4: Invokes docs-sync and names both docs plus the missing queue command, but is
+        less explicit about help-text comparison.
+      - Score 3: Notices documentation drift but misses either README.md or CLAUDE.md.
+      - Score 2: Mentions documentation generally without triggering docs-sync or naming the
+        missing queue command.
+      - Score 1: Treats the diff as code-only or says no skill/docs action is needed.
+    min_score: 4

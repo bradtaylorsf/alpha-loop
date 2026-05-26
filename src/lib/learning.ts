@@ -22,6 +22,8 @@ export type ExtractLearningsOptions = {
   verifyOutput: string;
   body: string;
   config: Config;
+  outputRoot?: string;
+  agentCwd?: string;
   sessionLogsDir?: string;
   sessionName?: string;
 };
@@ -39,6 +41,14 @@ export type SessionLearningRepairIssue = {
   status?: string;
   duration?: number;
   retries?: number;
+};
+
+export type SessionSummaryResult = {
+  issueNum: number;
+  title: string;
+  status: string;
+  duration: number;
+  recoveryMode?: string;
 };
 
 /** Expected sections in learning output. */
@@ -469,17 +479,19 @@ export function repairSessionSummaryArtifact(options: {
  * only expected sections, and saves a concise learning file with trace pointers.
  * Raw agent output is saved separately to the traces directory.
  */
-export async function extractLearnings(options: ExtractLearningsOptions): Promise<void> {
+export async function extractLearnings(options: ExtractLearningsOptions): Promise<string | null> {
   const { config } = options;
 
   if (config.skipLearn) {
     log.info('Skipping learning extraction (skipLearn=true)');
-    return;
+    return null;
   }
 
   log.step('Extracting learnings from run...');
 
-  const learningsDir = join(process.cwd(), '.alpha-loop', 'learnings');
+  const outputRoot = options.outputRoot ?? process.cwd();
+  const agentCwd = options.agentCwd ?? outputRoot;
+  const learningsDir = join(outputRoot, '.alpha-loop', 'learnings');
   mkdirSync(learningsDir, { recursive: true });
 
   const timestamp = formatTimestamp(new Date());
@@ -500,7 +512,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
 
   if (config.dryRun) {
     log.dry(`Would extract learnings to ${learningFile}`);
-    return;
+    return null;
   }
 
   const learnStep = resolveStepConfig(config, 'learn');
@@ -508,13 +520,13 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
     agent: learnStep.agent as typeof config.agent,
     model: learnStep.model,
     prompt,
-    cwd: process.cwd(),
+    cwd: agentCwd,
     logFile: undefined,
   });
 
   if (result.exitCode !== 0 || !result.output.trim()) {
     log.warn(`Learning extraction failed (exit ${result.exitCode}, output ${result.output.length} chars), skipping`);
-    return;
+    return null;
   }
 
   const rawOutput = result.output.trim();
@@ -531,7 +543,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
   const { frontmatter: parsedFm, sections, hasMeaningfulSections } = parseLearningOutput(rawOutput);
   if (!hasMeaningfulSections || !sections.trim()) {
     log.warn(`Learning extraction output for issue #${options.issueNum} did not contain meaningful learning sections, skipping`);
-    return;
+    return null;
   }
 
   const today = new Date().toISOString().split('T')[0];
@@ -570,6 +582,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
 
   writeFileSync(learningFile, finalOutput + '\n');
   log.success(`Learning saved to ${learningFile}`);
+  return learningFile;
 }
 
 /**
@@ -649,7 +662,7 @@ export function getLearningContext(learningsDir: string): string {
  */
 export async function generateSessionSummary(options: {
   sessionName: string;
-  results: Array<{ issueNum: number; title: string; status: string; duration: number }>;
+  results: SessionSummaryResult[];
   learningsDir: string;
   config: Config;
 }): Promise<string | null> {
@@ -672,14 +685,38 @@ export async function generateSessionSummary(options: {
 
   if (learningContents.length === 0) return null;
 
-  const successCount = results.filter((r) => r.status === 'success').length;
-  const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+  const recoveredResults = results.filter((r) => r.recoveryMode !== undefined);
+  const naturalResults = results.filter((r) => r.recoveryMode === undefined);
+  const metricResults = recoveredResults.length > 0 ? naturalResults : results;
+  const successCount = metricResults.filter((r) => r.status === 'success').length;
+  const failureCount = metricResults.filter((r) => r.status !== 'success').length;
+  const totalDuration = metricResults.reduce((sum, r) => sum + r.duration, 0);
+  const processedSummary = recoveredResults.length > 0
+    ? `${results.length} (${successCount} succeeded, ${failureCount} failed, ${recoveredResults.length} recovered)`
+    : `${results.length} (${successCount} succeeded, ${results.length - successCount} failed)`;
+  const successRate = metricResults.length > 0
+    ? `${Math.round((successCount / metricResults.length) * 100)}%`
+    : 'N/A';
+  const avgDuration = metricResults.length > 0
+    ? `${Math.round(totalDuration / metricResults.length)}s`
+    : 'N/A';
+  const recoveryDetails = recoveredResults.length > 0
+    ? `\n## Recovery Details
+
+Recovered issues are excluded from failure counts and success-rate calculations because resume creates synthetic results after recovering stranded work.
+- Recovered issues: ${recoveredResults.map((r) => `#${r.issueNum} ${r.title} (${r.recoveryMode})`).join(', ')}
+`
+    : '';
+  const recoveredMetricRow = recoveredResults.length > 0
+    ? `| Recovered issues | ${recoveredResults.map((r) => `#${r.issueNum} (${r.recoveryMode})`).join(', ')} |\n`
+    : '';
 
   const prompt = `Analyze these learnings from a development session and produce a concise session summary with actionable recommendations.
 
 ## Session: ${sessionName}
-- Issues processed: ${results.length} (${successCount} succeeded, ${results.length - successCount} failed)
+- Issues processed: ${processedSummary}
 - Total duration: ${Math.round(totalDuration / 60)} minutes
+${recoveryDetails}
 
 ## Individual Learnings
 
@@ -707,8 +744,8 @@ Output ONLY this markdown structure:
 | Metric | Value |
 |--------|-------|
 | Issues processed | ${results.length} |
-| Success rate | ${Math.round((successCount / results.length) * 100)}% |
-| Avg duration | ${Math.round(totalDuration / results.length)}s |
+${recoveredMetricRow}| Success rate | ${successRate} |
+| Avg duration | ${avgDuration} |
 | Total duration | ${Math.round(totalDuration / 60)} min |`;
 
   const agentResult = await spawnAgent({

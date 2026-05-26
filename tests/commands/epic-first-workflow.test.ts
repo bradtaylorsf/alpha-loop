@@ -289,6 +289,7 @@ describe('epic-first planning workflow', () => {
 
   beforeEach(() => {
     clearPhaseMocks();
+    process.exitCode = undefined;
     consoleSpy = jest.spyOn(console, 'log').mockImplementation();
     mockCreateIssue.mockReturnValue(195);
     mockCreateMilestone.mockReturnValue(1);
@@ -299,6 +300,7 @@ describe('epic-first planning workflow', () => {
     consoleSpy.mockRestore();
     process.removeAllListeners('SIGINT');
     process.removeAllListeners('SIGTERM');
+    process.exitCode = undefined;
   });
 
   afterAll(() => {

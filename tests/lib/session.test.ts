@@ -1,4 +1,4 @@
-import { createSession, saveResult, getPreviousResult, finalizeSession } from '../../src/lib/session';
+import { createSession, saveResult, getPreviousResult, finalizeSession, writeCrashMarker, loadCrashMarkers, clearCrashMarker } from '../../src/lib/session';
 import type { PipelineResult } from '../../src/lib/pipeline';
 import type { BranchAncestryMode, QueueSessionContext } from '../../src/lib/epic-queue';
 
@@ -33,12 +33,15 @@ jest.mock('node:fs', () => ({
   mkdirSync: jest.fn(),
   writeFileSync: jest.fn(),
   existsSync: jest.fn(),
+  readdirSync: jest.fn(),
+  readFileSync: jest.fn(),
+  unlinkSync: jest.fn(),
 }));
 
 import { exec } from '../../src/lib/shell';
 import { createPR } from '../../src/lib/github';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
@@ -46,6 +49,9 @@ const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>;
 const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
+const mockReaddirSync = readdirSync as jest.MockedFunction<typeof readdirSync>;
+const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
+const mockUnlinkSync = unlinkSync as jest.MockedFunction<typeof unlinkSync>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
 
@@ -136,6 +142,9 @@ function makeQueueContext(overrides: Partial<QueueSessionContext> = {}): QueueSe
 beforeEach(() => {
   jest.clearAllMocks();
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
+  mockExistsSync.mockReturnValue(false);
+  mockReaddirSync.mockReturnValue([]);
+  mockReadFileSync.mockReturnValue('');
 });
 
 describe('createSession', () => {
@@ -302,6 +311,83 @@ describe('saveResult', () => {
       expect.stringContaining('"issueNum": 42'),
     );
   });
+
+  test('clears a stale crash marker after writing a result', () => {
+    const session = createSession(makeConfig());
+    const result: PipelineResult = {
+      issueNum: 42,
+      title: 'Recovered issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 120,
+      filesChanged: 5,
+    };
+    mockExistsSync.mockImplementation((filePath: any) => String(filePath).endsWith('crash-42.json'));
+
+    saveResult(session, result);
+
+    expect(mockUnlinkSync).toHaveBeenCalledWith(expect.stringContaining('crash-42.json'));
+  });
+});
+
+describe('crash markers', () => {
+  test('writes crash marker JSON to the session directory', () => {
+    const session = createSession(makeConfig());
+
+    writeCrashMarker(session, {
+      issueNum: 216,
+      step: 'review',
+      branch: 'agent/issue-216',
+      hasCommits: true,
+      error: 'review crashed',
+      timestamp: '2026-05-25T23:59:00.000Z',
+      recoverable: true,
+    });
+
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('crash-216.json'),
+      expect.stringContaining('"step": "review"'),
+    );
+  });
+
+  test('loads valid markers and ignores invalid marker files', () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReaddirSync.mockReturnValue(['crash-216.json', 'crash-bad.json', 'result-216.json'] as any);
+    mockReadFileSync.mockImplementation((filePath: any) => {
+      if (String(filePath).endsWith('crash-216.json')) {
+        return JSON.stringify({
+          issueNum: 216,
+          step: 'review',
+          branch: 'agent/issue-216',
+          hasCommits: true,
+          error: 'review crashed',
+          timestamp: '2026-05-25T23:59:00.000Z',
+          recoverable: true,
+        });
+      }
+      return '{';
+    });
+
+    expect(loadCrashMarkers('/tmp/session')).toEqual([{
+      issueNum: 216,
+      step: 'review',
+      branch: 'agent/issue-216',
+      hasCommits: true,
+      error: 'review crashed',
+      timestamp: '2026-05-25T23:59:00.000Z',
+      recoverable: true,
+    }]);
+  });
+
+  test('clears a crash marker by issue number', () => {
+    mockExistsSync.mockReturnValue(true);
+
+    clearCrashMarker('/tmp/session', 216);
+
+    expect(mockUnlinkSync).toHaveBeenCalledWith('/tmp/session/crash-216.json');
+  });
 });
 
 describe('getPreviousResult', () => {
@@ -401,6 +487,49 @@ describe('finalizeSession', () => {
     expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
       body: expect.not.stringContaining('## Execution Queue'),
     }));
+  });
+
+  test('lists auto-committed issues in final session PR body and manifest', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('diff --cached --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config);
+    session.results.push({
+      issueNum: 229,
+      title: 'Surface auto commit fallback',
+      status: 'success',
+      prUrl: 'https://github.com/owner/repo/pull/229',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 2,
+      autoCommittedByPipeline: true,
+      autoCommittedPaths: ['src/lib/pipeline.ts', 'tests/lib/pipeline.test.ts'],
+    });
+
+    await finalizeSession(session, config);
+
+    const body = mockCreatePR.mock.calls.at(-1)![0].body;
+    expect(body).toContain('### Auto-Committed By Pipeline');
+    expect(body).toContain('#229: Surface auto commit fallback ([PR](https://github.com/owner/repo/pull/229))');
+    expect(body).toContain('`src/lib/pipeline.ts`, `tests/lib/pipeline.test.ts`');
+
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('session-session-20260101-000000.json'),
+      expect.stringContaining('"autoCommittedByPipeline": true'),
+    );
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('session-session-20260101-000000.json'),
+      expect.stringContaining('"autoCommittedPaths"'),
+    );
   });
 
   test('adds merge order and queue risk notes to final stacked queue session PR body', async () => {
@@ -544,5 +673,35 @@ describe('finalizeSession', () => {
     // Title should only count completed issues (not transient)
     const title = mockCreatePR.mock.calls[0][0].title;
     expect(title).toContain('1/1 succeeded');
+  });
+
+  test('shows recovered issues separately from natural successes in final session PR body', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('diff --cached --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config);
+    session.results.push(
+      { issueNum: 1, title: 'Success issue', status: 'success', prUrl: 'https://github.com/owner/repo/pull/1', testsPassing: true, verifyPassing: true, verifySkipped: false, duration: 60, filesChanged: 3 },
+      { issueNum: 2, title: 'Recovered issue', status: 'failure', recoveryMode: 'resume', failureReason: 'transient', prUrl: 'https://github.com/owner/repo/pull/2', testsPassing: false, verifyPassing: false, verifySkipped: true, duration: 0, filesChanged: 2 },
+    );
+
+    await finalizeSession(session, config);
+
+    const finalPrCall = mockCreatePR.mock.calls.at(-1)![0];
+    const title = finalPrCall.title;
+    const body = finalPrCall.body;
+    expect(title).toContain('1/1 succeeded, 1 recovered');
+    expect(body).toContain('1 succeeded, 0 failed, 1 recovered');
+    expect(body).toContain('### Recovered Issues');
+    expect(body).toContain('#2: Recovered issue — RECOVERED BY RESUME');
+    expect(body).toContain('Closes #1');
+    expect(body).not.toContain('Closes #2');
   });
 });

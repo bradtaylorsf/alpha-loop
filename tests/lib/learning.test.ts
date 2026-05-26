@@ -350,15 +350,41 @@ describe('extractLearnings', () => {
       duration: 5000,
     });
 
-    await extractLearnings({ ...baseOptions, config: makeConfig() });
+    const result = await extractLearnings({ ...baseOptions, config: makeConfig() });
 
     expect(mockSpawnAgent).toHaveBeenCalledWith(expect.objectContaining({
       agent: 'claude',
       model: 'opus',
+      cwd: process.cwd(),
     }));
+    expect(result).toContain('issue-42-20260101-000000.md');
     expect(mockWriteFileSync).toHaveBeenCalledWith(
       expect.stringContaining('issue-42-'),
       expect.stringContaining('## What Worked'),
+    );
+  });
+
+  test('writes learning artifacts under outputRoot and runs the learn agent there', async () => {
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: '## What Worked\n- Output root used',
+      duration: 5000,
+    });
+
+    const result = await extractLearnings({
+      ...baseOptions,
+      config: makeConfig(),
+      outputRoot: '/tmp/worktree',
+      agentCwd: '/tmp/worktree',
+    });
+
+    expect(mockSpawnAgent).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: '/tmp/worktree',
+    }));
+    expect(result).toBe('/tmp/worktree/.alpha-loop/learnings/issue-42-20260101-000000.md');
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      '/tmp/worktree/.alpha-loop/learnings/issue-42-20260101-000000.md',
+      expect.stringContaining('Output root used'),
     );
   });
 
@@ -582,6 +608,37 @@ describe('generateSessionSummary', () => {
     const writtenContent = mockWriteFileSync.mock.calls[0][1] as string;
     expect(writtenContent).not.toContain('warning: terminal could not enable raw mode');
     expect(writtenContent).not.toContain('(patterns that appeared');
+  });
+
+  test('reports recovered issues separately from ordinary failures in the summary prompt', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockReaddirSync.mockReturnValue([
+      'issue-42-20260101-000000.md' as any,
+      'issue-216-20260101-000000.md' as any,
+    ]);
+    mockReadFileSync.mockReturnValue(learningFileContent());
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: codexSummaryTranscript(),
+      duration: 5000,
+    });
+
+    await generateSessionSummary({
+      sessionName: 'session/test',
+      results: [
+        { issueNum: 42, title: 'Clean issue', status: 'success', duration: 120 },
+        { issueNum: 216, title: 'Recovered issue', status: 'failure', recoveryMode: 'resume', duration: 0 },
+      ],
+      learningsDir: '/fake/learnings',
+      config: makeConfig({ agent: 'codex' }),
+    });
+
+    const prompt = mockSpawnAgent.mock.calls[0][0].prompt;
+    expect(prompt).toContain('- Issues processed: 2 (1 succeeded, 0 failed, 1 recovered)');
+    expect(prompt).toContain('- Recovered issues: #216 Recovered issue (resume)');
+    expect(prompt).toContain('Recovered issues are excluded from failure counts and success-rate calculations');
+    expect(prompt).toContain('| Recovered issues | #216 (resume) |');
+    expect(prompt).toContain('| Success rate | 100% |');
   });
 
   test('skips writing session summary when output is placeholder-only', async () => {

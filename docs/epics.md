@@ -160,6 +160,10 @@ Queue execution is fail-stop by default. Alpha Loop stops at the first epic that
 
 If the process crashes inside a child issue before its branch has a PR, run `alpha-loop resume` to recover stranded `agent/issue-*` branches as WIP PRs. Recovered PRs are not marked complete; run the project tests and final verification before merging, then inspect the queue manifest and continue with the remaining epic IDs.
 
+### Test Discovery
+
+Alpha Loop creates full project copies under `.worktrees/` while processing issues. If you maintain a custom Jest, Vitest, Mocha, or other test-runner config, exclude `.worktrees/` from test discovery before running epic queues or parallel issue work. Otherwise a parent-repo test run can discover stale or duplicate tests from sibling worktrees. The bundled Jest template ignores `.worktrees/` with `testPathIgnorePatterns`.
+
 ### Branch Ancestry Modes
 
 Queued epics always create separate session PRs that target the configured base branch. The branch ancestry controls where later session branches start.

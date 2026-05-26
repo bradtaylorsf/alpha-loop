@@ -1,7 +1,7 @@
 /**
  * Session Management — create sessions, save results, finalize with PR.
  */
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { log } from './logger.js';
 import { exec, formatTimestamp } from './shell.js';
@@ -26,6 +26,32 @@ export type SessionContext = {
   epic?: number;
   /** Queue metadata for multi-epic queue sessions. */
   queue?: QueueSessionContext;
+};
+
+function isRecoveredSessionResult(
+  result: PipelineResult,
+): result is PipelineResult & { recoveryMode: NonNullable<PipelineResult['recoveryMode']> } {
+  return result.recoveryMode !== undefined;
+}
+
+export type CrashMarker = {
+  issueNum: number;
+  step: string;
+  branch: string;
+  hasCommits: boolean;
+  error: string;
+  timestamp: string;
+  recoverable: boolean;
+};
+
+export type CrashMarkerRef = CrashMarker & {
+  sessionDir: string;
+  sessionName: string;
+  filePath: string;
+};
+
+export type WriteCrashMarkerInput = Omit<CrashMarker, 'timestamp'> & {
+  timestamp?: string;
 };
 
 export type CreateSessionOptions = {
@@ -68,6 +94,138 @@ function previousPrLabel(queue: QueueSessionContext): string {
     return `the previous session PR for #${queue.previousEpic.number}`;
   }
   return 'the previous session PR';
+}
+
+function formatPathList(paths: string[] | undefined): string {
+  if (!paths || paths.length === 0) return '(paths unavailable)';
+  return paths.map((path) => `\`${path.replace(/`/g, '\\`')}\``).join(', ');
+}
+
+export function formatAutoCommittedResultsSection(results: PipelineResult[]): string[] {
+  const autoCommitted = results.filter((result) => result.autoCommittedByPipeline);
+  if (autoCommitted.length === 0) return [];
+
+  const lines = ['### Auto-Committed By Pipeline', ''];
+  for (const result of autoCommitted) {
+    const pr = result.prUrl ? ` ([PR](${result.prUrl}))` : '';
+    lines.push(`- #${result.issueNum}: ${result.title}${pr} — ${formatPathList(result.autoCommittedPaths)}`);
+  }
+  lines.push('');
+  return lines;
+}
+
+function crashMarkerPath(sessionDir: string, issueNum: number): string {
+  return join(sessionDir, `crash-${issueNum}.json`);
+}
+
+function parseCrashMarker(raw: unknown): CrashMarker | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const data = raw as Record<string, unknown>;
+  const issueNum = typeof data.issueNum === 'number'
+    ? data.issueNum
+    : Number(data.issueNum);
+
+  if (!Number.isInteger(issueNum) || issueNum <= 0) return null;
+  if (typeof data.step !== 'string' || !data.step) return null;
+  if (typeof data.branch !== 'string' || !data.branch) return null;
+  if (typeof data.hasCommits !== 'boolean') return null;
+  if (typeof data.error !== 'string') return null;
+  if (typeof data.timestamp !== 'string' || !data.timestamp) return null;
+  if (typeof data.recoverable !== 'boolean') return null;
+
+  return {
+    issueNum,
+    step: data.step,
+    branch: data.branch,
+    hasCommits: data.hasCommits,
+    error: data.error,
+    timestamp: data.timestamp,
+    recoverable: data.recoverable,
+  };
+}
+
+/**
+ * Write a crash marker for a half-finished issue so session state can detect it.
+ */
+export function writeCrashMarker(session: SessionContext, marker: WriteCrashMarkerInput): void {
+  const crash: CrashMarker = {
+    ...marker,
+    timestamp: marker.timestamp ?? new Date().toISOString(),
+  };
+  mkdirSync(session.resultsDir, { recursive: true });
+  const filePath = crashMarkerPath(session.resultsDir, crash.issueNum);
+  writeFileSync(filePath, JSON.stringify(crash, null, 2) + '\n');
+  log.warn(`Crash marker saved: ${filePath}`);
+}
+
+/**
+ * Load valid crash markers from one session directory.
+ * Invalid or unreadable markers are ignored so recovery can fall back to branch walking.
+ */
+export function loadCrashMarkers(sessionDir: string): CrashMarker[] {
+  try {
+    if (!existsSync(sessionDir)) return [];
+    return readdirSync(sessionDir)
+      .filter((file) => /^crash-\d+\.json$/.test(file))
+      .map((file) => {
+        try {
+          return parseCrashMarker(JSON.parse(readFileSync(join(sessionDir, file), 'utf-8')));
+        } catch {
+          return null;
+        }
+      })
+      .filter((marker): marker is CrashMarker => marker !== null);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Find crash markers across .alpha-loop/sessions.
+ */
+export function findCrashMarkers(sessionsRoot = join(process.cwd(), '.alpha-loop', 'sessions')): CrashMarkerRef[] {
+  if (!existsSync(sessionsRoot)) return [];
+
+  const markers: CrashMarkerRef[] = [];
+  try {
+    for (const group of readdirSync(sessionsRoot, { withFileTypes: true })) {
+      if (!group.isDirectory()) continue;
+      const groupDir = join(sessionsRoot, group.name);
+      for (const entry of readdirSync(groupDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const sessionDir = join(groupDir, entry.name);
+        const sessionName = `${group.name}/${entry.name}`;
+        for (const marker of loadCrashMarkers(sessionDir)) {
+          markers.push({
+            ...marker,
+            sessionDir,
+            sessionName,
+            filePath: crashMarkerPath(sessionDir, marker.issueNum),
+          });
+        }
+      }
+    }
+  } catch {
+    return markers;
+  }
+
+  markers.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  return markers;
+}
+
+/**
+ * Remove a crash marker after a normal result or recovered result is written.
+ */
+export function clearCrashMarker(sessionOrDir: Pick<SessionContext, 'resultsDir'> | string, issueNum: number): void {
+  const sessionDir = typeof sessionOrDir === 'string' ? sessionOrDir : sessionOrDir.resultsDir;
+  const filePath = crashMarkerPath(sessionDir, issueNum);
+  try {
+    if (!existsSync(filePath)) return;
+    unlinkSync(filePath);
+    log.info(`Crash marker cleared: ${filePath}`);
+  } catch {
+    log.warn(`Could not clear crash marker: ${filePath}`);
+  }
 }
 
 function buildQueueSection(queue: QueueSessionContext, branch: string, baseBranch: string): string[] {
@@ -303,6 +461,7 @@ export function saveResult(session: SessionContext, result: PipelineResult): voi
   const filePath = join(session.resultsDir, `result-${result.issueNum}.json`);
   writeFileSync(filePath, JSON.stringify(result, null, 2) + '\n');
   log.info(`Session result saved: ${filePath}`);
+  clearCrashMarker(session, result.issueNum);
 }
 
 /**
@@ -398,6 +557,9 @@ export async function finalizeSession(
       prUrl: r.prUrl,
       testsPassing: r.testsPassing,
       verifyPassing: r.verifyPassing,
+      recoveryMode: r.recoveryMode,
+      autoCommittedByPipeline: r.autoCommittedByPipeline,
+      autoCommittedPaths: r.autoCommittedPaths,
       duration: r.duration,
       filesChanged: r.filesChanged,
     })),
@@ -426,20 +588,25 @@ export async function finalizeSession(
   }
 
   // Create or update session PR
-  const successes = session.results.filter((r) => r.status === 'success');
-  const permanentFailures = session.results.filter((r) => r.status === 'failure' && r.failureReason !== 'transient');
-  const transientFailures = session.results.filter((r) => r.status === 'failure' && r.failureReason === 'transient');
-  const totalDuration = session.results.reduce((sum, r) => sum + r.duration, 0);
+  const recovered = session.results.filter(isRecoveredSessionResult);
+  const naturalResults = session.results.filter((r) => !isRecoveredSessionResult(r));
+  const successes = naturalResults.filter((r) => r.status === 'success');
+  const permanentFailures = naturalResults.filter((r) => r.status === 'failure' && r.failureReason !== 'transient');
+  const transientFailures = naturalResults.filter((r) => r.status === 'failure' && r.failureReason === 'transient');
+  const totalDuration = naturalResults.reduce((sum, r) => sum + r.duration, 0);
 
   // Only count completed issues (not transient failures that were re-queued)
   const completedCount = successes.length + permanentFailures.length;
-  const prTitle = `Session: ${session.name} — ${successes.length}/${completedCount} succeeded`;
+  const titleStatus = completedCount > 0
+    ? `${successes.length}/${completedCount} succeeded`
+    : `${successes.length} succeeded`;
+  const prTitle = `Session: ${session.name} — ${titleStatus}${recovered.length > 0 ? `, ${recovered.length} recovered` : ''}`;
 
   const prLines: string[] = [
     '## Session Summary',
     '',
     `**Branch:** ${session.branch}`,
-    `**Issues completed:** ${completedCount} (${successes.length} succeeded, ${permanentFailures.length} failed)`,
+    `**Issues processed:** ${session.results.length} (${successes.length} succeeded, ${permanentFailures.length} failed, ${recovered.length} recovered)`,
     `**Total duration:** ${Math.round(totalDuration / 60)} minutes`,
     `**Completed:** ${new Date().toISOString()}`,
     '',
@@ -460,6 +627,20 @@ export async function finalizeSession(
     prLines.push(...successes.map((r) => `Closes #${r.issueNum}`));
     prLines.push('');
   }
+
+  // Recovered issues — visible, but not natural successes/failures.
+  if (recovered.length > 0) {
+    prLines.push('### Recovered Issues');
+    for (const r of recovered) {
+      const mode = r.recoveryMode.toUpperCase();
+      prLines.push(`- #${r.issueNum}: ${r.title} — RECOVERED BY ${mode}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`);
+    }
+    prLines.push('');
+    prLines.push('*Recovered issues were not counted as succeeded or failed because recovery did not run the full pipeline verification path.*');
+    prLines.push('');
+  }
+
+  prLines.push(...formatAutoCommittedResultsSection(session.results));
 
   // Permanent failures — collapsed
   if (permanentFailures.length > 0) {
@@ -521,7 +702,7 @@ export async function finalizeSession(
     // When not auto-merging, individual PRs were already created, so mark as "Done"
     const boardStatus = config.autoMerge ? 'In Review' : 'Done';
     for (const r of session.results) {
-      if (r.status === 'success' && config.project > 0) {
+      if (r.status === 'success' && !isRecoveredSessionResult(r) && config.project > 0) {
         updateProjectStatus(config.repo, config.project, config.repoOwner, r.issueNum, boardStatus);
       }
     }

@@ -14,7 +14,7 @@ function createTempDir(): string {
 function createSession(
   sessionsDir: string,
   timestamp: string,
-  results: Array<{ issueNum: number; title: string; status: string; prUrl?: string; duration: number }>,
+  results: Array<{ issueNum: number; title: string; status: string; prUrl?: string; duration: number; recoveryMode?: 'resume' | 'manual' }>,
 ): void {
   const dir = path.join(sessionsDir, 'session', timestamp);
   fs.mkdirSync(dir, { recursive: true });
@@ -25,6 +25,7 @@ function createSession(
         issueNum: r.issueNum,
         title: r.title,
         status: r.status,
+        recoveryMode: r.recoveryMode,
         prUrl: r.prUrl,
         testsPassing: r.status === 'success',
         verifyPassing: r.status === 'success',
@@ -33,6 +34,34 @@ function createSession(
       }, null, 2),
     );
   }
+}
+
+function createCrashMarker(
+  sessionsDir: string,
+  timestamp: string,
+  issueNum: number,
+  overrides: Partial<{
+    step: string;
+    branch: string;
+    error: string;
+    markerTimestamp: string;
+    recoverable: boolean;
+  }> = {},
+): void {
+  const dir = path.join(sessionsDir, 'session', timestamp);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, `crash-${issueNum}.json`),
+    JSON.stringify({
+      issueNum,
+      step: overrides.step ?? 'review',
+      branch: overrides.branch ?? `agent/issue-${issueNum}`,
+      hasCommits: true,
+      error: overrides.error ?? 'review crashed',
+      timestamp: overrides.markerTimestamp ?? '2026-05-25T23:59:00.000Z',
+      recoverable: overrides.recoverable ?? true,
+    }, null, 2),
+  );
 }
 
 function createQueueManifest(sessionsDir: string): void {
@@ -190,6 +219,36 @@ describe('history', () => {
       expect(output).toContain('5m 00s');
     });
 
+    it('shows crashed issue counts from crash markers', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createSession(sessionsDir, '20250115-100000', [
+        { issueNum: 1, title: 'Good issue', status: 'success', duration: 180 },
+      ]);
+      createCrashMarker(sessionsDir, '20250115-100000', 2);
+
+      historyList(sessionsDir, tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('2 issues');
+      expect(output).toContain('1 crashed');
+    });
+
+    it('shows recovered issue counts separately from success and failure counts', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createSession(sessionsDir, '20250115-100000', [
+        { issueNum: 1, title: 'Good issue', status: 'success', duration: 180 },
+        { issueNum: 2, title: 'Recovered issue', status: 'failure', recoveryMode: 'resume', duration: 0 },
+      ]);
+
+      historyList(sessionsDir, tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('2 issues');
+      expect(output).toContain('1 recovered');
+      expect(output).toContain('1 ✓');
+      expect(output).not.toContain('1 ✗');
+    });
+
     it('lists multi-epic queue manifests with status and pending counts', () => {
       const sessionsDir = path.join(tmpDir, '.alpha-loop', 'sessions');
       createQueueManifest(sessionsDir);
@@ -222,6 +281,37 @@ describe('history', () => {
       expect(output).toContain('Feature A');
       expect(output).toContain('Feature B');
       expect(output).toContain('2m 00s');
+    });
+
+    it('shows crashed issues distinctly in session detail', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createCrashMarker(sessionsDir, '20250115-103000', 216, {
+        step: 'review',
+        branch: 'agent/issue-216',
+        error: 'review log ended unexpectedly',
+      });
+
+      historyDetail(sessionsDir, 'session/20250115-103000');
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('1 crashed');
+      expect(output).toContain('#216  CRASHED during review');
+      expect(output).toContain('branch agent/issue-216');
+      expect(output).toContain('error: review log ended unexpectedly');
+    });
+
+    it('shows recovered issues distinctly in session detail', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createSession(sessionsDir, '20250115-103000', [
+        { issueNum: 216, title: 'Recovered branch', status: 'failure', prUrl: 'https://github.com/owner/repo/pull/216', recoveryMode: 'resume', duration: 0 },
+      ]);
+
+      historyDetail(sessionsDir, 'session/20250115-103000');
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('0 succeeded, 0 failed, 1 recovered');
+      expect(output).toContain('~ #216');
+      expect(output).toContain('RECOVERED:RESUME');
     });
 
     it('shows error for non-existent session', () => {

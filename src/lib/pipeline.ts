@@ -2,7 +2,7 @@
  * Process Issue Pipeline — the 12-step orchestration for a single issue.
  */
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { log } from './logger.js';
 import { exec } from './shell.js';
 import { spawnAgent, buildEndpointEnv } from './agent.js';
@@ -15,7 +15,7 @@ import {
   appendEscalationEventToTrace,
 } from './escalation.js';
 import type { EscalationEvent } from './escalation.js';
-import { setupWorktree, cleanupWorktree } from './worktree.js';
+import { setupWorktree, cleanupWorktree, worktreeHasCommits } from './worktree.js';
 import {
   assignIssue,
   labelIssue,
@@ -41,7 +41,7 @@ import {
 import { runTests } from './testing.js';
 import { runVerify } from './verify.js';
 import { extractLearnings, getLearningContext } from './learning.js';
-import { saveResult, getPreviousResult } from './session.js';
+import { saveResult, getPreviousResult, writeCrashMarker } from './session.js';
 import {
   writeTrace,
   writeTraceMetadata,
@@ -322,10 +322,18 @@ export function formatGateFindings(gate: GateResult, gateType: string): string {
   return lines.join('\n');
 }
 
+export type PipelineRecoveryMode = 'resume' | 'manual';
+
 export type PipelineResult = {
   issueNum: number;
   title: string;
   status: 'success' | 'failure';
+  /** Set when the result was synthesized after out-of-band recovery instead of produced by the normal pipeline. */
+  recoveryMode?: PipelineRecoveryMode;
+  /** Set when the pipeline committed dirty work left behind by a successful implementation agent. */
+  autoCommittedByPipeline?: boolean;
+  /** Paths included in the pipeline-authored fallback commit. */
+  autoCommittedPaths?: string[];
   /** Why the issue failed — 'transient' means re-queue (e.g. usage limit), 'permanent' means label failed. */
   failureReason?: 'transient' | 'permanent';
   prUrl?: string;
@@ -337,6 +345,12 @@ export type PipelineResult = {
   /** Structured escalation events recorded while processing this issue. */
   escalationEvents?: EscalationEvent[];
 };
+
+export function isRecoveredResult<T extends { recoveryMode?: PipelineRecoveryMode }>(
+  result: T,
+): result is T & { recoveryMode: PipelineRecoveryMode } {
+  return result.recoveryMode !== undefined;
+}
 
 export type PipelineOptions = {
   epicContext?: EpicPromptContext;
@@ -359,6 +373,78 @@ function epicPromptOption(options: PipelineOptions): { epicContext?: EpicPromptC
 function formatEpicFixContext(options: PipelineOptions, issueNum: number): string {
   if (!options.epicContext) return '';
   return `\n\n${formatEpicPromptContext(options.epicContext)}\n\nUse the parent epic context to keep fixes scoped to issue #${issueNum} while preserving integration with sibling work.`;
+}
+
+function learningPathForCommit(worktreePath: string, learningFile: string): string | null {
+  const relPath = relative(worktreePath, learningFile);
+  if (!relPath || relPath.startsWith('..') || relPath.startsWith('/')) return null;
+  if (!relPath.startsWith('.alpha-loop/learnings/')) return null;
+  return relPath;
+}
+
+function parseGitStatusPaths(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => {
+      const path = line.length > 3 ? line.slice(3) : line.trim();
+      const renameTarget = path.includes(' -> ') ? path.split(' -> ').at(-1) : path;
+      return renameTarget?.trim() ?? '';
+    })
+    .filter(Boolean);
+}
+
+function autoCommitDirtyWorktree(worktreePath: string, commitMessage: string): string[] {
+  const statusResult = exec('git status --porcelain', { cwd: worktreePath });
+  const paths = parseGitStatusPaths(statusResult.stdout);
+  if (paths.length === 0) return [];
+
+  log.warn(`Agent did not commit; auto-committing ${paths.length} files: ${paths.join(', ')}`);
+  exec('git add -A', { cwd: worktreePath });
+  exec(commitMessage, { cwd: worktreePath });
+  return paths;
+}
+
+function commitLearningFiles(worktreePath: string, learningFiles: Array<string | null>, message: string): void {
+  const paths = Array.from(new Set(
+    learningFiles
+      .filter((file): file is string => Boolean(file))
+      .map((file) => learningPathForCommit(worktreePath, file))
+      .filter((file): file is string => Boolean(file)),
+  ));
+
+  if (paths.length === 0) return;
+
+  const pathspecs = paths.map((path) => JSON.stringify(path)).join(' ');
+  const addResult = exec(`git add -- ${pathspecs}`, { cwd: worktreePath });
+  if (addResult.exitCode !== 0) {
+    log.warn(`Could not stage learning artifact(s): ${addResult.stderr || addResult.stdout}`);
+    return;
+  }
+
+  const stagedResult = exec(`git diff --cached --name-only -- ${pathspecs}`, { cwd: worktreePath });
+  if (stagedResult.exitCode !== 0) {
+    log.warn(`Could not inspect staged learning artifact(s): ${stagedResult.stderr || stagedResult.stdout}`);
+    return;
+  }
+
+  const stagedPaths = stagedResult.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => paths.includes(line));
+  if (stagedPaths.length === 0) return;
+
+  const commitResult = exec(
+    `git commit -m ${JSON.stringify(message)} -- ${stagedPaths.map((path) => JSON.stringify(path)).join(' ')}`,
+    { cwd: worktreePath },
+  );
+  if (commitResult.exitCode !== 0) {
+    log.warn(`Could not commit learning artifact(s): ${commitResult.stderr || commitResult.stdout}`);
+    return;
+  }
+
+  log.success(`Committed ${stagedPaths.length} learning artifact(s)`);
 }
 
 /** Per-issue context for the escalation wrapper. */
@@ -572,6 +658,7 @@ export async function processIssue(
   const stepCosts: StepCost[] = [];
   const stepsCompleted: string[] = [];
   const escalationEvents: EscalationEvent[] = [];
+  let currentStep = 'status';
   const { trackerOverride, options: pipelineOptions } = resolvePipelineOptions(trackerOrOptions, maybeOptions);
   const tracker = trackerOverride ?? new EscalationTracker({
     statePath: defaultEscalationStatePath(projectDir),
@@ -586,6 +673,7 @@ export async function processIssue(
     tracker,
     events: escalationEvents,
   });
+  let autoCommittedPaths: string[] = [];
 
   // Setup logging
   mkdirSync(session.logsDir, { recursive: true });
@@ -594,6 +682,7 @@ export async function processIssue(
   log.step(`Processing Issue #${issueNum}: ${title}`);
 
   // --- Step 1: Update status ---
+  currentStep = 'status';
   log.step('Step 1: Updating issue status');
   if (!config.dryRun) {
     updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In progress');
@@ -604,6 +693,7 @@ export async function processIssue(
   }
 
   // --- Step 2: Setup worktree ---
+  currentStep = 'worktree';
   log.step('Step 2: Setting up worktree');
   let worktreePath: string;
   let worktreeBranch: string;
@@ -632,7 +722,33 @@ export async function processIssue(
     return failureResult(issueNum, title, startTime);
   }
 
+  const writeRecoverableCrashMarker = (err: unknown, step = currentStep): void => {
+    if (config.dryRun) return;
+    let commitCount = 0;
+    try {
+      commitCount = worktreeHasCommits(worktreePath);
+    } catch {
+      commitCount = 0;
+    }
+    if (commitCount <= 0) return;
+
+    try {
+      writeCrashMarker(session, {
+        issueNum,
+        step,
+        branch: worktreeBranch,
+        hasCommits: true,
+        error: err instanceof Error ? err.message : String(err),
+        recoverable: true,
+      });
+    } catch (markerErr) {
+      log.warn(`Could not write crash marker for #${issueNum}: ${markerErr instanceof Error ? markerErr.message : markerErr}`);
+    }
+  };
+
+  try {
   // --- Step 3: Plan (structured JSON — controls test/verify steps) ---
+  currentStep = 'plan';
   log.step('Step 3: Planning');
   let plan: IssuePlan = DEFAULT_PLAN;
   // Write plan inside the worktree (agents sandbox to their CWD), then move to sessions dir
@@ -690,6 +806,7 @@ export async function processIssue(
   }
 
   // --- Step 3b: Fetch issue comments for full context ---
+  currentStep = 'context';
   let issueComments: Comment[] = [];
   if (!config.dryRun) {
     issueComments = getIssueComments(config.repo, issueNum);
@@ -699,6 +816,7 @@ export async function processIssue(
   }
 
   // --- Step 4: Implement ---
+  currentStep = 'implement';
   log.step('Step 4: Implementing');
   // Build resume context if worktree was recovered from a previous session
   const resumeNote = worktreeResumed
@@ -763,16 +881,16 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       log.error(`Implementation failed for issue #${issueNum}`);
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, 'Agent loop failed during implementation. See logs for details.');
+      writeRecoverableCrashMarker(new Error('Implementation failed after writing commits'), 'implement');
       await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
       return failureResult(issueNum, title, startTime, 'permanent');
     }
 
     // Auto-commit if agent didn't
-    const statusResult = exec('git status --porcelain', { cwd: worktreePath });
-    if (statusResult.stdout.trim()) {
-      exec('git add -A', { cwd: worktreePath });
-      exec(`git commit -m "feat: implement issue #${issueNum} - ${title}"`, { cwd: worktreePath });
-    }
+    autoCommittedPaths = autoCommitDirtyWorktree(
+      worktreePath,
+      `git commit -m "feat: implement issue #${issueNum} - ${title}"`,
+    );
 
     stepsCompleted.push('implement');
 
@@ -786,6 +904,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 5: Test + retry loop ---
+  currentStep = 'test';
   log.step('Step 5: Running tests');
   let testOutput = '';
   let testsPassing = false;
@@ -860,6 +979,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 6: Review gate (JSON-based) ---
+  currentStep = 'review';
   log.step('Step 6: Code review');
   let reviewOutput = '';
   let reviewGate: GateResult = DEFAULT_GATE;
@@ -970,6 +1090,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 7: Verify gate (JSON-based) ---
+  currentStep = 'verify';
   log.step('Step 7: Live verification');
   let verifyOutput = '';
   let verifyPassing = false;
@@ -1088,6 +1209,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 7b: Smoke test (if configured) ---
   if (config.smokeTest && !config.dryRun) {
+    currentStep = 'smoke';
     log.step('Step 7b: Running smoke test');
     const smokeResult = exec(config.smokeTest, { cwd: worktreePath, timeout: 60_000 });
     if (smokeResult.exitCode === 0) {
@@ -1097,8 +1219,53 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     }
   }
 
-  // --- Step 8: Create PR ---
-  log.step('Step 8: Creating PR');
+  const duration = Math.round((Date.now() - startTime) / 1000);
+
+  // Get diff before writing learnings so the learning prompt analyzes only the implementation.
+  let runDiff = '';
+  if (!config.dryRun) {
+    const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+    runDiff = diffResult.stdout.slice(0, MAX_DIFF_CHARS);
+  }
+
+  // Format review gate for learnings
+  const reviewForLearnings = reviewGate.findings.length > 0
+    ? `Review: ${reviewGate.summary}\n${reviewGate.findings.map((f) => `- [${f.severity}] ${f.description} (${f.fixed ? 'fixed' : 'unfixed'})`).join('\n')}`
+    : `Review: ${reviewGate.summary || 'passed'}`;
+
+  // --- Step 8: Extract learnings ---
+  currentStep = 'learn';
+  log.step('Step 8: Extracting learnings');
+  const learningFile = await extractLearnings({
+    issueNum,
+    title,
+    status: testsPassing ? 'success' : 'failure',
+    retries: testRetries,
+    duration,
+    diff: runDiff,
+    testOutput,
+    reviewOutput: reviewForLearnings,
+    verifyOutput,
+    body,
+    config,
+    outputRoot: worktreePath,
+    agentCwd: worktreePath,
+    sessionLogsDir: session.logsDir,
+    sessionName: session.name,
+  });
+
+  if (!config.dryRun) {
+    commitLearningFiles(
+      worktreePath,
+      [learningFile],
+      `chore: add learning artifact for issue #${issueNum}`,
+    );
+  }
+  stepsCompleted.push('learn');
+
+  // --- Step 9: Create PR ---
+  currentStep = 'pr';
+  log.step('Step 9: Creating PR');
   let prUrl: string | undefined;
 
   if (!config.dryRun) {
@@ -1120,6 +1287,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       log.error(`Failed to create PR for issue #${issueNum}: ${err}`);
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, `Agent loop failed: could not create PR. Branch: ${worktreeBranch}`);
+      writeRecoverableCrashMarker(err, 'pr');
       log.warn(`Worktree preserved at ${worktreePath} — use "alpha-loop resume --issue ${issueNum}" to retry`);
       return failureResult(issueNum, title, startTime);
     }
@@ -1127,16 +1295,16 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     log.dry('Would create PR');
   }
 
-  // --- Step 8b: Post assumptions/decisions comment ---
+  // --- Step 9b: Post assumptions/decisions comment ---
   if (!config.dryRun && prUrl) {
+    currentStep = 'assumptions';
     try {
-      const assumptionsDiff = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
       const reviewSummary = reviewGate.summary || 'No review findings';
       const assumptionsPrompt = buildAssumptionsPrompt({
         issueNum,
         title,
         body,
-        diff: assumptionsDiff.stdout,
+        diff: runDiff,
         reviewSummary,
       });
 
@@ -1168,40 +1336,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     }
   }
 
-  // --- Step 9: Extract learnings ---
-  log.step('Step 9: Extracting learnings');
-  const duration = Math.round((Date.now() - startTime) / 1000);
-
-  // Get diff for learning analysis
-  let runDiff = '';
-  if (!config.dryRun) {
-    const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
-    runDiff = diffResult.stdout.slice(0, MAX_DIFF_CHARS);
-  }
-
-  // Format review gate for learnings
-  const reviewForLearnings = reviewGate.findings.length > 0
-    ? `Review: ${reviewGate.summary}\n${reviewGate.findings.map((f) => `- [${f.severity}] ${f.description} (${f.fixed ? 'fixed' : 'unfixed'})`).join('\n')}`
-    : `Review: ${reviewGate.summary || 'passed'}`;
-
-  await extractLearnings({
-    issueNum,
-    title,
-    status: testsPassing ? 'success' : 'failure',
-    retries: testRetries,
-    duration,
-    diff: runDiff,
-    testOutput,
-    reviewOutput: reviewForLearnings,
-    verifyOutput,
-    body,
-    config,
-    sessionLogsDir: session.logsDir,
-    sessionName: session.name,
-  });
-
-  // --- Step 9b: Write full traces (Meta-Harness style) ---
-  stepsCompleted.push('learn');
+  // --- Step 9c: Write full traces (Meta-Harness style) ---
+  currentStep = 'trace';
   const filesChanged = runDiff ? (runDiff.match(/^diff --git/gm) ?? []).length : 0;
 
   if (!config.dryRun) {
@@ -1256,6 +1392,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 10: Update issue status ---
+  currentStep = 'status';
   log.step('Step 10: Updating issue status');
   if (!config.dryRun) {
     const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
@@ -1275,6 +1412,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       log.warn('Skipping auto-merge: tests are not passing');
     } else {
       log.step('Step 11: Auto-merging PR');
+      currentStep = 'merge';
       try {
         mergePR(config.repo, worktreeBranch);
         mergeSucceeded = true;
@@ -1295,6 +1433,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 12: Cleanup ---
+  currentStep = 'cleanup';
   log.step('Step 12: Cleanup');
   if (!mergeSucceeded && config.autoMerge && prUrl) {
     // Merge was expected but didn't happen (tests failing or merge failed) — preserve worktree for recovery
@@ -1324,6 +1463,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     verifySkipped,
     duration,
     filesChanged,
+    autoCommittedByPipeline: autoCommittedPaths.length > 0 ? true : undefined,
+    autoCommittedPaths: autoCommittedPaths.length > 0 ? autoCommittedPaths : undefined,
     escalationEvents: escalationEvents.length > 0 ? escalationEvents : undefined,
   };
 
@@ -1334,6 +1475,10 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   if (prUrl) log.info(`PR: ${prUrl}`);
 
   return result;
+  } catch (err) {
+    writeRecoverableCrashMarker(err);
+    throw err;
+  }
 }
 
 /**
@@ -1355,6 +1500,7 @@ export async function processBatch(
   const stepsCompleted: string[] = [];
   const issueNums = issues.map((i) => i.number);
   const epicOption = epicPromptOption(options);
+  let autoCommittedPaths: string[] = [];
 
   mkdirSync(session.logsDir, { recursive: true });
   const logFile = join(session.logsDir, `batch-${issueNums.join('-')}.log`);
@@ -1542,12 +1688,11 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     }
 
     // Auto-commit if agent didn't
-    const statusResult = exec('git status --porcelain', { cwd: worktreePath });
-    if (statusResult.stdout.trim()) {
-      exec('git add -A', { cwd: worktreePath });
-      const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
-      exec(`git commit -m "feat: batch implement issues ${issueRefs}"`, { cwd: worktreePath });
-    }
+    const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
+    autoCommittedPaths = autoCommitDirtyWorktree(
+      worktreePath,
+      `git commit -m "feat: batch implement issues ${issueRefs}"`,
+    );
 
     stepsCompleted.push('implement');
 
@@ -1719,8 +1864,58 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     }
   }
 
-  // --- Step 8: Create single PR for the batch ---
-  log.step('Batch Step 7: Creating PR');
+  const duration = Math.round((Date.now() - startTime) / 1000);
+  const perIssueDuration = Math.round(duration / issues.length);
+
+  // Get diff before writing learnings so the learning prompt analyzes only the implementation.
+  let runDiff = '';
+  if (!config.dryRun) {
+    const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+    runDiff = diffResult.stdout.slice(0, MAX_DIFF_CHARS);
+  }
+
+  // Format review gate for learnings (same format as single-issue pipeline)
+  const reviewForLearnings = reviewGate.findings.length > 0
+    ? `Review: ${reviewGate.summary}\n${reviewGate.findings.map((f) => `- [${f.severity}] ${f.description} (${f.fixed ? 'fixed' : 'unfixed'})`).join('\n')}`
+    : `Review: ${reviewGate.summary || 'passed'}`;
+
+  const filesChanged = runDiff ? (runDiff.match(/^diff --git/gm) ?? []).length : 0;
+
+  // --- Step 8: Extract learnings ---
+  log.step('Batch Step 7: Extracting learnings');
+  const learningFiles: Array<string | null> = [];
+  for (const issue of issues) {
+    const learningFile = await extractLearnings({
+      issueNum: issue.number,
+      title: issue.title,
+      status: testsPassing ? 'success' : 'failure',
+      retries: 0,
+      duration: perIssueDuration,
+      diff: runDiff,
+      testOutput,
+      reviewOutput: reviewForLearnings,
+      verifyOutput: '',
+      body: issue.body,
+      config,
+      outputRoot: worktreePath,
+      agentCwd: worktreePath,
+      sessionLogsDir: session.logsDir,
+      sessionName: session.name,
+    });
+    learningFiles.push(learningFile);
+  }
+
+  if (!config.dryRun) {
+    commitLearningFiles(
+      worktreePath,
+      learningFiles,
+      `chore: add learning artifacts for issues ${issues.map((i) => `#${i.number}`).join(', ')}`,
+    );
+  }
+  stepsCompleted.push('learn');
+
+  // --- Step 9: Create single PR for the batch ---
+  log.step('Batch Step 8: Creating PR');
   let prUrl: string | undefined;
 
   if (!config.dryRun) {
@@ -1755,24 +1950,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     }
   }
 
-  // --- Step 9: Update each issue individually + extract learnings ---
-  log.step('Batch Step 8: Updating individual issues');
-  const duration = Math.round((Date.now() - startTime) / 1000);
-  const perIssueDuration = Math.round(duration / issues.length);
-
-  // Get diff for traces and learning analysis
-  let runDiff = '';
-  if (!config.dryRun) {
-    const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
-    runDiff = diffResult.stdout.slice(0, MAX_DIFF_CHARS);
-  }
-
-  // Format review gate for learnings (same format as single-issue pipeline)
-  const reviewForLearnings = reviewGate.findings.length > 0
-    ? `Review: ${reviewGate.summary}\n${reviewGate.findings.map((f) => `- [${f.severity}] ${f.description} (${f.fixed ? 'fixed' : 'unfixed'})`).join('\n')}`
-    : `Review: ${reviewGate.summary || 'passed'}`;
-
-  const filesChanged = runDiff ? (runDiff.match(/^diff --git/gm) ?? []).length : 0;
+  // --- Step 10: Update each issue individually ---
+  log.step('Batch Step 9: Updating individual issues');
   const results: PipelineResult[] = [];
 
   for (const issue of issues) {
@@ -1795,27 +1974,12 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       verifySkipped: true,
       duration: perIssueDuration,
       filesChanged,
+      autoCommittedByPipeline: autoCommittedPaths.length > 0 ? true : undefined,
+      autoCommittedPaths: autoCommittedPaths.length > 0 ? autoCommittedPaths : undefined,
     };
 
     results.push(result);
     saveResult(session, result);
-
-    // Extract learnings per issue
-    await extractLearnings({
-      issueNum: issue.number,
-      title: issue.title,
-      status: testsPassing ? 'success' : 'failure',
-      retries: 0,
-      duration: perIssueDuration,
-      diff: runDiff,
-      testOutput,
-      reviewOutput: reviewForLearnings,
-      verifyOutput: '',
-      body: issue.body,
-      config,
-      sessionLogsDir: session.logsDir,
-      sessionName: session.name,
-    });
 
     // Write per-issue traces
     if (!config.dryRun) {
@@ -1857,14 +2021,13 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     log.success(`Issue #${issue.number} updated`);
   }
 
-  stepsCompleted.push('learn');
-
   // Write aggregate scores and costs
   if (!config.dryRun) {
     try {
       const scoreResults: PipelineResultForScores[] = results.map((r) => ({
         issueNum: r.issueNum,
         status: r.status,
+        recoveryMode: r.recoveryMode,
         testsPassing: r.testsPassing,
         verifyPassing: r.verifyPassing,
         verifySkipped: r.verifySkipped,
@@ -1894,7 +2057,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     if (!testsPassing) {
       log.warn('Skipping auto-merge: tests are not passing');
     } else {
-      log.step('Batch Step 9: Auto-merging PR');
+        log.step('Batch Step 10: Auto-merging PR');
       try {
         mergePR(config.repo, worktreeBranch);
         mergeSucceeded = true;
@@ -1911,7 +2074,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 11: Cleanup ---
-  log.step('Batch Step 10: Cleanup');
+  log.step('Batch Step 11: Cleanup');
   if (!mergeSucceeded && config.autoMerge && prUrl) {
     // Merge was expected but didn't happen (tests failing or merge failed) — preserve worktree for recovery
     await cleanupWorktree({

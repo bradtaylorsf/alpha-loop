@@ -66,16 +66,16 @@ Alpha Loop implements a 12-step pipeline for each issue:
 5. **Test + Retry** — Runs your test command; if tests fail, agent fixes and retries (up to `max_test_retries`)
 6. **Verify + Retry** — Starts your dev server, uses playwright-cli to test the feature like a real user, takes screenshots
 7. **Review** — A review agent reads the diff, checks for gaps, security issues, and missing wiring — fixes what it can
-8. **Create PR** — Opens a PR with test results, review summary, and verification status
-8b. **Assumptions** — Agent summarizes assumptions and decisions made, posts as a comment on the issue for user validation
-9. **Learn** — Extracts learnings (patterns, anti-patterns, what worked/failed) for future sessions
+8. **Learn** — Extracts learnings (patterns, anti-patterns, what worked/failed) and commits them in the issue worktree
+9. **Create PR** — Opens a PR with the implementation, learning artifact, test results, review summary, and verification status
+9b. **Assumptions** — Agent summarizes assumptions and decisions made, posts as a comment on the issue for user validation
 10. **Update Issue** — Posts results as a comment, updates labels
 11. **Auto-Merge** — Merges the PR to the session branch (if enabled)
 12. **Cleanup** — Removes the worktree
 
 After all issues are processed, Alpha Loop:
 1. **Auto-captures failures** as eval cases for regression testing
-2. Generates a **session summary** aggregating learnings across issues
+2. Generates a **session summary** aggregating learnings across issues when a session branch is being finalized
 3. Runs a **post-session code review** on the full session diff to catch cross-issue integration problems
 4. Creates the **session PR** with all findings included
 
@@ -106,7 +106,7 @@ When `auto_merge` is enabled (default), Alpha Loop creates a session branch (e.g
 
 ### Learnings
 
-Each completed issue produces a learning file in `.alpha-loop/learnings/` with:
+Each completed issue produces a learning file in `.alpha-loop/learnings/` that is committed with that issue's implementation PR. It includes:
 - What worked and what failed
 - Reusable patterns discovered
 - Anti-patterns to avoid
@@ -164,7 +164,7 @@ alpha-loop eval run --matrix --profiles "all-frontier,hybrid-v1" --out eval/repo
 alpha-loop eval run --matrix --tags routing-regression --execute  # real runs (see CASE_FORMAT.md)
 ```
 
-Eval cases live in `.alpha-loop/evals/` and scores are appended to `scores.jsonl` (Git-friendly, append-only). The composite score formula is pass-rate primary with lightweight penalties for retries and duration. Real API costs (tokens, USD) are tracked per case from agent output and used for the Pareto frontier.
+Eval cases live in `.alpha-loop/evals/` and scores are appended to `scores.jsonl` (Git-friendly, append-only). The composite score formula is pass-rate primary with lightweight penalties for retries and duration. Recovered session results are flagged and excluded from aggregate scoring. Real API costs (tokens, USD) are tracked per case from agent output and used for the Pareto frontier.
 
 Step-level evals test individual pipeline stages (plan, implement, test, test-fix, review, learn, skill) and run in seconds using LLM-judge and keyword checks:
 
@@ -252,14 +252,17 @@ batch_size: 5
 
 If the loop hangs or crashes mid-session, work can be stranded on local branches with no PR. Run `alpha-loop resume` to recover:
 
-1. Scans for local `agent/issue-*` branches with commits but no open PR
+1. Reads session crash markers first, then falls back to scanning local `agent/issue-*` branches with commits but no open PR
 2. Pushes each branch to origin
 3. Runs code review
 4. Creates WIP PRs, marks issues `In Review`, and updates the session PR with a verification caveat
+5. Regenerates missing learning artifacts and the aggregate session summary from recovered session results
 
-Recovered PRs are not marked complete. `resume` does not rerun the project test suite or final smoke tests, so verify recovered work before merging.
+Recovered PRs are written with `recoveryMode: "resume"` and are not marked complete. `resume` does not rerun the project test suite or final smoke tests, so verify recovered work before merging.
 
 Use `--issue <N>` to resume a specific issue.
+
+`alpha-loop history <session>` shows both unrecovered `crash-<N>.json` markers and recovered result files separately from normal successes and failures.
 
 ### Screenshots
 

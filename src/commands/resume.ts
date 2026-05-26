@@ -15,11 +15,18 @@ import { ghExec } from '../lib/rate-limit.js';
 import { spawnAgent } from '../lib/agent.js';
 import { buildReviewPrompt } from '../lib/prompts.js';
 import {
+  generateSessionSummary,
+  repairSessionLearningArtifacts,
+  repairSessionSummaryArtifact,
+} from '../lib/learning.js';
+import { clearCrashMarker, findCrashMarkers, formatAutoCommittedResultsSection, type CrashMarkerRef } from '../lib/session.js';
+import {
   labelIssue,
   commentIssue,
   createPR,
   updateProjectStatus,
 } from '../lib/github.js';
+import { isRecoveredResult } from '../lib/pipeline.js';
 import type { PipelineResult } from '../lib/pipeline.js';
 
 export type ResumeOptions = {
@@ -32,6 +39,7 @@ type StrandedBranch = {
   issueNum: number;
   commits: string[];
   filesChanged: string[];
+  crashMarker?: CrashMarkerRef;
 };
 
 function normalizeGitBranchLine(line: string): string {
@@ -62,6 +70,87 @@ function listAgentIssueBranches(): string[] {
   return Array.from(branches).sort();
 }
 
+function worktreePathForBranch(branch: string): string | null {
+  const worktreeResult = exec('git worktree list --porcelain');
+  if (worktreeResult.exitCode !== 0) return null;
+
+  let currentWorktree: string | null = null;
+  for (const line of worktreeResult.stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('worktree ')) {
+      currentWorktree = trimmed.slice('worktree '.length);
+      continue;
+    }
+    if (trimmed === `branch refs/heads/${branch}`) {
+      return currentWorktree;
+    }
+  }
+
+  return null;
+}
+
+function checkoutBranchForResume(branch: string): string | null {
+  const existingWorktree = worktreePathForBranch(branch);
+  if (existingWorktree) return existingWorktree;
+
+  const toplevelResult = exec('git rev-parse --show-toplevel');
+  const cwd = toplevelResult.exitCode === 0 && toplevelResult.stdout
+    ? toplevelResult.stdout
+    : process.cwd();
+  const checkoutResult = exec(`git checkout ${JSON.stringify(branch)}`, { cwd });
+  if (checkoutResult.exitCode !== 0) {
+    log.error(`Could not check out ${branch}: ${checkoutResult.stderr || checkoutResult.stdout}`);
+    return null;
+  }
+  return cwd;
+}
+
+function changedLearningPaths(cwd: string, issueNum: number): string[] {
+  const statusResult = exec('git status --porcelain -- ".alpha-loop/learnings"', { cwd });
+  if (statusResult.exitCode !== 0 || !statusResult.stdout.trim()) return [];
+
+  return statusResult.stdout
+    .split('\n')
+    .map((line) => {
+      const path = line.slice(3).trim();
+      return path.includes(' -> ') ? path.split(' -> ').pop()!.trim() : path;
+    })
+    .filter((path) => path.startsWith(`.alpha-loop/learnings/issue-${issueNum}-`) && path.endsWith('.md'));
+}
+
+function commitChangedLearningArtifacts(cwd: string, issueNum: number): boolean {
+  const paths = changedLearningPaths(cwd, issueNum);
+  if (paths.length === 0) return false;
+
+  const pathspecs = paths.map((path) => JSON.stringify(path)).join(' ');
+  const addResult = exec(`git add -- ${pathspecs}`, { cwd });
+  if (addResult.exitCode !== 0) {
+    log.warn(`Could not stage learning artifact for #${issueNum}: ${addResult.stderr || addResult.stdout}`);
+    return false;
+  }
+
+  const stagedResult = exec(`git diff --cached --name-only -- ${pathspecs}`, { cwd });
+  if (stagedResult.exitCode !== 0 || !stagedResult.stdout.trim()) return false;
+
+  const stagedPaths = stagedResult.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => paths.includes(line));
+  if (stagedPaths.length === 0) return false;
+
+  const commitResult = exec(
+    `git commit -m ${JSON.stringify(`chore: add learning artifact for issue #${issueNum}`)} -- ${stagedPaths.map((path) => JSON.stringify(path)).join(' ')}`,
+    { cwd },
+  );
+  if (commitResult.exitCode !== 0) {
+    log.warn(`Could not commit learning artifact for #${issueNum}: ${commitResult.stderr || commitResult.stdout}`);
+    return false;
+  }
+
+  log.success(`Learning artifact committed for #${issueNum}`);
+  return true;
+}
+
 /**
  * Find local branches matching agent/issue-* that have no open PR and have
  * commits ahead of the remote base branch.
@@ -80,29 +169,71 @@ export function findStrandedBranches(baseBranch: string, filterIssue?: number): 
     // Apply --issue filter if provided
     if (filterIssue !== undefined && issueNum !== filterIssue) continue;
 
-    // Check if there are commits ahead of the base branch
-    const aheadResult = exec(
-      `git log "origin/${baseBranch}..${branch}" --oneline`,
-    );
-    if (aheadResult.exitCode !== 0 || !aheadResult.stdout.trim()) {
-      // No commits ahead — not stranded
-      continue;
-    }
+    const item = inspectStrandedBranch(baseBranch, branch, issueNum);
+    if (item) stranded.push(item);
+  }
 
-    const commits = aheadResult.stdout
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
+  return stranded;
+}
 
-    // Get files changed relative to base branch
-    const filesResult = exec(
-      `git diff --name-only "origin/${baseBranch}...${branch}"`,
-    );
-    const filesChanged = filesResult.exitCode === 0
-      ? filesResult.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
-      : [];
+function inspectStrandedBranch(
+  baseBranch: string,
+  branch: string,
+  issueNum: number,
+  crashMarker?: CrashMarkerRef,
+): StrandedBranch | null {
+  // Check if there are commits ahead of the base branch
+  const aheadResult = exec(
+    `git log "origin/${baseBranch}..${branch}" --oneline`,
+  );
+  if (aheadResult.exitCode !== 0 || !aheadResult.stdout.trim()) {
+    // No commits ahead — not stranded
+    return null;
+  }
 
-    stranded.push({ branch, issueNum, commits, filesChanged });
+  const commits = aheadResult.stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  // Get files changed relative to base branch
+  const filesResult = exec(
+    `git diff --name-only "origin/${baseBranch}...${branch}"`,
+  );
+  const filesChanged = filesResult.exitCode === 0
+    ? filesResult.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
+    : [];
+
+  return { branch, issueNum, commits, filesChanged, crashMarker };
+}
+
+function matchesSessionFilter(marker: CrashMarkerRef, sessionFilter?: string): boolean {
+  if (!sessionFilter) return true;
+  const wanted = sessionFilter.trim();
+  if (!wanted) return true;
+  const timestamp = marker.sessionName.split('/').pop() ?? marker.sessionName;
+  return marker.sessionName === wanted
+    || marker.sessionName.endsWith(wanted)
+    || timestamp === wanted;
+}
+
+function findStrandedBranchesFromCrashMarkers(
+  baseBranch: string,
+  filterIssue?: number,
+  sessionFilter?: string,
+): StrandedBranch[] {
+  const markers = findCrashMarkers()
+    .filter((marker) => marker.recoverable && marker.hasCommits)
+    .filter((marker) => filterIssue === undefined || marker.issueNum === filterIssue)
+    .filter((marker) => matchesSessionFilter(marker, sessionFilter));
+
+  const seenIssues = new Set<number>();
+  const stranded: StrandedBranch[] = [];
+  for (const marker of markers) {
+    if (seenIssues.has(marker.issueNum)) continue;
+    seenIssues.add(marker.issueNum);
+    const item = inspectStrandedBranch(baseBranch, marker.branch, marker.issueNum, marker);
+    if (item) stranded.push(item);
   }
 
   return stranded;
@@ -160,6 +291,10 @@ function getBranchDiff(baseBranch: string, branch: string): string {
 function printStrandedSummary(item: StrandedBranch): void {
   log.step(`Found stranded branch: ${item.branch}`);
   log.info(`  Issue:   #${item.issueNum}`);
+  if (item.crashMarker) {
+    log.info(`  Crash:   ${item.crashMarker.step} at ${item.crashMarker.timestamp}`);
+    log.info(`  Session: ${item.crashMarker.sessionName}`);
+  }
   log.info(`  Commits: ${item.commits.length}`);
   for (const commit of item.commits) {
     log.info(`    ${commit}`);
@@ -187,14 +322,30 @@ async function resumeBranch(
   const title = getIssueTitle(repo, issueNum);
   log.step(`Resuming issue #${issueNum}: ${title}`);
 
+  const branchWorktree = checkoutBranchForResume(branch);
+  if (!branchWorktree) return null;
+
+  const session = findSessionForIssue(issueNum);
+  if (session && !config.skipLearn) {
+    repairSessionLearningArtifacts({
+      sessionName: session.sessionName,
+      issues: [{ issueNum, title, status: 'failure', duration: 0, retries: 0 }],
+      learningsDir: join(branchWorktree, '.alpha-loop', 'learnings'),
+      sessionLogsDir: join(session.sessionDir, 'logs'),
+    });
+    commitChangedLearningArtifacts(branchWorktree, issueNum);
+  } else if (config.skipLearn) {
+    log.info('Skipping learning artifact repair (skipLearn=true)');
+  }
+
   // Push the branch so createPR can work with it.
   // createPR also pushes internally, but we do it first here for explicit
   // feedback and to fail fast if the push is going to be a problem.
   log.info(`Pushing ${branch} to origin...`);
-  const pushResult = exec(`git push -u origin "${branch}"`);
+  const pushResult = exec(`git push -u origin "${branch}"`, { cwd: branchWorktree });
   if (pushResult.exitCode !== 0) {
     log.warn(`Push failed: ${pushResult.stderr}. Attempting force push...`);
-    const forceResult = exec(`git push -u origin "${branch}" --force`);
+    const forceResult = exec(`git push -u origin "${branch}" --force`, { cwd: branchWorktree });
     if (forceResult.exitCode !== 0) {
       log.error(`Could not push ${branch}: ${forceResult.stderr}`);
       return null;
@@ -217,19 +368,12 @@ async function resumeBranch(
       baseBranch,
     });
 
-    // Determine the cwd for the review — use the repo root (git toplevel).
-    const toplevelResult = exec('git rev-parse --show-toplevel');
-    const cwd = toplevelResult.exitCode === 0 ? toplevelResult.stdout : process.cwd();
-
-    // Switch to the branch so the agent can run git commands against it.
-    exec(`git checkout "${branch}"`);
-
     const reviewStep = resolveStepConfig(config, 'review');
     const reviewResult = await spawnAgent({
       agent: reviewStep.agent as typeof config.agent,
       model: reviewStep.model,
       prompt: reviewPrompt,
-      cwd,
+      cwd: branchWorktree,
       verbose: config.verbose,
       timeout: 10 * 60 * 1000, // 10 minutes for a review
       maxTurns: 20,
@@ -264,6 +408,7 @@ This PR was recovered by \`alpha-loop resume\`. Resume creates the PR and runs b
       head: branch,
       title: `feat: ${title} (closes #${issueNum})`,
       body: prBody,
+      cwd: branchWorktree,
     });
   } catch (err) {
     log.error(`Failed to create PR for #${issueNum}: ${String(err)}`);
@@ -297,6 +442,13 @@ This PR was recovered by \`alpha-loop resume\`. Resume creates the PR and runs b
 function findSessionForIssue(issueNum: number): { sessionDir: string; sessionName: string } | null {
   const sessionsRoot = join(process.cwd(), '.alpha-loop', 'sessions');
   if (!existsSync(sessionsRoot)) return null;
+
+  const crashMarker = findCrashMarkers(sessionsRoot).find((marker) => (
+    marker.issueNum === issueNum && marker.recoverable
+  ));
+  if (crashMarker) {
+    return { sessionDir: crashMarker.sessionDir, sessionName: crashMarker.sessionName };
+  }
 
   // Walk all session directories, sorted newest first
   const sessionDirs: Array<{ dir: string; name: string }> = [];
@@ -335,26 +487,25 @@ function saveResumedResult(
   const filePath = join(sessionDir, `result-${result.issueNum}.json`);
   writeFileSync(filePath, JSON.stringify(result, null, 2) + '\n');
   log.info(`Session result saved: ${filePath}`);
-}
-
-function isRecoveredUnverified(result: PipelineResult): boolean {
-  return Boolean(result.prUrl) && result.verifySkipped && !result.verifyPassing;
+  clearCrashMarker(sessionDir, result.issueNum);
 }
 
 function formatSessionIssueStatus(result: PipelineResult): string {
-  if (isRecoveredUnverified(result)) return 'RECOVERED - VERIFY SKIPPED';
+  if (isRecoveredResult(result)) return `RECOVERED BY ${result.recoveryMode?.toUpperCase()}`;
   return result.status === 'success' ? 'SUCCESS' : 'FAILURE';
 }
 
 /**
  * Find and update the session PR with current results.
  */
-function updateSessionPR(
-  repo: string,
+async function updateSessionPR(
+  config: ReturnType<typeof loadConfig>,
   sessionName: string,
   sessionDir: string,
-  baseBranch: string,
-): void {
+): Promise<void> {
+  const repo = config.repo;
+  const baseBranch = config.baseBranch;
+
   // Find the session branch
   const sessionBranch = sessionName;
 
@@ -393,28 +544,69 @@ function updateSessionPR(
 
   if (results.length === 0) return;
 
-  const successCount = results.filter((r) => r.status === 'success').length;
-  const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
-  const recoveredUnverifiedCount = results.filter(isRecoveredUnverified).length;
-  const resumeCaveat = recoveredUnverifiedCount > 0
+  const learningsDir = join(process.cwd(), '.alpha-loop', 'learnings');
+  if (!config.skipLearn) {
+    repairSessionLearningArtifacts({
+      sessionName,
+      issues: results.map((r) => ({
+        issueNum: r.issueNum,
+        title: r.title,
+        status: r.status,
+        duration: r.duration,
+      })),
+      learningsDir,
+      sessionLogsDir: join(sessionDir, 'logs'),
+    });
+    await generateSessionSummary({
+      sessionName,
+      results,
+      learningsDir,
+      config,
+    });
+    repairSessionSummaryArtifact({
+      sessionName,
+      learningsDir,
+    });
+  } else {
+    log.info('Skipping session summary regeneration (skipLearn=true)');
+  }
+
+  const recovered = results.filter(isRecoveredResult);
+  const naturalResults = results.filter((r) => !isRecoveredResult(r));
+  const successes = naturalResults.filter((r) => r.status === 'success');
+  const failures = naturalResults.filter((r) => r.status === 'failure');
+  const totalDuration = naturalResults.reduce((sum, r) => sum + r.duration, 0);
+  const resumeCaveat = recovered.length > 0
     ? `
 ### Resume Caveat
 
-${recoveredUnverifiedCount} recovered PR(s) were not counted as succeeded because \`alpha-loop resume\` does not rerun tests or final verification smoke tests.
+${recovered.length} recovered PR(s) were not counted as succeeded or failed because \`alpha-loop resume\` does not rerun tests or final verification smoke tests.
 `
     : '';
+  const titleStatus = naturalResults.length > 0
+    ? `${successes.length}/${naturalResults.length} succeeded`
+    : `${successes.length} succeeded`;
+  const titleRecovery = recovered.length > 0 ? `, ${recovered.length} recovered` : '';
+  const autoCommittedSection = formatAutoCommittedResultsSection(results).join('\n');
 
-  const title = `Session: ${sessionName} — ${successCount}/${results.length} succeeded`;
+  const title = `Session: ${sessionName} — ${titleStatus}${titleRecovery}`;
   const body = `## Session Summary
 
 **Branch:** ${sessionBranch}
-**Issues processed:** ${results.length} (${successCount} succeeded, ${results.length - successCount} failed)
+**Issues processed:** ${results.length} (${successes.length} succeeded, ${failures.length} failed, ${recovered.length} recovered)
 **Total duration:** ${Math.round(totalDuration / 60)} minutes
 **Updated:** ${new Date().toISOString()}
 ${resumeCaveat}
 
 ### Issues
-${results.map((r) => `- #${r.issueNum}: ${r.title} — ${formatSessionIssueStatus(r)}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
+${naturalResults.length > 0
+    ? naturalResults.map((r) => `- #${r.issueNum}: ${r.title} — ${formatSessionIssueStatus(r)}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')
+    : 'No naturally completed issues yet.'}
+${recovered.length > 0 ? `
+### Recovered Issues
+${recovered.map((r) => `- #${r.issueNum}: ${r.title} — ${formatSessionIssueStatus(r)}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
+` : ''}
+${autoCommittedSection ? `\n${autoCommittedSection}` : ''}
 
 ---
 This PR collects all changes from this session for final review before merging to ${baseBranch}.
@@ -452,8 +644,11 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
 
   log.step('Scanning for stranded branches...');
 
-  // Find local branches with unpushed/unreviewed work
-  const stranded = findStrandedBranches(config.baseBranch, filterIssue);
+  // Prefer explicit crash markers when present; fall back to branch walking for older sessions.
+  const markerStranded = findStrandedBranchesFromCrashMarkers(config.baseBranch, filterIssue, options.session);
+  const stranded = markerStranded.length > 0
+    ? markerStranded
+    : findStrandedBranches(config.baseBranch, filterIssue);
 
   // Filter out branches that already have an open PR
   const withoutPR = stranded.filter((item) => !prExists(config.repo, item.branch));
@@ -485,7 +680,9 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
     }
   }
 
-  // Save results to session and update session PR
+  // Save all recovered results before updating each touched session PR, so the
+  // regenerated summary sees the complete recovered set for that session.
+  const sessionsToUpdate = new Map<string, { sessionDir: string; sessionName: string }>();
   for (const r of results) {
     const session = findSessionForIssue(r.issueNum);
     if (session) {
@@ -493,6 +690,7 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
         issueNum: r.issueNum,
         title: r.title,
         status: 'failure',
+        recoveryMode: 'resume',
         failureReason: 'transient',
         prUrl: r.prUrl,
         testsPassing: false,
@@ -502,8 +700,12 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
         filesChanged: r.filesChanged,
       };
       saveResumedResult(session.sessionDir, pipelineResult);
-      updateSessionPR(config.repo, session.sessionName, session.sessionDir, config.baseBranch);
+      sessionsToUpdate.set(session.sessionDir, session);
     }
+  }
+
+  for (const session of sessionsToUpdate.values()) {
+    await updateSessionPR(config, session.sessionName, session.sessionDir);
   }
 
   // Print summary

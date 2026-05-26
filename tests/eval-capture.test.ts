@@ -78,6 +78,17 @@ describe('detectFailureStep', () => {
     });
     expect(detectFailureStep(result)).toBe('review');
   });
+
+  it('flags recovered results instead of assigning them to a normal failure step', () => {
+    const result = makePipelineResult({
+      recoveryMode: 'resume',
+      testsPassing: false,
+      verifyPassing: false,
+      verifySkipped: true,
+      filesChanged: 2,
+    });
+    expect(detectFailureStep(result)).toBe('recovered');
+  });
 });
 
 describe('saveCapturedCase', () => {

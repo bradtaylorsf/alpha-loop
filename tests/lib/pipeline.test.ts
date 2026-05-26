@@ -26,6 +26,7 @@ jest.mock('../../src/lib/agent', () => ({
 jest.mock('../../src/lib/worktree', () => ({
   setupWorktree: jest.fn(),
   cleanupWorktree: jest.fn(),
+  worktreeHasCommits: jest.fn(),
 }));
 
 jest.mock('../../src/lib/github', () => ({
@@ -54,6 +55,7 @@ jest.mock('../../src/lib/learning', () => ({
 jest.mock('../../src/lib/session', () => ({
   saveResult: jest.fn(),
   getPreviousResult: jest.fn(),
+  writeCrashMarker: jest.fn(),
 }));
 
 jest.mock('../../src/lib/traces', () => ({
@@ -108,21 +110,24 @@ jest.mock('node:fs', () => ({
 }));
 
 import { exec } from '../../src/lib/shell';
+import { log } from '../../src/lib/logger';
 import { spawnAgent } from '../../src/lib/agent';
-import { setupWorktree, cleanupWorktree } from '../../src/lib/worktree';
+import { setupWorktree, cleanupWorktree, worktreeHasCommits } from '../../src/lib/worktree';
 import { labelIssue, commentIssue, createPR, mergePR, updateProjectStatus } from '../../src/lib/github';
 import { runTests } from '../../src/lib/testing';
 import { runVerify } from '../../src/lib/verify';
 import { extractLearnings, getLearningContext } from '../../src/lib/learning';
-import { saveResult, getPreviousResult } from '../../src/lib/session';
+import { saveResult, getPreviousResult, writeCrashMarker } from '../../src/lib/session';
 import { buildIssuePlanPrompt, buildImplementPrompt, buildReviewPrompt, buildBatchPlanPrompt, buildBatchImplementPrompt, buildBatchReviewPrompt } from '../../src/lib/prompts';
 import { writeTraceToSubdir } from '../../src/lib/traces';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
+const mockLog = log as jest.Mocked<typeof log>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
+const mockWorktreeHasCommits = worktreeHasCommits as jest.MockedFunction<typeof worktreeHasCommits>;
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockMergePR = mergePR as jest.MockedFunction<typeof mergePR>;
 const mockRunTests = runTests as jest.MockedFunction<typeof runTests>;
@@ -131,6 +136,7 @@ const mockExtractLearnings = extractLearnings as jest.MockedFunction<typeof extr
 const mockGetLearningContext = getLearningContext as jest.MockedFunction<typeof getLearningContext>;
 const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGetPreviousResult = getPreviousResult as jest.MockedFunction<typeof getPreviousResult>;
+const mockWriteCrashMarker = writeCrashMarker as jest.MockedFunction<typeof writeCrashMarker>;
 const mockBuildIssuePlanPrompt = buildIssuePlanPrompt as jest.MockedFunction<typeof buildIssuePlanPrompt>;
 const mockBuildImplementPrompt = buildImplementPrompt as jest.MockedFunction<typeof buildImplementPrompt>;
 const mockBuildReviewPrompt = buildReviewPrompt as jest.MockedFunction<typeof buildReviewPrompt>;
@@ -228,11 +234,12 @@ beforeEach(() => {
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
   mockSetupWorktree.mockResolvedValue({ path: '/tmp/worktree', branch: 'agent/issue-42', resumed: false });
   mockCleanupWorktree.mockResolvedValue();
+  mockWorktreeHasCommits.mockReturnValue(0);
   mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: 'Agent output', duration: 5000 });
   mockRunTests.mockReturnValue({ passed: true, output: 'All tests passed' });
   mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/1');
   mockMergePR.mockReturnValue(undefined as any);
-  mockExtractLearnings.mockResolvedValue();
+  mockExtractLearnings.mockResolvedValue(null);
   mockGetLearningContext.mockReturnValue('');
   mockGetPreviousResult.mockReturnValue(null);
 });
@@ -258,6 +265,67 @@ describe('processIssue', () => {
     expect(mockExtractLearnings).toHaveBeenCalled();
     expect(mockSaveResult).toHaveBeenCalled();
     expect(mockCleanupWorktree).toHaveBeenCalled();
+  });
+
+  test('sets auto-commit metadata when the agent leaves uncommitted work', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: ' M src/lib/pipeline.ts\n?? tests/lib/pipeline.test.ts\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(result.autoCommittedByPipeline).toBe(true);
+    expect(result.autoCommittedPaths).toEqual(['src/lib/pipeline.ts', 'tests/lib/pipeline.test.ts']);
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      'Agent did not commit; auto-committing 2 files: src/lib/pipeline.ts, tests/lib/pipeline.test.ts',
+    );
+    expect(mockExec).toHaveBeenCalledWith('git add -A', { cwd: '/tmp/worktree' });
+    expect(mockExec).toHaveBeenCalledWith(
+      'git commit -m "feat: implement issue #42 - Test issue"',
+      { cwd: '/tmp/worktree' },
+    );
+    expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      autoCommittedByPipeline: true,
+      autoCommittedPaths: ['src/lib/pipeline.ts', 'tests/lib/pipeline.test.ts'],
+    }));
+  });
+
+  test('extracts and commits the learning artifact in the worktree before creating the PR', async () => {
+    const learningPath = '/tmp/worktree/.alpha-loop/learnings/issue-42-20260101-000000.md';
+    mockExtractLearnings.mockResolvedValueOnce(learningPath);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git diff "origin/master...HEAD"') {
+        return { stdout: 'diff --git a/src/foo.ts b/src/foo.ts', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith('git diff --cached --name-only --')) {
+        return { stdout: '.alpha-loop/learnings/issue-42-20260101-000000.md', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({
+      outputRoot: '/tmp/worktree',
+      agentCwd: '/tmp/worktree',
+      sessionLogsDir: '/tmp/sessions/session/20260330-143000/logs',
+      sessionName: 'session/20260330-143000',
+    }));
+
+    const commitCallIndex = mockExec.mock.calls.findIndex(([cmd]) =>
+      String(cmd).startsWith('git commit -m "chore: add learning artifact for issue #42"'),
+    );
+    expect(commitCallIndex).toBeGreaterThanOrEqual(0);
+    expect(mockExec.mock.calls[commitCallIndex][0]).toContain('.alpha-loop/learnings/issue-42-20260101-000000.md');
+    expect(mockExtractLearnings.mock.invocationCallOrder[0]).toBeLessThan(
+      mockExec.mock.invocationCallOrder[commitCallIndex],
+    );
+    expect(mockExec.mock.invocationCallOrder[commitCallIndex]).toBeLessThan(
+      mockCreatePR.mock.invocationCallOrder[0],
+    );
   });
 
   test('uses per-step pipeline agents for plan, implementation, and review', async () => {
@@ -580,6 +648,43 @@ describe('processIssue', () => {
     expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'Todo');
   });
 
+  test('writes a recoverable crash marker when a post-commit pipeline step throws', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+    const session = makeSession();
+
+    mockExistsSync.mockImplementation((path: any) => String(path).includes('plan-issue-42.json'));
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).includes('plan-issue-42.json')) {
+        return JSON.stringify({
+          summary: 'Plan with live verification',
+          files: ['src/index.ts'],
+          implementation: 'Implement it',
+          testing: { needed: false, reason: 'Covered by verification' },
+          verification: { needed: true, method: 'playwright', instructions: 'Open app', reason: 'Runtime behavior' },
+        });
+      }
+      return '';
+    });
+    mockWorktreeHasCommits.mockReturnValue(1);
+    mockRunVerify.mockRejectedValueOnce(new Error('review browser crashed'));
+
+    await expect(
+      processIssue(42, 'Test issue', 'Body', makeConfig({ skipVerify: false }), session),
+    ).rejects.toThrow('review browser crashed');
+
+    expect(mockWriteCrashMarker).toHaveBeenCalledWith(session, expect.objectContaining({
+      issueNum: 42,
+      step: 'verify',
+      branch: 'agent/issue-42',
+      hasCommits: true,
+      error: 'review browser crashed',
+      recoverable: true,
+    }));
+    expect(mockSaveResult).not.toHaveBeenCalled();
+  });
+
   test('creates PR with review report and test output', async () => {
     mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: 'Review: all good', duration: 1000 });
 
@@ -889,6 +994,55 @@ describe('processBatch', () => {
     expect(mockBuildBatchPlanPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildBatchImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildBatchReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+  });
+
+  test('commits all batch learning artifacts before creating the batch PR', async () => {
+    mockExtractLearnings
+      .mockResolvedValueOnce('/tmp/worktree/.alpha-loop/learnings/issue-10-20260101-000000.md')
+      .mockResolvedValueOnce('/tmp/worktree/.alpha-loop/learnings/issue-11-20260101-000000.md');
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git diff "origin/master...HEAD"') {
+        return { stdout: 'diff --git a/src/foo.ts b/src/foo.ts', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith('git diff --cached --name-only --')) {
+        return {
+          stdout: [
+            '.alpha-loop/learnings/issue-10-20260101-000000.md',
+            '.alpha-loop/learnings/issue-11-20260101-000000.md',
+          ].join('\n'),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await processBatch(batchIssues, makeConfig({ batch: true }), makeSession());
+
+    expect(mockExtractLearnings).toHaveBeenCalledTimes(2);
+    expect(mockExtractLearnings).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      issueNum: 10,
+      outputRoot: '/tmp/worktree',
+      agentCwd: '/tmp/worktree',
+    }));
+    expect(mockExtractLearnings).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      issueNum: 11,
+      outputRoot: '/tmp/worktree',
+      agentCwd: '/tmp/worktree',
+    }));
+
+    const commitCallIndex = mockExec.mock.calls.findIndex(([cmd]) =>
+      String(cmd).startsWith('git commit -m "chore: add learning artifacts for issues #10, #11"'),
+    );
+    expect(commitCallIndex).toBeGreaterThanOrEqual(0);
+    expect(mockExec.mock.calls[commitCallIndex][0]).toContain('issue-10-20260101-000000.md');
+    expect(mockExec.mock.calls[commitCallIndex][0]).toContain('issue-11-20260101-000000.md');
+    expect(mockExtractLearnings.mock.invocationCallOrder[1]).toBeLessThan(
+      mockExec.mock.invocationCallOrder[commitCallIndex],
+    );
+    expect(mockExec.mock.invocationCallOrder[commitCallIndex]).toBeLessThan(
+      mockCreatePR.mock.invocationCallOrder[0],
+    );
   });
 
   test('skips auto-merge when tests are failing', async () => {
