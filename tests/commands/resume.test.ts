@@ -27,7 +27,9 @@ jest.mock('../../src/lib/github', () => ({
 }));
 
 jest.mock('../../src/lib/learning', () => ({
+  generateSessionSummary: jest.fn().mockResolvedValue(null),
   repairSessionLearningArtifacts: jest.fn(),
+  repairSessionSummaryArtifact: jest.fn(),
 }));
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -39,7 +41,11 @@ import { createPR, labelIssue, commentIssue, updateProjectStatus } from '../../s
 import { ghExec } from '../../src/lib/rate-limit';
 import { spawnAgent } from '../../src/lib/agent';
 import { exec } from '../../src/lib/shell';
-import { repairSessionLearningArtifacts } from '../../src/lib/learning';
+import {
+  generateSessionSummary,
+  repairSessionLearningArtifacts,
+  repairSessionSummaryArtifact,
+} from '../../src/lib/learning';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>;
@@ -50,7 +56,9 @@ const mockLabelIssue = labelIssue as jest.MockedFunction<typeof labelIssue>;
 const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue>;
 const mockUpdateProjectStatus = updateProjectStatus as jest.MockedFunction<typeof updateProjectStatus>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
+const mockGenerateSessionSummary = generateSessionSummary as jest.MockedFunction<typeof generateSessionSummary>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
+const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
 
 const ok = (stdout = '') => ({ stdout, stderr: '', exitCode: 0 });
 const repoRoot = process.cwd();
@@ -357,6 +365,21 @@ describe('resumeCommand', () => {
     expect(sessionPrBody).toContain('### Recovered Issues');
     expect(sessionPrBody).toContain('#269: Recover artifact exports — RECOVERED BY RESUME');
     expect(sessionPrBody).toContain('https://github.com/owner/repo/pull/269');
+    expect(mockGenerateSessionSummary).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: 'session/epic-123',
+      results: [expect.objectContaining({
+        issueNum: 269,
+        title: 'Recover artifact exports',
+        status: 'failure',
+        recoveryMode: 'resume',
+      })],
+      learningsDir: expect.stringMatching(/\.alpha-loop\/learnings$/),
+      config: expect.objectContaining({ repo: 'owner/repo', skipLearn: false }),
+    }));
+    expect(mockRepairSessionSummaryArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      sessionName: 'session/epic-123',
+      learningsDir: expect.stringMatching(/\.alpha-loop\/learnings$/),
+    }));
   });
 
   test('keeps the ESM resume command free of runtime CommonJS require calls', () => {

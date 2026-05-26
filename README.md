@@ -256,6 +256,7 @@ If the loop hangs or crashes mid-session, work can be stranded on local branches
 2. Pushes each branch to origin
 3. Runs code review
 4. Creates WIP PRs, marks issues `In Review`, and updates the session PR with a verification caveat
+5. Regenerates missing learning artifacts and the aggregate session summary from recovered session results
 
 Recovered PRs are written with `recoveryMode: "resume"` and are not marked complete. `resume` does not rerun the project test suite or final smoke tests, so verify recovered work before merging.
 

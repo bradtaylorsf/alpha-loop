@@ -14,7 +14,11 @@ import { exec } from '../lib/shell.js';
 import { ghExec } from '../lib/rate-limit.js';
 import { spawnAgent } from '../lib/agent.js';
 import { buildReviewPrompt } from '../lib/prompts.js';
-import { repairSessionLearningArtifacts } from '../lib/learning.js';
+import {
+  generateSessionSummary,
+  repairSessionLearningArtifacts,
+  repairSessionSummaryArtifact,
+} from '../lib/learning.js';
 import { clearCrashMarker, findCrashMarkers, type CrashMarkerRef } from '../lib/session.js';
 import {
   labelIssue,
@@ -494,12 +498,14 @@ function formatSessionIssueStatus(result: PipelineResult): string {
 /**
  * Find and update the session PR with current results.
  */
-function updateSessionPR(
-  repo: string,
+async function updateSessionPR(
+  config: ReturnType<typeof loadConfig>,
   sessionName: string,
   sessionDir: string,
-  baseBranch: string,
-): void {
+): Promise<void> {
+  const repo = config.repo;
+  const baseBranch = config.baseBranch;
+
   // Find the session branch
   const sessionBranch = sessionName;
 
@@ -537,6 +543,33 @@ function updateSessionPR(
   }
 
   if (results.length === 0) return;
+
+  const learningsDir = join(process.cwd(), '.alpha-loop', 'learnings');
+  if (!config.skipLearn) {
+    repairSessionLearningArtifacts({
+      sessionName,
+      issues: results.map((r) => ({
+        issueNum: r.issueNum,
+        title: r.title,
+        status: r.status,
+        duration: r.duration,
+      })),
+      learningsDir,
+      sessionLogsDir: join(sessionDir, 'logs'),
+    });
+    await generateSessionSummary({
+      sessionName,
+      results,
+      learningsDir,
+      config,
+    });
+    repairSessionSummaryArtifact({
+      sessionName,
+      learningsDir,
+    });
+  } else {
+    log.info('Skipping session summary regeneration (skipLearn=true)');
+  }
 
   const recovered = results.filter(isRecoveredResult);
   const naturalResults = results.filter((r) => !isRecoveredResult(r));
@@ -645,7 +678,9 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
     }
   }
 
-  // Save results to session and update session PR
+  // Save all recovered results before updating each touched session PR, so the
+  // regenerated summary sees the complete recovered set for that session.
+  const sessionsToUpdate = new Map<string, { sessionDir: string; sessionName: string }>();
   for (const r of results) {
     const session = findSessionForIssue(r.issueNum);
     if (session) {
@@ -663,8 +698,12 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
         filesChanged: r.filesChanged,
       };
       saveResumedResult(session.sessionDir, pipelineResult);
-      updateSessionPR(config.repo, session.sessionName, session.sessionDir, config.baseBranch);
+      sessionsToUpdate.set(session.sessionDir, session);
     }
+  }
+
+  for (const session of sessionsToUpdate.values()) {
+    await updateSessionPR(config, session.sessionName, session.sessionDir);
   }
 
   // Print summary
