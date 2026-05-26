@@ -364,6 +364,21 @@ export function mergePR(repo: string, head: string, method: 'squash' | 'merge' =
   log.info(`PR #${prNum} merged`);
 }
 
+function projectFailureReason(message: string, detail?: string): string {
+  const trimmed = detail?.trim();
+  return trimmed ? `${message}: ${trimmed}` : message;
+}
+
+function disableProjectStatus(owner: string, projectNum: number, reason: string): void {
+  const existing = getProjectCache(owner, projectNum);
+  if (existing?.disabled) {
+    return;
+  }
+
+  setProjectCache(owner, projectNum, { disabled: true, reason });
+  log.warn(`Project board #${projectNum} disabled for this session: ${reason}`);
+}
+
 /**
  * Update project board status for an issue.
  * This is a multi-step operation using gh project commands.
@@ -375,15 +390,27 @@ export function updateProjectStatus(
   issueNum: number,
   status: string,
 ): void {
-  // ── Resolve project metadata (cached after first call) ────────────────
+  if (!projectNum || projectNum <= 0) {
+    return;
+  }
+
+  // ── Resolve project metadata (cached on success, disabled on failure) ─
   let cache = getProjectCache(owner, projectNum);
+  if (cache?.disabled) {
+    return;
+  }
+
   if (!cache) {
     // Fetch field list (contains field IDs and option IDs)
     const fieldResult = ghExec(
       `gh project field-list ${projectNum} --owner "${owner}" --format json`,
     );
     if (fieldResult.exitCode !== 0) {
-      log.warn(`Could not list project fields: ${fieldResult.stderr}`);
+      disableProjectStatus(
+        owner,
+        projectNum,
+        projectFailureReason('Could not list project fields', fieldResult.stderr),
+      );
       return;
     }
 
@@ -405,12 +432,12 @@ export function updateProjectStatus(
         }
       }
     } catch {
-      log.warn('Failed to parse project fields');
+      disableProjectStatus(owner, projectNum, 'Failed to parse project fields');
       return;
     }
 
     if (!fieldId || optionMap.size === 0) {
-      log.warn('Could not resolve project Status field');
+      disableProjectStatus(owner, projectNum, 'Could not resolve project Status field');
       return;
     }
 
@@ -419,7 +446,11 @@ export function updateProjectStatus(
       `gh project view ${projectNum} --owner "${owner}" --format json`,
     );
     if (projectResult.exitCode !== 0) {
-      log.warn(`Could not view project: ${projectResult.stderr}`);
+      disableProjectStatus(
+        owner,
+        projectNum,
+        projectFailureReason('Could not view project', projectResult.stderr),
+      );
       return;
     }
 
@@ -428,12 +459,12 @@ export function updateProjectStatus(
       const data = JSON.parse(projectResult.stdout) as { id: string };
       projectId = data.id;
     } catch {
-      log.warn('Failed to parse project data');
+      disableProjectStatus(owner, projectNum, 'Failed to parse project data');
       return;
     }
 
     if (!projectId) {
-      log.warn('Could not get project ID');
+      disableProjectStatus(owner, projectNum, 'Could not get project ID');
       return;
     }
 
@@ -442,10 +473,14 @@ export function updateProjectStatus(
     log.debug(`Cached project metadata for ${owner}/${projectNum}`);
   }
 
+  if (cache.disabled) {
+    return;
+  }
+
   // ── Resolve option ID for the requested status ──────────────────────
   const optionId = cache.optionMap.get(status);
   if (!optionId) {
-    log.warn(`Could not resolve project option for status '${status}'`);
+    disableProjectStatus(owner, projectNum, `Could not resolve project option for status '${status}'`);
     return;
   }
 
@@ -459,7 +494,11 @@ export function updateProjectStatus(
     `gh project item-add ${projectNum} --owner "${owner}" --url "${issueUrl}" --format json`,
   );
   if (itemResult.exitCode !== 0) {
-    log.warn(`Could not resolve project item for #${issueNum}: ${itemResult.stderr}`);
+    disableProjectStatus(
+      owner,
+      projectNum,
+      projectFailureReason(`Could not resolve project item for #${issueNum}`, itemResult.stderr),
+    );
     return;
   }
 
@@ -468,12 +507,12 @@ export function updateProjectStatus(
     const data = JSON.parse(itemResult.stdout) as { id: string };
     itemId = data.id;
   } catch {
-    log.warn('Failed to parse project item response');
+    disableProjectStatus(owner, projectNum, 'Failed to parse project item response');
     return;
   }
 
   if (!itemId) {
-    log.warn(`Could not find project item for issue #${issueNum}`);
+    disableProjectStatus(owner, projectNum, `Could not find project item for issue #${issueNum}`);
     return;
   }
 
@@ -483,7 +522,11 @@ export function updateProjectStatus(
     undefined, true,
   );
   if (editResult.exitCode !== 0) {
-    log.warn(`Failed to update project status for #${issueNum}: ${editResult.stderr}`);
+    disableProjectStatus(
+      owner,
+      projectNum,
+      projectFailureReason(`Failed to update project status for #${issueNum}`, editResult.stderr),
+    );
     return;
   }
 
