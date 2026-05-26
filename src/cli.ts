@@ -6,11 +6,12 @@ import { visionCommand } from './commands/vision.js';
 import { authCommand } from './commands/auth.js';
 import { syncCommand } from './commands/sync.js';
 import { normalizeScriptArgv } from './lib/cli-args.js';
+import { getPackageVersion } from './lib/package-version.js';
 
 program
   .name('alpha-loop')
   .description('Agent-agnostic automated development loop')
-  .version('1.8.0');
+  .version(getPackageVersion());
 
 program
   .command('init')

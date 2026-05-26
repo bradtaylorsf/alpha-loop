@@ -186,6 +186,7 @@ export function buildIssuePlanPrompt(options: IssuePlanPromptOptions): string {
     '- verification.needed: true if the issue changes behavior that can be validated at runtime.',
     '- verification.method: "playwright" for UI changes, "script" for validation scripts, "boot" for service startup checks, "cli" for CLI testing, "api" for API endpoint testing.',
     '- verification.command: required for script/cli/boot/api methods - the shell command to run. Exit code 0 = pass.',
+    '- verification.command must be executable by /bin/sh after JSON parsing. Do not double-escape quotes as \\\\"; prefer single quotes around inline Node snippets or a checked-in helper script.',
     '- verification.instructions: for playwright method, list the exact playwright-cli commands to verify.',
     '- implementation: be concise and actionable. List files to modify and what to change in each.',
     '- Write ONLY the JSON file. Do not create any other files or make any code changes.',
