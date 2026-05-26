@@ -10,6 +10,19 @@ import {
 
 let tempDir: string;
 
+const validContext = `## Architecture
+- src/cli.ts wires Commander commands to handlers.
+
+## Conventions
+- TypeScript strict mode with ESM imports.
+
+## Critical Rules
+- Do not overwrite protected agent instruction files with unvalidated output.
+
+## Active State
+- Test status: pending
+`;
+
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), 'context-test-'));
 });
@@ -96,7 +109,7 @@ describe('updateContextAfterRun', () => {
 describe('generateProjectContext', () => {
   it('writes agent output to context file', async () => {
     const executor = async () => ({
-      stdout: '## Architecture\n- generated content\n',
+      stdout: validContext,
       stderr: '',
       exitCode: 0,
     });
@@ -104,7 +117,7 @@ describe('generateProjectContext', () => {
     await generateProjectContext(tempDir, 'claude', executor);
 
     const content = readFileSync(join(tempDir, '.alpha-loop', 'context.md'), 'utf-8');
-    expect(content).toBe('## Architecture\n- generated content\n');
+    expect(content).toBe(validContext);
   });
 
   it('does nothing on agent failure', async () => {
@@ -117,7 +130,7 @@ describe('generateProjectContext', () => {
 
   it('creates .alpha-loop directory if needed', async () => {
     const executor = async () => ({
-      stdout: 'content',
+      stdout: validContext,
       stderr: '',
       exitCode: 0,
     });
@@ -125,6 +138,18 @@ describe('generateProjectContext', () => {
     await generateProjectContext(tempDir, 'claude', executor);
 
     const content = readFileSync(join(tempDir, '.alpha-loop', 'context.md'), 'utf-8');
-    expect(content).toBe('content');
+    expect(content).toBe(validContext);
+  });
+
+  it('does not write context when agent output is a status summary', async () => {
+    const executor = async () => ({
+      stdout: 'Wrote `PROJECT_CONTEXT.md` summarizing the current codebase.',
+      stderr: '',
+      exitCode: 0,
+    });
+
+    await generateProjectContext(tempDir, 'claude', executor);
+
+    expect(getProjectContext(tempDir)).toBeNull();
   });
 });

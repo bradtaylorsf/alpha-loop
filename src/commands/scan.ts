@@ -5,8 +5,15 @@ import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
 import { assertSafeShellArg, loadConfig } from '../lib/config.js';
 import { buildOneShotCommand } from '../lib/agent.js';
+import {
+  excerptForLog,
+  validateInstructionsMarkdown,
+  validateProjectContextMarkdown,
+} from '../lib/scan-validation.js';
 
-const SCAN_PROMPT = `Analyze this codebase and produce a concise project context file. Read the key files (package.json, entry points, config files, README, CLAUDE.md) and output ONLY this markdown structure:
+const SCAN_PROMPT = `Analyze this codebase and produce a concise project context file. Read the key files (package.json, entry points, config files, README, CLAUDE.md) and output ONLY this markdown structure.
+
+Do NOT use tools. Do NOT create, edit, or write files. Output the full markdown content directly on stdout and nothing else.
 
 ## Architecture
 - Entry points and how they connect (e.g., "Express server in src/server/index.ts mounts routes from routes/*.ts")
@@ -34,6 +41,8 @@ Keep each section to 3-5 bullet points. Be specific to THIS codebase, not generi
  * Contains ONLY project context — procedural content (testing, git, security) lives in skills.
  */
 const INSTRUCTIONS_PROMPT = `Analyze this codebase and produce a concise project instructions file for AI coding agents working in this repo.
+
+Do NOT use tools. Do NOT create, edit, or write files. Output the full markdown content directly on stdout and nothing else.
 
 Output ONLY this markdown structure with the marker comment on the first line:
 
@@ -70,6 +79,8 @@ IMPORTANT RULES:
  */
 const INSTRUCTIONS_MERGE_PROMPT = `You are updating a project instructions file for AI coding agents.
 
+Do NOT use tools. Do NOT create, edit, or write files. Output the complete updated markdown content directly on stdout and nothing else.
+
 Below is the EXISTING instructions file and the CURRENT state of the codebase. Your job is to:
 1. PRESERVE any user customizations and project-specific rules in the existing file
 2. UPDATE sections that are stale or incorrect based on the current codebase
@@ -87,6 +98,24 @@ IMPORTANT: Do NOT add testing procedures, git workflow, code review checklists, 
 /** Timeout for one-shot agent calls (scan, instructions). */
 const AGENT_TIMEOUT = 5 * 60 * 1000;
 
+function runPromptFile(projectDir: string, agentCmd: string, prompt: string, prefix: string) {
+  const promptFile = path.join(tmpdir(), `alpha-loop-${prefix}-${Date.now()}.txt`);
+  fs.writeFileSync(promptFile, prompt, 'utf-8');
+  try {
+    return exec(
+      `${agentCmd} < "${promptFile}" 2>/dev/null`,
+      { cwd: projectDir, timeout: AGENT_TIMEOUT },
+    );
+  } finally {
+    try { fs.unlinkSync(promptFile); } catch { /* cleanup best-effort */ }
+  }
+}
+
+function logInvalidOutput(kind: string, reason: string | undefined, stdout: string): void {
+  log.warn(`${kind} output rejected: ${reason ?? 'invalid markdown structure'}`);
+  log.warn(`Agent stdout excerpt: ${excerptForLog(stdout)}`);
+}
+
 export function scanCommand(): void {
   const projectDir = process.cwd();
   const contextDir = path.join(projectDir, '.alpha-loop');
@@ -99,19 +128,19 @@ export function scanCommand(): void {
   log.step('Scanning codebase for project context...');
 
   const safeModel = assertSafeShellArg(config.model, 'model');
-  const agentCmd = buildOneShotCommand(config.agent, safeModel);
-  const result = exec(
-    `echo ${JSON.stringify(SCAN_PROMPT)} | ${agentCmd} 2>/dev/null`,
-    { cwd: projectDir, timeout: AGENT_TIMEOUT },
-  );
+  const agentCmd = buildOneShotCommand(config.agent, safeModel, { textOnly: true });
+  const result = runPromptFile(projectDir, agentCmd, SCAN_PROMPT, 'scan');
 
-  if (result.exitCode === 0 && result.stdout) {
-    fs.writeFileSync(contextFile, result.stdout + '\n');
+  const contextOutput = result.stdout.trim();
+  const contextValidation = validateProjectContextMarkdown(contextOutput);
+  if (contextValidation.valid) {
+    fs.writeFileSync(contextFile, contextOutput + '\n');
+    if (result.exitCode !== 0) {
+      log.warn('Agent exited with errors but produced valid project context output');
+    }
     log.success(`Project context saved to ${contextFile}`);
-  } else if (result.stdout) {
-    fs.writeFileSync(contextFile, result.stdout + '\n');
-    log.warn('Agent exited with errors but produced output');
-    log.success(`Project context saved to ${contextFile}`);
+  } else if (contextOutput) {
+    logInvalidOutput('Project context', contextValidation.reason, result.stdout);
   } else {
     log.error(`Project context generation failed: ${result.stderr || 'empty output'}`);
   }
@@ -133,35 +162,29 @@ export function generateInstructions(projectDir: string, agent: 'claude' | 'code
     ? fs.readFileSync(instructionsFile, 'utf-8')
     : null;
 
-  const agentCmd = buildOneShotCommand(agent, model);
+  const agentCmd = buildOneShotCommand(agent, model, { textOnly: true });
 
   if (existing) {
     // Merge mode: preserve user customizations, update stale content
     log.step('Updating instructions file...');
 
-    // Back up existing before merge
-    fs.writeFileSync(instructionsFile + '.bak', existing, 'utf-8');
-
     const mergePrompt = INSTRUCTIONS_MERGE_PROMPT + existing +
       '\n\n## OUTPUT:\nProduce the updated instructions file. Output ONLY the markdown content, nothing else.';
 
-    // Write prompt to temp file to avoid shell injection from file content
-    const promptFile = path.join(tmpdir(), `alpha-loop-merge-${Date.now()}.txt`);
-    fs.writeFileSync(promptFile, mergePrompt, 'utf-8');
-    const mergeResult = exec(
-      `${agentCmd} < "${promptFile}" 2>/dev/null`,
-      { cwd: projectDir, timeout: AGENT_TIMEOUT },
-    );
-    try { fs.unlinkSync(promptFile); } catch { /* cleanup best-effort */ }
+    const mergeResult = runPromptFile(projectDir, agentCmd, mergePrompt, 'merge');
+    const output = mergeResult.stdout.trim();
+    const validation = validateInstructionsMarkdown(mergeResult.stdout);
 
-    if (mergeResult.exitCode === 0 && mergeResult.stdout.trim()) {
-      let output = mergeResult.stdout.trim();
-      // Ensure marker is present
-      if (!output.startsWith('<!-- managed by alpha-loop -->')) {
-        output = '<!-- managed by alpha-loop -->\n' + output;
-      }
+    if (validation.valid) {
+      fs.writeFileSync(instructionsFile + '.bak', existing, 'utf-8');
       fs.writeFileSync(instructionsFile, output + '\n');
+      if (mergeResult.exitCode !== 0) {
+        log.warn('Agent exited with errors but produced valid instructions output');
+      }
       log.success('Instructions file updated (backup at instructions.md.bak)');
+    } else if (output) {
+      logInvalidOutput('Instructions merge', validation.reason, mergeResult.stdout);
+      log.warn('Instructions merge failed validation, keeping existing file');
     } else {
       log.warn('Instructions merge failed, keeping existing file');
     }
@@ -169,28 +192,19 @@ export function generateInstructions(projectDir: string, agent: 'claude' | 'code
     // Fresh generation
     log.step('Generating baseline instructions file...');
 
-    const genPromptFile = path.join(tmpdir(), `alpha-loop-gen-${Date.now()}.txt`);
-    fs.writeFileSync(genPromptFile, INSTRUCTIONS_PROMPT, 'utf-8');
-    const genResult = exec(
-      `${agentCmd} < "${genPromptFile}" 2>/dev/null`,
-      { cwd: projectDir, timeout: AGENT_TIMEOUT },
-    );
-    try { fs.unlinkSync(genPromptFile); } catch { /* cleanup best-effort */ }
+    const genResult = runPromptFile(projectDir, agentCmd, INSTRUCTIONS_PROMPT, 'gen');
+    const output = genResult.stdout.trim();
+    const validation = validateInstructionsMarkdown(genResult.stdout);
 
-    if (genResult.exitCode === 0 && genResult.stdout.trim()) {
-      let output = genResult.stdout.trim();
-      if (!output.startsWith('<!-- managed by alpha-loop -->')) {
-        output = '<!-- managed by alpha-loop -->\n' + output;
-      }
+    if (validation.valid) {
       fs.writeFileSync(instructionsFile, output + '\n');
+      if (genResult.exitCode !== 0) {
+        log.warn('Agent exited with errors but produced valid instructions output');
+      }
       log.success(`Instructions file generated: ${instructionsFile}`);
-    } else if (genResult.stdout?.trim()) {
-      let output = genResult.stdout.trim();
-      if (!output.startsWith('<!-- managed by alpha-loop -->')) {
-        output = '<!-- managed by alpha-loop -->\n' + output;
-      }
-      fs.writeFileSync(instructionsFile, output + '\n');
-      log.warn('Claude exited with errors but produced instructions output');
+    } else if (output) {
+      logInvalidOutput('Instructions generation', validation.reason, genResult.stdout);
+      log.warn('Instructions generation failed validation — will retry on next scan');
     } else {
       log.warn('Instructions generation failed — will retry on next scan');
     }

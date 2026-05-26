@@ -184,6 +184,16 @@ describe('buildOneShotCommand', () => {
     expect(cmd).toBe('claude -p --dangerously-skip-permissions --output-format text');
   });
 
+  test('builds claude text-only command without write permissions', () => {
+    const cmd = buildOneShotCommand('claude', 'opus', { textOnly: true });
+    expect(cmd).toBe('claude -p --model opus --allowedTools "" --output-format text');
+  });
+
+  test('builds lmstudio text-only command without write permissions', () => {
+    const cmd = buildOneShotCommand('lmstudio', 'local-model', { textOnly: true });
+    expect(cmd).toBe('claude -p --model local-model --allowedTools "" --output-format text');
+  });
+
   test('builds codex command with model', () => {
     const cmd = buildOneShotCommand('codex', 'gpt-5.4');
     expect(cmd).toBe('codex exec --model gpt-5.4 --full-auto');
