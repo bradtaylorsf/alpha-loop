@@ -43,6 +43,14 @@ export type SessionLearningRepairIssue = {
   retries?: number;
 };
 
+export type SessionSummaryResult = {
+  issueNum: number;
+  title: string;
+  status: string;
+  duration: number;
+  recoveryMode?: string;
+};
+
 /** Expected sections in learning output. */
 const LEARNING_SECTIONS = [
   '## What Worked',
@@ -654,7 +662,7 @@ export function getLearningContext(learningsDir: string): string {
  */
 export async function generateSessionSummary(options: {
   sessionName: string;
-  results: Array<{ issueNum: number; title: string; status: string; duration: number }>;
+  results: SessionSummaryResult[];
   learningsDir: string;
   config: Config;
 }): Promise<string | null> {
@@ -677,14 +685,38 @@ export async function generateSessionSummary(options: {
 
   if (learningContents.length === 0) return null;
 
-  const successCount = results.filter((r) => r.status === 'success').length;
-  const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
+  const recoveredResults = results.filter((r) => r.recoveryMode !== undefined);
+  const naturalResults = results.filter((r) => r.recoveryMode === undefined);
+  const metricResults = recoveredResults.length > 0 ? naturalResults : results;
+  const successCount = metricResults.filter((r) => r.status === 'success').length;
+  const failureCount = metricResults.filter((r) => r.status !== 'success').length;
+  const totalDuration = metricResults.reduce((sum, r) => sum + r.duration, 0);
+  const processedSummary = recoveredResults.length > 0
+    ? `${results.length} (${successCount} succeeded, ${failureCount} failed, ${recoveredResults.length} recovered)`
+    : `${results.length} (${successCount} succeeded, ${results.length - successCount} failed)`;
+  const successRate = metricResults.length > 0
+    ? `${Math.round((successCount / metricResults.length) * 100)}%`
+    : 'N/A';
+  const avgDuration = metricResults.length > 0
+    ? `${Math.round(totalDuration / metricResults.length)}s`
+    : 'N/A';
+  const recoveryDetails = recoveredResults.length > 0
+    ? `\n## Recovery Details
+
+Recovered issues are excluded from failure counts and success-rate calculations because resume creates synthetic results after recovering stranded work.
+- Recovered issues: ${recoveredResults.map((r) => `#${r.issueNum} ${r.title} (${r.recoveryMode})`).join(', ')}
+`
+    : '';
+  const recoveredMetricRow = recoveredResults.length > 0
+    ? `| Recovered issues | ${recoveredResults.map((r) => `#${r.issueNum} (${r.recoveryMode})`).join(', ')} |\n`
+    : '';
 
   const prompt = `Analyze these learnings from a development session and produce a concise session summary with actionable recommendations.
 
 ## Session: ${sessionName}
-- Issues processed: ${results.length} (${successCount} succeeded, ${results.length - successCount} failed)
+- Issues processed: ${processedSummary}
 - Total duration: ${Math.round(totalDuration / 60)} minutes
+${recoveryDetails}
 
 ## Individual Learnings
 
@@ -712,8 +744,8 @@ Output ONLY this markdown structure:
 | Metric | Value |
 |--------|-------|
 | Issues processed | ${results.length} |
-| Success rate | ${Math.round((successCount / results.length) * 100)}% |
-| Avg duration | ${Math.round(totalDuration / results.length)}s |
+${recoveredMetricRow}| Success rate | ${successRate} |
+| Avg duration | ${avgDuration} |
 | Total duration | ${Math.round(totalDuration / 60)} min |`;
 
   const agentResult = await spawnAgent({
