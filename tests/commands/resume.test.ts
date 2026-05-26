@@ -255,6 +255,7 @@ describe('resumeCommand', () => {
     writeFileSync(join(sessionDir, 'logs', 'issue-269-review.log'), 'review agent hit max turns');
 
     let sessionPrBody = '';
+    let sessionPrBodyFile: string | undefined;
     mockLoadConfig.mockReturnValue(baseConfig());
     mockExec.mockImplementation((cmd: string) => {
       if (cmd === 'git branch --list "agent/issue-*"') return ok('  agent/issue-269\n');
@@ -284,7 +285,10 @@ describe('resumeCommand', () => {
       }
       if (cmd.startsWith('gh pr edit 999 --repo "owner/repo" --body-file ')) {
         const bodyFile = cmd.match(/--body-file "([^"]+)"/)?.[1];
-        if (bodyFile) sessionPrBody = readFileSync(bodyFile, 'utf-8');
+        if (bodyFile) {
+          sessionPrBodyFile = bodyFile;
+          sessionPrBody = readFileSync(bodyFile, 'utf-8');
+        }
         return ok('');
       }
       if (cmd.startsWith('gh pr edit 999 --repo "owner/repo" --title ')) return ok('');
@@ -341,6 +345,13 @@ describe('resumeCommand', () => {
       undefined,
       true,
     );
+    expect(mockGhExec).toHaveBeenCalledWith(
+      expect.stringMatching(/^gh pr edit 999 --repo "owner\/repo" --body-file ".+"/),
+      undefined,
+      true,
+    );
+    expect(sessionPrBodyFile).toBeDefined();
+    expect(existsSync(sessionPrBodyFile!)).toBe(false);
     expect(sessionPrBody).toContain('0 succeeded, 0 failed, 1 recovered');
     expect(sessionPrBody).toContain('Resume Caveat');
     expect(sessionPrBody).toContain('### Recovered Issues');
