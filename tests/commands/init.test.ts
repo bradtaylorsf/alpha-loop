@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, mkdirSync, cpSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
@@ -74,6 +74,10 @@ jest.mock('node:readline', () => ({
 }));
 
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
+const { findDistributionTemplatesDir: mockedFindDistributionTemplatesDir } = jest.requireMock('../../src/lib/templates') as {
+  findDistributionTemplatesDir: jest.Mock;
+};
+const { exec: mockExec } = jest.requireMock('../../src/lib/shell') as { exec: jest.Mock };
 
 // Mock process.exit to prevent Jest from actually exiting
 const mockExit = jest.spyOn(process, 'exit').mockImplementation(((code?: number) => {
@@ -92,6 +96,9 @@ beforeEach(() => {
   mockedExecSync.mockImplementation(() => {
     throw new Error('not a git repo');
   });
+  mockedFindDistributionTemplatesDir.mockReturnValue(null);
+  mockExec.mockReset();
+  mockExec.mockReturnValue({ exitCode: 1, stdout: '', stderr: '' });
   mockExit.mockClear();
 });
 
@@ -100,7 +107,21 @@ afterEach(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-const { exec: mockExec } = jest.requireMock('../../src/lib/shell') as { exec: jest.Mock };
+function mockRecursiveCopyExec(): void {
+  mockExec.mockImplementation((cmd: string) => {
+    const match = cmd.match(/^cp -R "(.+)\/"\* "(.+)\/" 2>\/dev\/null \|\| true$/);
+    if (!match) {
+      return { exitCode: 1, stdout: '', stderr: '' };
+    }
+
+    const [, src, dest] = match;
+    mkdirSync(dest, { recursive: true });
+    for (const entry of readdirSync(src)) {
+      cpSync(join(src, entry), join(dest, entry), { recursive: true });
+    }
+    return { exitCode: 0, stdout: '', stderr: '' };
+  });
+}
 
 describe('ensureLabels', () => {
   it('skips creation when all labels exist', async () => {
@@ -249,6 +270,49 @@ describe('init command', () => {
 
     expect(readFileSync(epicTemplatePath, 'utf-8')).toBe(customEpicTemplate);
     expect(existsSync(join(templateDir, 'agent-ready.yml'))).toBe(true);
+  });
+
+  it('seeds alpha-loop-runner from distribution templates', async () => {
+    const distTemplatesDir = join(tempDir, 'dist-templates');
+    const distSkillDir = join(distTemplatesDir, 'skills', 'alpha-loop-runner');
+    const skillContent = [
+      '---',
+      'name: alpha-loop-runner',
+      'auto_load: true',
+      'priority: high',
+      '---',
+      '# Alpha Loop Runner',
+      '',
+    ].join('\n');
+    mkdirSync(distSkillDir, { recursive: true });
+    writeFileSync(join(distSkillDir, 'SKILL.md'), skillContent);
+    mockedFindDistributionTemplatesDir.mockReturnValue(distTemplatesDir);
+    mockRecursiveCopyExec();
+
+    await initCommand({ yes: true });
+
+    const installedSkill = readFileSync(
+      join(tempDir, '.alpha-loop', 'templates', 'skills', 'alpha-loop-runner', 'SKILL.md'),
+      'utf-8',
+    );
+    expect(installedSkill).toBe(skillContent);
+  });
+
+  it('does not overwrite a customized alpha-loop-runner skill during init', async () => {
+    const distTemplatesDir = join(tempDir, 'dist-templates');
+    const distSkillDir = join(distTemplatesDir, 'skills', 'alpha-loop-runner');
+    const projectSkillDir = join(tempDir, '.alpha-loop', 'templates', 'skills', 'alpha-loop-runner');
+    const customContent = '# Custom Runner\n';
+    mkdirSync(distSkillDir, { recursive: true });
+    mkdirSync(projectSkillDir, { recursive: true });
+    writeFileSync(join(distSkillDir, 'SKILL.md'), '# Distribution Runner\n');
+    writeFileSync(join(projectSkillDir, 'SKILL.md'), customContent);
+    mockedFindDistributionTemplatesDir.mockReturnValue(distTemplatesDir);
+    mockRecursiveCopyExec();
+
+    await initCommand({ yes: true });
+
+    expect(readFileSync(join(projectSkillDir, 'SKILL.md'), 'utf-8')).toBe(customContent);
   });
 });
 
