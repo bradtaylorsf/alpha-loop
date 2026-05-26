@@ -164,7 +164,7 @@ alpha-loop eval run --matrix --profiles "all-frontier,hybrid-v1" --out eval/repo
 alpha-loop eval run --matrix --tags routing-regression --execute  # real runs (see CASE_FORMAT.md)
 ```
 
-Eval cases live in `.alpha-loop/evals/` and scores are appended to `scores.jsonl` (Git-friendly, append-only). The composite score formula is pass-rate primary with lightweight penalties for retries and duration. Real API costs (tokens, USD) are tracked per case from agent output and used for the Pareto frontier.
+Eval cases live in `.alpha-loop/evals/` and scores are appended to `scores.jsonl` (Git-friendly, append-only). The composite score formula is pass-rate primary with lightweight penalties for retries and duration. Recovered session results are flagged and excluded from aggregate scoring. Real API costs (tokens, USD) are tracked per case from agent output and used for the Pareto frontier.
 
 Step-level evals test individual pipeline stages (plan, implement, test, test-fix, review, learn, skill) and run in seconds using LLM-judge and keyword checks:
 
@@ -257,11 +257,11 @@ If the loop hangs or crashes mid-session, work can be stranded on local branches
 3. Runs code review
 4. Creates WIP PRs, marks issues `In Review`, and updates the session PR with a verification caveat
 
-Recovered PRs are not marked complete. `resume` does not rerun the project test suite or final smoke tests, so verify recovered work before merging.
+Recovered PRs are written with `recoveryMode: "resume"` and are not marked complete. `resume` does not rerun the project test suite or final smoke tests, so verify recovered work before merging.
 
 Use `--issue <N>` to resume a specific issue.
 
-`alpha-loop history <session>` also shows `crash-<N>.json` markers for issues that crashed after writing commits but before a result file was saved.
+`alpha-loop history <session>` shows both unrecovered `crash-<N>.json` markers and recovered result files separately from normal successes and failures.
 
 ### Screenshots
 

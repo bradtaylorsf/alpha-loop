@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { log } from './logger.js';
 import { computeCompositeScore } from './score.js';
 import type { CaseResult } from './score.js';
+import type { PipelineRecoveryMode } from './pipeline.js';
 
 /** Known trace file names within an issue trace directory (backward compat). */
 export type TraceFile =
@@ -36,6 +37,7 @@ export type TraceMetadata = {
   issueNum: number;
   title: string;
   status: 'success' | 'failure';
+  recoveryMode?: PipelineRecoveryMode;
   failureReason?: 'transient' | 'permanent';
   duration: number;
   retries: number;
@@ -82,6 +84,8 @@ export type RunManifest = {
 /** Per-issue score in scores.json. */
 export type IssueScore = {
   status: 'success' | 'failure';
+  recovery_mode?: PipelineRecoveryMode;
+  scored?: boolean;
   tests_passed: boolean;
   verify_passed: boolean;
   retries: number;
@@ -99,6 +103,8 @@ export type ScoresJson = {
     avg_retries: number;
     avg_duration: number;
     total_issues: number;
+    scored_issues?: number;
+    recovered_issues?: number;
     issues_passed: number;
   };
 };
@@ -129,6 +135,7 @@ export type CostsJson = {
 export type PipelineResultForScores = {
   issueNum: number;
   status: 'success' | 'failure';
+  recoveryMode?: PipelineRecoveryMode;
   testsPassing: boolean;
   verifyPassing: boolean;
   verifySkipped: boolean;
@@ -269,8 +276,11 @@ export function computeScores(results: PipelineResultForScores[]): ScoresJson {
   const issues: Record<string, IssueScore> = {};
 
   for (const r of results) {
+    const recovered = r.recoveryMode !== undefined;
     issues[String(r.issueNum)] = {
       status: r.status,
+      recovery_mode: r.recoveryMode,
+      scored: !recovered,
       tests_passed: r.testsPassing,
       verify_passed: r.verifyPassing,
       retries: r.retries,
@@ -280,14 +290,16 @@ export function computeScores(results: PipelineResultForScores[]): ScoresJson {
     };
   }
 
-  const total = results.length;
-  const passed = results.filter((r) => r.status === 'success').length;
+  const scoredResults = results.filter((r) => r.recoveryMode === undefined);
+  const total = scoredResults.length;
+  const recovered = results.length - total;
+  const passed = scoredResults.filter((r) => r.status === 'success').length;
   const passRate = total > 0 ? passed / total : 0;
-  const avgRetries = total > 0 ? results.reduce((sum, r) => sum + r.retries, 0) / total : 0;
-  const avgDuration = total > 0 ? results.reduce((sum, r) => sum + r.duration, 0) / total : 0;
+  const avgRetries = total > 0 ? scoredResults.reduce((sum, r) => sum + r.retries, 0) / total : 0;
+  const avgDuration = total > 0 ? scoredResults.reduce((sum, r) => sum + r.duration, 0) / total : 0;
 
   // Use the canonical composite score formula from score.ts
-  const caseResults: CaseResult[] = results.map((r) => ({
+  const caseResults: CaseResult[] = scoredResults.map((r) => ({
     caseId: String(r.issueNum),
     passed: r.status === 'success',
     partialCredit: r.status === 'success' ? 1 : 0,
@@ -303,7 +315,9 @@ export function computeScores(results: PipelineResultForScores[]): ScoresJson {
       pass_rate: Math.round(passRate * 1000) / 1000,
       avg_retries: Math.round(avgRetries * 10) / 10,
       avg_duration: Math.round(avgDuration),
-      total_issues: total,
+      total_issues: results.length,
+      scored_issues: total,
+      recovered_issues: recovered,
       issues_passed: passed,
     },
   };

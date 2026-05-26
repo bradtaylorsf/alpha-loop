@@ -277,6 +277,46 @@ describe('computeScores', () => {
     // score.ts formula: (1/1)*100 - 0.1*0 - 0.01*100 = 99
     expect(scores.composite_score).toBe(99);
   });
+
+  it('flags recovered results and excludes them from aggregate scoring', () => {
+    const results: PipelineResultForScores[] = [
+      {
+        issueNum: 1,
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        retries: 0,
+        duration: 100,
+        filesChanged: 1,
+        stepsCompleted: ['plan', 'implement', 'test', 'review', 'pr'],
+      },
+      {
+        issueNum: 2,
+        status: 'failure',
+        recoveryMode: 'resume',
+        testsPassing: false,
+        verifyPassing: false,
+        verifySkipped: true,
+        retries: 0,
+        duration: 0,
+        filesChanged: 2,
+        stepsCompleted: [],
+      },
+    ];
+
+    const scores = computeScores(results);
+    expect(scores.aggregate.total_issues).toBe(2);
+    expect(scores.aggregate.scored_issues).toBe(1);
+    expect(scores.aggregate.recovered_issues).toBe(1);
+    expect(scores.aggregate.issues_passed).toBe(1);
+    expect(scores.aggregate.pass_rate).toBe(1);
+    expect(scores.aggregate.avg_duration).toBe(100);
+    expect(scores.issues['2']).toEqual(expect.objectContaining({
+      recovery_mode: 'resume',
+      scored: false,
+    }));
+  });
 });
 
 describe('computeCosts', () => {

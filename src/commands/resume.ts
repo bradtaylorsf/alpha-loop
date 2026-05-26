@@ -22,6 +22,7 @@ import {
   createPR,
   updateProjectStatus,
 } from '../lib/github.js';
+import { isRecoveredResult } from '../lib/pipeline.js';
 import type { PipelineResult } from '../lib/pipeline.js';
 
 export type ResumeOptions = {
@@ -485,12 +486,8 @@ function saveResumedResult(
   clearCrashMarker(sessionDir, result.issueNum);
 }
 
-function isRecoveredUnverified(result: PipelineResult): boolean {
-  return Boolean(result.prUrl) && result.verifySkipped && !result.verifyPassing;
-}
-
 function formatSessionIssueStatus(result: PipelineResult): string {
-  if (isRecoveredUnverified(result)) return 'RECOVERED - VERIFY SKIPPED';
+  if (isRecoveredResult(result)) return `RECOVERED BY ${result.recoveryMode?.toUpperCase()}`;
   return result.status === 'success' ? 'SUCCESS' : 'FAILURE';
 }
 
@@ -541,28 +538,40 @@ function updateSessionPR(
 
   if (results.length === 0) return;
 
-  const successCount = results.filter((r) => r.status === 'success').length;
-  const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
-  const recoveredUnverifiedCount = results.filter(isRecoveredUnverified).length;
-  const resumeCaveat = recoveredUnverifiedCount > 0
+  const recovered = results.filter(isRecoveredResult);
+  const naturalResults = results.filter((r) => !isRecoveredResult(r));
+  const successes = naturalResults.filter((r) => r.status === 'success');
+  const failures = naturalResults.filter((r) => r.status === 'failure');
+  const totalDuration = naturalResults.reduce((sum, r) => sum + r.duration, 0);
+  const resumeCaveat = recovered.length > 0
     ? `
 ### Resume Caveat
 
-${recoveredUnverifiedCount} recovered PR(s) were not counted as succeeded because \`alpha-loop resume\` does not rerun tests or final verification smoke tests.
+${recovered.length} recovered PR(s) were not counted as succeeded or failed because \`alpha-loop resume\` does not rerun tests or final verification smoke tests.
 `
     : '';
+  const titleStatus = naturalResults.length > 0
+    ? `${successes.length}/${naturalResults.length} succeeded`
+    : `${successes.length} succeeded`;
+  const titleRecovery = recovered.length > 0 ? `, ${recovered.length} recovered` : '';
 
-  const title = `Session: ${sessionName} — ${successCount}/${results.length} succeeded`;
+  const title = `Session: ${sessionName} — ${titleStatus}${titleRecovery}`;
   const body = `## Session Summary
 
 **Branch:** ${sessionBranch}
-**Issues processed:** ${results.length} (${successCount} succeeded, ${results.length - successCount} failed)
+**Issues processed:** ${results.length} (${successes.length} succeeded, ${failures.length} failed, ${recovered.length} recovered)
 **Total duration:** ${Math.round(totalDuration / 60)} minutes
 **Updated:** ${new Date().toISOString()}
 ${resumeCaveat}
 
 ### Issues
-${results.map((r) => `- #${r.issueNum}: ${r.title} — ${formatSessionIssueStatus(r)}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
+${naturalResults.length > 0
+    ? naturalResults.map((r) => `- #${r.issueNum}: ${r.title} — ${formatSessionIssueStatus(r)}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')
+    : 'No naturally completed issues yet.'}
+${recovered.length > 0 ? `
+### Recovered Issues
+${recovered.map((r) => `- #${r.issueNum}: ${r.title} — ${formatSessionIssueStatus(r)}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`).join('\n')}
+` : ''}
 
 ---
 This PR collects all changes from this session for final review before merging to ${baseBranch}.
@@ -644,6 +653,7 @@ export async function resumeCommand(options: ResumeOptions): Promise<void> {
         issueNum: r.issueNum,
         title: r.title,
         status: 'failure',
+        recoveryMode: 'resume',
         failureReason: 'transient',
         prUrl: r.prUrl,
         testsPassing: false,

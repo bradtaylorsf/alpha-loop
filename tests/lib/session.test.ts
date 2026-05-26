@@ -631,4 +631,34 @@ describe('finalizeSession', () => {
     const title = mockCreatePR.mock.calls[0][0].title;
     expect(title).toContain('1/1 succeeded');
   });
+
+  test('shows recovered issues separately from natural successes in final session PR body', async () => {
+    mockExistsSync.mockReturnValue(true);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('diff --cached --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config);
+    session.results.push(
+      { issueNum: 1, title: 'Success issue', status: 'success', prUrl: 'https://github.com/owner/repo/pull/1', testsPassing: true, verifyPassing: true, verifySkipped: false, duration: 60, filesChanged: 3 },
+      { issueNum: 2, title: 'Recovered issue', status: 'failure', recoveryMode: 'resume', failureReason: 'transient', prUrl: 'https://github.com/owner/repo/pull/2', testsPassing: false, verifyPassing: false, verifySkipped: true, duration: 0, filesChanged: 2 },
+    );
+
+    await finalizeSession(session, config);
+
+    const finalPrCall = mockCreatePR.mock.calls.at(-1)![0];
+    const title = finalPrCall.title;
+    const body = finalPrCall.body;
+    expect(title).toContain('1/1 succeeded, 1 recovered');
+    expect(body).toContain('1 succeeded, 0 failed, 1 recovered');
+    expect(body).toContain('### Recovered Issues');
+    expect(body).toContain('#2: Recovered issue — RECOVERED BY RESUME');
+    expect(body).toContain('Closes #1');
+    expect(body).not.toContain('Closes #2');
+  });
 });

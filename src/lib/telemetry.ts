@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { estimateCost } from './config.js';
 import type { Config, RoutingEndpointType } from './config.js';
 import type { AgentResult } from './agent.js';
+import type { PipelineRecoveryMode } from './pipeline.js';
 
 /** One per-stage telemetry record. Written once per agent invocation. */
 export type StageTelemetry = {
@@ -52,6 +53,7 @@ export type SessionManifestLite = {
   results?: Array<{
     issueNum: number;
     status: 'success' | 'failure';
+    recoveryMode?: PipelineRecoveryMode;
     filesChanged?: number;
     prUrl?: string;
   }>;
@@ -241,7 +243,7 @@ function median(values: number[]): number {
  * - `pipeline_success_rate`: fraction of parent sessions that shipped a
  *   successful issue while this (stage, model) cell was active.
  * - `cost_per_issue_shipped`: total cost across this cell divided by the
- *   number of shipped (status=success, filesChanged>0) issues in the sessions
+ *   number of shipped (status=success, filesChanged>0, not recovered) issues in the sessions
  *   where this cell ran.
  * - `median_wall_time_s`: median wall_time_s across invocations.
  * - `tool_error_rate`: sum(tool_errors) / sum(tool_calls || runs).
@@ -282,10 +284,10 @@ export function aggregateRouting(
   for (const { session, entries } of items) {
     const sessionName = deriveSessionName(session);
     const manifest = manifestByName.get(sessionName) ?? manifestByName.get(session);
-    // Count shipped issues per session (success + filesChanged > 0).
+    // Count shipped issues per session (success + filesChanged > 0, excluding recovered synthetic results).
     if (manifest && !sessionShipped.has(session)) {
       const shipped = (manifest.results ?? []).filter(
-        (r) => r.status === 'success' && (r.filesChanged ?? 0) > 0,
+        (r) => r.status === 'success' && (r.filesChanged ?? 0) > 0 && r.recoveryMode === undefined,
       ).length;
       sessionShipped.set(session, shipped);
     }
