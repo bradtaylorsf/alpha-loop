@@ -7,6 +7,12 @@ on:
       - '*.md'
       - 'docs/**'
       - '.github/ISSUE_TEMPLATE/**'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why are you manually triggering a release? (e.g. "validate post-#271 commit-back logic")'
+        required: false
+        default: 'manual release'
 
 permissions:
   contents: write
