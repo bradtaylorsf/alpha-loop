@@ -46,8 +46,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Determine version from git tags (source of truth) + commit messages
-      # This avoids needing to commit version bumps back to master
+      # Determine version from git tags (source of truth) + commit messages.
+      # The stamped package.json is committed back to master after publish so
+      # `--version` on a fresh source clone matches what's published on npm.
       - name: Determine version
         id: version
         run: |
@@ -139,3 +140,27 @@ jobs:
             --title "v$NEW_VERSION" \
             --notes "$NOTES" \
             --latest
+
+      # Commit the stamped package.json back to master so source-of-truth
+      # tracks the published npm version. Without this, a fresh `git clone`
+      # + `node dist/cli.js --version` reports the stale value left over
+      # from before the last release.
+      #
+      # The `[skip ci]` marker prevents this commit from re-triggering the
+      # release workflow (infinite loop).
+      - name: Commit version bump back to master
+        if: steps.version.outputs.skip != 'true'
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add package.json
+          if git diff --cached --quiet; then
+            echo "package.json already at v$NEW_VERSION on master — nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "chore(release): bump version to v$NEW_VERSION [skip ci]"
+          git push origin HEAD:master
