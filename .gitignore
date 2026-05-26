@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .worktrees/
+plugins/
 sessions/
 .alpha-loop/sessions/
 .alpha-loop/traces/
