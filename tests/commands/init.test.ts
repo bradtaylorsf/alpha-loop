@@ -298,6 +298,32 @@ describe('init command', () => {
     expect(installedSkill).toBe(skillContent);
   });
 
+  it('seeds alpha-loop-setup from distribution templates', async () => {
+    const distTemplatesDir = join(tempDir, 'dist-templates');
+    const distSkillDir = join(distTemplatesDir, 'skills', 'alpha-loop-setup');
+    const skillContent = [
+      '---',
+      'name: alpha-loop-setup',
+      'auto_load: false',
+      'priority: medium',
+      '---',
+      '# Alpha Loop Setup',
+      '',
+    ].join('\n');
+    mkdirSync(distSkillDir, { recursive: true });
+    writeFileSync(join(distSkillDir, 'SKILL.md'), skillContent);
+    mockedFindDistributionTemplatesDir.mockReturnValue(distTemplatesDir);
+    mockRecursiveCopyExec();
+
+    await initCommand({ yes: true });
+
+    const installedSkill = readFileSync(
+      join(tempDir, '.alpha-loop', 'templates', 'skills', 'alpha-loop-setup', 'SKILL.md'),
+      'utf-8',
+    );
+    expect(installedSkill).toBe(skillContent);
+  });
+
   it('does not overwrite a customized alpha-loop-runner skill during init', async () => {
     const distTemplatesDir = join(tempDir, 'dist-templates');
     const distSkillDir = join(distTemplatesDir, 'skills', 'alpha-loop-runner');
@@ -306,6 +332,23 @@ describe('init command', () => {
     mkdirSync(distSkillDir, { recursive: true });
     mkdirSync(projectSkillDir, { recursive: true });
     writeFileSync(join(distSkillDir, 'SKILL.md'), '# Distribution Runner\n');
+    writeFileSync(join(projectSkillDir, 'SKILL.md'), customContent);
+    mockedFindDistributionTemplatesDir.mockReturnValue(distTemplatesDir);
+    mockRecursiveCopyExec();
+
+    await initCommand({ yes: true });
+
+    expect(readFileSync(join(projectSkillDir, 'SKILL.md'), 'utf-8')).toBe(customContent);
+  });
+
+  it('does not overwrite a customized alpha-loop-setup skill during init', async () => {
+    const distTemplatesDir = join(tempDir, 'dist-templates');
+    const distSkillDir = join(distTemplatesDir, 'skills', 'alpha-loop-setup');
+    const projectSkillDir = join(tempDir, '.alpha-loop', 'templates', 'skills', 'alpha-loop-setup');
+    const customContent = '# Custom Setup\n';
+    mkdirSync(distSkillDir, { recursive: true });
+    mkdirSync(projectSkillDir, { recursive: true });
+    writeFileSync(join(distSkillDir, 'SKILL.md'), '# Distribution Setup\n');
     writeFileSync(join(projectSkillDir, 'SKILL.md'), customContent);
     mockedFindDistributionTemplatesDir.mockReturnValue(distTemplatesDir);
     mockRecursiveCopyExec();

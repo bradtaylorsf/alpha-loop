@@ -55,6 +55,30 @@ describe('syncAgentAssets', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test('syncs alpha-loop-setup skill into Claude and Codex harness dirs', () => {
+    const dir = makeTmpDir();
+    const templatesBase = join(dir, '.alpha-loop', 'templates');
+    const skillContent = [
+      '---',
+      'name: alpha-loop-setup',
+      'auto_load: false',
+      'priority: medium',
+      '---',
+      '# Alpha Loop Setup',
+      '',
+    ].join('\n');
+    mkdirSync(join(templatesBase, 'skills', 'alpha-loop-setup'), { recursive: true });
+    writeFileSync(join(templatesBase, 'skills', 'alpha-loop-setup', 'SKILL.md'), skillContent);
+
+    const result = syncAgentAssets(['claude-code', 'codex'], { projectDir: dir });
+
+    expect(result.synced).toBe(true);
+    expect(readFileSync(join(dir, '.claude', 'skills', 'alpha-loop-setup', 'SKILL.md'), 'utf-8')).toBe(skillContent);
+    expect(readFileSync(join(dir, '.agents', 'skills', 'alpha-loop-setup', 'SKILL.md'), 'utf-8')).toBe(skillContent);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   test('syncs agents from templates to .claude/agents/', () => {
     const dir = makeTmpDir();
     const templatesBase = join(dir, '.alpha-loop', 'templates');
