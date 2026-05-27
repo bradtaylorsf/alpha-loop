@@ -21,7 +21,9 @@
     "test": "jest --runInBand",
     "test:unit": "jest --runInBand",
     "test:watch": "jest --watch",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm build",
+    "release": "node scripts/deploy.mjs",
+    "release:watch": "node scripts/release-watch.mjs"
   },
   "keywords": [
     "ai",
