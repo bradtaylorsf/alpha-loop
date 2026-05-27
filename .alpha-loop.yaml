@@ -11,7 +11,7 @@
 # === Project ================================================================
 # Identifies the GitHub repo + project board the loop reads from.
 repo: bradtaylorsf/alpha-loop
-project: 2           # GitHub Project number (from project URL: /projects/N)
+# project: 0         # GitHub Project number (from project URL: /projects/N). 0 or omitted = disabled.
 # milestone: ""      # Only process issues in this milestone (empty = all)
 
 # === Agent ==================================================================

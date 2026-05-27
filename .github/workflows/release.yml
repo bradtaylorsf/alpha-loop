@@ -10,14 +10,13 @@ on:
   workflow_dispatch:
     inputs:
       reason:
-        description: 'Why are you manually triggering a release? (e.g. "validate post-#271 commit-back logic")'
+        description: 'Why are you manually triggering a release? (e.g. "republish v2.0.5")'
         required: false
         default: 'manual release'
 
 permissions:
   contents: write
   id-token: write
-  pull-requests: write
 
 jobs:
   test:
@@ -53,160 +52,59 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # Determine version from git tags (source of truth) + commit messages.
-      # The stamped package.json is committed back to master after publish so
-      # `--version` on a fresh source clone matches what's published on npm.
-      #
-      # Loop guard: if the latest commit on master IS the auto-generated
-      # release-bump-back commit, skip this run entirely. Otherwise the
-      # bump-PR's own merge would trigger another release, which would
-      # generate another bump-PR, in a perpetual chain.
-      - name: Determine version
-        id: version
+      # Bump-in-PR model: the release PR ALREADY contains the version bump
+      # (created by `pnpm release` locally). CI just publishes whatever version
+      # is in package.json. If it matches the latest tag, this commit isn't a
+      # release — skip. No rewrites, no follow-up PR, no infinite-loop risk.
+      - name: Check for release
+        id: gate
         run: |
-          # Loop guard — skip when the latest commit is the bot's
-          # auto-bump merge. Match the squash-merged form too:
-          # "chore(release): bump version to v2.0.3 (#274)".
-          LATEST_MSG=$(git log -1 --format="%s")
-          if echo "$LATEST_MSG" | grep -qE '^chore\(release\): bump version to v[0-9]+\.[0-9]+\.[0-9]+( \(#[0-9]+\))?$'; then
-            echo "Latest commit is the bot's auto-bump — skipping this release to avoid an infinite loop."
-            echo "Subject: $LATEST_MSG"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Get latest tag — this is the source of truth, NOT package.json
+          PKG_VERSION=$(node scripts/read-package-version.mjs)
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -z "$LAST_TAG" ]; then
-            # First release — use package.json version
-            NEW_VERSION=$(node scripts/read-package-version.mjs)
-            echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          LAST_VERSION=${LAST_TAG#v}
 
-          CURRENT=${LAST_TAG#v}
-          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "package.json: v$PKG_VERSION"
+          echo "latest tag:   ${LAST_TAG:-(none)}"
 
-          COMMITS=$(git log "$LAST_TAG"..HEAD --oneline --format="%s")
-
-          # Skip if no new commits since last tag
-          if [ -z "$COMMITS" ]; then
+          if [ "$PKG_VERSION" = "$LAST_VERSION" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "→ Version unchanged from latest tag. Skipping release."
             exit 0
           fi
 
-          # Determine bump type from conventional commits
-          if echo "$COMMITS" | grep -qiE "BREAKING CHANGE|^.*!:"; then
-            BUMP="major"
-          elif echo "$COMMITS" | grep -qE "^feat"; then
-            BUMP="minor"
-          else
-            BUMP="patch"
-          fi
-
-          # Compute new version
-          NEW_VERSION=$(node -e "
-            const [major, minor, patch] = '$CURRENT'.split('.').map(Number);
-            const bump = '$BUMP';
-            if (bump === 'major') console.log((major+1)+'.0.0');
-            else if (bump === 'minor') console.log(major+'.'+(minor+1)+'.0');
-            else console.log(major+'.'+minor+'.'+(patch+1));
-          ")
-
-          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "Computed: $CURRENT + $BUMP = $NEW_VERSION"
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+          echo "→ Will publish v$PKG_VERSION"
 
-      # Stamp package metadata before building and publishing
-      - name: Stamp version
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          NEW_VERSION=${{ steps.version.outputs.new_version }}
-
-          node -e "
-            const pkg = require('./package.json');
-            pkg.version = '$NEW_VERSION';
-            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-
-          # Rebuild with correct version
-          pnpm build
+      - name: Build for publish
+        if: steps.gate.outputs.skip != 'true'
+        run: pnpm build
 
       - name: Publish to npm
-        if: steps.version.outputs.skip != 'true'
+        if: steps.gate.outputs.skip != 'true'
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create tag and release
-        if: steps.version.outputs.skip != 'true'
+        if: steps.gate.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          NEW_VERSION: ${{ steps.gate.outputs.version }}
         run: |
-          # Create and push tag (no commit to master needed)
           git tag "v$NEW_VERSION"
           git push origin "v$NEW_VERSION"
 
-          # Generate release notes from commits since last tag
-          LAST_TAG=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || echo "")
-          PREV_TAG=$(git describe --tags --abbrev=0 "$LAST_TAG^" 2>/dev/null || echo "")
+          # Release notes: commits since the previous tag (exclusive of the
+          # new tag itself, which doesn't exist as a ref point yet).
+          PREV_TAG=$(git describe --tags --abbrev=0 "v$NEW_VERSION^" 2>/dev/null || echo "")
           if [ -z "$PREV_TAG" ]; then
             NOTES=$(git log --oneline --format="- %s" | head -20)
           else
-            NOTES=$(git log "$PREV_TAG".."$LAST_TAG^" --oneline --format="- %s")
+            NOTES=$(git log "$PREV_TAG"..HEAD --oneline --format="- %s")
           fi
 
           gh release create "v$NEW_VERSION" \
             --title "v$NEW_VERSION" \
             --notes "$NOTES" \
             --latest
-
-      # Sync the stamped package.json back to master via PR. Master is
-      # protected by a repo rule that requires changes go through PRs,
-      # so a direct push from CI is rejected. Without this step, a
-      # fresh `git clone` + `node dist/cli.js --version` would report
-      # the stale value left over from before the last release.
-      #
-      # Flow: push a chore/release-bump-vX.Y.Z branch, open a PR,
-      # merge it. GitHub's recursive-trigger prevention means the
-      # GITHUB_TOKEN-merged push to master does NOT fire a new
-      # workflow run, so there is no infinite loop. continue-on-error
-      # keeps a hiccup here from failing the whole release once the
-      # npm publish + git tag have already succeeded.
-      - name: Sync version bump back to master via PR
-        if: steps.version.outputs.skip != 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          NEW_VERSION: ${{ steps.version.outputs.new_version }}
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add package.json
-          if git diff --cached --quiet; then
-            echo "package.json already at v$NEW_VERSION on master — nothing to sync."
-            exit 0
-          fi
-
-          BUMP_BRANCH="chore/release-bump-v$NEW_VERSION"
-          git checkout -b "$BUMP_BRANCH"
-          git commit -m "chore(release): bump version to v$NEW_VERSION"
-          git push -u origin "$BUMP_BRANCH"
-
-          gh pr create \
-            --base master \
-            --head "$BUMP_BRANCH" \
-            --title "chore(release): bump version to v$NEW_VERSION" \
-            --body "Auto-generated after publishing v$NEW_VERSION to npm. Syncs source-of-truth package.json with the released version so the CLI reports the correct version on fresh source clones."
-
-          # No --admin: master's ruleset only requires changes go through a
-          # PR; it does not require approvals or status checks, so the bot
-          # can merge directly. If the user later adds those requirements,
-          # the merge fails loudly and continue-on-error keeps the release
-          # green so a human can take over the sync manually.
-          gh pr merge "$BUMP_BRANCH" --squash --delete-branch
