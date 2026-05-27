@@ -181,7 +181,7 @@ export type Config = {
 const DEFAULTS: Config = {
   repo: '',
   repoOwner: '',
-  project: 2,
+  project: 0,
   agent: 'claude',
   model: '',
   reviewModel: '',
