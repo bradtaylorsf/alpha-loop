@@ -76,15 +76,18 @@ if (final.conclusion !== 'success') {
 
 console.log('\n✓ Release workflow completed successfully.\n');
 
-// Sync local state
+// Sync local state. Fetch tags explicitly — `git pull` does not pull new
+// tags by default, and the release tag is the source of truth we check
+// against below.
 if (PULL) {
-  console.log('Syncing local master...');
+  console.log('Syncing local master + tags...');
   const branch = sh('git rev-parse --abbrev-ref HEAD');
   if (branch === 'master') {
     shOk('git pull --ff-only origin master');
   } else {
-    console.log(`  (on ${branch}, not pulling — pass --no-pull to silence this)`);
+    console.log(`  (on ${branch}, not pulling branch — pass --no-pull to silence this)`);
   }
+  shOk('git fetch --tags origin');
 }
 
 // Verify versions
