@@ -435,6 +435,35 @@ describe('init command', () => {
     expect(installedSkill).toBe(skillContent);
   });
 
+  it('seeds context-rot with bundled reference files from distribution templates', async () => {
+    const distTemplatesDir = join(tempDir, 'dist-templates');
+    const distSkillDir = join(distTemplatesDir, 'skills', 'context-rot');
+    const referencesDir = join(distSkillDir, 'references');
+    const skillContent = [
+      '---',
+      'name: context-rot',
+      'description: Audit a codebase for context rot and create Alpha Loop-ready issues.',
+      'auto_load: false',
+      'priority: medium',
+      '---',
+      '# Context Rot Audit',
+      '',
+    ].join('\n');
+    mkdirSync(referencesDir, { recursive: true });
+    writeFileSync(join(distSkillDir, 'SKILL.md'), skillContent);
+    writeFileSync(join(referencesDir, 'github-issues.md'), '# GitHub Issues\n\n## Epic Template\n');
+    mockedFindDistributionTemplatesDir.mockReturnValue(distTemplatesDir);
+    mockRecursiveCopyExec();
+
+    await initCommand({ yes: true });
+
+    const installedSkillDir = join(tempDir, '.alpha-loop', 'templates', 'skills', 'context-rot');
+    const installedSkill = readFileSync(join(installedSkillDir, 'SKILL.md'), 'utf-8');
+    const installedReference = readFileSync(join(installedSkillDir, 'references', 'github-issues.md'), 'utf-8');
+    expect(installedSkill).toBe(skillContent);
+    expect(installedReference).toContain('## Epic Template');
+  });
+
   it('does not overwrite a customized alpha-loop-learning-review skill during init', async () => {
     const distTemplatesDir = join(tempDir, 'dist-templates');
     const distSkillDir = join(distTemplatesDir, 'skills', 'alpha-loop-learning-review');
