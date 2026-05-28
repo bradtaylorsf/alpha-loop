@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getIssueWithComments, type Issue } from './github.js';
+import { hasLabel } from './labels.js';
 
 export type BranchAncestryMode = 'stacked' | 'independent';
 
@@ -123,7 +124,7 @@ function normalizeIssueStateReason(value: string | null | undefined): string {
 }
 
 function hasEpicLabel(issue: Issue): boolean {
-  return issue.labels.some((label) => label.toLowerCase() === 'epic');
+  return hasLabel(issue.labels, 'epic');
 }
 
 function isClosed(issue: Issue): boolean {

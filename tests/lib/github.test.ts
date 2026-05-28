@@ -92,6 +92,25 @@ describe('pollIssues', () => {
     expect(issues[1].labels).toEqual(['ready']);
   });
 
+  test('filters malformed label payloads from issue polling', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify([
+        {
+          number: 1,
+          title: 'Fix labels',
+          body: 'Description here',
+          labels: [{ name: 'ready' }, {}, { name: null }, null],
+        },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    const issues = pollIssues('owner/repo', 'ready');
+
+    expect(issues[0].labels).toEqual(['ready']);
+  });
+
   test('calls gh with correct arguments', () => {
     mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });
 
@@ -844,6 +863,20 @@ describe('listOpenIssues', () => {
     expect(issues).toHaveLength(2);
     expect(issues[0]).toEqual({ number: 1, title: 'Bug', body: 'Fix it', labels: ['bug'] });
     expect(issues[1]).toEqual({ number: 2, title: 'Feature', body: 'Add it', labels: [], milestone: 'Sprint 1' });
+  });
+
+  test('filters malformed label payloads from open issue listing', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify([
+        { number: 1, title: 'Bug', body: 'Fix it', labels: [{ name: 'bug' }, {}, { name: null }] },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    const issues = listOpenIssues('owner/repo');
+
+    expect(issues[0]).toEqual({ number: 1, title: 'Bug', body: 'Fix it', labels: ['bug'] });
   });
 
   test('requests milestone data for roadmap issue context', () => {

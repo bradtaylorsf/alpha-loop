@@ -101,7 +101,7 @@ program
   .description('Generate a full project scope (milestones + issues) from seed inputs using AI')
   .option('--seed <file>', 'Read seed description from a file instead of prompting')
   .option('--no-vision', 'Skip vision generation even if no vision exists')
-  .option('--dry-run', 'Display the plan without creating any GitHub resources')
+  .option('--dry-run', 'Display and save the plan without creating any GitHub resources')
   .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
   .option('--resume', 'Resume from a previously saved plan draft (.alpha-loop/plan.json)')
   .action(async (options) => {

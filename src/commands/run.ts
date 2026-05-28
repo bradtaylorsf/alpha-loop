@@ -33,6 +33,7 @@ import { writeTraceToSubdir } from '../lib/traces.js';
 import { validateGeneratedMarkdownForCommit } from '../lib/scan-validation.js';
 import { readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, parseDependencies, type ValidationReport } from '../lib/validation.js';
+import { hasLabel } from '../lib/labels.js';
 import {
   createEpicQueueManifest,
   createEpicQueueValidationFailureManifest,
@@ -306,7 +307,7 @@ type ResolvedRunTarget = {
 };
 
 function hasEpicLabel(issue: Issue): boolean {
-  return issue.labels.some((label) => label.toLowerCase() === 'epic');
+  return hasLabel(issue.labels, 'epic');
 }
 
 export function formatEpicPickerMeta(epic: Issue): string {
@@ -775,10 +776,15 @@ async function runIssueSession(
   process.on('SIGINT', handleSigint);
   process.on('SIGTERM', handleSigterm);
 
-  // Sync agent assets to all configured harnesses before starting the loop
-  const syncResult = syncAgentAssets(resolveHarnesses(config.harnesses, config.agent));
-  if (syncResult.synced) {
-    log.success('Agent assets synced before run');
+  // Sync agent assets to all configured harnesses before starting the loop.
+  // Dry-run must remain read-only, so report what would happen instead.
+  if (config.dryRun) {
+    log.dry('Would sync agent assets before run');
+  } else {
+    const syncResult = syncAgentAssets(resolveHarnesses(config.harnesses, config.agent));
+    if (syncResult.synced) {
+      log.success('Agent assets synced before run');
+    }
   }
 
   // Pre-flight test validation
@@ -801,7 +807,7 @@ async function runIssueSession(
   }
 
   // Prompt for project vision if it doesn't exist (interactive only)
-  if (!hasVision() && process.stdin.isTTY) {
+  if (!config.dryRun && !hasVision() && process.stdin.isTTY) {
     log.warn('No project vision found. The agent will make better decisions with one.');
     const answer = await askYesNo('Set up project vision now? [Y/n]: ');
     if (answer) {
@@ -812,9 +818,13 @@ async function runIssueSession(
 
   // Generate or refresh project context if needed
   if (contextNeedsRefresh()) {
-    log.info('Project context is stale or missing. Generating...');
-    const { scanCommand } = await import('./scan.js');
-    scanCommand();
+    if (config.dryRun) {
+      log.dry('Would refresh project context and instructions');
+    } else {
+      log.info('Project context is stale or missing. Generating...');
+      const { scanCommand } = await import('./scan.js');
+      scanCommand();
+    }
   } else {
     log.info('Project context is fresh');
   }
@@ -871,7 +881,7 @@ async function runIssueSession(
           log.warn(`Sub-issue #${sub.number} skipped: is itself an epic (nested epics unsupported in v1)`);
           continue;
         }
-        if (!sub.labels.includes(config.labelReady)) {
+        if (!hasLabel(sub.labels, config.labelReady)) {
           log.warn(`Sub-issue #${sub.number} skipped: not labeled '${config.labelReady}'`);
           continue;
         }

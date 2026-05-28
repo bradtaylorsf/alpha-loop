@@ -652,6 +652,8 @@ describe('processIssue', () => {
     expect(labelIssue).not.toHaveBeenCalled();
     // Should not create PR
     expect(mockCreatePR).not.toHaveBeenCalled();
+    expect(mockSaveResult).not.toHaveBeenCalled();
+    expect(mockWriteTraceToSubdir).not.toHaveBeenCalled();
   });
 
   test('returns failure and re-queues when worktree setup fails', async () => {
@@ -1011,6 +1013,13 @@ describe('processBatch', () => {
     expect(mockBuildBatchPlanPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildBatchImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildBatchReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+  });
+
+  test('dry run mode does not save batch results or traces', async () => {
+    await processBatch(batchIssues, makeConfig({ batch: true, dryRun: true }), makeSession());
+
+    expect(mockSaveResult).not.toHaveBeenCalled();
+    expect(mockWriteTraceToSubdir).not.toHaveBeenCalled();
   });
 
   test('commits all batch learning artifacts before creating the batch PR', async () => {

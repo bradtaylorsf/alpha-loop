@@ -249,7 +249,10 @@ describe('plan command', () => {
     );
     expect(mockCreateMilestone).not.toHaveBeenCalled();
     expect(mockCreateIssue).not.toHaveBeenCalled();
-    expect(mockSavePlanDraft).not.toHaveBeenCalled();
+    expect(mockSavePlanDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ milestones: VALID_PLAN_DRAFT.milestones }),
+      expect.any(String),
+    );
   });
 
   it('reads seed file with --seed option', async () => {
@@ -344,6 +347,35 @@ describe('plan command', () => {
     expect(mockCreateMilestone).not.toHaveBeenCalled();
     expect(mockCreateIssue).not.toHaveBeenCalled();
     expect(mockCheckbox).not.toHaveBeenCalled();
+    expect(mockSavePlanDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ milestones: VALID_PLAN_DRAFT.milestones }),
+      expect.any(String),
+    );
+  });
+
+  it('saves the edited draft when interactive creation is cancelled', async () => {
+    mockInput.mockResolvedValueOnce('Build an app');
+    mockCheckbox
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([1]);
+    mockConfirm
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(VALID_PLAN_DRAFT);
+
+    await planCommand({});
+
+    expect(mockSavePlanDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issues: expect.arrayContaining([
+          expect.objectContaining({ id: 1, selected: true }),
+          expect.objectContaining({ id: 2, selected: false }),
+        ]),
+      }),
+      expect.any(String),
+    );
+    expect(mockCreateIssue).not.toHaveBeenCalled();
   });
 
   it('adds issues to project board when project is configured', async () => {

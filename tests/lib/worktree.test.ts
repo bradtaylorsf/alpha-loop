@@ -30,10 +30,11 @@ jest.mock('node:fs', () => ({
 
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
-import { existsSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockExists = existsSync as jest.MockedFunction<typeof existsSync>;
+const mockMkdir = mkdirSync as jest.MockedFunction<typeof mkdirSync>;
 const mockSymlink = symlinkSync as jest.MockedFunction<typeof symlinkSync>;
 const mockWriteFile = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
 
@@ -295,6 +296,7 @@ describe('setupWorktree', () => {
     await setupWorktree({ ...baseOptions, dryRun: true });
 
     expect(log.dry).toHaveBeenCalledWith(expect.stringContaining('Would create worktree'));
+    expect(mockMkdir).not.toHaveBeenCalled();
 
     // Should not have run any destructive git commands
     const destructiveCalls = mockExec.mock.calls.filter(

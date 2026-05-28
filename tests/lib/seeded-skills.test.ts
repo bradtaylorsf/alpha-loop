@@ -168,4 +168,36 @@ describe('seeded alpha-loop skills', () => {
     expect(distSkill).toContain('Harness-only additions applied');
     expect(distSkill).toContain('proposal hallucinated citations');
   });
+
+  it('includes context-rot in distribution templates with Alpha Loop issue guidance', () => {
+    const distSkillPath = join(repoRoot, 'templates', 'skills', 'context-rot', 'SKILL.md');
+    const githubIssuesPath = join(repoRoot, 'templates', 'skills', 'context-rot', 'references', 'github-issues.md');
+    const detectionPatternsPath = join(repoRoot, 'templates', 'skills', 'context-rot', 'references', 'detection-patterns.md');
+    const perLanguagePath = join(repoRoot, 'templates', 'skills', 'context-rot', 'references', 'per-language.md');
+
+    expect(existsSync(distSkillPath)).toBe(true);
+    expect(existsSync(githubIssuesPath)).toBe(true);
+    expect(existsSync(detectionPatternsPath)).toBe(true);
+    expect(existsSync(perLanguagePath)).toBe(true);
+
+    const distSkill = readFileSync(distSkillPath, 'utf-8');
+    const githubIssues = readFileSync(githubIssuesPath, 'utf-8');
+
+    expect(distSkill).toMatch(/^name: context-rot$/m);
+    expect(distSkill).toMatch(/^description: .*Alpha Loop-ready GitHub epic and child issues/m);
+    expect(distSkill).toMatch(/^auto_load: false$/m);
+    expect(distSkill).toMatch(/^priority: medium$/m);
+    expect(distSkill).toContain('## Workflow');
+    expect(distSkill).toContain('### Phase 4');
+    expect(distSkill).toContain('Path B or C (Alpha Loop GitHub issues)');
+    expect(distSkill).toContain('references/github-issues.md');
+
+    expect(githubIssues).toContain('## Epic Template');
+    expect(githubIssues).toContain('## Child Issue Template');
+    expect(githubIssues).toContain('alpha-loop run --epic <N>');
+    expect(githubIssues).toContain('READY_LABEL');
+    expect(githubIssues).toContain('Part of #${EPIC_NUMBER}');
+    expect(githubIssues).toContain('context-rot');
+    expect(githubIssues).toContain('epic');
+  });
 });

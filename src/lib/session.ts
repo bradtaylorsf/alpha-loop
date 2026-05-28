@@ -348,8 +348,10 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
   let sessionPrUrl: string | undefined;
   const branchSource = queue?.branchedFromBranch ?? config.baseBranch;
 
-  mkdirSync(resultsDir, { recursive: true });
-  mkdirSync(logsDir, { recursive: true });
+  if (!config.dryRun) {
+    mkdirSync(resultsDir, { recursive: true });
+    mkdirSync(logsDir, { recursive: true });
+  }
 
   // Create session branch and draft PR if auto-merge is enabled
   if (config.autoMerge && !config.dryRun) {
