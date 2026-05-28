@@ -30,6 +30,7 @@ jest.mock('../../src/lib/rate-limit', () => {
 // Mock shell exec so init steps that shell out (scan, sync, git) don't run real commands
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn().mockReturnValue({ exitCode: 1, stdout: '', stderr: '' }),
+  shellQuote: (value: string) => `'${String(value).replace(/'/g, `'\\''`)}'`,
   formatTimestamp: jest.fn().mockReturnValue('20260401-100000'),
 }));
 
@@ -84,7 +85,7 @@ const mockExit = jest.spyOn(process, 'exit').mockImplementation(((code?: number)
   throw new Error(`process.exit(${code})`);
 }) as () => never);
 
-import { initCommand, ensureLabels } from '../../src/commands/init.js';
+import { initCommand, ensureLabels, ensureProjectStatuses } from '../../src/commands/init.js';
 
 let originalCwd: string;
 let tempDir: string;
@@ -182,6 +183,63 @@ describe('ensureLabels', () => {
     mockExec.mockReturnValue({ exitCode: 1, stdout: '', stderr: 'error' });
     await ensureLabels('owner/repo', 'ready');
     // Should not throw, just warn
+  });
+});
+
+describe('ensureProjectStatuses', () => {
+  it('updates project status options through GraphQL variables and dedupes names case-insensitively', async () => {
+    let graphqlPayload: any = null;
+
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh project view')) {
+        return { exitCode: 0, stdout: JSON.stringify({ id: 'PVT_project' }), stderr: '' };
+      }
+      if (cmd.includes('gh project field-list')) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            fields: [{
+              id: 'PVTSSF_status',
+              name: 'Status',
+              options: [
+                { id: 'todo-id', name: 'Todo', color: 'GRAY', description: 'Existing todo' },
+                { id: 'progress-id', name: 'In Progress', color: 'YELLOW', description: 'Existing progress' },
+                { id: 'done-id', name: 'Done', color: 'GREEN', description: 'Existing done' },
+              ],
+            }],
+          }),
+          stderr: '',
+        };
+      }
+      if (cmd.includes('gh api graphql --input')) {
+        const inputFile = cmd.match(/--input '([^']+)'/)?.[1];
+        graphqlPayload = JSON.parse(readFileSync(inputFile!, 'utf-8'));
+        return { exitCode: 0, stdout: '', stderr: '' };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+
+    await ensureProjectStatuses('owner', 1);
+
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('gh api graphql --input'));
+    expect(graphqlPayload.query).toContain('mutation($projectId: ID!, $fieldId: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]!)');
+    expect(graphqlPayload.query).toContain('singleSelectOptions: $options');
+    expect(graphqlPayload.query).not.toContain('singleSelectOptions: [{"name"');
+    expect(graphqlPayload.variables).toEqual(expect.objectContaining({
+      projectId: 'PVT_project',
+      fieldId: 'PVTSSF_status',
+    }));
+    expect(graphqlPayload.variables.options.map((option: any) => option.name)).toEqual([
+      'Todo',
+      'In Progress',
+      'Done',
+      'In Review',
+    ]);
+    expect(graphqlPayload.variables.options.at(-1)).toEqual({
+      name: 'In Review',
+      color: 'PURPLE',
+      description: 'Alpha Loop status',
+    });
   });
 });
 

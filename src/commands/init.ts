@@ -13,11 +13,12 @@
  * 9. Install GitHub issue templates
  * 10. Commit generated files
  */
-import { existsSync, writeFileSync, readFileSync, readdirSync, copyFileSync, mkdirSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, readdirSync, copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import * as readline from 'node:readline';
 import { detectRepo, loadConfig } from '../lib/config.js';
-import { exec } from '../lib/shell.js';
+import { exec, shellQuote } from '../lib/shell.js';
 import { ghExec } from '../lib/rate-limit.js';
 import { log } from '../lib/logger.js';
 import { syncAgentAssets, migrateToTemplates, resolveHarnesses } from './sync.js';
@@ -557,6 +558,46 @@ function ensureGitignore(): void {
 }
 
 const REQUIRED_PROJECT_STATUSES = ['Todo', 'In progress', 'In Review', 'Done'];
+const PROJECT_STATUS_COLORS: Record<string, ProjectV2SingleSelectFieldOptionColor> = {
+  todo: 'GRAY',
+  'in progress': 'YELLOW',
+  'in review': 'PURPLE',
+  done: 'GREEN',
+};
+const PROJECT_V2_SINGLE_SELECT_COLORS = new Set([
+  'BLUE',
+  'GRAY',
+  'GREEN',
+  'ORANGE',
+  'PINK',
+  'PURPLE',
+  'RED',
+  'YELLOW',
+] as const);
+
+type ProjectV2SingleSelectFieldOptionColor =
+  | 'BLUE'
+  | 'GRAY'
+  | 'GREEN'
+  | 'ORANGE'
+  | 'PINK'
+  | 'PURPLE'
+  | 'RED'
+  | 'YELLOW';
+
+type ProjectV2SingleSelectFieldOption = {
+  id?: string;
+  name: string;
+  color?: string | null;
+  description?: string | null;
+};
+
+type ProjectV2SingleSelectFieldOptionInput = {
+  id?: string;
+  name: string;
+  color: ProjectV2SingleSelectFieldOptionColor;
+  description: string;
+};
 
 const REQUIRED_LABELS = [
   { name: 'ready', color: '0E8A16', description: 'Ready for agent processing' },
@@ -683,10 +724,10 @@ export async function ensureProjectStatuses(repoOwner: string, project: number):
   }
 
   let fieldId: string | undefined;
-  let existingOptions: Array<{ id: string; name: string }> = [];
+  let existingOptions: ProjectV2SingleSelectFieldOption[] = [];
   try {
     const data = JSON.parse(fieldResult.stdout) as {
-      fields: Array<{ id: string; name: string; options?: Array<{ id: string; name: string }> }>;
+      fields: Array<{ id: string; name: string; options?: ProjectV2SingleSelectFieldOption[] }>;
     };
     const statusField = data.fields.find((f) => f.name === 'Status');
     if (statusField) {
@@ -703,8 +744,8 @@ export async function ensureProjectStatuses(repoOwner: string, project: number):
     return;
   }
 
-  const existingNames = new Set(existingOptions.map((o) => o.name));
-  const missing = REQUIRED_PROJECT_STATUSES.filter((s) => !existingNames.has(s));
+  const existingNames = new Set(existingOptions.map((o) => o.name.toLowerCase()));
+  const missing = REQUIRED_PROJECT_STATUSES.filter((s) => !existingNames.has(s.toLowerCase()));
 
   if (missing.length === 0) {
     log.success('All required project statuses exist');
@@ -726,29 +767,63 @@ export async function ensureProjectStatuses(repoOwner: string, project: number):
     }
   }
 
-  // Build the full options list (existing + new) for the update mutation
-  const allOptionObjs: Array<{ name: string; id?: string }> = [
-    ...existingOptions.map((o) => ({ name: o.name, id: o.id })),
-    ...missing.map((name) => ({ name })),
+  // Build the full options list (existing + new) for the update mutation.
+  // GitHub's GraphQL object literals do not allow JSON-style quoted keys, so
+  // pass the structured options as variables through --input instead.
+  const allOptionObjs: ProjectV2SingleSelectFieldOptionInput[] = [
+    ...existingOptions.map((option) => ({
+      ...(option.id ? { id: option.id } : {}),
+      name: option.name,
+      color: normalizeProjectStatusColor(option.color),
+      description: option.description ?? '',
+    })),
+    ...missing.map((name) => ({
+      name,
+      color: PROJECT_STATUS_COLORS[name.toLowerCase()] ?? 'GRAY',
+      description: 'Alpha Loop status',
+    })),
   ];
 
-  const optionsJson = JSON.stringify(allOptionObjs);
-
-  const mutation = `mutation {
+  const mutation = `mutation($projectId: ID!, $fieldId: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
     updateProjectV2Field(input: {
-      projectId: "${projectId}"
-      fieldId: "${fieldId}"
-      singleSelectOptions: ${optionsJson.replace(/"/g, '\\"')}
+      projectId: $projectId
+      fieldId: $fieldId
+      singleSelectOptions: $options
     }) { projectV2Field { ... on ProjectV2SingleSelectField { id } } }
   }`;
 
-  const createResult = ghExec(`gh api graphql -f query="${mutation}"`, undefined, true);
+  const tempDir = mkdtempSync(join(tmpdir(), 'alpha-loop-project-status-'));
+  const inputFile = join(tempDir, 'graphql.json');
+  writeFileSync(inputFile, JSON.stringify({
+    query: mutation,
+    variables: {
+      projectId,
+      fieldId,
+      options: allOptionObjs,
+    },
+  }));
+
+  const createResult = (() => {
+    try {
+      return ghExec(`gh api graphql --input ${shellQuote(inputFile)}`, undefined, true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  })();
   if (createResult.exitCode === 0) {
     log.success(`Created project statuses: ${missing.join(', ')}`);
   } else {
     log.warn(`Could not create project statuses: ${createResult.stderr}`);
     log.info(`Please add these statuses manually in your project settings: ${missing.join(', ')}`);
   }
+}
+
+function normalizeProjectStatusColor(color: string | null | undefined): ProjectV2SingleSelectFieldOptionColor {
+  const upper = color?.toUpperCase();
+  if (upper && PROJECT_V2_SINGLE_SELECT_COLORS.has(upper as ProjectV2SingleSelectFieldOptionColor)) {
+    return upper as ProjectV2SingleSelectFieldOptionColor;
+  }
+  return 'GRAY';
 }
 
 export async function initCommand(options: InitOptions = {}): Promise<void> {

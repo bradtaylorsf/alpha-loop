@@ -48,7 +48,6 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
   const { issueNum, projectDir, baseBranch, sessionBranch, autoMerge, skipInstall, setupCommand, dryRun } = options;
   const branch = `agent/issue-${issueNum}`;
   const worktreesDir = resolve(projectDir, '.worktrees');
-  mkdirSync(worktreesDir, { recursive: true });
   const worktreePath = resolve(worktreesDir, `issue-${issueNum}`);
 
   log.info(`Creating worktree at ${worktreePath} (branch: ${branch})`);
@@ -57,6 +56,8 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
     log.dry(`Would create worktree: ${worktreePath}`);
     return { path: worktreePath, branch, resumed: false };
   }
+
+  mkdirSync(worktreesDir, { recursive: true });
 
   let resumed = false;
 

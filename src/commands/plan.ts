@@ -276,7 +276,9 @@ export async function planCommand(options: PlanOptions): Promise<void> {
 
     // ── Dry run exit ─────────────────────────────────────────────────────────
     if (options.dryRun) {
-      log.dry('Dry run — no GitHub resources will be created.');
+      savePlanDraft(draft, projectDir);
+      log.info('Plan saved to .alpha-loop/plan.json');
+      log.dry('Dry run — no GitHub resources will be created. Re-run with `alpha-loop plan --resume` to create.');
       return;
     }
 
@@ -326,6 +328,8 @@ export async function planCommand(options: PlanOptions): Promise<void> {
       });
 
       if (!proceedConfirm) {
+        savePlanDraft(draft, projectDir);
+        log.info('Plan saved to .alpha-loop/plan.json');
         log.info('Cancelled.');
         return;
       }

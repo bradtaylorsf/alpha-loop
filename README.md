@@ -314,7 +314,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop evolve routing --demote <stage>` | Manually demote a stage to routing.fallback.escalate_to |
 | `alpha-loop plan` | Generate a full project scope (milestones + issues) from seed inputs using AI |
 | `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
-| `alpha-loop plan --dry-run` | Display the plan without creating any GitHub resources |
+| `alpha-loop plan --dry-run` | Display the plan and save `.alpha-loop/plan.json` without creating GitHub resources |
+| `alpha-loop plan --resume` | Create GitHub resources from the saved `.alpha-loop/plan.json` draft |
 | `alpha-loop plan --yes --seed <file>` | Non-interactive mode: accept all AI recommendations |
 | `alpha-loop triage` | Analyze open issues, clean up backlog noise, and propose/apply epic groups |
 | `alpha-loop triage --dry-run` | Display cleanup findings and epic proposals without making changes |

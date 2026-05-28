@@ -492,8 +492,6 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
   const outputRoot = options.outputRoot ?? process.cwd();
   const agentCwd = options.agentCwd ?? outputRoot;
   const learningsDir = join(outputRoot, '.alpha-loop', 'learnings');
-  mkdirSync(learningsDir, { recursive: true });
-
   const timestamp = formatTimestamp(new Date());
   const learningFile = join(learningsDir, `issue-${options.issueNum}-${timestamp}.md`);
 
@@ -514,6 +512,8 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
     log.dry(`Would extract learnings to ${learningFile}`);
     return null;
   }
+
+  mkdirSync(learningsDir, { recursive: true });
 
   const learnStep = resolveStepConfig(config, 'learn');
   const result = await spawnAgent({

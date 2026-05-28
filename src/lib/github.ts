@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { exec, shellQuote } from './shell.js';
 import { ghExec, getProjectCache, setProjectCache } from './rate-limit.js';
 import { log } from './logger.js';
+import { labelName } from './labels.js';
 import {
   findUnparsedSubIssueChecklistLines,
   flipChecklistItem,
@@ -64,6 +65,13 @@ export type Milestone = {
   dueOn: string | null;
   state: string;
 };
+
+function compactLabelNames(labels: unknown): string[] {
+  if (!Array.isArray(labels)) return [];
+  return labels
+    .map((label) => labelName(label))
+    .filter((name): name is string => typeof name === 'string' && name.length > 0);
+}
 
 /**
  * List open milestones for a repository.
@@ -131,7 +139,7 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
       items: Array<{
         status: string;
         content: { type: string; number: number; title: string; body: string };
-        labels?: Array<{ name: string }>;
+        labels?: unknown;
       }>;
     };
 
@@ -151,7 +159,7 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
         number: item.content.number,
         title: item.content.title,
         body: item.content.body ?? '',
-        labels: (item.labels ?? []).map((l) => l.name),
+        labels: compactLabelNames(item.labels),
       }));
   } catch {
     log.warn('Failed to parse project board JSON');
@@ -195,14 +203,14 @@ function pollIssuesByLabel(repo: string, label: string, limit: number, milestone
       number: number;
       title: string;
       body: string;
-      labels: Array<{ name: string }>;
+      labels?: unknown;
     }>;
     return raw
       .map((issue) => ({
         number: issue.number,
         title: issue.title,
         body: issue.body ?? '',
-        labels: (issue.labels ?? []).map((l) => l.name),
+        labels: compactLabelNames(issue.labels),
       }))
       .sort((a, b) => a.number - b.number)
       .slice(0, limit);
@@ -615,8 +623,7 @@ export function listLabels(repo: string): string[] {
     return [];
   }
   try {
-    const raw = JSON.parse(result.stdout) as Array<{ name: string }>;
-    return raw.map((l) => l.name);
+    return compactLabelNames(JSON.parse(result.stdout));
   } catch {
     log.warn('Failed to parse labels JSON');
     return [];
@@ -692,7 +699,7 @@ export function listOpenIssues(repo: string, limit = 100): Issue[] {
       number: number;
       title: string;
       body: string;
-      labels: Array<{ name: string }>;
+      labels?: unknown;
       milestone?: unknown;
     }>;
     return raw.map((issue) => {
@@ -701,7 +708,7 @@ export function listOpenIssues(repo: string, limit = 100): Issue[] {
         number: issue.number,
         title: issue.title,
         body: issue.body ?? '',
-        labels: (issue.labels ?? []).map((l) => l.name),
+        labels: compactLabelNames(issue.labels),
         ...(msTitle ? { milestone: msTitle } : {}),
       };
     });
@@ -816,14 +823,14 @@ export function listOpenIssuesWithComments(repo: string, limit = 100): Issue[] {
       number: number;
       title: string;
       body: string;
-      labels: Array<{ name: string }>;
+      labels?: unknown;
       comments: Array<{ author: { login: string }; body: string; createdAt: string }>;
     }>;
     return raw.map((issue) => ({
       number: issue.number,
       title: issue.title,
       body: issue.body ?? '',
-      labels: (issue.labels ?? []).map((l) => l.name),
+      labels: compactLabelNames(issue.labels),
       comments: (issue.comments ?? []).map((c) => ({
         author: c.author?.login ?? 'unknown',
         body: c.body ?? '',
@@ -878,7 +885,7 @@ export function getIssueWithComments(repo: string, issueNum: number): Issue | nu
       number: number;
       title: string;
       body: string;
-      labels: Array<{ name: string }>;
+      labels?: unknown;
       comments: Array<{ author: { login: string }; body: string; createdAt: string }>;
       state?: string;
       stateReason?: string | null;
@@ -888,7 +895,7 @@ export function getIssueWithComments(repo: string, issueNum: number): Issue | nu
       number: data.number,
       title: data.title,
       body: data.body ?? '',
-      labels: (data.labels ?? []).map((l) => l.name),
+      labels: compactLabelNames(data.labels),
       comments: (data.comments ?? []).map((c) => ({
         author: c.author?.login ?? 'unknown',
         body: c.body ?? '',
@@ -970,14 +977,14 @@ export function listEpics(repo: string, options?: { milestone?: string }): Issue
       number: number;
       title: string;
       body: string;
-      labels: Array<{ name: string }>;
+      labels?: unknown;
       milestone?: unknown;
     }>;
     return raw.map((issue) => ({
       number: issue.number,
       title: issue.title,
       body: issue.body ?? '',
-      labels: (issue.labels ?? []).map((l) => l.name),
+      labels: compactLabelNames(issue.labels),
       milestone: milestoneTitle(issue.milestone),
     }));
   } catch {

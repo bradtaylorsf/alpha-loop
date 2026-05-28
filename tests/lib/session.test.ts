@@ -194,6 +194,7 @@ describe('createSession', () => {
       (call: string[]) => call[0]?.includes('git checkout -b'),
     );
     expect(checkoutCalls).toHaveLength(0);
+    expect(mockMkdirSync).not.toHaveBeenCalled();
   });
 
   test('generates epic-scoped session name when epicNum and epicTitle are provided', () => {

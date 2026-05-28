@@ -684,7 +684,9 @@ export async function processIssue(
   let autoCommittedPaths: string[] = [];
 
   // Setup logging
-  mkdirSync(session.logsDir, { recursive: true });
+  if (!config.dryRun) {
+    mkdirSync(session.logsDir, { recursive: true });
+  }
   const logFile = join(session.logsDir, `issue-${issueNum}.log`);
 
   log.step(`Processing Issue #${issueNum}: ${title}`);
@@ -931,7 +933,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     testOutput = testResult.output;
 
     // Trace test output
-    traceTest(session.name, issueNum, attempt, testOutput);
+    if (!config.dryRun) {
+      traceTest(session.name, issueNum, attempt, testOutput);
+    }
 
     if (testResult.passed) {
       testsPassing = true;
@@ -1477,7 +1481,11 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   };
 
   // Save result to session
-  saveResult(session, result);
+  if (!config.dryRun) {
+    saveResult(session, result);
+  } else {
+    log.dry(`Would save session result for issue #${issueNum}`);
+  }
 
   log.success(`Issue #${issueNum} processed in ${duration}s`);
   if (prUrl) log.info(`PR: ${prUrl}`);
@@ -1510,7 +1518,9 @@ export async function processBatch(
   const epicOption = epicPromptOption(options);
   let autoCommittedPaths: string[] = [];
 
-  mkdirSync(session.logsDir, { recursive: true });
+  if (!config.dryRun) {
+    mkdirSync(session.logsDir, { recursive: true });
+  }
   const logFile = join(session.logsDir, `batch-${issueNums.join('-')}.log`);
 
   log.step(`Batch processing ${issues.length} issues: ${issueNums.map((n) => `#${n}`).join(', ')}`);
@@ -1729,7 +1739,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
     const testResult = runTests(worktreePath, config, logFile);
     testOutput = testResult.output;
-    traceTest(session.name, issues[0].number, attempt, testOutput);
+    if (!config.dryRun) {
+      traceTest(session.name, issues[0].number, attempt, testOutput);
+    }
 
     if (testResult.passed) {
       testsPassing = true;
@@ -1987,7 +1999,11 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     };
 
     results.push(result);
-    saveResult(session, result);
+    if (!config.dryRun) {
+      saveResult(session, result);
+    } else {
+      log.dry(`Would save session result for issue #${issue.number}`);
+    }
 
     // Write per-issue traces
     if (!config.dryRun) {

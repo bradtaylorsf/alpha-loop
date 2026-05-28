@@ -104,6 +104,8 @@ import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEp
 import { processIssue, processBatch } from '../../src/lib/pipeline';
 import { createSession, finalizeSession } from '../../src/lib/session';
 import { generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
+import { contextNeedsRefresh } from '../../src/lib/context';
+import { syncAgentAssets } from '../../src/commands/sync';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
@@ -121,6 +123,8 @@ const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finali
 const mockGenerateSessionSummary = generateSessionSummary as jest.MockedFunction<typeof generateSessionSummary>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
+const mockContextNeedsRefresh = contextNeedsRefresh as jest.MockedFunction<typeof contextNeedsRefresh>;
+const mockSyncAgentAssets = syncAgentAssets as jest.MockedFunction<typeof syncAgentAssets>;
 const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
@@ -200,6 +204,8 @@ beforeEach(() => {
   mockGetEpicSubIssues.mockReturnValue([]);
   mockGetIssueWithComments.mockReturnValue(null);
   mockProcessBatch.mockResolvedValue([]);
+  mockContextNeedsRefresh.mockReturnValue(false);
+  mockSyncAgentAssets.mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] });
 });
 
 afterEach(() => {
@@ -376,6 +382,58 @@ describe('runCommand', () => {
     expect(mockFinalizeSession).not.toHaveBeenCalled();
     expect(mockWriteFileSync).not.toHaveBeenCalled();
     expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('dry-run session preview does not sync assets or refresh generated context', async () => {
+    mockContextNeedsRefresh.mockReturnValue(true);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Flat issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Flat issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({ dryRun: true, validate: true });
+
+    expect(mockSyncAgentAssets).not.toHaveBeenCalled();
+    expect(mockLog.dry).toHaveBeenCalledWith('Would sync agent assets before run');
+    expect(mockLog.dry).toHaveBeenCalledWith('Would refresh project context and instructions');
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
+  });
+
+  test('--skip-epic tolerates malformed label entries when filtering epics', async () => {
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Runnable issue', body: 'Body', labels: [undefined, { name: 'ready' }] as any },
+      { number: 195, title: 'Parent Epic', body: '- [ ] #42', labels: [{ name: 'epic' }] as any },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Runnable issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({ skipEpic: true, dryRun: true });
+
+    expect(mockProcessIssue).toHaveBeenCalledTimes(1);
+    expect(mockProcessIssue).toHaveBeenCalledWith(
+      42,
+      'Runnable issue',
+      'Body',
+      expect.any(Object),
+      expect.any(Object),
+    );
   });
 
   test('--epics dry-run previews non-epic labels as warnings without mutating', async () => {
