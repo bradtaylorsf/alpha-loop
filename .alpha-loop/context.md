@@ -1,22 +1,22 @@
 ## Architecture
-- `src/cli.ts` is the Commander entry point; most commands lazy-load handlers from `src/commands/*.ts`, then delegate shared behavior to `src/lib/*`.
-- Main execution flows through `src/commands/run.ts` into `src/lib/pipeline.ts`, which orchestrates issue plan, agent implementation, tests, verification, review, PR creation, learnings, and cleanup.
-- Database is GitHub: issues/projects/milestones/PRs are queried and mutated through `src/lib/github.ts` using the `gh` CLI; repo/project/label settings live in `.alpha-loop.yaml`.
-- Key directories: `src/commands` for CLI handlers, `src/lib` for orchestration/helpers, `src/engine` for agent CLI definitions, `tests` mirroring source modules, `templates` for npm-shipped defaults, `.alpha-loop` for this repo’s context/learnings/evals/templates.
+- CLI entry point is `src/cli.ts`; it uses Commander to register subcommands and dispatches to handlers in `src/commands/*.ts`.
+- Main loop execution flows through `src/commands/run.ts` into shared libraries such as `lib/pipeline.ts`, `lib/agent.ts`, `lib/github.ts`, `lib/testing.ts`, `lib/session.ts`, and `lib/worktree.ts`.
+- GitHub is the database: issues are work items, labels are state, PRs are review artifacts, and Actions provide CI. GitHub access is centralized in `src/lib/github.ts`.
+- Key directories: `src/commands` contains CLI commands, `src/lib` shared logic, `src/engine` agent/prerequisite plumbing, `tests` mirrors source tests, `templates` contains npm-distributed starter assets, and `.alpha-loop/templates` contains this repo’s own loop config.
 
 ## Conventions
-- TypeScript strict mode, ESM package, `.js` extensions in source imports, functional style, `node:` prefixes for built-ins, pnpm-only workflows.
-- Tests use Jest + ts-jest in Node, `*.test.ts` files under `tests/`, heavy mocking of shell/GitHub/agent boundaries, run via `pnpm test` (`jest --runInBand`).
-- New CLI features must be registered in `src/cli.ts`, implemented in `src/commands/<name>.ts`, and covered by command/lib tests.
-- Config additions must update `Config`, `DEFAULTS`, YAML/env key maps, parsing/coercion in `src/lib/config.ts`, `.alpha-loop.yaml` docs, and related tests.
+- Code is TypeScript, strict mode, ESM; local imports use `.js` extensions and Node built-ins use the `node:` prefix.
+- Style is mostly functional; avoid classes unless wrapping external APIs or matching an existing pattern.
+- Tests use Jest with `.test.ts` files under `tests/`; run with `pnpm test`, and build with `pnpm build`.
+- New CLI commands should be implemented under `src/commands`, registered in `src/cli.ts`, covered in `tests`, and reflected in docs/help text when user-facing behavior changes.
 
 ## Critical Rules
-- Do not casually modify `AGENTS.md`, `CLAUDE.md`, `.alpha-loop/templates/`, `.agents/`, `.codex/`, or `.claude/`; templates are the source, harness folders are synced outputs.
-- Do not confuse root `templates/` npm distribution defaults with `.alpha-loop/templates/` repo-local loop configuration.
-- Agent support spans `src/lib/config.ts`, `src/engine/agents.ts`, `src/lib/agent.ts`, and `src/commands/sync.ts`; update these together when adding agents/harnesses.
-- Releases are automated from pushes to `master` by `.github/workflows/release.yml`; do not manually publish or bump package versions.
+- Do not modify `AGENTS.md` unless explicitly asked.
+- Do not edit `.Codex/`, `.agents/`, or `.codex/` directly; they are generated from template sources.
+- Do not confuse `templates/` with `.alpha-loop/templates/`: root `templates/` ships to users, while `.alpha-loop/templates/` controls this repo’s own loop behavior.
+- Do not manually publish, run `pnpm publish`/`npm publish`, or bump package versions; releases are automated from commits merged to `master`.
+- Tests must close HTTP servers/connections and use fake timers for timer-based behavior; avoid real timers that keep Jest open.
 
 ## Active State
 - Test status: (will be filled in by the loop)
 - Recent changes: (will be filled in by the loop)
-- Runtime config: current repo config uses `agent: codex`, `base_branch: master`, `label: ready`, `test_command: pnpm test`, and codex harness sync.
