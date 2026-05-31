@@ -306,6 +306,21 @@ automation_policy:
 #     - destructive-content
 #     - ambiguous
 
+# === Hosted daemon ==========================================================
+# Long-running repo steward. Modes: full, triage-only, feedback-only, run-only.
+# daemon:
+#   mode: full
+#   triage_interval: 900       # Seconds between intake triage passes
+#   feedback_interval: 60      # Seconds between feedback poll/resume passes
+#   run_interval: 120          # Seconds between ready-work selection passes
+#   health_interval: 300       # Seconds between health lifecycle events
+#   idle_sleep: 30             # Seconds to sleep when no tick is due
+#   feedback_poll_command: ""  # Optional adapter command returning JSON/NDJSON
+#   lock:
+#     enabled: true
+#     stale_after: 86400
+#     path: ""                 # Defaults to .alpha-loop/daemon.lock
+
 # === Session retention ======================================================
 # Durable session manifests are kept in .alpha-loop/sessions/<session>/session.json.
 # Paused/waiting/QA worktrees are preserved unless paused_worktree_days is > 0.

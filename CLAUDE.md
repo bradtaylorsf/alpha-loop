@@ -26,6 +26,8 @@ alpha-loop run --issue <N>       # Process exactly one ready issue
 alpha-loop run --epic <N>        # Process an epic (sub-issues in checklist order, auto-verify on completion)
 alpha-loop run --epics <ids>     # Process multiple epics in order, one session PR per epic
 alpha-loop run --verify-only <N> # Run just the epic verification pass
+alpha-loop daemon        # Run hosted daemon mode continuously
+alpha-loop daemon --mode feedback-only # Poll feedback and resume without selecting new work
 alpha-loop scan          # Generate/refresh project context
 alpha-loop plan          # Generate project scope (milestones + issues) from seed inputs
 alpha-loop add           # Create a new issue from a free-form description using AI
@@ -54,6 +56,7 @@ alpha-loop/
 │   ├── cli.ts                  # CLI entry point (Commander setup)
 │   ├── commands/               # Subcommand handlers
 │   │   ├── auth.ts             # Browser auth state management
+│   │   ├── daemon.ts           # Hosted daemon command
 │   │   ├── history.ts          # Session history viewer
 │   │   ├── init.ts             # Config template creation
 │   │   ├── resume.ts           # Resume stranded work from crashed sessions
@@ -67,6 +70,7 @@ alpha-loop/
 │   └── lib/                    # Shared libraries
 │       ├── agent.ts            # Agent runner abstraction
 │       ├── config.ts           # YAML config loading
+│       ├── daemon.ts           # Hosted daemon scheduler, lock, and manifest recovery
 │       ├── context.ts          # Project context management
 │       ├── github.ts           # GitHub API (issues, PRs, labels)
 │       ├── learning.ts         # Learning extraction/application

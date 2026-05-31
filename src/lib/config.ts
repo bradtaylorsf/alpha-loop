@@ -90,7 +90,15 @@ export type EventName =
   | 'feedback.received'
   | 'session.resumed'
   | 'session.completed'
-  | 'session.failed';
+  | 'session.failed'
+  | 'daemon.started'
+  | 'daemon.idle'
+  | 'daemon.health'
+  | 'daemon.work.selected'
+  | 'daemon.work.skipped'
+  | 'daemon.resume.requested'
+  | 'daemon.shutdown'
+  | 'daemon.failed';
 
 export type EventFilter = EventName | '*';
 export type EventFormat = 'json' | 'slack' | 'teams' | 'discord';
@@ -171,6 +179,27 @@ export type AutomationPolicyConfig = {
   maxIssueCostUsd: number;
 };
 
+export type DaemonMode = 'full' | 'triage-only' | 'feedback-only' | 'run-only';
+
+export type DaemonLockConfig = {
+  enabled: boolean;
+  /** Seconds before a still-live lock can be treated as stale. 0 disables age-based staleness. */
+  staleAfterSeconds: number;
+  /** Optional override for the repo lock path. Defaults to .alpha-loop/daemon.lock. */
+  path: string;
+};
+
+export type DaemonConfig = {
+  mode: DaemonMode;
+  triageIntervalSeconds: number;
+  feedbackIntervalSeconds: number;
+  runIntervalSeconds: number;
+  healthIntervalSeconds: number;
+  idleSleepSeconds: number;
+  feedbackPollCommand: string;
+  lock: DaemonLockConfig;
+};
+
 export const DEFAULT_SESSION_RETENTION: SessionRetentionConfig = {
   pausedWorktreeDays: 0,
   completedWorktreeDays: 30,
@@ -195,6 +224,21 @@ export const DEFAULT_AUTOMATION_POLICY: AutomationPolicyConfig = {
   maxSessionMinutes: 0,
   maxSessionCostUsd: 0,
   maxIssueCostUsd: 0,
+};
+
+export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {
+  mode: 'full',
+  triageIntervalSeconds: 15 * 60,
+  feedbackIntervalSeconds: 60,
+  runIntervalSeconds: 2 * 60,
+  healthIntervalSeconds: 5 * 60,
+  idleSleepSeconds: 30,
+  feedbackPollCommand: '',
+  lock: {
+    enabled: true,
+    staleAfterSeconds: 24 * 60 * 60,
+    path: '',
+  },
 };
 
 const VALID_ROUTING_STAGES: readonly RoutingStageName[] = [
@@ -227,6 +271,21 @@ const VALID_EVENT_NAMES: readonly EventName[] = [
   'session.resumed',
   'session.completed',
   'session.failed',
+  'daemon.started',
+  'daemon.idle',
+  'daemon.health',
+  'daemon.work.selected',
+  'daemon.work.skipped',
+  'daemon.resume.requested',
+  'daemon.shutdown',
+  'daemon.failed',
+] as const;
+
+const VALID_DAEMON_MODES: readonly DaemonMode[] = [
+  'full',
+  'triage-only',
+  'feedback-only',
+  'run-only',
 ] as const;
 
 const VALID_EVENT_FORMATS: readonly EventFormat[] = ['json', 'slack', 'teams', 'discord'] as const;
@@ -324,6 +383,8 @@ export type Config = {
   events?: EventsConfig;
   /** Hosted automation guardrails for issue selection, commands, diffs, runtime, and budget. */
   automationPolicy?: AutomationPolicyConfig;
+  /** Long-running hosted daemon mode configuration. */
+  daemon?: DaemonConfig;
   /**
    * When there is exactly one open epic in the repo, the picker auto-selects
    * it instead of prompting. Default: false.
@@ -393,6 +454,7 @@ const DEFAULTS: Config = {
   sessionRetention: DEFAULT_SESSION_RETENTION,
   events: DEFAULT_EVENTS_CONFIG,
   automationPolicy: DEFAULT_AUTOMATION_POLICY,
+  daemon: DEFAULT_DAEMON_CONFIG,
   preferEpics: false,
 };
 
@@ -543,6 +605,15 @@ function parseNonNegativeInteger(raw: unknown, key: string, fallback: number): n
   return fallback;
 }
 
+function parsePositiveInteger(raw: unknown, key: string, fallback: number): number {
+  if (raw === undefined) return fallback;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return Math.floor(raw);
+  }
+  console.warn(`[config] ${key}: expected a positive number (got ${String(raw)})`);
+  return fallback;
+}
+
 function parseBoolean(raw: unknown, fallback: boolean): boolean {
   return typeof raw === 'boolean' ? raw : fallback;
 }
@@ -643,6 +714,85 @@ function parseAutomationPolicy(raw: unknown): AutomationPolicyConfig | undefined
   if (maxIssueCost !== undefined) policy.maxIssueCostUsd = maxIssueCost;
 
   return policy;
+}
+
+function parseDaemonMode(raw: unknown, fallback: DaemonMode): DaemonMode {
+  if (raw === undefined) return fallback;
+  if (typeof raw === 'string' && VALID_DAEMON_MODES.includes(raw as DaemonMode)) {
+    return raw as DaemonMode;
+  }
+  console.warn(`[config] daemon.mode: invalid mode "${String(raw)}" (expected one of ${VALID_DAEMON_MODES.join(', ')})`);
+  return fallback;
+}
+
+function parseDaemonConfig(raw: unknown): DaemonConfig | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const daemon: DaemonConfig = {
+    ...DEFAULT_DAEMON_CONFIG,
+    lock: { ...DEFAULT_DAEMON_CONFIG.lock },
+  };
+
+  daemon.mode = parseDaemonMode(r.mode, daemon.mode);
+  daemon.triageIntervalSeconds = parsePositiveInteger(
+    r.triage_interval,
+    'daemon.triage_interval',
+    daemon.triageIntervalSeconds,
+  );
+  daemon.feedbackIntervalSeconds = parsePositiveInteger(
+    r.feedback_interval,
+    'daemon.feedback_interval',
+    daemon.feedbackIntervalSeconds,
+  );
+  daemon.runIntervalSeconds = parsePositiveInteger(
+    r.run_interval,
+    'daemon.run_interval',
+    daemon.runIntervalSeconds,
+  );
+  daemon.healthIntervalSeconds = parsePositiveInteger(
+    r.health_interval,
+    'daemon.health_interval',
+    daemon.healthIntervalSeconds,
+  );
+  daemon.idleSleepSeconds = parsePositiveInteger(
+    r.idle_sleep,
+    'daemon.idle_sleep',
+    daemon.idleSleepSeconds,
+  );
+
+  if (typeof r.feedback_poll_command === 'string') {
+    daemon.feedbackPollCommand = r.feedback_poll_command.trim();
+  } else if (r.feedback_poll_command !== undefined) {
+    console.warn(`[config] daemon.feedback_poll_command: expected a string (got ${String(r.feedback_poll_command)})`);
+  }
+
+  if (typeof r.lock === 'boolean') {
+    daemon.lock.enabled = r.lock;
+  } else if (r.lock !== undefined && r.lock && typeof r.lock === 'object' && !Array.isArray(r.lock)) {
+    const lock = r.lock as Record<string, unknown>;
+    daemon.lock.enabled = parseBoolean(lock.enabled, daemon.lock.enabled);
+    daemon.lock.staleAfterSeconds = parseNonNegativeInteger(
+      lock.stale_after,
+      'daemon.lock.stale_after',
+      daemon.lock.staleAfterSeconds,
+    );
+    if (typeof lock.path === 'string') daemon.lock.path = lock.path.trim();
+    else if (lock.path !== undefined) console.warn(`[config] daemon.lock.path: expected a string (got ${String(lock.path)})`);
+  } else if (r.lock !== undefined) {
+    console.warn('[config] daemon.lock: expected a boolean or object');
+  }
+
+  if (r.lock_enabled !== undefined) {
+    daemon.lock.enabled = parseBoolean(r.lock_enabled, daemon.lock.enabled);
+  }
+  daemon.lock.staleAfterSeconds = parseNonNegativeInteger(
+    r.lock_stale_after,
+    'daemon.lock_stale_after',
+    daemon.lock.staleAfterSeconds,
+  );
+  if (typeof r.lock_path === 'string') daemon.lock.path = r.lock_path.trim();
+
+  return daemon;
 }
 
 function parseEventsConfig(raw: unknown): EventsConfig | undefined {
@@ -979,6 +1129,14 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     }
   }
 
+  // Handle hosted daemon mode configuration.
+  if (parsed.daemon !== undefined) {
+    const daemon = parseDaemonConfig(parsed.daemon);
+    if (daemon) {
+      result.daemon = daemon;
+    }
+  }
+
   // Handle pricing table (nested object, not in YAML_KEY_MAP)
   if (parsed.pricing && typeof parsed.pricing === 'object') {
     const pricing: Record<string, { input: number; output: number }> = {};
@@ -1062,6 +1220,16 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...yamlConfig.automationPolicy,
     ...overrides?.automationPolicy,
   };
+  const daemon = {
+    ...DEFAULT_DAEMON_CONFIG,
+    ...yamlConfig.daemon,
+    ...overrides?.daemon,
+    lock: {
+      ...DEFAULT_DAEMON_CONFIG.lock,
+      ...yamlConfig.daemon?.lock,
+      ...overrides?.daemon?.lock,
+    },
+  };
 
   const merged: Config = {
     ...DEFAULTS,
@@ -1075,6 +1243,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     sessionRetention,
     events,
     automationPolicy,
+    daemon,
   };
 
   // Validate agent is a known value

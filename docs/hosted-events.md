@@ -13,6 +13,14 @@ Supported events:
 - `session.resumed`
 - `session.completed`
 - `session.failed`
+- `daemon.started`
+- `daemon.idle`
+- `daemon.health`
+- `daemon.work.selected`
+- `daemon.work.skipped`
+- `daemon.resume.requested`
+- `daemon.shutdown`
+- `daemon.failed`
 
 ## Base Configuration
 

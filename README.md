@@ -303,6 +303,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run --epics <ids>` | Process an ordered comma-separated queue of epics, one session branch and PR per epic |
 | `alpha-loop run --epics <ids> --queue-branch-mode independent` | Run queued epics without stacking later session branches on earlier ones |
 | `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
+| `alpha-loop daemon` | Run hosted daemon mode continuously for repo stewardship |
+| `alpha-loop daemon --mode feedback-only` | Poll feedback and resume eligible sessions without triage or new work selection |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
 | `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
 | `alpha-loop auth` | Save authenticated browser state for verification |
@@ -377,6 +379,24 @@ Options:
   --verify-only <n>   Run only the verification pass on an existing epic
 ```
 
+### Daemon Options
+
+```bash
+alpha-loop daemon [options]
+
+Options:
+  --mode <mode>                 full, triage-only, feedback-only, or run-only
+  --triage-interval <seconds>   Seconds between intake triage ticks
+  --feedback-interval <seconds> Seconds between feedback poll/resume ticks
+  --run-interval <seconds>      Seconds between ready-work selection ticks
+  --health-interval <seconds>   Seconds between daemon health events
+  --idle-sleep <seconds>        Seconds to sleep when no tick is due
+  --feedback-command <command>  Adapter command returning feedback JSON/NDJSON
+  --no-lock                     Disable the repo-level daemon lock
+  --once-tick                   Run one due daemon tick and exit
+  --max-ticks <n>               Stop after this many daemon ticks
+```
+
 ## Configuration
 
 Running `alpha-loop init` creates a `.alpha-loop.yaml` file:
@@ -405,6 +425,20 @@ max_session_duration: 7200  # 2 hours in seconds
 automation_policy:
   block_labels: [do-not-automate, needs-human-input]
   # See docs/hosted-policy.md for full marketing-site and web-app profiles.
+
+# Hosted daemon mode
+daemon:
+  mode: full
+  triage_interval: 900
+  feedback_interval: 60
+  run_interval: 120
+  health_interval: 300
+  idle_sleep: 30
+  feedback_poll_command: ""  # optional adapter command returning JSON/NDJSON
+  lock:
+    enabled: true
+    stale_after: 86400
+    path: ""                 # defaults to .alpha-loop/daemon.lock
 
 # Worktree retention for durable session manifests
 session_retention:
@@ -500,10 +534,20 @@ eval_dir: .alpha-loop/evals
 | `automation_policy.max_session_minutes` | `0` | Runtime limit for hosted automation sessions (`0` = unlimited) |
 | `automation_policy.max_session_cost_usd` | `0` | Estimated session budget limit (`0` = unlimited) |
 | `automation_policy.max_issue_cost_usd` | `0` | Estimated per-issue budget limit (`0` = unlimited) |
+| `daemon.mode` | `full` | Hosted daemon mode: `full`, `triage-only`, `feedback-only`, or `run-only` |
+| `daemon.triage_interval` | `900` | Seconds between intake triage ticks |
+| `daemon.feedback_interval` | `60` | Seconds between feedback poll and resume ticks |
+| `daemon.run_interval` | `120` | Seconds between ready-work selection ticks |
+| `daemon.health_interval` | `300` | Seconds between daemon health lifecycle events |
+| `daemon.idle_sleep` | `30` | Seconds to sleep when no daemon tick is due |
+| `daemon.feedback_poll_command` | (none) | Optional adapter command that returns one feedback JSON object, an array, or NDJSON |
+| `daemon.lock.enabled` | `true` | Use `.alpha-loop/daemon.lock` to prevent concurrent daemon mutation in one repo |
+| `daemon.lock.stale_after` | `86400` | Seconds before a still-live lock can be treated as stale (`0` = PID-only stale checks) |
+| `daemon.lock.path` | (none) | Optional custom lock path; empty uses `.alpha-loop/daemon.lock` |
 
 ### Lifecycle Events
 
-Alpha Loop emits typed lifecycle events for hosted sessions: `session.started`, `session.paused`, `human_input.requested`, `qa.requested`, `feedback.received`, `session.resumed`, `session.completed`, and `session.failed`.
+Alpha Loop emits typed lifecycle events for hosted sessions and daemons: `session.started`, `session.paused`, `human_input.requested`, `qa.requested`, `feedback.received`, `session.resumed`, `session.completed`, `session.failed`, `daemon.started`, `daemon.idle`, `daemon.health`, `daemon.work.selected`, `daemon.work.skipped`, `daemon.resume.requested`, `daemon.shutdown`, and `daemon.failed`.
 
 Destinations can write to the session history log, POST to webhooks, or run a local command with canonical JSON on stdin. Webhooks can use `format: json`, `slack`, `teams`, or `discord`; command destinations always receive canonical JSON. `--dry-run` prints matching destinations instead of sending.
 
