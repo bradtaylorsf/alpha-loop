@@ -16,6 +16,7 @@ describe('epic-first workflow docs and help text', () => {
     expect(readme).toContain('Agents working on each child issue receive the parent epic goal, acceptance criteria, and sibling checklist as context');
     expect(readme).toContain('`alpha-loop roadmap --queue` recommends the next ordered epic queue');
     expect(readme).toContain('`alpha-loop run --epics <A,B,C>` runs several parent epics back-to-back');
+    expect(readme).toContain('Use `alpha-loop run --issue <N>` when you need to restart or process exactly one ready issue');
   });
 
   it('docs/epics.md explains milestone scheduling and parent context for child agents', () => {
@@ -27,6 +28,8 @@ describe('epic-first workflow docs and help text', () => {
     expect(epicsDoc).toContain('does not assign those child issues separately as standalone roadmap items');
     expect(epicsDoc).toContain('prompts include parent epic context');
     expect(epicsDoc).toContain('the parent goal/body summary, parent acceptance criteria, and the full ordered sibling checklist');
+    expect(epicsDoc).toContain('alpha-loop run --issue 158');
+    expect(epicsDoc).toContain('If multiple open parent epics reference the same issue');
   });
 
   it('documents multi-epic queue behavior and inspection workflow', () => {
@@ -67,6 +70,7 @@ describe('epic-first workflow docs and help text', () => {
     expect(cli).toContain('Recommend the next ordered epic run queue without making changes');
     expect(cli).toContain('Display proposed epic/standalone milestone assignments without making changes');
     expect(cli).toContain('Process multiple epics in order (comma-separated issue numbers)');
+    expect(cli).toContain('Process exactly one issue by issue number (skips the picker)');
     expect(cli).toContain('Branch mode for --epics: stacked or independent');
     expect(cli).toContain('View session and queue history');
   });

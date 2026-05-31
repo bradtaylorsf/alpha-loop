@@ -101,6 +101,18 @@ Processes epic `#165` directly, skipping the picker.
 
 `--epic` is the explicit override. If you also pass `--milestone`, the milestone filter is ignored and the selected epic's checklist is processed.
 
+### Targeted Child Issue
+
+```bash
+alpha-loop run --issue 158
+```
+
+Processes exactly issue `#158`, skipping the picker, milestone discovery, epic queue selection, and the open-ready queue. The issue must exist, be open, have the configured ready label, and not have a `blocked` label.
+
+If the issue is listed in exactly one open parent epic checklist, Alpha Loop uses that parent epic goal, acceptance criteria, and sibling checklist in planning, implementation, review, learning, and PR text. On success it flips only that issue's checklist item and then runs the normal epic verification pass only if every sibling item is complete.
+
+If multiple open parent epics reference the same issue, `--issue` exits before creating a session or mutating GitHub/git state. Remove the duplicate parent checklist reference or close the unintended parent epic before retrying. If the target issue itself is labeled `epic`, use `alpha-loop run --epic <N>` instead.
+
 ### Milestone Scheduled
 
 ```bash
