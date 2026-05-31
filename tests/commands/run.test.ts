@@ -81,6 +81,10 @@ jest.mock('../../src/lib/preflight', () => ({
   runPortCheck: jest.fn().mockReturnValue([]),
 }));
 
+jest.mock('../../src/lib/events', () => ({
+  emitLifecycleEvent: jest.fn().mockResolvedValue({ event: {}, deliveries: [] }),
+}));
+
 jest.mock('../../src/lib/eval', () => ({
   saveCapturedCase: jest.fn(),
   detectFailureStep: jest.fn(() => 'implement'),
@@ -110,6 +114,7 @@ import { generateSessionSummary, repairSessionLearningArtifacts, repairSessionSu
 import { contextNeedsRefresh } from '../../src/lib/context';
 import { syncAgentAssets } from '../../src/commands/sync';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { emitLifecycleEvent } from '../../src/lib/events';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
@@ -132,6 +137,7 @@ const mockSyncAgentAssets = syncAgentAssets as jest.MockedFunction<typeof syncAg
 const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
+const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -282,6 +288,16 @@ describe('runCommand', () => {
       verificationClosedEpic: true,
     }));
     expect(mockUpdateEpicChecklist).toHaveBeenCalledWith('owner/repo', 195, 201, true);
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.started',
+      session: expect.objectContaining({ name: 'session/20260330-143000' }),
+    }));
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.completed',
+      context: expect.objectContaining({
+        prUrl: 'https://github.com/owner/repo/pull/500',
+      }),
+    }));
     expect(mockExit).not.toHaveBeenCalled();
   });
 

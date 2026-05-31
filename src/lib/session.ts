@@ -536,7 +536,7 @@ export function recordSessionTranscript(
 }
 
 export function recordSessionLogFile(
-  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'> | string,
   filePath: string,
 ): DurableSessionManifest | null {
   const relPath = projectRelative(filePath);

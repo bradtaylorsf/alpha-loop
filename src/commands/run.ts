@@ -43,6 +43,7 @@ import { validateGeneratedMarkdownForCommit } from '../lib/scan-validation.js';
 import { readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
 import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, parseDependencies, type ValidationReport } from '../lib/validation.js';
 import { hasLabel } from '../lib/labels.js';
+import { emitLifecycleEvent } from '../lib/events.js';
 import {
   createEpicQueueManifest,
   createEpicQueueValidationFailureManifest,
@@ -780,6 +781,18 @@ async function runIssueSession(
 
   // Print startup banner
   printBanner(config, session);
+  await emitLifecycleEvent({
+    config,
+    type: 'session.started',
+    session,
+    context: {
+      metadata: {
+        targetType: target.type,
+        activeEpic: activeEpic ?? null,
+        activeMilestone: activeMilestone || null,
+      },
+    },
+  });
 
   // Check prerequisites
   checkPrerequisites(config);
@@ -812,6 +825,19 @@ async function runIssueSession(
           worktreePath: cleanupResult.path,
           reason: cleanupResult.reason,
           at: new Date().toISOString(),
+        });
+        await emitLifecycleEvent({
+          config,
+          type: 'session.paused',
+          session,
+          context: {
+            issueNumber: activeIssueNum,
+            reason: 'Received termination signal',
+            metadata: {
+              signal: true,
+              cleanupStatus: cleanupResult.status,
+            },
+          },
         });
       } catch {
         // Best effort cleanup
@@ -1452,6 +1478,26 @@ async function runIssueSession(
     prUrl: sessionPrUrl,
     sessionPrUrl,
   });
+  if (finalStatus === 'completed' || finalStatus === 'failed') {
+    await emitLifecycleEvent({
+      config,
+      type: finalStatus === 'completed' ? 'session.completed' : 'session.failed',
+      session,
+      context: {
+        prUrl: sessionPrUrl,
+        error: failures.length > 0 ? failures.map((failure) => failure.message).join('\n') : null,
+        metadata: {
+          failures: failures.map((failure) => ({
+            code: failure.code,
+            message: failure.message,
+            issueNum: failure.issueNum ?? null,
+          })),
+          successCount: session.results.filter((r) => r.status === 'success' && !isRecoveredRunResult(r)).length,
+          issueCount: session.results.length,
+        },
+      },
+    });
+  }
 
   const successCount = session.results.filter((r) => r.status === 'success' && !isRecoveredRunResult(r)).length;
   log.info(`Session complete: ${successCount}/${session.results.length} issues succeeded`);

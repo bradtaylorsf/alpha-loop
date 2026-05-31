@@ -86,6 +86,7 @@ import type { Config, PipelineStepName, RoutingStageName, RoutingEndpointType } 
 import type { AgentResult } from './agent.js';
 import type { SessionContext } from './session.js';
 import { buildStageTelemetry, writeStageTelemetry } from './telemetry.js';
+import { emitLifecycleEvent } from './events.js';
 
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
@@ -691,6 +692,54 @@ async function pauseSessionForRequest(input: PauseSessionInput): Promise<Pipelin
   if (!config.dryRun) {
     saveResult(session, result);
   }
+  await emitLifecycleEvent({
+    config,
+    type: 'session.paused',
+    session,
+    context: {
+      issueNumber: issueNum,
+      issueTitle: title,
+      prUrl,
+      branch: worktreeBranch,
+      worktreePath,
+      previewUrl,
+      qaChecklist,
+      question,
+      resumeInstructions,
+      reason: request.reason,
+      metadata: {
+        waitingStatus,
+        requestType: request.type,
+        classification: classification ?? null,
+        followUpIssueNumber: followUpIssueNumber ?? null,
+        followUpIssueUrl: followUpUrl ?? null,
+      },
+    },
+  });
+  await emitLifecycleEvent({
+    config,
+    type: waitingStatus === 'qa_requested' ? 'qa.requested' : 'human_input.requested',
+    session,
+    context: {
+      issueNumber: issueNum,
+      issueTitle: title,
+      prUrl,
+      branch: worktreeBranch,
+      worktreePath,
+      previewUrl,
+      qaChecklist,
+      question,
+      resumeInstructions,
+      reason: request.reason,
+      metadata: {
+        waitingStatus,
+        requestType: request.type,
+        classification: classification ?? null,
+        followUpIssueNumber: followUpIssueNumber ?? null,
+        followUpIssueUrl: followUpUrl ?? null,
+      },
+    },
+  });
   log.warn(`Issue #${issueNum} paused in ${waitingStatus}: ${request.reason}`);
   return result;
 }

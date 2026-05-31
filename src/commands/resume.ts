@@ -51,6 +51,7 @@ import {
   normalizeHumanFeedbackStatus,
   type FeedbackClassification,
 } from '../lib/session-state.js';
+import { emitLifecycleEvent } from '../lib/events.js';
 
 export type ResumeOptions = {
   issue?: string;
@@ -986,6 +987,27 @@ async function resumePausedIssueFromManifest(
     log.info(`Feedback classification: ${context.classification}; stage: ${context.resumeStage}`);
 
     transitionManifestToResuming(ref, context);
+    await emitLifecycleEvent({
+      config,
+      type: 'session.resumed',
+      manifestPath: ref.manifestPath,
+      session,
+      context: {
+        issueNumber: issueNum,
+        issueTitle: issue.title,
+        prUrl: context.existingPrUrl,
+        branch: savedBranch,
+        worktreePath: savedPath,
+        feedback: {
+          classification: context.classification,
+          newCommentCount: context.newComments.length,
+          commentsUsedForClassification: context.commentsUsedForClassification.length,
+        },
+        metadata: {
+          resumeStage: context.resumeStage,
+        },
+      },
+    });
     if (!config.dryRun) {
       markResumeLabels(config, issueNum);
     }
@@ -1033,6 +1055,31 @@ async function resumePausedIssueFromManifest(
       await finalizeSession(session, config);
     }
 
+    if (finalStatus === 'completed' || finalStatus === 'failed') {
+      await emitLifecycleEvent({
+        config,
+        type: finalStatus === 'completed' ? 'session.completed' : 'session.failed',
+        manifestPath: ref.manifestPath,
+        session,
+        context: {
+          issueNumber: issueNum,
+          issueTitle: issue.title,
+          prUrl: result.prUrl ?? context.existingPrUrl,
+          error: result.status === 'failure' ? `Resume pipeline failed for issue #${issueNum}` : null,
+          feedback: {
+            classification: context.classification,
+          },
+          metadata: {
+            resumed: true,
+            resumeStage: context.resumeStage,
+            testsPassing: result.testsPassing,
+            verifyPassing: result.verifyPassing,
+            verifySkipped: result.verifySkipped,
+          },
+        },
+      });
+    }
+
     if (!config.dryRun) {
       commentIssue(config.repo, issueNum, formatResumeSummaryComment(context, result));
     }
@@ -1048,6 +1095,18 @@ async function resumePausedIssueFromManifest(
     } catch {
       transitionSessionStatus(ref.manifestPath, 'failed', 'failed');
     }
+    await emitLifecycleEvent({
+      config,
+      type: 'session.failed',
+      manifestPath: ref.manifestPath,
+      context: {
+        issueNumber: issueNum,
+        error: err instanceof Error ? err.message : String(err),
+        metadata: {
+          resumed: true,
+        },
+      },
+    });
     throw err;
   } finally {
     releaseResumeLock(lockPath);

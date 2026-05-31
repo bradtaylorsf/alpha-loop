@@ -26,14 +26,20 @@ jest.mock('../../src/lib/feedback', () => {
   };
 });
 
+jest.mock('../../src/lib/events', () => ({
+  emitLifecycleEvent: jest.fn().mockResolvedValue({ event: {}, deliveries: [] }),
+}));
+
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { feedbackIngestCommand } from '../../src/commands/feedback.js';
 import { ingestFeedback } from '../../src/lib/feedback.js';
 import { log } from '../../src/lib/logger.js';
+import { emitLifecycleEvent } from '../../src/lib/events.js';
 
 const mockIngestFeedback = ingestFeedback as jest.MockedFunction<typeof ingestFeedback>;
+const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 
 describe('feedback ingest command', () => {
   let tempDir: string;
@@ -116,6 +122,18 @@ describe('feedback ingest command', () => {
       readyLabel: 'ready',
     }));
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('"status": "processed"'));
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'feedback.received',
+      manifestPath: expect.stringContaining('session.json'),
+      context: expect.objectContaining({
+        issueNumber: 287,
+        feedback: expect.objectContaining({
+          idempotencyHash: 'hash',
+          source: 'slack',
+          classification: 'approval',
+        }),
+      }),
+    }));
   });
 
   it('reads plain stdin body text and applies adapter field options', async () => {
@@ -145,5 +163,6 @@ describe('feedback ingest command', () => {
       requestResume: true,
     }));
     expect(log.info).toHaveBeenCalledWith('Feedback already processed: hash-2');
+    expect(mockEmitLifecycleEvent).not.toHaveBeenCalled();
   });
 });
