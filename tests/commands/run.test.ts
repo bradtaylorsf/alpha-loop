@@ -45,6 +45,10 @@ jest.mock('../../src/lib/pipeline', () => ({
 jest.mock('../../src/lib/session', () => ({
   createSession: jest.fn(),
   finalizeSession: jest.fn(),
+  recordSessionIssue: jest.fn(),
+  recordSessionPolicyDecision: jest.fn(),
+  saveResult: jest.fn(),
+  transitionHumanFeedbackSessionStatus: jest.fn(),
   recordSessionCleanup: jest.fn(),
   transitionSessionStatus: jest.fn(),
   updateSessionManifest: jest.fn(),
@@ -107,9 +111,9 @@ jest.mock('node:fs', () => ({
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
-import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist } from '../../src/lib/github';
+import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
 import { processIssue, processBatch } from '../../src/lib/pipeline';
-import { createSession, finalizeSession, transitionSessionStatus } from '../../src/lib/session';
+import { createSession, finalizeSession, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
 import { syncAgentAssets } from '../../src/commands/sync';
@@ -124,11 +128,15 @@ const mockListEpics = listEpics as jest.MockedFunction<typeof listEpics>;
 const mockGetEpicSubIssues = getEpicSubIssues as jest.MockedFunction<typeof getEpicSubIssues>;
 const mockGetIssueWithComments = getIssueWithComments as jest.MockedFunction<typeof getIssueWithComments>;
 const mockUpdateEpicChecklist = updateEpicChecklist as jest.MockedFunction<typeof updateEpicChecklist>;
+const mockLabelIssue = labelIssue as jest.MockedFunction<typeof labelIssue>;
+const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue>;
 const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue>;
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
 const mockTransitionSessionStatus = transitionSessionStatus as jest.MockedFunction<typeof transitionSessionStatus>;
+const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
+const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGenerateSessionSummary = generateSessionSummary as jest.MockedFunction<typeof generateSessionSummary>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
@@ -454,6 +462,44 @@ describe('runCommand', () => {
       expect.any(Object),
       expect.any(Object),
     );
+  });
+
+  test('automation policy pauses blocked-label issues before agent execution', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      automationPolicy: {
+        requireLabels: [],
+        blockLabels: ['do-not-automate'],
+        allowedPaths: [],
+        protectedPaths: [],
+        allowedCommands: [],
+        requireHumanFor: [],
+        maxActiveSessions: 0,
+        maxPausedSessions: 0,
+        maxIssuesPerSession: 0,
+        maxSessionMinutes: 0,
+        maxSessionCostUsd: 0,
+        maxIssueCostUsd: 0,
+      },
+      ...overrides,
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Unsafe issue', body: 'Body', labels: ['ready', 'do-not-automate'] },
+    ]);
+
+    await runCommand({ skipEpic: true });
+
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockLabelIssue).toHaveBeenCalledWith('owner/repo', 42, 'needs-human-input', 'ready');
+    expect(mockCommentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('blocked label'));
+    expect(mockRecordSessionPolicyDecision).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      stage: 'issue_start',
+      issueNum: 42,
+    }));
+    expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      issueNum: 42,
+      status: 'waiting',
+      waitingStatus: 'human_input_requested',
+    }));
   });
 
   test('--epics dry-run previews non-epic labels as warnings without mutating', async () => {

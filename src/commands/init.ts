@@ -268,6 +268,44 @@ max_issues: ${answers.maxIssues}
 max_session_duration: 7200    # Total session wall-clock budget, in seconds (2h)
 # poll_interval: 60           # Seconds between issue queue polls when running continuously
 
+# === Automation policy (hosted guardrails) =================================
+# Repo-level safety policy for unattended hosted runs. Keep this narrow before
+# enabling daemon mode. See docs/hosted-policy.md for marketing-site and web-app
+# starter profiles.
+automation_policy:
+  block_labels: [do-not-automate, needs-human-input]
+#   require_labels: [ready]
+#   max_active_sessions: 1
+#   max_paused_sessions: 10
+#   max_issues_per_session: 1
+#   max_session_minutes: 90
+#   max_session_cost_usd: 25
+#   max_issue_cost_usd: 5
+#   allowed_paths:
+#     - src/**
+#     - content/**
+#     - public/**
+#   protected_paths:
+#     - package.json
+#     - pnpm-lock.yaml
+#     - .github/workflows/**
+#     - sanity/schema/**
+#   allowed_commands:
+#     - pnpm install
+#     - pnpm test
+#     - pnpm build
+#     - pnpm dev
+#   require_human_for:
+#     - auth
+#     - billing
+#     - production-deploy
+#     - dependency-upgrade
+#     - sanity-schema
+#     - secrets
+#     - migrations
+#     - destructive-content
+#     - ambiguous
+
 # === Session retention ======================================================
 # Durable session manifests are kept in .alpha-loop/sessions/<session>/session.json.
 # Paused/waiting/QA worktrees are preserved unless paused_worktree_days is > 0.

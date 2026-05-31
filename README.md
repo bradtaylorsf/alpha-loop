@@ -401,6 +401,11 @@ harnesses:
 max_issues: 20
 max_session_duration: 7200  # 2 hours in seconds
 
+# Hosted automation guardrails
+automation_policy:
+  block_labels: [do-not-automate, needs-human-input]
+  # See docs/hosted-policy.md for full marketing-site and web-app profiles.
+
 # Worktree retention for durable session manifests
 session_retention:
   paused_worktree_days: 0       # keep paused/waiting/QA worktrees until explicit cleanup
@@ -483,6 +488,18 @@ eval_dir: .alpha-loop/evals
 | `events.include_prompt_text` | `false` | Include redacted prompt text in lifecycle events; prompt paths and hashes are always retained when available |
 | `events.redact` | `[]` | Env var names or literal values to redact from lifecycle event payloads |
 | `events.destinations` | `{}` | Lifecycle event destinations (`log`, `webhook`, `command`) with per-destination event filters |
+| `automation_policy.require_labels` | `[]` | Labels required before hosted automation may start an issue |
+| `automation_policy.block_labels` | `do-not-automate`, `needs-human-input` | Labels that pause automation and request human input |
+| `automation_policy.allowed_paths` | `[]` | Optional glob allowlist for changed files; empty means all paths are allowed unless protected |
+| `automation_policy.protected_paths` | `[]` | Glob list of paths that require human input when changed |
+| `automation_policy.allowed_commands` | `[]` | Optional allowlist for configured shell commands; entries match exact commands or subcommands |
+| `automation_policy.require_human_for` | `[]` | High-risk categories that require human input (`auth`, `billing`, `production-deploy`, `dependency-upgrade`, `sanity-schema`, `secrets`, `migrations`, `destructive-content`, `ambiguous`) |
+| `automation_policy.max_active_sessions` | `0` | Maximum active durable sessions (`0` = unlimited) |
+| `automation_policy.max_paused_sessions` | `0` | Maximum paused/waiting sessions (`0` = unlimited) |
+| `automation_policy.max_issues_per_session` | `0` | Maximum issues hosted automation may process in one session (`0` = unlimited) |
+| `automation_policy.max_session_minutes` | `0` | Runtime limit for hosted automation sessions (`0` = unlimited) |
+| `automation_policy.max_session_cost_usd` | `0` | Estimated session budget limit (`0` = unlimited) |
+| `automation_policy.max_issue_cost_usd` | `0` | Estimated per-issue budget limit (`0` = unlimited) |
 
 ### Lifecycle Events
 
@@ -491,6 +508,12 @@ Alpha Loop emits typed lifecycle events for hosted sessions: `session.started`, 
 Destinations can write to the session history log, POST to webhooks, or run a local command with canonical JSON on stdin. Webhooks can use `format: json`, `slack`, `teams`, or `discord`; command destinations always receive canonical JSON. `--dry-run` prints matching destinations instead of sending.
 
 See [docs/hosted-events.md](docs/hosted-events.md) for Slack, Teams, Discord, email-via-script, and custom service examples.
+
+### Hosted Automation Policy
+
+`automation_policy` constrains unattended hosted runs before issue work starts, before configured commands run, and before PR creation when diffs touch protected paths. Blocked work receives `needs-human-input`, a GitHub comment explaining the decision, and policy metadata in the session manifest and lifecycle event payloads.
+
+See [docs/hosted-policy.md](docs/hosted-policy.md) for ready-to-paste marketing-site and web-app policies.
 
 ### Environment Variables
 

@@ -51,6 +51,7 @@ import {
   recordSessionIssue,
   recordSessionLogFile,
   recordSessionPrompt,
+  recordSessionPolicyDecision,
   recordSessionStage,
   recordSessionTranscript,
   recordSessionWorktree,
@@ -87,6 +88,15 @@ import type { AgentResult } from './agent.js';
 import type { SessionContext } from './session.js';
 import { buildStageTelemetry, writeStageTelemetry } from './telemetry.js';
 import { emitLifecycleEvent } from './events.js';
+import {
+  decisionAllowed,
+  evaluateCommandPolicy,
+  evaluateCostPolicy,
+  evaluateDiffPolicy,
+  formatAutomationPolicyComment,
+  parseDiffNameOnly,
+  type AutomationPolicyDecision,
+} from './automation-policy.js';
 
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
@@ -424,6 +434,8 @@ export type PipelineResult = {
   filesChanged: number;
   /** Structured escalation events recorded while processing this issue. */
   escalationEvents?: EscalationEvent[];
+  /** Automation policy decision that paused or blocked this issue, when applicable. */
+  policyDecision?: AutomationPolicyDecision;
 };
 
 export function isRecoveredResult<T extends { recoveryMode?: PipelineRecoveryMode }>(
@@ -741,6 +753,124 @@ async function pauseSessionForRequest(input: PauseSessionInput): Promise<Pipelin
     },
   });
   log.warn(`Issue #${issueNum} paused in ${waitingStatus}: ${request.reason}`);
+  return result;
+}
+
+async function pauseSessionForAutomationPolicy(input: {
+  issueNum: number;
+  title: string;
+  config: Config;
+  session: SessionContext;
+  decision: AutomationPolicyDecision;
+  startTime: number;
+  projectDir: string;
+  worktreePath?: string;
+  worktreeBranch?: string;
+  testsPassing?: boolean;
+  verifyPassing?: boolean;
+  verifySkipped?: boolean;
+  filesChanged?: number;
+  prUrl?: string;
+}): Promise<PipelineResult> {
+  const duration = Math.round((Date.now() - input.startTime) / 1000);
+  const question = 'Please review the automation policy decision and confirm whether Alpha Loop should continue.';
+  const resumeInstructions = `Adjust the issue, labels, or .alpha-loop.yaml as needed, then run alpha-loop resume --issue ${input.issueNum}.`;
+
+  recordSessionPolicyDecision(input.session, input.decision);
+  transitionHumanFeedbackSessionStatus(input.session, {
+    to: 'human_input_requested',
+    reason: input.decision.reason,
+    issueNum: input.issueNum,
+    question,
+    resumeInstructions,
+    prUrl: input.prUrl ?? null,
+    eventPayload: {
+      policyDecision: input.decision,
+      worktreePath: input.worktreePath ?? null,
+      branch: input.worktreeBranch ?? null,
+    },
+  });
+  recordSessionIssue(input.session, input.issueNum, {
+    title: input.title,
+    status: 'human_input_requested',
+    stage: 'paused',
+    labels: ['needs-human-input'],
+    branch: input.worktreeBranch,
+    worktreePath: input.worktreePath,
+    prUrl: input.prUrl,
+  });
+
+  if (!input.config.dryRun) {
+    labelIssue(input.config.repo, input.issueNum, 'needs-human-input', 'in-progress');
+    labelIssue(input.config.repo, input.issueNum, 'needs-human-input', input.config.labelReady);
+    commentIssue(input.config.repo, input.issueNum, formatAutomationPolicyComment(input.decision));
+  }
+
+  if (input.worktreePath) {
+    const cleanup = await cleanupWorktree({
+      issueNum: input.issueNum,
+      projectDir: input.projectDir,
+      autoCleanup: input.config.autoCleanup,
+      preserveIfCommits: true,
+      worktreePath: input.worktreePath,
+      sessionStatus: 'human_input_requested',
+      dryRun: input.config.dryRun,
+    });
+    recordSessionCleanup(input.session, {
+      status: cleanup.status,
+      worktreePath: cleanup.path,
+      reason: cleanup.reason,
+      at: new Date().toISOString(),
+    });
+  }
+
+  const result: PipelineResult = {
+    issueNum: input.issueNum,
+    title: input.title,
+    status: 'waiting',
+    waitingStatus: 'human_input_requested',
+    waitingReason: input.decision.reason,
+    humanInputQuestion: question,
+    resumeInstructions,
+    prUrl: input.prUrl,
+    testsPassing: input.testsPassing ?? false,
+    verifyPassing: input.verifyPassing ?? false,
+    verifySkipped: input.verifySkipped ?? true,
+    duration,
+    filesChanged: input.filesChanged ?? 0,
+    policyDecision: input.decision,
+  };
+
+  if (!input.config.dryRun) {
+    saveResult(input.session, result);
+  }
+
+  const eventContext = {
+    issueNumber: input.issueNum,
+    issueTitle: input.title,
+    prUrl: input.prUrl,
+    branch: input.worktreeBranch,
+    worktreePath: input.worktreePath,
+    question,
+    resumeInstructions,
+    reason: input.decision.reason,
+    metadata: {
+      policyDecision: input.decision,
+    },
+  };
+  await emitLifecycleEvent({
+    config: input.config,
+    type: 'session.paused',
+    session: input.session,
+    context: eventContext,
+  });
+  await emitLifecycleEvent({
+    config: input.config,
+    type: 'human_input.requested',
+    session: input.session,
+    context: eventContext,
+  });
+  log.warn(`Issue #${input.issueNum} paused by automation policy: ${input.decision.reason}`);
   return result;
 }
 
@@ -1112,6 +1242,25 @@ export async function processIssue(
   let worktreeBranch: string;
   let worktreeResumed = false;
 
+  const setupCommands = [
+    ...(!config.skipInstall ? ['pnpm install --frozen-lockfile', 'pnpm install'] : []),
+    ...(config.setupCommand ? [config.setupCommand] : []),
+  ];
+  for (const command of setupCommands) {
+    const decision = evaluateCommandPolicy(config, command, { issueNum, title, stage: 'command' });
+    if (!decisionAllowed(decision)) {
+      return pauseSessionForAutomationPolicy({
+        issueNum,
+        title,
+        config,
+        session,
+        decision,
+        startTime,
+        projectDir,
+      });
+    }
+  }
+
   try {
     const wt = await setupWorktree({
       issueNum,
@@ -1403,6 +1552,29 @@ export async function processIssue(
       const implDiff = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
       if (implDiff.stdout) traceDiff(session.name, issueNum, 'implement', implDiff.stdout);
     } catch { /* non-fatal */ }
+
+    const diffNameResult = exec(`git diff --name-only "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+    const diffDecision = evaluateDiffPolicy(config, parseDiffNameOnly(diffNameResult.stdout), {
+      issueNum,
+      title,
+      stage: 'diff',
+    });
+    if (!decisionAllowed(diffDecision)) {
+      return pauseSessionForAutomationPolicy({
+        issueNum,
+        title,
+        config,
+        session,
+        decision: diffDecision,
+        startTime,
+        projectDir,
+        worktreePath,
+        worktreeBranch,
+        testsPassing: false,
+        verifyPassing: false,
+        verifySkipped: true,
+      });
+    }
   } else {
     log.dry('Would run implementation agent');
   }
@@ -1423,6 +1595,24 @@ export async function processIssue(
 
   for (let attempt = 1; testsPassing ? false : attempt <= config.maxTestRetries; attempt++) {
     log.info(`Test attempt ${attempt} of ${config.maxTestRetries}`);
+
+    const commandDecision = evaluateCommandPolicy(config, config.testCommand, { issueNum, title, stage: 'command' });
+    if (!decisionAllowed(commandDecision)) {
+      return pauseSessionForAutomationPolicy({
+        issueNum,
+        title,
+        config,
+        session,
+        decision: commandDecision,
+        startTime,
+        projectDir,
+        worktreePath,
+        worktreeBranch,
+        testsPassing: false,
+        verifyPassing: false,
+        verifySkipped: true,
+      });
+    }
 
     const testResult = runTests(worktreePath, config, logFile);
     testOutput = testResult.output;
@@ -1485,6 +1675,29 @@ export async function processIssue(
           const fixDiffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
           if (fixDiffResult.stdout) traceDiff(session.name, issueNum, `fix-${attempt}`, fixDiffResult.stdout);
         } catch { /* non-fatal */ }
+
+        const diffNameResult = exec(`git diff --name-only "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+        const diffDecision = evaluateDiffPolicy(config, parseDiffNameOnly(diffNameResult.stdout), {
+          issueNum,
+          title,
+          stage: 'diff',
+        });
+        if (!decisionAllowed(diffDecision)) {
+          return pauseSessionForAutomationPolicy({
+            issueNum,
+            title,
+            config,
+            session,
+            decision: diffDecision,
+            startTime,
+            projectDir,
+            worktreePath,
+            worktreeBranch,
+            testsPassing: false,
+            verifyPassing: false,
+            verifySkipped: true,
+          });
+        }
       }
     } else {
       log.warn(`Tests still failing after ${config.maxTestRetries} attempts`);
@@ -1606,6 +1819,23 @@ export async function processIssue(
         }
 
         // Re-run tests before next review attempt
+        const commandDecision = evaluateCommandPolicy(config, config.testCommand, { issueNum, title, stage: 'command' });
+        if (!decisionAllowed(commandDecision)) {
+          return pauseSessionForAutomationPolicy({
+            issueNum,
+            title,
+            config,
+            session,
+            decision: commandDecision,
+            startTime,
+            projectDir,
+            worktreePath,
+            worktreeBranch,
+            testsPassing,
+            verifyPassing: false,
+            verifySkipped: true,
+          });
+        }
         const retest = runTests(worktreePath, config, logFile);
         if (!retest.passed) {
           log.warn('Tests failed after review fixes — will be caught in final status');
@@ -1639,6 +1869,29 @@ export async function processIssue(
 
     for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
       log.info(`Verification attempt ${attempt} of ${config.maxTestRetries}`);
+
+      const verificationCommands = (plan.verification.method ?? 'playwright') === 'playwright'
+        ? (config.devCommand ? [config.devCommand] : [])
+        : (plan.verification.command ? [plan.verification.command] : []);
+      for (const command of verificationCommands) {
+        const commandDecision = evaluateCommandPolicy(config, command, { issueNum, title, stage: 'command' });
+        if (!decisionAllowed(commandDecision)) {
+          return pauseSessionForAutomationPolicy({
+            issueNum,
+            title,
+            config,
+            session,
+            decision: commandDecision,
+            startTime,
+            projectDir,
+            worktreePath,
+            worktreeBranch,
+            testsPassing,
+            verifyPassing: false,
+            verifySkipped: false,
+          });
+        }
+      }
 
       const verifyResult = await runVerify({
         worktree: worktreePath,
@@ -1735,6 +1988,23 @@ export async function processIssue(
           }
 
           // Re-run tests before next verify attempt
+          const commandDecision = evaluateCommandPolicy(config, config.testCommand, { issueNum, title, stage: 'command' });
+          if (!decisionAllowed(commandDecision)) {
+            return pauseSessionForAutomationPolicy({
+              issueNum,
+              title,
+              config,
+              session,
+              decision: commandDecision,
+              startTime,
+              projectDir,
+              worktreePath,
+              worktreeBranch,
+              testsPassing,
+              verifyPassing: false,
+              verifySkipped: false,
+            });
+          }
           const retest = runTests(worktreePath, config, logFile);
           if (!retest.passed) {
             log.warn('Tests failed after verify fixes');
@@ -1757,6 +2027,23 @@ export async function processIssue(
     currentStep = 'smoke';
     recordSessionStage(session, 'smoke');
     log.step('Step 7b: Running smoke test');
+    const commandDecision = evaluateCommandPolicy(config, config.smokeTest, { issueNum, title, stage: 'command' });
+    if (!decisionAllowed(commandDecision)) {
+      return pauseSessionForAutomationPolicy({
+        issueNum,
+        title,
+        config,
+        session,
+        decision: commandDecision,
+        startTime,
+        projectDir,
+        worktreePath,
+        worktreeBranch,
+        testsPassing,
+        verifyPassing,
+        verifySkipped,
+      });
+    }
     const smokeResult = exec(config.smokeTest, { cwd: worktreePath, timeout: 60_000 });
     if (smokeResult.exitCode === 0) {
       log.success('Smoke test passed');
@@ -1766,12 +2053,57 @@ export async function processIssue(
   }
 
   const duration = Math.round((Date.now() - startTime) / 1000);
+  const issueCostUsd = stepCosts.reduce((sum, step) => sum + step.cost_usd, 0);
+  const costDecision = evaluateCostPolicy(config, {
+    issueNum,
+    title,
+    issueCostUsd,
+    sessionCostUsd: issueCostUsd,
+  });
+  if (!decisionAllowed(costDecision)) {
+    return pauseSessionForAutomationPolicy({
+      issueNum,
+      title,
+      config,
+      session,
+      decision: costDecision,
+      startTime,
+      projectDir,
+      worktreePath,
+      worktreeBranch,
+      testsPassing,
+      verifyPassing,
+      verifySkipped,
+    });
+  }
 
   // Get diff before writing learnings so the learning prompt analyzes only the implementation.
   let runDiff = '';
   if (!config.dryRun) {
     const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
     runDiff = diffResult.stdout.slice(0, MAX_DIFF_CHARS);
+    const diffNameResult = exec(`git diff --name-only "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+    const diffDecision = evaluateDiffPolicy(config, parseDiffNameOnly(diffNameResult.stdout), {
+      issueNum,
+      title,
+      stage: 'diff',
+    });
+    if (!decisionAllowed(diffDecision)) {
+      return pauseSessionForAutomationPolicy({
+        issueNum,
+        title,
+        config,
+        session,
+        decision: diffDecision,
+        startTime,
+        projectDir,
+        worktreePath,
+        worktreeBranch,
+        testsPassing,
+        verifyPassing,
+        verifySkipped,
+      });
+    }
   }
 
   // Format review gate for learnings
@@ -2143,6 +2475,37 @@ export async function processBatch(
   let worktreeBranch: string;
 
   let worktreeResumed = false;
+  const setupCommands = [
+    ...(!config.skipInstall ? ['pnpm install --frozen-lockfile', 'pnpm install'] : []),
+    ...(config.setupCommand ? [config.setupCommand] : []),
+  ];
+  for (const command of setupCommands) {
+    const firstDecision = evaluateCommandPolicy(config, command, {
+      issueNum: issues[0]?.number,
+      title: issues[0]?.title,
+      stage: 'command',
+    });
+    if (!decisionAllowed(firstDecision)) {
+      const results: PipelineResult[] = [];
+      for (const issue of issues) {
+        const decision = evaluateCommandPolicy(config, command, {
+          issueNum: issue.number,
+          title: issue.title,
+          stage: 'command',
+        });
+        results.push(await pauseSessionForAutomationPolicy({
+          issueNum: issue.number,
+          title: issue.title,
+          config,
+          session,
+          decision,
+          startTime,
+          projectDir,
+        }));
+      }
+      return results;
+    }
+  }
   try {
     const wt = await setupWorktree({
       issueNum: issues[0].number, // Use first issue number for branch naming
@@ -2363,6 +2726,38 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       const implDiff = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
       if (implDiff.stdout) traceDiff(session.name, issues[0].number, 'batch-implement', implDiff.stdout);
     } catch { /* non-fatal */ }
+
+    const diffNameResult = exec(`git diff --name-only "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+    const diffDecision = evaluateDiffPolicy(config, parseDiffNameOnly(diffNameResult.stdout), {
+      issueNum: issues[0]?.number,
+      title: issues[0]?.title,
+      stage: 'diff',
+    });
+    if (!decisionAllowed(diffDecision)) {
+      const results: PipelineResult[] = [];
+      for (const issue of issues) {
+        const issueDecision = evaluateDiffPolicy(config, parseDiffNameOnly(diffNameResult.stdout), {
+          issueNum: issue.number,
+          title: issue.title,
+          stage: 'diff',
+        });
+        results.push(await pauseSessionForAutomationPolicy({
+          issueNum: issue.number,
+          title: issue.title,
+          config,
+          session,
+          decision: issueDecision,
+          startTime,
+          projectDir,
+          worktreePath,
+          worktreeBranch,
+          testsPassing: false,
+          verifyPassing: false,
+          verifySkipped: true,
+        }));
+      }
+      return results;
+    }
   }
 
   // --- Step 6: Test + retry loop ---
@@ -2381,6 +2776,37 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   for (let attempt = 1; testsPassing ? false : attempt <= config.maxTestRetries; attempt++) {
     log.info(`Test attempt ${attempt} of ${config.maxTestRetries}`);
+
+    const commandDecision = evaluateCommandPolicy(config, config.testCommand, {
+      issueNum: issues[0]?.number,
+      title: issues[0]?.title,
+      stage: 'command',
+    });
+    if (!decisionAllowed(commandDecision)) {
+      const results: PipelineResult[] = [];
+      for (const issue of issues) {
+        const decision = evaluateCommandPolicy(config, config.testCommand, {
+          issueNum: issue.number,
+          title: issue.title,
+          stage: 'command',
+        });
+        results.push(await pauseSessionForAutomationPolicy({
+          issueNum: issue.number,
+          title: issue.title,
+          config,
+          session,
+          decision,
+          startTime,
+          projectDir,
+          worktreePath,
+          worktreeBranch,
+          testsPassing: false,
+          verifyPassing: false,
+          verifySkipped: true,
+        }));
+      }
+      return results;
+    }
 
     const testResult = runTests(worktreePath, config, logFile);
     testOutput = testResult.output;
@@ -2532,12 +2958,76 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   const duration = Math.round((Date.now() - startTime) / 1000);
   const perIssueDuration = Math.round(duration / issues.length);
+  const batchCostUsd = stepCosts.reduce((sum, step) => sum + step.cost_usd, 0);
+  const costDecision = evaluateCostPolicy(config, {
+    issueNum: issues[0]?.number,
+    title: issues[0]?.title,
+    issueCostUsd: issues.length > 0 ? batchCostUsd / issues.length : batchCostUsd,
+    sessionCostUsd: batchCostUsd,
+  });
+  if (!decisionAllowed(costDecision)) {
+    const results: PipelineResult[] = [];
+    for (const issue of issues) {
+      const issueDecision = evaluateCostPolicy(config, {
+        issueNum: issue.number,
+        title: issue.title,
+        issueCostUsd: issues.length > 0 ? batchCostUsd / issues.length : batchCostUsd,
+        sessionCostUsd: batchCostUsd,
+      });
+      results.push(await pauseSessionForAutomationPolicy({
+        issueNum: issue.number,
+        title: issue.title,
+        config,
+        session,
+        decision: issueDecision,
+        startTime,
+        projectDir,
+        worktreePath,
+        worktreeBranch,
+        testsPassing,
+        verifyPassing: true,
+        verifySkipped: true,
+      }));
+    }
+    return results;
+  }
 
   // Get diff before writing learnings so the learning prompt analyzes only the implementation.
   let runDiff = '';
   if (!config.dryRun) {
     const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
     runDiff = diffResult.stdout.slice(0, MAX_DIFF_CHARS);
+    const diffNameResult = exec(`git diff --name-only "origin/${config.baseBranch}...HEAD"`, { cwd: worktreePath });
+    const diffDecision = evaluateDiffPolicy(config, parseDiffNameOnly(diffNameResult.stdout), {
+      issueNum: issues[0]?.number,
+      title: issues[0]?.title,
+      stage: 'diff',
+    });
+    if (!decisionAllowed(diffDecision)) {
+      const results: PipelineResult[] = [];
+      for (const issue of issues) {
+        const issueDecision = evaluateDiffPolicy(config, parseDiffNameOnly(diffNameResult.stdout), {
+          issueNum: issue.number,
+          title: issue.title,
+          stage: 'diff',
+        });
+        results.push(await pauseSessionForAutomationPolicy({
+          issueNum: issue.number,
+          title: issue.title,
+          config,
+          session,
+          decision: issueDecision,
+          startTime,
+          projectDir,
+          worktreePath,
+          worktreeBranch,
+          testsPassing,
+          verifyPassing: true,
+          verifySkipped: true,
+        }));
+      }
+      return results;
+    }
   }
 
   // Format review gate for learnings (same format as single-issue pipeline)

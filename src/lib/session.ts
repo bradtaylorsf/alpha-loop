@@ -21,6 +21,7 @@ import {
 import type { Config } from './config.js';
 import type { PipelineResult, GateResult } from './pipeline.js';
 import type { QueueEpicLink, QueueSessionContext } from './epic-queue.js';
+import type { AutomationPolicyDecision } from './automation-policy.js';
 
 export type SessionContext = {
   /** Stable id used in durable manifests and trace joins. */
@@ -177,6 +178,7 @@ export type DurableSessionManifest = {
     endedAt?: string;
   };
   lastEventId: string | null;
+  policyDecisions?: AutomationPolicyDecision[];
   errors: Array<{
     issueNum?: number;
     stage: string;
@@ -565,6 +567,29 @@ export function recordSessionCleanup(
         }
       : manifest.worktree,
   }));
+}
+
+export function recordSessionPolicyDecision(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'> | string,
+  decision: AutomationPolicyDecision,
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => {
+    const currentPolicyDecisions = manifest.policyDecisions ?? [];
+    const policyDecisions = currentPolicyDecisions.some((entry) => entry.id === decision.id)
+      ? currentPolicyDecisions
+      : [...currentPolicyDecisions, decision];
+    if (decision.issueNum === undefined) {
+      return { ...manifest, policyDecisions };
+    }
+    const issuePatch: Partial<SessionIssueManifest> = {
+      title: decision.title,
+      status: decision.status === 'allowed' ? 'running' : 'human_input_requested',
+      stage: decision.stage === 'diff' ? 'review' : 'paused',
+      ...(decision.status === 'allowed' ? {} : { labels: ['needs-human-input'] }),
+    };
+    const updated = upsertIssue(manifest, decision.issueNum, issuePatch);
+    return { ...updated, policyDecisions };
+  });
 }
 
 function issueMatchesManifest(manifest: DurableSessionManifest, issueNum: number): boolean {
@@ -1138,6 +1163,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
         updatedAt: startedAt,
       },
       lastEventId: null,
+      policyDecisions: [],
       errors: [],
       ...(epicNum !== undefined ? { epic: epicNum } : {}),
       ...(queue ? { queue } : {}),

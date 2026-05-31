@@ -17,6 +17,10 @@ import { processIssue, processBatch } from '../lib/pipeline.js';
 import {
   createSession,
   finalizeSession,
+  recordSessionIssue,
+  recordSessionPolicyDecision,
+  saveResult,
+  transitionHumanFeedbackSessionStatus,
   recordSessionCleanup,
   transitionSessionStatus,
   updateSessionManifest,
@@ -58,6 +62,17 @@ import {
   type QueueSessionContext,
   type ValidatedEpicQueueEntry,
 } from '../lib/epic-queue.js';
+import {
+  decisionAllowed,
+  evaluateCommandPolicy,
+  evaluateIssuePolicy,
+  evaluateRuntimePolicy,
+  evaluateSessionCapacityPolicy,
+  formatAutomationPolicyComment,
+  maxIssuesPerPolicySession,
+  type AutomationPolicyDecision,
+} from '../lib/automation-policy.js';
+import type { PipelineResult } from '../lib/pipeline.js';
 
 export type RunOptions = {
   dryRun?: boolean;
@@ -235,6 +250,79 @@ function sessionStatusFromResults(session: SessionContext, failures: EpicExecuti
 
 function hasWaitingResults(session: SessionContext): boolean {
   return session.results.some((result) => result.status === 'waiting' && !isRecoveredRunResult(result));
+}
+
+async function pauseIssueForAutomationPolicy(args: {
+  config: Config;
+  session: SessionContext;
+  issue: Issue;
+  decision: AutomationPolicyDecision;
+}): Promise<PipelineResult> {
+  const question = 'Please review the automation policy decision and confirm whether Alpha Loop should continue.';
+  const resumeInstructions = `Adjust the issue, labels, or .alpha-loop.yaml as needed, then run alpha-loop resume --issue ${args.issue.number}.`;
+
+  recordSessionPolicyDecision(args.session, args.decision);
+  transitionHumanFeedbackSessionStatus(args.session, {
+    to: 'human_input_requested',
+    reason: args.decision.reason,
+    issueNum: args.issue.number,
+    question,
+    resumeInstructions,
+    eventPayload: {
+      policyDecision: args.decision,
+    },
+  });
+  recordSessionIssue(args.session, args.issue.number, {
+    title: args.issue.title,
+    status: 'human_input_requested',
+    stage: 'paused',
+    labels: ['needs-human-input'],
+  });
+
+  if (!args.config.dryRun) {
+    labelIssue(args.config.repo, args.issue.number, 'needs-human-input', args.config.labelReady);
+    commentIssue(args.config.repo, args.issue.number, formatAutomationPolicyComment(args.decision));
+  } else {
+    log.dry(`Would label issue #${args.issue.number} needs-human-input and comment with automation policy reason`);
+  }
+
+  const result: PipelineResult = {
+    issueNum: args.issue.number,
+    title: args.issue.title,
+    status: 'waiting',
+    waitingStatus: 'human_input_requested',
+    waitingReason: args.decision.reason,
+    humanInputQuestion: question,
+    resumeInstructions,
+    testsPassing: false,
+    verifyPassing: false,
+    verifySkipped: true,
+    duration: 0,
+    filesChanged: 0,
+    policyDecision: args.decision,
+  };
+
+  if (!args.config.dryRun) {
+    saveResult(args.session, result);
+  }
+
+  await emitLifecycleEvent({
+    config: args.config,
+    type: 'human_input.requested',
+    session: args.session,
+    context: {
+      issueNumber: args.issue.number,
+      issueTitle: args.issue.title,
+      question,
+      resumeInstructions,
+      reason: args.decision.reason,
+      metadata: {
+        policyDecision: args.decision,
+      },
+    },
+  });
+  log.warn(`Issue #${args.issue.number} paused by automation policy: ${args.decision.reason}`);
+  return result;
 }
 
 /**
@@ -794,6 +882,33 @@ async function runIssueSession(
     },
   });
 
+  const capacityDecision = evaluateSessionCapacityPolicy(config, { excludeSessionId: session.id });
+  if (!decisionAllowed(capacityDecision)) {
+    recordSessionPolicyDecision(session, capacityDecision);
+    transitionSessionStatus(session, 'human_input_requested', 'human_input_requested', {
+      lastEventId: capacityDecision.id,
+    });
+    await emitLifecycleEvent({
+      config,
+      type: 'human_input.requested',
+      session,
+      context: {
+        reason: capacityDecision.reason,
+        metadata: {
+          policyDecision: capacityDecision,
+        },
+      },
+    });
+    log.warn(`Session paused by automation policy: ${capacityDecision.reason}`);
+    return {
+      session,
+      sessionPrUrl: session.sessionPrUrl ?? null,
+      failures,
+      verificationClosedEpic,
+      waiting: true,
+    };
+  }
+
   // Check prerequisites
   checkPrerequisites(config);
 
@@ -897,6 +1012,46 @@ async function runIssueSession(
 
   // Pre-flight test validation
   log.step('Running pre-flight test validation...');
+  if (!config.skipPreflight && !config.skipTests) {
+    const preflightDecision = evaluateCommandPolicy(config, config.testCommand, {
+      issueNum: target.type === 'issue' ? target.issue.number : undefined,
+      title: target.type === 'issue' ? target.issue.title : undefined,
+      stage: 'command',
+    });
+    if (!decisionAllowed(preflightDecision)) {
+      if (target.type === 'issue') {
+        const result = await pauseIssueForAutomationPolicy({
+          config,
+          session,
+          issue: target.issue,
+          decision: preflightDecision,
+        });
+        session.results.push(result);
+      } else {
+        recordSessionPolicyDecision(session, preflightDecision);
+        transitionSessionStatus(session, 'human_input_requested', 'human_input_requested', {
+          lastEventId: preflightDecision.id,
+        });
+        await emitLifecycleEvent({
+          config,
+          type: 'human_input.requested',
+          session,
+          context: {
+            reason: preflightDecision.reason,
+            metadata: { policyDecision: preflightDecision },
+          },
+        });
+        log.warn(`Session paused by automation policy: ${preflightDecision.reason}`);
+      }
+      return {
+        session,
+        sessionPrUrl: session.sessionPrUrl ?? null,
+        failures,
+        verificationClosedEpic,
+        waiting: true,
+      };
+    }
+  }
   const preflightResult = await runPreflight({
     testCommand: config.testCommand,
     skipPreflight: config.skipPreflight,
@@ -1068,6 +1223,24 @@ async function runIssueSession(
       }
     }
 
+    const policyIssueLimit = maxIssuesPerPolicySession(config);
+    if (policyIssueLimit > 0 && issuesToProcess.length > policyIssueLimit) {
+      log.info(`Automation policy limits sessions to ${policyIssueLimit} issue(s); deferring ${issuesToProcess.length - policyIssueLimit}`);
+      issuesToProcess = issuesToProcess.slice(0, policyIssueLimit);
+    }
+
+    const eligibleIssues: Issue[] = [];
+    for (const issue of issuesToProcess) {
+      const decision = evaluateIssuePolicy(config, issue);
+      if (decisionAllowed(decision)) {
+        eligibleIssues.push(issue);
+        continue;
+      }
+      const result = await pauseIssueForAutomationPolicy({ config, session, issue, decision });
+      session.results.push(result);
+    }
+    issuesToProcess = eligibleIssues;
+
     if (config.maxIssues > 0 && issues.length > config.maxIssues) {
       log.info(`Found ${issues.length} issue(s), processing first ${issueLimit} (max_issues=${config.maxIssues})`);
     } else {
@@ -1075,21 +1248,27 @@ async function runIssueSession(
     }
     updateSessionManifest(session, (manifest) => ({
       ...manifest,
-      issueNumbers: Array.from(new Set(issuesToProcess.map((issue) => issue.number))),
+      issueNumbers: Array.from(new Set([
+        ...manifest.issueNumbers,
+        ...issuesToProcess.map((issue) => issue.number),
+      ])),
       issueNumber: target.type === 'issue'
         ? target.issue.number
         : (issuesToProcess[0]?.number ?? manifest.issueNumber),
-      issues: issuesToProcess.map((issue) => {
-        const existing = manifest.issues.find((entry) => entry.issueNum === issue.number);
-        return {
-          ...existing,
-          issueNum: issue.number,
-          title: issue.title,
-          status: existing?.status ?? 'running',
-          stage: existing?.stage ?? 'created',
-          updatedAt: new Date().toISOString(),
-        };
-      }),
+      issues: [
+        ...manifest.issues.filter((entry) => !issuesToProcess.some((issue) => issue.number === entry.issueNum)),
+        ...issuesToProcess.map((issue) => {
+          const existing = manifest.issues.find((entry) => entry.issueNum === issue.number);
+          return {
+            ...existing,
+            issueNum: issue.number,
+            title: issue.title,
+            status: existing?.status ?? 'running',
+            stage: existing?.stage ?? 'created',
+            updatedAt: new Date().toISOString(),
+          };
+        }),
+      ],
     }));
 
     const sessionStartTime = Date.now();
@@ -1102,6 +1281,12 @@ async function runIssueSession(
 
       for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
         // Check duration limit before each batch
+        const runtimeDecision = evaluateRuntimePolicy(config, Date.now() - sessionStartTime);
+        if (!decisionAllowed(runtimeDecision)) {
+          recordSessionPolicyDecision(session, runtimeDecision);
+          log.info(`Stopping: ${runtimeDecision.reason}`);
+          break;
+        }
         if (config.maxSessionDuration > 0) {
           const elapsed = Math.round((Date.now() - sessionStartTime) / 1000);
           if (elapsed >= config.maxSessionDuration) {
@@ -1175,6 +1360,12 @@ async function runIssueSession(
       // --- Sequential mode (original behavior) ---
       for (const issue of issuesToProcess) {
         // Check duration limit before each issue
+        const runtimeDecision = evaluateRuntimePolicy(config, Date.now() - sessionStartTime);
+        if (!decisionAllowed(runtimeDecision)) {
+          recordSessionPolicyDecision(session, runtimeDecision);
+          log.info(`Stopping: ${runtimeDecision.reason}`);
+          break;
+        }
         if (config.maxSessionDuration > 0) {
           const elapsed = Math.round((Date.now() - sessionStartTime) / 1000);
           if (elapsed >= config.maxSessionDuration) {

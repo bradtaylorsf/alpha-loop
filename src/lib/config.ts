@@ -133,6 +133,44 @@ export type EventsConfig = {
   destinations: Record<string, EventDestinationConfig>;
 };
 
+export type AutomationPolicyCategory =
+  | 'auth'
+  | 'billing'
+  | 'production-deploy'
+  | 'dependency-upgrade'
+  | 'sanity-schema'
+  | 'secrets'
+  | 'migrations'
+  | 'destructive-content'
+  | 'ambiguous';
+
+export type AutomationPolicyConfig = {
+  /** Labels that must be present before hosted automation can start an issue. */
+  requireLabels: string[];
+  /** Labels that always block automation and request human input. */
+  blockLabels: string[];
+  /** If set, changed files must match one of these globs. Empty means no allowlist. */
+  allowedPaths: string[];
+  /** Changed files matching these globs require human input. */
+  protectedPaths: string[];
+  /** Configured shell commands allowed to run. Empty means no command allowlist. */
+  allowedCommands: string[];
+  /** Categories that require a human before automation can proceed. */
+  requireHumanFor: AutomationPolicyCategory[];
+  /** Maximum active session manifests allowed. 0 disables the cap. */
+  maxActiveSessions: number;
+  /** Maximum paused/waiting session manifests allowed. 0 disables the cap. */
+  maxPausedSessions: number;
+  /** Maximum issues to process in one session. 0 disables the cap. */
+  maxIssuesPerSession: number;
+  /** Maximum wall-clock runtime in minutes. 0 disables the cap. */
+  maxSessionMinutes: number;
+  /** Maximum estimated cost for one session. 0 disables the cap. */
+  maxSessionCostUsd: number;
+  /** Maximum estimated cost for one issue. 0 disables the cap. */
+  maxIssueCostUsd: number;
+};
+
 export const DEFAULT_SESSION_RETENTION: SessionRetentionConfig = {
   pausedWorktreeDays: 0,
   completedWorktreeDays: 30,
@@ -142,6 +180,21 @@ export const DEFAULT_EVENTS_CONFIG: EventsConfig = {
   includePromptText: false,
   redact: [],
   destinations: {},
+};
+
+export const DEFAULT_AUTOMATION_POLICY: AutomationPolicyConfig = {
+  requireLabels: [],
+  blockLabels: ['do-not-automate', 'needs-human-input'],
+  allowedPaths: [],
+  protectedPaths: [],
+  allowedCommands: [],
+  requireHumanFor: [],
+  maxActiveSessions: 0,
+  maxPausedSessions: 0,
+  maxIssuesPerSession: 0,
+  maxSessionMinutes: 0,
+  maxSessionCostUsd: 0,
+  maxIssueCostUsd: 0,
 };
 
 const VALID_ROUTING_STAGES: readonly RoutingStageName[] = [
@@ -178,6 +231,17 @@ const VALID_EVENT_NAMES: readonly EventName[] = [
 
 const VALID_EVENT_FORMATS: readonly EventFormat[] = ['json', 'slack', 'teams', 'discord'] as const;
 const VALID_EVENT_DESTINATION_TYPES: readonly EventDestinationType[] = ['log', 'webhook', 'command'] as const;
+const VALID_AUTOMATION_POLICY_CATEGORIES: readonly AutomationPolicyCategory[] = [
+  'auth',
+  'billing',
+  'production-deploy',
+  'dependency-upgrade',
+  'sanity-schema',
+  'secrets',
+  'migrations',
+  'destructive-content',
+  'ambiguous',
+] as const;
 
 /**
  * Estimate cost in USD from token counts and a pricing table.
@@ -258,6 +322,8 @@ export type Config = {
   sessionRetention?: SessionRetentionConfig;
   /** Lifecycle event destinations for hosted/session automation. */
   events?: EventsConfig;
+  /** Hosted automation guardrails for issue selection, commands, diffs, runtime, and budget. */
+  automationPolicy?: AutomationPolicyConfig;
   /**
    * When there is exactly one open epic in the repo, the picker auto-selects
    * it instead of prompting. Default: false.
@@ -326,6 +392,7 @@ const DEFAULTS: Config = {
   evalIncludeSkills: true,
   sessionRetention: DEFAULT_SESSION_RETENTION,
   events: DEFAULT_EVENTS_CONFIG,
+  automationPolicy: DEFAULT_AUTOMATION_POLICY,
   preferEpics: false,
 };
 
@@ -478,6 +545,104 @@ function parseNonNegativeInteger(raw: unknown, key: string, fallback: number): n
 
 function parseBoolean(raw: unknown, fallback: boolean): boolean {
   return typeof raw === 'boolean' ? raw : fallback;
+}
+
+function parseStringList(raw: unknown, key: string): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.warn(`[config] ${key}: expected a list of strings`);
+    return undefined;
+  }
+  return raw.map(String).map((item) => item.trim()).filter(Boolean);
+}
+
+function parseAutomationPolicyCategories(raw: unknown): AutomationPolicyCategory[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.warn('[config] automation_policy.require_human_for: expected a list of category names');
+    return undefined;
+  }
+
+  const categories: AutomationPolicyCategory[] = [];
+  for (const item of raw) {
+    const category = String(item).trim().toLowerCase().replace(/_/g, '-') as AutomationPolicyCategory;
+    if (!VALID_AUTOMATION_POLICY_CATEGORIES.includes(category)) {
+      console.warn(
+        `[config] automation_policy.require_human_for: unknown category "${String(item)}" (ignored)`,
+      );
+      continue;
+    }
+    categories.push(category);
+  }
+  return categories;
+}
+
+function parseNonNegativeMoney(raw: unknown, key: string): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+    return raw;
+  }
+  console.warn(`[config] ${key}: expected a non-negative number (got ${String(raw)})`);
+  return undefined;
+}
+
+function parseAutomationPolicy(raw: unknown): AutomationPolicyConfig | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const policy: AutomationPolicyConfig = { ...DEFAULT_AUTOMATION_POLICY };
+
+  const requireLabels = parseStringList(r.require_labels, 'automation_policy.require_labels');
+  if (requireLabels !== undefined) policy.requireLabels = requireLabels;
+
+  const blockLabels = parseStringList(r.block_labels, 'automation_policy.block_labels');
+  if (blockLabels !== undefined) policy.blockLabels = blockLabels;
+
+  const allowedPaths = parseStringList(r.allowed_paths, 'automation_policy.allowed_paths');
+  if (allowedPaths !== undefined) policy.allowedPaths = allowedPaths;
+
+  const protectedPaths = parseStringList(r.protected_paths, 'automation_policy.protected_paths');
+  if (protectedPaths !== undefined) policy.protectedPaths = protectedPaths;
+
+  const allowedCommands = parseStringList(r.allowed_commands, 'automation_policy.allowed_commands');
+  if (allowedCommands !== undefined) policy.allowedCommands = allowedCommands;
+
+  const requireHumanFor = parseAutomationPolicyCategories(r.require_human_for);
+  if (requireHumanFor !== undefined) policy.requireHumanFor = requireHumanFor;
+
+  policy.maxActiveSessions = parseNonNegativeInteger(
+    r.max_active_sessions,
+    'automation_policy.max_active_sessions',
+    policy.maxActiveSessions,
+  );
+  policy.maxPausedSessions = parseNonNegativeInteger(
+    r.max_paused_sessions,
+    'automation_policy.max_paused_sessions',
+    policy.maxPausedSessions,
+  );
+  policy.maxIssuesPerSession = parseNonNegativeInteger(
+    r.max_issues_per_session,
+    'automation_policy.max_issues_per_session',
+    policy.maxIssuesPerSession,
+  );
+  policy.maxSessionMinutes = parseNonNegativeInteger(
+    r.max_session_minutes,
+    'automation_policy.max_session_minutes',
+    policy.maxSessionMinutes,
+  );
+
+  const maxSessionCost = parseNonNegativeMoney(
+    r.max_session_cost_usd,
+    'automation_policy.max_session_cost_usd',
+  );
+  if (maxSessionCost !== undefined) policy.maxSessionCostUsd = maxSessionCost;
+
+  const maxIssueCost = parseNonNegativeMoney(
+    r.max_issue_cost_usd,
+    'automation_policy.max_issue_cost_usd',
+  );
+  if (maxIssueCost !== undefined) policy.maxIssueCostUsd = maxIssueCost;
+
+  return policy;
 }
 
 function parseEventsConfig(raw: unknown): EventsConfig | undefined {
@@ -806,6 +971,14 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     }
   }
 
+  // Handle hosted automation policy guardrails.
+  if (parsed.automation_policy !== undefined) {
+    const automationPolicy = parseAutomationPolicy(parsed.automation_policy);
+    if (automationPolicy) {
+      result.automationPolicy = automationPolicy;
+    }
+  }
+
   // Handle pricing table (nested object, not in YAML_KEY_MAP)
   if (parsed.pricing && typeof parsed.pricing === 'object') {
     const pricing: Record<string, { input: number; output: number }> = {};
@@ -884,6 +1057,11 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...overrides?.sessionRetention,
   };
   const events = overrides?.events ?? yamlConfig.events ?? DEFAULTS.events;
+  const automationPolicy = {
+    ...DEFAULT_AUTOMATION_POLICY,
+    ...yamlConfig.automationPolicy,
+    ...overrides?.automationPolicy,
+  };
 
   const merged: Config = {
     ...DEFAULTS,
@@ -896,6 +1074,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     routing,
     sessionRetention,
     events,
+    automationPolicy,
   };
 
   // Validate agent is a known value
