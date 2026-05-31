@@ -35,6 +35,7 @@ jest.mock('../../src/lib/github', () => ({
   labelIssue: jest.fn(),
   commentIssue: jest.fn(),
   createPR: jest.fn(),
+  createIssue: jest.fn(),
   mergePR: jest.fn(),
   updateProjectStatus: jest.fn(),
   getIssueComments: jest.fn(() => []),
@@ -65,6 +66,7 @@ jest.mock('../../src/lib/session', () => ({
   recordSessionStage: jest.fn(),
   recordSessionTranscript: jest.fn(),
   recordSessionWorktree: jest.fn(),
+  transitionHumanFeedbackSessionStatus: jest.fn(),
   updateSessionManifest: jest.fn(),
 }));
 
@@ -123,7 +125,7 @@ import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { spawnAgent } from '../../src/lib/agent';
 import { setupWorktree, cleanupWorktree, worktreeHasCommits } from '../../src/lib/worktree';
-import { labelIssue, commentIssue, createPR, mergePR, updateProjectStatus } from '../../src/lib/github';
+import { labelIssue, commentIssue, createPR, createIssue, mergePR, updateProjectStatus } from '../../src/lib/github';
 import { runTests } from '../../src/lib/testing';
 import { runVerify } from '../../src/lib/verify';
 import { extractLearnings, getLearningContext } from '../../src/lib/learning';
@@ -136,6 +138,7 @@ import {
   recordSessionPrompt,
   recordSessionTranscript,
   recordSessionWorktree,
+  transitionHumanFeedbackSessionStatus,
 } from '../../src/lib/session';
 import { buildIssuePlanPrompt, buildImplementPrompt, buildReviewPrompt, buildBatchPlanPrompt, buildBatchImplementPrompt, buildBatchReviewPrompt } from '../../src/lib/prompts';
 import { writeTraceToSubdir } from '../../src/lib/traces';
@@ -148,6 +151,7 @@ const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorkt
 const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
 const mockWorktreeHasCommits = worktreeHasCommits as jest.MockedFunction<typeof worktreeHasCommits>;
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
+const mockCreateIssue = createIssue as jest.MockedFunction<typeof createIssue>;
 const mockMergePR = mergePR as jest.MockedFunction<typeof mergePR>;
 const mockRunTests = runTests as jest.MockedFunction<typeof runTests>;
 const mockRunVerify = runVerify as jest.MockedFunction<typeof runVerify>;
@@ -161,6 +165,7 @@ const mockRecordSessionIssue = recordSessionIssue as jest.MockedFunction<typeof 
 const mockRecordSessionPrompt = recordSessionPrompt as jest.MockedFunction<typeof recordSessionPrompt>;
 const mockRecordSessionTranscript = recordSessionTranscript as jest.MockedFunction<typeof recordSessionTranscript>;
 const mockRecordSessionWorktree = recordSessionWorktree as jest.MockedFunction<typeof recordSessionWorktree>;
+const mockTransitionHumanFeedbackSessionStatus = transitionHumanFeedbackSessionStatus as jest.MockedFunction<typeof transitionHumanFeedbackSessionStatus>;
 const mockBuildIssuePlanPrompt = buildIssuePlanPrompt as jest.MockedFunction<typeof buildIssuePlanPrompt>;
 const mockBuildImplementPrompt = buildImplementPrompt as jest.MockedFunction<typeof buildImplementPrompt>;
 const mockBuildReviewPrompt = buildReviewPrompt as jest.MockedFunction<typeof buildReviewPrompt>;
@@ -263,6 +268,7 @@ beforeEach(() => {
   mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: 'Agent output', duration: 5000 });
   mockRunTests.mockReturnValue({ passed: true, output: 'All tests passed' });
   mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/1');
+  mockCreateIssue.mockReturnValue(501);
   mockMergePR.mockReturnValue(undefined as any);
   mockExtractLearnings.mockResolvedValue(null);
   mockGetLearningContext.mockReturnValue('');
@@ -346,6 +352,149 @@ describe('processIssue', () => {
       status: 'removed',
       worktreePath: '/tmp/worktree',
     }));
+  });
+
+  test('pauses for human input when an agent writes a pause request', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+    let implementFinished = false;
+
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'implement prompt') {
+        implementFinished = true;
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+    mockExistsSync.mockImplementation((path: any) => (
+      String(path).endsWith('alpha-loop-pause-request.json') && implementFinished
+    ));
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).endsWith('alpha-loop-pause-request.json')) {
+        return JSON.stringify({
+          type: 'human_input',
+          reason: 'Need product clarification',
+          question: 'Which copy variant should be used?',
+          resumeInstructions: 'Use the selected copy variant and continue implementation.',
+        });
+      }
+      return '';
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('waiting');
+    expect(result.waitingStatus).toBe('human_input_requested');
+    expect(result.humanInputQuestion).toBe('Which copy variant should be used?');
+    expect(mockTransitionHumanFeedbackSessionStatus).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      to: 'human_input_requested',
+      issueNum: 42,
+      question: 'Which copy variant should be used?',
+    }));
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'needs-human-input', 'in-progress');
+    expect(commentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('Which copy variant should be used?'));
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      preserveIfCommits: true,
+      sessionStatus: 'human_input_requested',
+    }));
+    expect(mockCreatePR).not.toHaveBeenCalled();
+    expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      status: 'waiting',
+      waitingStatus: 'human_input_requested',
+    }));
+  });
+
+  test('requests human QA after PR creation when the plan includes a QA checklist', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+
+    mockExistsSync.mockImplementation((path: any) => String(path).includes('plan-issue-42.json'));
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).includes('plan-issue-42.json')) {
+        return JSON.stringify({
+          summary: 'Plan with QA',
+          files: ['src/index.ts'],
+          implementation: 'Implement it',
+          testing: { needed: true, reason: 'Code changed' },
+          verification: { needed: false, reason: 'Unit covered' },
+          qa: {
+            needed: true,
+            checklist: ['Open the PR preview', 'Confirm the content renders correctly'],
+            reason: 'Human content review is required',
+            previewUrl: 'https://preview.example.test',
+          },
+        });
+      }
+      return '';
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(mockCreatePR).toHaveBeenCalled();
+    expect(result.status).toBe('waiting');
+    expect(result.waitingStatus).toBe('qa_requested');
+    expect(result.qaChecklist).toEqual(['Open the PR preview', 'Confirm the content renders correctly']);
+    expect(mockTransitionHumanFeedbackSessionStatus).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      to: 'qa_requested',
+      issueNum: 42,
+      qaChecklist: ['Open the PR preview', 'Confirm the content renders correctly'],
+      prUrl: 'https://github.com/owner/repo/pull/1',
+      previewUrl: 'https://preview.example.test',
+    }));
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'in-review', 'in-progress');
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'needs-human-input', 'ready');
+    expect(commentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('- [ ] Open the PR preview'));
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      sessionStatus: 'qa_requested',
+    }));
+  });
+
+  test('turns new-scope feedback into a follow-up issue instead of expanding the active PR', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+    let implementFinished = false;
+
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'implement prompt') {
+        implementFinished = true;
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+    mockExistsSync.mockImplementation((path: any) => (
+      String(path).endsWith('alpha-loop-pause-request.json') && implementFinished
+    ));
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).endsWith('alpha-loop-pause-request.json')) {
+        return JSON.stringify({
+          type: 'new_scope',
+          reason: 'Human feedback asks for an unrelated settings page',
+          summary: 'The settings page is new scope.',
+          followUp: {
+            title: 'Add settings page',
+            body: 'Build the settings page requested during feedback.',
+          },
+        });
+      }
+      return '';
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('waiting');
+    expect(result.feedbackClassification).toBe('new_scope');
+    expect(result.followUpIssueNumber).toBe(501);
+    expect(result.followUpIssueUrl).toBe('https://github.com/owner/repo/issues/501');
+    expect(mockCreateIssue).toHaveBeenCalledWith(
+      'owner/repo',
+      'Add settings page',
+      'Build the settings page requested during feedback.',
+      ['ready'],
+      undefined,
+    );
+    expect(commentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('A follow-up issue was created'));
+    expect(mockCreatePR).not.toHaveBeenCalled();
   });
 
   test('shell-quotes issue titles in fallback auto-commit messages', async () => {

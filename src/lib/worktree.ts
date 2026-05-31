@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, symlinkSync, readlinkSync, unlinkSync, readFileS
 import { join, resolve, basename } from 'node:path';
 import { exec } from './shell.js';
 import { log } from './logger.js';
+import { isWaitingFeedbackStatus } from './session-state.js';
 import type { SessionStatus } from './session.js';
 
 export type WorktreeResult = {
@@ -237,11 +238,9 @@ export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<
     return { status: 'dry-run', path: worktreePath };
   }
 
-  const shouldPreserveForStatus = (
-    sessionStatus === 'paused' ||
-    sessionStatus === 'waiting-for-feedback' ||
-    sessionStatus === 'qa-requested'
-  ) && !retentionExpired;
+  const shouldPreserveForStatus = sessionStatus !== undefined
+    && isWaitingFeedbackStatus(sessionStatus)
+    && !retentionExpired;
   if (shouldPreserveForStatus) {
     log.warn(`Preserving ${sessionStatus} worktree at: ${worktreePath}`);
     return { status: 'preserved', path: worktreePath, reason: `session-status:${sessionStatus}` };

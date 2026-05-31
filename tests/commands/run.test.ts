@@ -105,7 +105,7 @@ import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist } from '../../src/lib/github';
 import { processIssue, processBatch } from '../../src/lib/pipeline';
-import { createSession, finalizeSession } from '../../src/lib/session';
+import { createSession, finalizeSession, transitionSessionStatus } from '../../src/lib/session';
 import { generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
 import { syncAgentAssets } from '../../src/commands/sync';
@@ -123,6 +123,7 @@ const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
+const mockTransitionSessionStatus = transitionSessionStatus as jest.MockedFunction<typeof transitionSessionStatus>;
 const mockGenerateSessionSummary = generateSessionSummary as jest.MockedFunction<typeof generateSessionSummary>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
@@ -1131,6 +1132,43 @@ Coordinate hosted work.
     expect(mockRepairSessionSummaryArtifact).not.toHaveBeenCalled();
     expect(mockLog.info).toHaveBeenCalledWith('Skipping parent learning artifact repair; issue learnings are committed in child PRs');
     expect(mockFinalizeSession).toHaveBeenCalled();
+  });
+
+  test('continues other eligible work when one issue is waiting for human feedback', async () => {
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Needs clarification', body: 'Body', labels: ['ready'] },
+      { number: 43, title: 'Still eligible', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue
+      .mockResolvedValueOnce({
+        issueNum: 42,
+        title: 'Needs clarification',
+        status: 'waiting',
+        waitingStatus: 'human_input_requested',
+        waitingReason: 'Need a decision',
+        humanInputQuestion: 'Which option should be used?',
+        testsPassing: false,
+        verifyPassing: false,
+        verifySkipped: true,
+        duration: 10,
+        filesChanged: 0,
+      })
+      .mockResolvedValueOnce({
+        issueNum: 43,
+        title: 'Still eligible',
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        duration: 60,
+        filesChanged: 5,
+      });
+
+    await runCommand({ dryRun: true });
+
+    expect(mockProcessIssue.mock.calls.map((call) => call[0])).toEqual([42, 43]);
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(expect.any(Object), 'human_input_requested', 'human_input_requested', expect.any(Object));
+    expect(process.exitCode).toBeUndefined();
   });
 
   test('repairs session learning artifacts only when auto-merge uses a session branch', async () => {

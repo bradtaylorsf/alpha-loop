@@ -188,9 +188,14 @@ describe('createSession', () => {
       issueNumber: 284,
       issueNumbers: [284],
       parentEpicNumber: 293,
-      status: 'active',
+      status: 'running',
       stage: 'created',
       branch: 'session/20260101-000000',
+    }));
+    expect(manifest.feedback).toEqual(expect.objectContaining({
+      currentStatus: 'running',
+      transitionHistory: [],
+      events: [],
     }));
     expect(manifest.harness).toEqual(expect.objectContaining({
       agent: 'claude',
@@ -734,7 +739,7 @@ describe('finalizeSession', () => {
     const title = finalPrCall.title;
     const body = finalPrCall.body;
     expect(title).toContain('1/1 succeeded, 1 recovered');
-    expect(body).toContain('1 succeeded, 0 failed, 1 recovered');
+    expect(body).toContain('1 succeeded, 0 failed, 0 waiting, 1 recovered');
     expect(body).toContain('### Recovered Issues');
     expect(body).toContain('#2: Recovered issue — RECOVERED BY RESUME');
     expect(body).toContain('Closes #1');
