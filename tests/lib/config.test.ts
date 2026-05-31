@@ -166,6 +166,41 @@ max_test_retries: 5
     });
   });
 
+  it('loads hosted daemon mode settings from nested config', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `daemon:
+  mode: feedback-only
+  triage_interval: 900
+  feedback_interval: 30
+  run_interval: 120
+  health_interval: 300
+  idle_sleep: 5
+  feedback_poll_command: ./scripts/poll-feedback.sh
+  lock:
+    enabled: false
+    stale_after: 600
+    path: .alpha-loop/custom-daemon.lock
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.daemon).toEqual({
+      mode: 'feedback-only',
+      triageIntervalSeconds: 900,
+      feedbackIntervalSeconds: 30,
+      runIntervalSeconds: 120,
+      healthIntervalSeconds: 300,
+      idleSleepSeconds: 5,
+      feedbackPollCommand: './scripts/poll-feedback.sh',
+      lock: {
+        enabled: false,
+        staleAfterSeconds: 600,
+        path: '.alpha-loop/custom-daemon.lock',
+      },
+    });
+  });
+
   it('loads agent from config file', () => {
     writeFileSync(
       join(tempDir, '.alpha-loop.yaml'),

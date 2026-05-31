@@ -955,12 +955,13 @@ function finalStageForStatus(status: SessionStatus): SessionStage {
   return status as SessionStage;
 }
 
-async function resumePausedIssueFromManifest(
+export async function resumePausedIssueFromManifest(
   issueNum: number,
   config: ReturnType<typeof loadConfig>,
+  options: { statuses?: Iterable<SessionStatus> } = {},
 ): Promise<boolean> {
   const ref = findLatestResumableSessionForIssue(issueNum, join(process.cwd(), '.alpha-loop', 'sessions'), {
-    statuses: FEEDBACK_RESUME_STATUSES,
+    statuses: options.statuses ?? FEEDBACK_RESUME_STATUSES,
   });
   if (!ref) return false;
 

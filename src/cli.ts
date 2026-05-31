@@ -52,6 +52,24 @@ program
   });
 
 program
+  .command('daemon')
+  .description('Run hosted daemon mode for repo stewardship')
+  .option('--mode <mode>', 'Daemon mode: full, triage-only, feedback-only, or run-only')
+  .option('--triage-interval <seconds>', 'Seconds between intake triage ticks', parseInt)
+  .option('--feedback-interval <seconds>', 'Seconds between feedback poll/resume ticks', parseInt)
+  .option('--run-interval <seconds>', 'Seconds between ready-work selection ticks', parseInt)
+  .option('--health-interval <seconds>', 'Seconds between daemon health events', parseInt)
+  .option('--idle-sleep <seconds>', 'Seconds to sleep when no daemon tick is due', parseInt)
+  .option('--feedback-command <command>', 'Shell command that returns feedback payload JSON/NDJSON')
+  .option('--no-lock', 'Disable repo-level daemon lock')
+  .option('--once-tick', 'Run one due daemon tick and exit')
+  .option('--max-ticks <n>', 'Stop after this many daemon ticks', parseInt)
+  .action(async (options) => {
+    const { daemonCommand } = await import('./commands/daemon.js');
+    await daemonCommand(options);
+  });
+
+program
   .command('history [session]')
   .description('View session and queue history')
   .option('--qa', 'Show QA checklist for session')
