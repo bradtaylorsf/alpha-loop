@@ -4,6 +4,7 @@ import {
   type Config,
   type DaemonConfig,
   type DaemonMode,
+  type EventName,
 } from '../lib/config.js';
 import {
   DaemonLockError,
@@ -100,6 +101,45 @@ export function parseFeedbackPollOutput(stdout: string): Record<string, unknown>
     .map((line) => parseFeedbackPayloadText(line));
 }
 
+async function emitFeedbackPollEvents(
+  config: Config,
+  ingestResult: Extract<ReturnType<typeof ingestFeedback>, { status: 'processed' }>,
+): Promise<void> {
+  const eventTypes: EventName[] = [
+    'feedback.received',
+    'feedback.classified',
+    ...(ingestResult.resumeCommand ? ['session.resume_requested' as const] : []),
+  ];
+
+  for (const type of eventTypes) {
+    await emitLifecycleEvent({
+      config,
+      type,
+      manifestPath: ingestResult.session.manifestPath,
+      context: {
+        issueNumber: ingestResult.githubComment.issueNumber,
+        prNumber: ingestResult.githubComment.prNumber,
+        feedback: {
+          idempotencyHash: ingestResult.idempotencyHash,
+          source: ingestResult.githubComment.marker.source,
+          externalEventId: ingestResult.githubComment.marker.externalEventId,
+          externalThreadId: ingestResult.githubComment.marker.externalThreadId,
+          externalMessageId: ingestResult.githubComment.marker.externalMessageId,
+          classification: ingestResult.classification,
+          resumeCommand: ingestResult.resumeCommand,
+        },
+        metadata: {
+          daemon: true,
+          githubCommentTarget: ingestResult.githubComment.targetNumber,
+          sessionFound: ingestResult.session.found,
+          sessionLookup: ingestResult.session.lookup,
+          sessionFeedbackEventIds: ingestResult.lifecycleEventIds,
+        },
+      },
+    });
+  }
+}
+
 async function pollFeedback(config: Config, daemon: DaemonConfig): Promise<DaemonFeedbackPollResult> {
   if (!daemon.feedbackPollCommand) {
     return {
@@ -142,30 +182,7 @@ async function pollFeedback(config: Config, daemon: DaemonConfig): Promise<Daemo
       continue;
     }
     processed += 1;
-    await emitLifecycleEvent({
-      config,
-      type: 'feedback.received',
-      manifestPath: ingestResult.session.manifestPath,
-      context: {
-        issueNumber: ingestResult.githubComment.issueNumber,
-        prNumber: ingestResult.githubComment.prNumber,
-        feedback: {
-          idempotencyHash: ingestResult.idempotencyHash,
-          source: ingestResult.githubComment.marker.source,
-          externalEventId: ingestResult.githubComment.marker.externalEventId,
-          externalThreadId: ingestResult.githubComment.marker.externalThreadId,
-          externalMessageId: ingestResult.githubComment.marker.externalMessageId,
-          classification: ingestResult.classification,
-          resumeCommand: ingestResult.resumeCommand,
-        },
-        metadata: {
-          daemon: true,
-          githubCommentTarget: ingestResult.githubComment.targetNumber,
-          sessionFound: ingestResult.session.found,
-          sessionLookup: ingestResult.session.lookup,
-        },
-      },
-    });
+    await emitFeedbackPollEvents(config, ingestResult);
   }
 
   return {

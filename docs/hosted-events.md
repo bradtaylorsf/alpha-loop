@@ -11,6 +11,8 @@ Supported events:
 - `human_input.requested`
 - `qa.requested`
 - `feedback.received`
+- `feedback.classified`
+- `session.resume_requested`
 - `session.resumed`
 - `session.completed`
 - `session.failed`
@@ -81,7 +83,7 @@ events:
   destinations:
     discord_alerts:
       type: webhook
-      events: [human_input.requested, feedback.received, session.failed]
+      events: [human_input.requested, feedback.received, feedback.classified, session.resume_requested, session.failed]
       url_env: DISCORD_WEBHOOK_URL
       format: discord
       required: false

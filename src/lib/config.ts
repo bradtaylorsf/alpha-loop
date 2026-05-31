@@ -88,6 +88,8 @@ export type EventName =
   | 'human_input.requested'
   | 'qa.requested'
   | 'feedback.received'
+  | 'feedback.classified'
+  | 'session.resume_requested'
   | 'session.resumed'
   | 'session.completed'
   | 'session.failed'
@@ -310,6 +312,8 @@ const VALID_EVENT_NAMES: readonly EventName[] = [
   'human_input.requested',
   'qa.requested',
   'feedback.received',
+  'feedback.classified',
+  'session.resume_requested',
   'session.resumed',
   'session.completed',
   'session.failed',

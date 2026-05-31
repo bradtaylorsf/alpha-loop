@@ -89,7 +89,7 @@ describe('feedback ingest command', () => {
         manifestPath: join(tempDir, '.alpha-loop', 'sessions', 'session', '20260530-120000', 'session.json'),
         lookup: 'issue',
       },
-      lifecycleEventIds: ['feedback-1'],
+      lifecycleEventIds: ['feedback-1', 'classified-1'],
       resumeCommand: null,
     });
   });
@@ -122,7 +122,8 @@ describe('feedback ingest command', () => {
       readyLabel: 'ready',
     }));
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('"status": "processed"'));
-    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledTimes(2);
+    expect(mockEmitLifecycleEvent).toHaveBeenNthCalledWith(1, expect.objectContaining({
       type: 'feedback.received',
       manifestPath: expect.stringContaining('session.json'),
       context: expect.objectContaining({
@@ -131,6 +132,83 @@ describe('feedback ingest command', () => {
           idempotencyHash: 'hash',
           source: 'slack',
           classification: 'approval',
+        }),
+      }),
+    }));
+    expect(mockEmitLifecycleEvent).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      type: 'feedback.classified',
+      manifestPath: expect.stringContaining('session.json'),
+      context: expect.objectContaining({
+        issueNumber: 287,
+        feedback: expect.objectContaining({
+          idempotencyHash: 'hash',
+          source: 'slack',
+          classification: 'approval',
+        }),
+        metadata: expect.objectContaining({
+          sessionFeedbackEventIds: ['feedback-1', 'classified-1'],
+        }),
+      }),
+    }));
+  });
+
+  it('emits a resume-requested lifecycle event when feedback queues resume', async () => {
+    mockIngestFeedback.mockReturnValueOnce({
+      status: 'processed',
+      idempotencyKey: 'owner/repo:slack:event:evt-resume',
+      idempotencyHash: 'hash-resume',
+      recordPath: join(tempDir, 'hash-resume.json'),
+      classification: 'change_request',
+      githubComment: {
+        repo: 'owner/repo',
+        targetNumber: 287,
+        issueNumber: 287,
+        prNumber: null,
+        marker: {
+          version: 1,
+          type: 'alpha-loop-feedback',
+          repo: 'owner/repo',
+          issueNumber: 287,
+          prNumber: null,
+          commentTarget: 287,
+          sessionId: 'session-1',
+          sessionName: 'session/20260530-120000',
+          source: 'slack',
+          externalEventId: 'evt-resume',
+          externalThreadId: null,
+          externalMessageId: null,
+          idempotencyKey: 'owner/repo:slack:event:evt-resume',
+          idempotencyHash: 'hash-resume',
+          classification: 'change_request',
+          eventTimestamp: '2026-05-30T12:00:00.000Z',
+          receivedAt: '2026-05-30T12:00:00.000Z',
+          resumeRequested: true,
+        },
+      },
+      session: {
+        found: true,
+        sessionId: 'session-1',
+        name: 'session/20260530-120000',
+        manifestPath: join(tempDir, '.alpha-loop', 'sessions', 'session', '20260530-120000', 'session.json'),
+        lookup: 'issue',
+      },
+      lifecycleEventIds: ['feedback-1', 'classified-1', 'resume-1'],
+      resumeCommand: 'alpha-loop resume --issue 287',
+    });
+
+    await feedbackIngestCommand({ issue: '287', requestResume: true }, 'Please update the footer copy.');
+
+    expect(mockEmitLifecycleEvent.mock.calls.map(([input]) => input.type)).toEqual([
+      'feedback.received',
+      'feedback.classified',
+      'session.resume_requested',
+    ]);
+    expect(mockEmitLifecycleEvent).toHaveBeenLastCalledWith(expect.objectContaining({
+      type: 'session.resume_requested',
+      context: expect.objectContaining({
+        feedback: expect.objectContaining({
+          classification: 'change_request',
+          resumeCommand: 'alpha-loop resume --issue 287',
         }),
       }),
     }));

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { ingestFeedback, normalizeFeedbackIngestPayload, parseFeedbackPayloadText } from '../lib/feedback.js';
-import { loadConfig } from '../lib/config.js';
+import { loadConfig, type Config, type EventName } from '../lib/config.js';
 import { log } from '../lib/logger.js';
 import { emitLifecycleEvent } from '../lib/events.js';
 
@@ -78,6 +78,44 @@ function printHumanResult(result: ReturnType<typeof ingestFeedback>): void {
   }
 }
 
+async function emitFeedbackIngestEvents(
+  config: Config,
+  result: Extract<ReturnType<typeof ingestFeedback>, { status: 'processed' }>,
+): Promise<void> {
+  const eventTypes: EventName[] = [
+    'feedback.received',
+    'feedback.classified',
+    ...(result.resumeCommand ? ['session.resume_requested' as const] : []),
+  ];
+
+  for (const type of eventTypes) {
+    await emitLifecycleEvent({
+      config,
+      type,
+      manifestPath: result.session.manifestPath,
+      context: {
+        issueNumber: result.githubComment.issueNumber,
+        prNumber: result.githubComment.prNumber,
+        feedback: {
+          idempotencyHash: result.idempotencyHash,
+          source: result.githubComment.marker.source,
+          externalEventId: result.githubComment.marker.externalEventId,
+          externalThreadId: result.githubComment.marker.externalThreadId,
+          externalMessageId: result.githubComment.marker.externalMessageId,
+          classification: result.classification,
+          resumeCommand: result.resumeCommand,
+        },
+        metadata: {
+          githubCommentTarget: result.githubComment.targetNumber,
+          sessionFound: result.session.found,
+          sessionLookup: result.session.lookup,
+          sessionFeedbackEventIds: result.lifecycleEventIds,
+        },
+      },
+    });
+  }
+}
+
 export async function feedbackIngestCommand(
   options: FeedbackIngestCommandOptions,
   inputText?: string,
@@ -103,29 +141,7 @@ export async function feedbackIngestCommand(
     });
 
     if (result.status === 'processed') {
-      await emitLifecycleEvent({
-        config,
-        type: 'feedback.received',
-        manifestPath: result.session.manifestPath,
-        context: {
-          issueNumber: result.githubComment.issueNumber,
-          prNumber: result.githubComment.prNumber,
-          feedback: {
-            idempotencyHash: result.idempotencyHash,
-            source: result.githubComment.marker.source,
-            externalEventId: result.githubComment.marker.externalEventId,
-            externalThreadId: result.githubComment.marker.externalThreadId,
-            externalMessageId: result.githubComment.marker.externalMessageId,
-            classification: result.classification,
-            resumeCommand: result.resumeCommand,
-          },
-          metadata: {
-            githubCommentTarget: result.githubComment.targetNumber,
-            sessionFound: result.session.found,
-            sessionLookup: result.session.lookup,
-          },
-        },
-      });
+      await emitFeedbackIngestEvents(config, result);
     }
 
     if (options.json) {

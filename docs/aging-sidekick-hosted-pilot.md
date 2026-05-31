@@ -375,7 +375,7 @@ events:
       required: false
     website_events:
       type: webhook
-      events: [qa.requested, feedback.received, session.completed, session.failed]
+      events: [qa.requested, feedback.received, feedback.classified, session.resume_requested, session.completed, session.failed]
       url_env: AGING_SIDEKICK_ALPHA_LOOP_EVENTS_URL
       secret_env: AGING_SIDEKICK_ALPHA_LOOP_EVENTS_SECRET
       format: json
