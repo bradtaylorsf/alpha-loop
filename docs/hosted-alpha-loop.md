@@ -272,6 +272,8 @@ Keep dependency, workflow, schema, migration, and secret paths protected. See [H
 
 See [Web/App Verification Profile](web-app-profile.md) for browser screenshots, preview URLs, QA checklist output, and provider-agnostic preview discovery.
 
+For a concrete Astro/Sanity marketing-site pilot with Slack and website feedback loops, see the [Aging Sidekick Hosted Pilot Blueprint](aging-sidekick-hosted-pilot.md).
+
 ## First Run Workflow
 
 Start attended. Do not make the daemon your first execution path.
