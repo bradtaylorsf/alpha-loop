@@ -1,0 +1,89 @@
+{
+  "name": "session/epic-293-epic-hosted-alpha-loop-for-24-7-repo-stewardship-with-human-feedback-loops",
+  "branch": "session/epic-293-epic-hosted-alpha-loop-for-24-7-repo-stewardship-with-human-feedback-loops",
+  "completed": "2026-05-31T00:20:46.112Z",
+  "results": [
+    {
+      "issueNum": 283,
+      "title": "feat: add targeted single-issue execution",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/307",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "autoCommittedByPipeline": true,
+      "autoCommittedPaths": [
+        "EADME.md",
+        "docs/epics.md",
+        "src/cli.ts",
+        "src/commands/run.ts",
+        "src/lib/learning.ts",
+        "src/lib/pipeline.ts",
+        "src/lib/prompts.ts",
+        "tests/commands/run.test.ts",
+        "tests/docs/epic-first-workflow.test.ts",
+        "tests/lib/pipeline.test.ts",
+        "tests/lib/prompts.test.ts"
+      ],
+      "duration": 1159,
+      "filesChanged": 4
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 134728,
+      "tokens_out": 103637,
+      "cost_usd": 0,
+      "wall_time_s": 250.127,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-05-30T23:51:52.486Z",
+      "issue_num": 283
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 595032,
+      "tokens_out": 457717,
+      "cost_usd": 0,
+      "wall_time_s": 643.187,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-05-30T23:56:03.171Z",
+      "issue_num": 283
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 126227,
+      "tokens_out": 97098,
+      "cost_usd": 0,
+      "wall_time_s": 251.589,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-05-31T00:06:50.785Z",
+      "issue_num": 283
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 55134,
+      "tokens_out": 42411,
+      "cost_usd": 0,
+      "wall_time_s": 129.691,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-05-31T00:11:30.575Z",
+      "issue_num": 283
+    }
+  ]
+}
