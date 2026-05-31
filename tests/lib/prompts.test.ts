@@ -316,6 +316,17 @@ describe('buildLearnPrompt', () => {
     expect(prompt).toContain('(no review output)');
     expect(prompt).toContain('(no verification output)');
   });
+
+  test('includes parent epic context when provided', () => {
+    const prompt = buildLearnPrompt({
+      ...baseOptions,
+      epicContext,
+    });
+
+    expect(prompt).toContain('## Parent Epic Context');
+    expect(prompt).toContain('Epic #195: Improve epic execution');
+    expect(prompt).toContain('Ordered Sub-Issue Checklist');
+  });
 });
 
 describe('buildBatchPlanPrompt', () => {

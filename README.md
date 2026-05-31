@@ -39,6 +39,9 @@ alpha-loop run
 
 # Or target a specific milestone directly
 alpha-loop run --milestone "v1.0"
+
+# Or process one ready issue directly
+alpha-loop run --issue 42
 ```
 
 ### Recommended Epic-First Flow
@@ -51,6 +54,8 @@ For planned feature work, use epics as the unit you schedule and ship:
 4. `alpha-loop roadmap --queue` recommends the next ordered epic queue, explains blockers and risks, and prints the exact `alpha-loop run --epics ...` command.
 5. `alpha-loop run --epics <A,B,C>` runs several parent epics back-to-back in that exact order, with a separate session branch and PR for each epic.
 6. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
+
+Use `alpha-loop run --issue <N>` when you need to restart or process exactly one ready issue. If that issue appears in exactly one open parent epic checklist, the agent receives that parent epic context and the resulting PR still includes `Part of #<epic>`; if multiple open epics reference it, Alpha Loop exits instead of guessing.
 
 Milestones answer "when should this epic ship?" The epic checklist answers "what child issues ship, and in what order?"
 
@@ -275,6 +280,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop init` | Full onboarding: config, templates, vision, scan, sync, commit |
 | `alpha-loop run` | Fetch matching issues, process them all, then exit |
 | `alpha-loop run --dry-run` | Preview without making changes |
+| `alpha-loop run --issue <N>` | Process exactly one open ready issue; child issues inherit one unambiguous parent epic context |
 | `alpha-loop run --epic <N>` | Process an epic — its sub-issues in checklist order, auto-verify on completion (see [docs/epics.md](docs/epics.md)) |
 | `alpha-loop run --epics <ids>` | Process an ordered comma-separated queue of epics, one session branch and PR per epic |
 | `alpha-loop run --epics <ids> --queue-branch-mode independent` | Run queued epics without stacking later session branches on earlier ones |
@@ -343,6 +349,7 @@ Options:
   --merge-to <branch> Use an existing branch instead of creating a new session branch
   --batch             Batch mode: process multiple issues per agent call (faster, fewer tokens)
   --batch-size <n>    Issues per batch (default: 5)
+  --issue <n>         Process exactly one issue by issue number (skips the picker)
   --epic <n>          Process a specific epic by issue number (skips the picker)
   --epics <ids>       Process multiple epics in order (comma-separated)
   --queue-branch-mode <mode>  Branch mode for --epics: stacked or independent
@@ -613,6 +620,14 @@ alpha-loop run --epic 165
 ```
 
 `alpha-loop run --milestone "v1.0"` checks for open epics assigned to that milestone before fetching flat issues. One scheduled epic is processed automatically, multiple scheduled epics require `--epic <N>`, and no scheduled epics falls back to ready non-epic issues in that milestone. `--epic` always wins over `--milestone`; `--skip-epic` disables epic discovery and preserves the flat milestone flow.
+
+For feedback-driven or hosted workflows that need one precise unit of work, use:
+
+```bash
+alpha-loop run --issue 158
+```
+
+`--issue` fetches only that issue, requires it to be open, labeled with the configured ready label, and not labeled `blocked`, and refuses parent epics with guidance to use `--epic`. When the issue is referenced by exactly one open parent epic, Alpha Loop includes that parent context in the run and updates only that checklist item on success. If multiple open parent epics reference the issue, the command exits before creating a session or mutating GitHub/git state. `--dry-run --issue <N>` prints the resolved target and eligibility decision.
 
 To ask Alpha Loop what to run next, use queue planning:
 

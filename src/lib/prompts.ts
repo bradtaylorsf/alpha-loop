@@ -87,6 +87,7 @@ export type LearnPromptOptions = {
   reviewOutput: string;
   verifyOutput: string;
   body?: string;
+  epicContext?: EpicPromptContext;
 };
 
 function normalizeBulletText(text: string): string {
@@ -750,10 +751,11 @@ export function buildSessionReviewPrompt(options: SessionReviewPromptOptions): s
 export function buildLearnPrompt(options: LearnPromptOptions): string {
   const {
     issueNum, title, status, retries, duration,
-    diff, testOutput, reviewOutput, verifyOutput, body,
+    diff, testOutput, reviewOutput, verifyOutput, body, epicContext,
   } = options;
 
   const today = new Date().toISOString().split('T')[0];
+  const parentContext = epicContext ? `\n${formatEpicPromptContext(epicContext)}\n` : '';
 
   return `Analyze this completed development run. Output ONLY a markdown document with the exact structure below. Keep each section to 2-3 bullet points max. Be factual and concise -- no creative writing.
 
@@ -765,6 +767,7 @@ export function buildLearnPrompt(options: LearnPromptOptions): string {
 
 ## Issue Requirements
 ${body || '(no description)'}
+${parentContext}
 
 ## Code Changes
 ${diff || '(no diff available)'}

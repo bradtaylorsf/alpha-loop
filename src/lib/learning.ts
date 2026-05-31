@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { log } from './logger.js';
 import { formatTimestamp } from './shell.js';
 import { spawnAgent } from './agent.js';
-import { buildLearnPrompt } from './prompts.js';
+import { buildLearnPrompt, type EpicPromptContext } from './prompts.js';
 import { resolveStepConfig } from './config.js';
 import type { Config } from './config.js';
 
@@ -26,6 +26,7 @@ export type ExtractLearningsOptions = {
   agentCwd?: string;
   sessionLogsDir?: string;
   sessionName?: string;
+  epicContext?: EpicPromptContext;
 };
 
 export type SessionLearningRepairResult = {
@@ -506,6 +507,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
     reviewOutput: options.reviewOutput,
     verifyOutput: options.verifyOutput,
     body: options.body,
+    epicContext: options.epicContext,
   });
 
   if (config.dryRun) {

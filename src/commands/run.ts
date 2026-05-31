@@ -65,6 +65,8 @@ export type RunOptions = {
   fix?: boolean;
   /** Force a specific epic by number, skip picker. */
   epic?: number;
+  /** Force a specific issue by number, skip picker and queue selection. */
+  issue?: number;
   /** Process multiple epics in the provided comma-separated order. */
   epics?: string;
   /** Branch ancestry mode for multi-epic queues. */
@@ -78,6 +80,13 @@ export type RunOptions = {
 };
 
 export type EpicExecutionFailureCode =
+  | 'invalid-issue-number'
+  | 'issue-not-found'
+  | 'issue-closed'
+  | 'issue-is-epic'
+  | 'issue-not-ready'
+  | 'issue-blocked'
+  | 'ambiguous-parent-epics'
   | 'invalid-epic-number'
   | 'epic-not-found'
   | 'missing-epic-label'
@@ -108,6 +117,17 @@ export type EpicExecutionResult = {
   verificationClosedEpic: boolean;
 };
 
+export type IssueExecutionResult = {
+  issueNumber: number;
+  parentEpicNumber: number | null;
+  sessionName: string | null;
+  sessionBranch: string | null;
+  sessionPrUrl: string | null;
+  status: 'success' | 'failure';
+  failures: EpicExecutionFailure[];
+  verificationClosedEpic: boolean;
+};
+
 type EpicVerificationFlowResult = {
   epicNumber: number;
   status: 'pass' | 'needs-human-input' | 'skipped' | 'failure';
@@ -118,6 +138,7 @@ type EpicVerificationFlowResult = {
 
 type SessionExecutionTarget =
   | { type: 'epic'; epicNum: number; epicTitle?: string; epicIssue: Issue; queue?: QueueSessionContext }
+  | { type: 'issue'; issue: Issue; parentEpic?: Issue }
   | { type: 'flat'; activeMilestone: string };
 
 type SessionExecutionResult = {
@@ -132,6 +153,7 @@ type CommandExitErrorCode =
   | 'missing-prerequisite'
   | 'ambiguous-milestone-epics'
   | 'invalid-verify-only'
+  | 'incompatible-issue-options'
   | 'incompatible-epic-queue-options'
   | 'invalid-epic-queue'
   | 'invalid-queue-branch-mode'
@@ -685,15 +707,32 @@ async function runIssueSession(
   options: RunOptions,
   target: SessionExecutionTarget,
 ): Promise<SessionExecutionResult> {
-  const activeEpic = target.type === 'epic' ? target.epicNum : undefined;
-  const activeEpicTitle = target.type === 'epic' ? target.epicTitle : undefined;
-  const activeEpicIssue = target.type === 'epic' ? target.epicIssue : undefined;
+  const activeEpic = target.type === 'epic'
+    ? target.epicNum
+    : target.type === 'issue'
+      ? target.parentEpic?.number
+      : undefined;
+  const activeEpicTitle = target.type === 'epic'
+    ? target.epicTitle
+    : target.type === 'issue'
+      ? target.parentEpic?.title
+      : undefined;
+  const activeEpicIssue = target.type === 'epic'
+    ? target.epicIssue
+    : target.type === 'issue'
+      ? target.parentEpic
+      : undefined;
   const queueContext = target.type === 'epic' ? target.queue : undefined;
   const activeMilestone = target.type === 'flat' ? target.activeMilestone : '';
   const failures: EpicExecutionFailure[] = [];
   let verificationClosedEpic = false;
 
-  if (activeEpic !== undefined) {
+  if (target.type === 'issue') {
+    log.info(`Processing targeted issue #${target.issue.number}: ${target.issue.title}`);
+    if (activeEpic !== undefined) {
+      log.info(`Using parent epic #${activeEpic}${activeEpicTitle ? ': ' + activeEpicTitle : ''}`);
+    }
+  } else if (activeEpic !== undefined) {
     log.info(`Processing epic #${activeEpic}${activeEpicTitle ? ': ' + activeEpicTitle : ''}`);
   } else if (activeMilestone) {
     log.info(`Filtering issues by milestone: ${activeMilestone}`);
@@ -859,7 +898,15 @@ async function runIssueSession(
   let issues: Issue[];
   let epicChecklist: EpicChecklistPromptItem[] = [];
   let epicPromptContext: EpicPromptContext | undefined;
-  if (activeEpic !== undefined) {
+  if (target.type === 'issue') {
+    issues = [target.issue];
+    if (activeEpicIssue) {
+      epicChecklist = parseEpicChecklistForPrompt(activeEpicIssue.body);
+      const item = epicChecklist.find((entry) => entry.issueNum === target.issue.number);
+      if (item) item.title = item.title ?? target.issue.title;
+      epicPromptContext = buildEpicPromptContextFromIssue(activeEpicIssue, epicChecklist);
+    }
+  } else if (activeEpic !== undefined) {
     log.info(`Fetching sub-issues of epic #${activeEpic} in checklist order...`);
     const epicIssue = activeEpicIssue;
     if (!epicIssue) {
@@ -1364,6 +1411,141 @@ function buildEpicFailureResult(epicNumber: number, failure: EpicExecutionFailur
   };
 }
 
+function buildIssueFailureResult(
+  issueNumber: number,
+  failure: EpicExecutionFailure,
+  parentEpicNumber: number | null = null,
+): IssueExecutionResult {
+  return {
+    issueNumber,
+    parentEpicNumber,
+    sessionName: null,
+    sessionBranch: null,
+    sessionPrUrl: null,
+    status: 'failure',
+    failures: [failure],
+    verificationClosedEpic: false,
+  };
+}
+
+function issueIsOpen(issue: Issue): boolean {
+  return issue.state === undefined || issue.state.toLowerCase() === 'open';
+}
+
+function formatParentEpicList(epics: Issue[]): string {
+  return epics.map((epic) => `#${epic.number} ${epic.title}`).join(', ');
+}
+
+function findOpenParentEpics(config: Config, issueNumber: number): Issue[] {
+  return listEpics(config.repo).filter((epic) => (
+    epic.number !== issueNumber
+    && parseSubIssues(epic.body).some((ref) => ref.number === issueNumber)
+  ));
+}
+
+function logSingleIssueDryRunDecision(config: Config, issue: Issue, parentEpic: Issue | undefined): void {
+  if (!config.dryRun) return;
+  const parent = parentEpic
+    ? `child of open epic #${parentEpic.number} ${parentEpic.title}`
+    : 'standalone issue with no open parent epic';
+  log.dry(`Resolved --issue #${issue.number}: ${issue.title}`);
+  log.dry(`Issue #${issue.number} is eligible: open, labeled '${config.labelReady}', not blocked, ${parent}`);
+}
+
+export async function runSingleIssueExecution(args: {
+  config: Config;
+  issueNumber: number;
+  issue?: Issue;
+  options?: RunOptions;
+}): Promise<IssueExecutionResult> {
+  const { config, issueNumber } = args;
+  const options = args.options ?? {};
+
+  if (typeof issueNumber !== 'number' || !Number.isFinite(issueNumber) || issueNumber <= 0) {
+    return buildIssueFailureResult(issueNumber, {
+      code: 'invalid-issue-number',
+      message: '--issue requires a positive integer issue number (e.g. --issue 42)',
+      exitCode: 1,
+    });
+  }
+
+  const issue = args.issue ?? getIssueWithComments(config.repo, issueNumber);
+  if (!issue) {
+    return buildIssueFailureResult(issueNumber, {
+      code: 'issue-not-found',
+      message: `Could not fetch issue #${issueNumber}. Check the issue number and repository before running --issue.`,
+      issueNum: issueNumber,
+      exitCode: 1,
+    });
+  }
+
+  if (!issueIsOpen(issue)) {
+    return buildIssueFailureResult(issueNumber, {
+      code: 'issue-closed',
+      message: `Issue #${issueNumber} is closed. Reopen it before running --issue.`,
+      issueNum: issueNumber,
+      exitCode: 1,
+    });
+  }
+
+  if (hasEpicLabel(issue)) {
+    return buildIssueFailureResult(issueNumber, {
+      code: 'issue-is-epic',
+      message: `Issue #${issueNumber} is labeled 'epic'. Use alpha-loop run --epic ${issueNumber} instead.`,
+      issueNum: issueNumber,
+      exitCode: 1,
+    });
+  }
+
+  if (hasLabel(issue.labels, 'blocked')) {
+    return buildIssueFailureResult(issueNumber, {
+      code: 'issue-blocked',
+      message: `Issue #${issueNumber} is blocked. Remove the 'blocked' label before running --issue.`,
+      issueNum: issueNumber,
+      exitCode: 1,
+    });
+  }
+
+  if (!hasLabel(issue.labels, config.labelReady)) {
+    return buildIssueFailureResult(issueNumber, {
+      code: 'issue-not-ready',
+      message: `Issue #${issueNumber} is not labeled '${config.labelReady}'. Add that label before running --issue.`,
+      issueNum: issueNumber,
+      exitCode: 1,
+    });
+  }
+
+  const parentEpics = findOpenParentEpics(config, issueNumber);
+  if (parentEpics.length > 1) {
+    return buildIssueFailureResult(issueNumber, {
+      code: 'ambiguous-parent-epics',
+      message: `Issue #${issueNumber} is referenced by multiple open parent epics: ${formatParentEpicList(parentEpics)}. Remove duplicate parent checklist references or close the unintended parent epic before running --issue.`,
+      issueNum: issueNumber,
+      exitCode: 1,
+    });
+  }
+
+  const parentEpic = parentEpics[0];
+  logSingleIssueDryRunDecision(config, issue, parentEpic);
+
+  const sessionResult = await runIssueSession(config, options, {
+    type: 'issue',
+    issue,
+    parentEpic,
+  });
+
+  return {
+    issueNumber: issue.number,
+    parentEpicNumber: parentEpic?.number ?? null,
+    sessionName: sessionResult.session.name,
+    sessionBranch: sessionResult.session.branch,
+    sessionPrUrl: sessionResult.sessionPrUrl,
+    status: sessionResult.failures.length > 0 ? 'failure' : 'success',
+    failures: sessionResult.failures,
+    verificationClosedEpic: sessionResult.verificationClosedEpic,
+  };
+}
+
 export async function runSingleEpicExecution(args: {
   config: Config;
   epicNumber: number;
@@ -1432,6 +1614,18 @@ function exitForCliEpicValidationFailure(result: EpicExecutionResult): void {
   });
 }
 
+function exitForCliIssueValidationFailure(result: IssueExecutionResult): void {
+  const failure = result.failures.find((entry) => entry.exitCode !== undefined);
+  if (!failure) return;
+  log.error(failure.message);
+  throw new CommandExitError({
+    code: failure.code,
+    message: failure.message,
+    exitCode: failure.exitCode ?? 1,
+    logged: true,
+  });
+}
+
 function buildConfigOverrides(options: RunOptions): Partial<Config> {
   const overrides: Partial<Config> = {};
   if (options.dryRun) overrides.dryRun = true;
@@ -1448,8 +1642,26 @@ function buildConfigOverrides(options: RunOptions): Partial<Config> {
   return overrides;
 }
 
+function rejectIncompatibleSingleIssueOptions(options: RunOptions): void {
+  const incompatible: string[] = [];
+  if (options.epic !== undefined) incompatible.push('--epic');
+  if (options.epics !== undefined) incompatible.push('--epics');
+  if (options.verifyOnly !== undefined) incompatible.push('--verify-only');
+
+  if (incompatible.length === 0) return;
+
+  log.error(`--issue cannot be combined with ${incompatible.join(', ')}`);
+  throw new CommandExitError({
+    code: 'incompatible-issue-options',
+    message: `--issue cannot be combined with ${incompatible.join(', ')}`,
+    exitCode: 1,
+    logged: true,
+  });
+}
+
 function rejectIncompatibleEpicQueueOptions(options: RunOptions): void {
   const incompatible: string[] = [];
+  if (options.issue !== undefined) incompatible.push('--issue');
   if (options.epic !== undefined) incompatible.push('--epic');
   if (options.verifyOnly !== undefined) incompatible.push('--verify-only');
   if (options.milestone) incompatible.push('--milestone');
@@ -1812,6 +2024,17 @@ export async function runCommand(options: RunOptions): Promise<void> {
         exitCode: 1,
         logged: true,
       });
+    }
+
+    if (options.issue !== undefined) {
+      rejectIncompatibleSingleIssueOptions(options);
+      const result = await runSingleIssueExecution({
+        config,
+        issueNumber: options.issue,
+        options,
+      });
+      exitForCliIssueValidationFailure(result);
+      return;
     }
 
     if (options.epics !== undefined) {

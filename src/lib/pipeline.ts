@@ -1264,6 +1264,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     agentCwd: worktreePath,
     sessionLogsDir: session.logsDir,
     sessionName: session.name,
+    ...epicOption,
   });
 
   if (!config.dryRun) {

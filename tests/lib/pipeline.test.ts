@@ -408,12 +408,13 @@ describe('processIssue', () => {
     }));
   });
 
-  test('passes epic context into plan, implementation, and review prompt builders', async () => {
+  test('passes epic context into plan, implementation, review, and learning stages', async () => {
     await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession(), { epicContext });
 
     expect(mockBuildIssuePlanPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+    expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
   });
 
   test('does not pass epic context when pipeline options are omitted', async () => {
@@ -422,6 +423,7 @@ describe('processIssue', () => {
     expect(mockBuildIssuePlanPrompt.mock.calls[0][0]).not.toHaveProperty('epicContext');
     expect(mockBuildImplementPrompt.mock.calls[0][0]).not.toHaveProperty('epicContext');
     expect(mockBuildReviewPrompt.mock.calls[0][0]).not.toHaveProperty('epicContext');
+    expect(mockExtractLearnings.mock.calls[0][0]).not.toHaveProperty('epicContext');
   });
 
   test('prompt traces contain epic context only when provided', async () => {
