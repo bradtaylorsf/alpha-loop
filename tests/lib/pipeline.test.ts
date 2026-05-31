@@ -57,6 +57,7 @@ jest.mock('../../src/lib/learning', () => ({
 jest.mock('../../src/lib/session', () => ({
   saveResult: jest.fn(),
   getPreviousResult: jest.fn(),
+  loadSessionManifest: jest.fn(),
   writeCrashMarker: jest.fn(),
   recordSessionCleanup: jest.fn(),
   recordSessionError: jest.fn(),
@@ -66,6 +67,7 @@ jest.mock('../../src/lib/session', () => ({
   recordSessionPrompt: jest.fn(),
   recordSessionStage: jest.fn(),
   recordSessionTranscript: jest.fn(),
+  recordSessionWebAppArtifacts: jest.fn(),
   recordSessionWorktree: jest.fn(),
   transitionHumanFeedbackSessionStatus: jest.fn(),
   updateSessionManifest: jest.fn(),
@@ -137,12 +139,14 @@ import { extractLearnings, getLearningContext } from '../../src/lib/learning';
 import {
   saveResult,
   getPreviousResult,
+  loadSessionManifest,
   writeCrashMarker,
   recordSessionCleanup,
   recordSessionIssue,
   recordSessionPolicyDecision,
   recordSessionPrompt,
   recordSessionTranscript,
+  recordSessionWebAppArtifacts,
   recordSessionWorktree,
   transitionHumanFeedbackSessionStatus,
 } from '../../src/lib/session';
@@ -166,12 +170,14 @@ const mockExtractLearnings = extractLearnings as jest.MockedFunction<typeof extr
 const mockGetLearningContext = getLearningContext as jest.MockedFunction<typeof getLearningContext>;
 const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGetPreviousResult = getPreviousResult as jest.MockedFunction<typeof getPreviousResult>;
+const mockLoadSessionManifest = loadSessionManifest as jest.MockedFunction<typeof loadSessionManifest>;
 const mockWriteCrashMarker = writeCrashMarker as jest.MockedFunction<typeof writeCrashMarker>;
 const mockRecordSessionCleanup = recordSessionCleanup as jest.MockedFunction<typeof recordSessionCleanup>;
 const mockRecordSessionIssue = recordSessionIssue as jest.MockedFunction<typeof recordSessionIssue>;
 const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
 const mockRecordSessionPrompt = recordSessionPrompt as jest.MockedFunction<typeof recordSessionPrompt>;
 const mockRecordSessionTranscript = recordSessionTranscript as jest.MockedFunction<typeof recordSessionTranscript>;
+const mockRecordSessionWebAppArtifacts = recordSessionWebAppArtifacts as jest.MockedFunction<typeof recordSessionWebAppArtifacts>;
 const mockRecordSessionWorktree = recordSessionWorktree as jest.MockedFunction<typeof recordSessionWorktree>;
 const mockTransitionHumanFeedbackSessionStatus = transitionHumanFeedbackSessionStatus as jest.MockedFunction<typeof transitionHumanFeedbackSessionStatus>;
 const mockBuildIssuePlanPrompt = buildIssuePlanPrompt as jest.MockedFunction<typeof buildIssuePlanPrompt>;
@@ -282,6 +288,7 @@ beforeEach(() => {
   mockExtractLearnings.mockResolvedValue(null);
   mockGetLearningContext.mockReturnValue('');
   mockGetPreviousResult.mockReturnValue(null);
+  mockLoadSessionManifest.mockReturnValue(null);
 });
 
 describe('processIssue', () => {
@@ -553,6 +560,88 @@ describe('processIssue', () => {
       context: expect.objectContaining({
         issueNumber: 42,
         qaChecklist: ['Open the PR preview', 'Confirm the content renders correctly'],
+        previewUrl: 'https://preview.example.test',
+      }),
+    }));
+  });
+
+  test('uses web app profile artifacts for PR content and QA handoff', async () => {
+    mockRunVerify.mockResolvedValueOnce({
+      passed: true,
+      skipped: false,
+      output: '### Status: PASS',
+      webApp: {
+        artifactPath: '.alpha-loop/sessions/session/test/web-app-verification/issue-42.json',
+        browserResultPath: '.alpha-loop/sessions/session/test/web-app-verification/issue-42.json',
+        screenshots: ['.alpha-loop/sessions/session/test/screenshots/issue-42/home-desktop.png'],
+        previewUrl: null,
+        devUrl: 'http://localhost:4321',
+        consoleErrors: [],
+        networkErrors: [],
+        passed: true,
+        skipped: false,
+        summary: 'Browser verification passed',
+      },
+    });
+    mockLoadSessionManifest.mockReturnValue({
+      webApp: {
+        previewUrl: 'https://preview.example.test',
+        devUrl: 'http://localhost:4321',
+        screenshots: ['.alpha-loop/sessions/session/test/screenshots/issue-42/home-desktop.png'],
+        browserResultPath: '.alpha-loop/sessions/session/test/web-app-verification/issue-42.json',
+        artifactPath: '.alpha-loop/sessions/session/test/web-app-verification/issue-42.json',
+        consoleErrors: [],
+        networkErrors: [],
+        qaChecklist: ['Open https://preview.example.test and confirm issue #42 works in the browser.'],
+        updatedAt: '2026-05-31T00:00:00.000Z',
+      },
+    } as any);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === './scripts/get-preview-url.sh') {
+        return { stdout: 'https://preview.example.test', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Marketing page update', 'Issue body', makeConfig({
+      skipVerify: false,
+      webApp: {
+        setupCommand: '',
+        buildCommand: 'pnpm build',
+        testCommand: 'pnpm test',
+        devCommand: 'pnpm dev',
+        devUrl: 'http://localhost:4321',
+        smokeTest: 'pnpm build',
+        screenshots: [{ name: 'home-desktop', url: '/', viewport: 'desktop' }],
+        preview: { url: '', command: './scripts/get-preview-url.sh', required: false },
+      },
+    }), makeSession());
+
+    expect(mockRunVerify).toHaveBeenCalledWith(expect.objectContaining({
+      webAppProfile: expect.objectContaining({
+        devUrl: 'http://localhost:4321',
+        screenshots: [expect.objectContaining({ name: 'home-desktop' })],
+      }),
+    }));
+    expect(mockRecordSessionWebAppArtifacts).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      previewUrl: 'https://preview.example.test',
+      screenshots: ['.alpha-loop/sessions/session/test/screenshots/issue-42/home-desktop.png'],
+      browserResultPath: '.alpha-loop/sessions/session/test/web-app-verification/issue-42.json',
+    }));
+    const prBody = mockCreatePR.mock.calls[0][0].body;
+    expect(prBody).toContain('## Web App Preview');
+    expect(prBody).toContain('https://preview.example.test');
+    expect(prBody).toContain('home-desktop.png');
+    expect(prBody).toContain('## Human QA Checklist');
+    expect(result.status).toBe('waiting');
+    expect(result.waitingStatus).toBe('qa_requested');
+    expect(result.previewUrl).toBe('https://preview.example.test');
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'qa.requested',
+      context: expect.objectContaining({
+        qaChecklist: expect.arrayContaining([
+          'Open https://preview.example.test and confirm issue #42 works in the browser.',
+        ]),
         previewUrl: 'https://preview.example.test',
       }),
     }));
@@ -1515,5 +1604,28 @@ describe('buildPRBody', () => {
   test('shows FAIL for verification when verifyPassing is false and not skipped', () => {
     const body = buildPRBody(42, 'My feature', defaultReviewGate, '', true, false, false, '');
     expect(body).toContain('FAIL');
+  });
+
+  test('includes web app preview, screenshots, browser results, and QA checklist', () => {
+    const body = buildPRBody(42, 'My feature', defaultReviewGate, '', true, true, false, '', undefined, {
+      previewUrl: 'https://preview.example.test',
+      devUrl: 'http://localhost:4321',
+      artifactPath: '.alpha-loop/sessions/session/test/web-app-verification/issue-42.json',
+      browserResultPath: '.alpha-loop/sessions/session/test/web-app-verification/issue-42.json',
+      screenshots: ['.alpha-loop/sessions/session/test/screenshots/issue-42/home-desktop.png'],
+      consoleErrors: [],
+      networkErrors: [],
+      passed: true,
+      skipped: false,
+      summary: 'Browser verification passed',
+      qaChecklist: ['Open preview and check the hero.'],
+    });
+
+    expect(body).toContain('## Web App Preview');
+    expect(body).toContain('https://preview.example.test');
+    expect(body).toContain('home-desktop.png');
+    expect(body).toContain('Browser results');
+    expect(body).toContain('## Human QA Checklist');
+    expect(body).toContain('- [ ] Open preview and check the hero.');
   });
 });

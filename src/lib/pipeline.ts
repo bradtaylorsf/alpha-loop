@@ -45,6 +45,7 @@ import { extractLearnings, getLearningContext } from './learning.js';
 import {
   saveResult,
   getPreviousResult,
+  loadSessionManifest,
   writeCrashMarker,
   recordSessionCleanup,
   recordSessionError,
@@ -54,6 +55,7 @@ import {
   recordSessionPolicyDecision,
   recordSessionStage,
   recordSessionTranscript,
+  recordSessionWebAppArtifacts,
   recordSessionWorktree,
   transitionHumanFeedbackSessionStatus,
   updateSessionManifest,
@@ -97,6 +99,16 @@ import {
   parseDiffNameOnly,
   type AutomationPolicyDecision,
 } from './automation-policy.js';
+import {
+  buildWebAppQaChecklist,
+  formatWebAppPRSection,
+  normalizeWebAppProfile,
+  resolveWebAppPreviewUrl,
+  type WebAppPRContext,
+  type WebAppProfile,
+  type WebAppPreviewResolution,
+  type WebAppVerificationSummary,
+} from './web-app-profile.js';
 
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
@@ -424,6 +436,18 @@ export type PipelineResult = {
   autoCommittedByPipeline?: boolean;
   /** Paths included in the pipeline-authored fallback commit. */
   autoCommittedPaths?: string[];
+  /** Web/app preview URL discovered for review or QA handoff. */
+  previewUrl?: string;
+  /** Screenshot artifact paths captured during web/app verification. */
+  screenshots?: string[];
+  /** Web/app browser verification artifact path. */
+  browserResultPath?: string;
+  /** Web/app verification JSON artifact path. */
+  webAppArtifactPath?: string;
+  /** Browser console errors captured during web/app verification. */
+  consoleErrors?: string[];
+  /** Failed network requests captured during web/app verification. */
+  networkErrors?: string[];
   /** Why the issue failed — 'transient' means re-queue (e.g. usage limit), 'permanent' means label failed. */
   failureReason?: 'transient' | 'permanent';
   prUrl?: string;
@@ -564,6 +588,37 @@ function labelSessionState(config: Config, issueNum: number, status: HumanFeedba
   }
 }
 
+function writeQaChecklistArtifact(args: {
+  session: SessionContext;
+  issueNum: number;
+  title: string;
+  checklist: string[];
+  prUrl?: string;
+  previewUrl?: string;
+  resumeInstructions: string;
+}): string | null {
+  if (args.checklist.length === 0) return null;
+  const filePath = join(args.session.resultsDir, 'qa-checklist.md');
+  const lines = [
+    `# QA Checklist: #${args.issueNum} ${args.title}`,
+    '',
+    ...(args.prUrl ? [`PR: ${args.prUrl}`] : []),
+    ...(args.previewUrl ? [`Preview: ${args.previewUrl}`] : []),
+    '',
+    ...args.checklist.map((item) => `- [ ] ${item}`),
+    '',
+    args.resumeInstructions,
+    '',
+  ];
+  try {
+    writeFileSync(filePath, lines.join('\n'));
+    recordSessionLogFile(args.session, filePath);
+    return filePath;
+  } catch {
+    return null;
+  }
+}
+
 function followUpIssueUrl(repo: string, issueNumber: number): string {
   return `https://github.com/${repo}/issues/${issueNumber}`;
 }
@@ -608,6 +663,18 @@ async function pauseSessionForRequest(input: PauseSessionInput): Promise<Pipelin
   const prUrl = request.prUrl ?? input.prUrl;
   const previewUrl = request.previewUrl ?? input.request.previewUrl;
   const qaChecklist = request.qaChecklist;
+  const webAppArtifacts = loadSessionManifest(session)?.webApp;
+  if (waitingStatus === 'qa_requested') {
+    writeQaChecklistArtifact({
+      session,
+      issueNum,
+      title,
+      checklist: qaChecklist,
+      prUrl,
+      previewUrl: previewUrl ?? webAppArtifacts?.previewUrl ?? undefined,
+      resumeInstructions,
+    });
+  }
 
   transitionHumanFeedbackSessionStatus(session, {
     to: waitingStatus,
@@ -690,6 +757,12 @@ async function pauseSessionForRequest(input: PauseSessionInput): Promise<Pipelin
     humanInputQuestion: waitingStatus === 'human_input_requested' ? question : undefined,
     resumeInstructions,
     qaChecklist: qaChecklist.length > 0 ? qaChecklist : undefined,
+    previewUrl: previewUrl ?? webAppArtifacts?.previewUrl ?? undefined,
+    screenshots: webAppArtifacts?.screenshots,
+    browserResultPath: webAppArtifacts?.browserResultPath ?? undefined,
+    webAppArtifactPath: webAppArtifacts?.artifactPath ?? undefined,
+    consoleErrors: webAppArtifacts?.consoleErrors,
+    networkErrors: webAppArtifacts?.networkErrors,
     feedbackClassification: classification,
     followUpIssueNumber,
     followUpIssueUrl: followUpUrl,
@@ -1203,6 +1276,10 @@ export async function processIssue(
     events: escalationEvents,
   });
   let autoCommittedPaths: string[] = [];
+  let webAppProfile: WebAppProfile | null = null;
+  let webAppSummary: WebAppVerificationSummary | null = null;
+  let webAppPreview: WebAppPreviewResolution | null = null;
+  let webAppQaChecklist: string[] = [];
 
   // Setup logging
   if (!config.dryRun) {
@@ -1242,9 +1319,15 @@ export async function processIssue(
   let worktreeBranch: string;
   let worktreeResumed = false;
 
+  const configuredSetupCommand = config.webApp?.setupCommand || config.setupCommand;
   const setupCommands = [
     ...(!config.skipInstall ? ['pnpm install --frozen-lockfile', 'pnpm install'] : []),
-    ...(config.setupCommand ? [config.setupCommand] : []),
+    ...(configuredSetupCommand ? [configuredSetupCommand] : []),
+    ...(config.webApp?.buildCommand ? [config.webApp.buildCommand] : []),
+    ...(config.webApp?.testCommand ? [config.webApp.testCommand] : []),
+    ...(config.webApp?.devCommand ? [config.webApp.devCommand] : []),
+    ...(config.webApp?.smokeTest ? [config.webApp.smokeTest] : []),
+    ...(config.webApp?.preview.command ? [config.webApp.preview.command] : []),
   ];
   for (const command of setupCommands) {
     const decision = evaluateCommandPolicy(config, command, { issueNum, title, stage: 'command' });
@@ -1269,7 +1352,7 @@ export async function processIssue(
       sessionBranch: session.branch,
       autoMerge: config.autoMerge,
       skipInstall: config.skipInstall,
-      setupCommand: config.setupCommand,
+      setupCommand: configuredSetupCommand,
       savedBranch: pipelineOptions.savedWorktree?.branch,
       savedPath: pipelineOptions.savedWorktree?.path,
       dryRun: config.dryRun,
@@ -1283,6 +1366,11 @@ export async function processIssue(
       path: worktreePath,
       branch: worktreeBranch,
       resumed: worktreeResumed,
+    });
+    webAppProfile = normalizeWebAppProfile(config, {
+      worktree: worktreePath,
+      sessionDir: session.resultsDir,
+      issueNum,
     });
   } catch (err) {
     log.error(`Failed to set up worktree for issue #${issueNum}: ${err}`);
@@ -1429,6 +1517,20 @@ export async function processIssue(
     }
   } else {
     log.dry('Would run planning agent');
+  }
+
+  if (webAppProfile && !config.skipVerify) {
+    plan = {
+      ...plan,
+      verification: {
+        needed: true,
+        reason: plan.verification.needed
+          ? plan.verification.reason
+          : 'Web/app profile configured; browser verification and screenshots are required.',
+        instructions: plan.verification.instructions,
+        method: 'playwright',
+      },
+    };
   }
 
   // --- Step 3b: Fetch issue comments for full context ---
@@ -1586,6 +1688,9 @@ export async function processIssue(
   let testOutput = '';
   let testsPassing = false;
   let testRetries = 0;
+  const testConfig = webAppProfile?.testCommand
+    ? { ...config, testCommand: webAppProfile.testCommand }
+    : config;
 
   if (!plan.testing.needed) {
     log.info(`Tests skipped by plan: ${plan.testing.reason}`);
@@ -1596,7 +1701,7 @@ export async function processIssue(
   for (let attempt = 1; testsPassing ? false : attempt <= config.maxTestRetries; attempt++) {
     log.info(`Test attempt ${attempt} of ${config.maxTestRetries}`);
 
-    const commandDecision = evaluateCommandPolicy(config, config.testCommand, { issueNum, title, stage: 'command' });
+    const commandDecision = evaluateCommandPolicy(config, testConfig.testCommand, { issueNum, title, stage: 'command' });
     if (!decisionAllowed(commandDecision)) {
       return pauseSessionForAutomationPolicy({
         issueNum,
@@ -1614,7 +1719,7 @@ export async function processIssue(
       });
     }
 
-    const testResult = runTests(worktreePath, config, logFile);
+    const testResult = runTests(worktreePath, testConfig, logFile);
     testOutput = testResult.output;
 
     // Trace test output
@@ -1702,6 +1807,38 @@ export async function processIssue(
     } else {
       log.warn(`Tests still failing after ${config.maxTestRetries} attempts`);
       testOutput = `TESTS FAILED after ${config.maxTestRetries} fix attempts. Latest output:\n${testOutput}`;
+    }
+  }
+
+  if (testsPassing && webAppProfile?.buildCommand && !config.dryRun) {
+    log.step('Step 5b: Running web/app build');
+    const commandDecision = evaluateCommandPolicy(config, webAppProfile.buildCommand, { issueNum, title, stage: 'command' });
+    if (!decisionAllowed(commandDecision)) {
+      return pauseSessionForAutomationPolicy({
+        issueNum,
+        title,
+        config,
+        session,
+        decision: commandDecision,
+        startTime,
+        projectDir,
+        worktreePath,
+        worktreeBranch,
+        testsPassing,
+        verifyPassing: false,
+        verifySkipped: true,
+      });
+    }
+    const buildResult = exec(webAppProfile.buildCommand, { cwd: worktreePath, timeout: 300_000 });
+    const buildOutput = [buildResult.stdout, buildResult.stderr].filter(Boolean).join('\n');
+    traceTest(session.name, issueNum, 0, `--- Web/App Build (${webAppProfile.buildCommand}) ---\n${buildOutput}`);
+    if (buildResult.exitCode === 0) {
+      log.success('Web/app build passed');
+      stepsCompleted.push('web-app-build');
+    } else {
+      testsPassing = false;
+      testOutput = `${testOutput}\n\nWEB APP BUILD FAILED (${webAppProfile.buildCommand})\n${buildOutput}`.trim();
+      log.warn(`Web/app build failed (exit ${buildResult.exitCode})`);
     }
   }
 
@@ -1819,7 +1956,7 @@ export async function processIssue(
         }
 
         // Re-run tests before next review attempt
-        const commandDecision = evaluateCommandPolicy(config, config.testCommand, { issueNum, title, stage: 'command' });
+        const commandDecision = evaluateCommandPolicy(config, testConfig.testCommand, { issueNum, title, stage: 'command' });
         if (!decisionAllowed(commandDecision)) {
           return pauseSessionForAutomationPolicy({
             issueNum,
@@ -1836,7 +1973,7 @@ export async function processIssue(
             verifySkipped: true,
           });
         }
-        const retest = runTests(worktreePath, config, logFile);
+        const retest = runTests(worktreePath, testConfig, logFile);
         if (!retest.passed) {
           log.warn('Tests failed after review fixes — will be caught in final status');
           testOutput = retest.output;
@@ -1871,7 +2008,7 @@ export async function processIssue(
       log.info(`Verification attempt ${attempt} of ${config.maxTestRetries}`);
 
       const verificationCommands = (plan.verification.method ?? 'playwright') === 'playwright'
-        ? (config.devCommand ? [config.devCommand] : [])
+        ? (webAppProfile?.devCommand ? [webAppProfile.devCommand] : (config.devCommand ? [config.devCommand] : []))
         : (plan.verification.command ? [plan.verification.command] : []);
       for (const command of verificationCommands) {
         const commandDecision = evaluateCommandPolicy(config, command, { issueNum, title, stage: 'command' });
@@ -1905,9 +2042,22 @@ export async function processIssue(
         verifyMethod: plan.verification.method,
         verifyCommand: plan.verification.command,
         resumeContext: resumeContext || undefined,
+        webAppProfile,
         ...epicOption,
       });
       verifyOutput = verifyResult.output;
+      if (verifyResult.webApp) {
+        webAppSummary = verifyResult.webApp;
+        recordSessionWebAppArtifacts(session, {
+          previewUrl: webAppSummary.previewUrl,
+          devUrl: webAppSummary.devUrl,
+          screenshots: webAppSummary.screenshots,
+          browserResultPath: webAppSummary.browserResultPath,
+          artifactPath: webAppSummary.artifactPath,
+          consoleErrors: webAppSummary.consoleErrors,
+          networkErrors: webAppSummary.networkErrors,
+        });
+      }
 
       // Trace verify output
       traceVerify(session.name, issueNum, attempt, verifyOutput);
@@ -1988,7 +2138,7 @@ export async function processIssue(
           }
 
           // Re-run tests before next verify attempt
-          const commandDecision = evaluateCommandPolicy(config, config.testCommand, { issueNum, title, stage: 'command' });
+          const commandDecision = evaluateCommandPolicy(config, testConfig.testCommand, { issueNum, title, stage: 'command' });
           if (!decisionAllowed(commandDecision)) {
             return pauseSessionForAutomationPolicy({
               issueNum,
@@ -2005,7 +2155,7 @@ export async function processIssue(
               verifySkipped: false,
             });
           }
-          const retest = runTests(worktreePath, config, logFile);
+          const retest = runTests(worktreePath, testConfig, logFile);
           if (!retest.passed) {
             log.warn('Tests failed after verify fixes');
             testOutput = retest.output;
@@ -2023,11 +2173,12 @@ export async function processIssue(
   }
 
   // --- Step 7b: Smoke test (if configured) ---
-  if (config.smokeTest && !config.dryRun) {
+  const smokeCommand = webAppProfile?.smokeTest || config.smokeTest;
+  if (smokeCommand && !config.dryRun) {
     currentStep = 'smoke';
     recordSessionStage(session, 'smoke');
     log.step('Step 7b: Running smoke test');
-    const commandDecision = evaluateCommandPolicy(config, config.smokeTest, { issueNum, title, stage: 'command' });
+    const commandDecision = evaluateCommandPolicy(config, smokeCommand, { issueNum, title, stage: 'command' });
     if (!decisionAllowed(commandDecision)) {
       return pauseSessionForAutomationPolicy({
         issueNum,
@@ -2044,11 +2195,58 @@ export async function processIssue(
         verifySkipped,
       });
     }
-    const smokeResult = exec(config.smokeTest, { cwd: worktreePath, timeout: 60_000 });
+    const smokeResult = exec(smokeCommand, { cwd: worktreePath, timeout: 60_000 });
     if (smokeResult.exitCode === 0) {
       log.success('Smoke test passed');
     } else {
       log.warn(`Smoke test failed (exit ${smokeResult.exitCode}): ${smokeResult.stderr || smokeResult.stdout}`);
+    }
+  }
+
+  if (webAppProfile && !config.dryRun) {
+    if (webAppProfile.preview.command) {
+      const commandDecision = evaluateCommandPolicy(config, webAppProfile.preview.command, { issueNum, title, stage: 'command' });
+      if (!decisionAllowed(commandDecision)) {
+        return pauseSessionForAutomationPolicy({
+          issueNum,
+          title,
+          config,
+          session,
+          decision: commandDecision,
+          startTime,
+          projectDir,
+          worktreePath,
+          worktreeBranch,
+          testsPassing,
+          verifyPassing,
+          verifySkipped,
+        });
+      }
+    }
+    webAppPreview = resolveWebAppPreviewUrl(webAppProfile, worktreePath);
+    if (webAppPreview.error) {
+      const level = webAppPreview.required ? log.warn : log.info;
+      level(`Preview URL discovery: ${webAppPreview.error}`);
+      if (webAppPreview.required) {
+        verifyPassing = false;
+        verifySkipped = false;
+        verifyOutput = `${verifyOutput}\n\nPreview URL discovery failed: ${webAppPreview.error}`.trim();
+      }
+    }
+    const previewUrl = webAppPreview.url ?? webAppSummary?.previewUrl ?? null;
+    if (previewUrl && webAppSummary) {
+      webAppSummary = { ...webAppSummary, previewUrl };
+    }
+    if (previewUrl || webAppSummary) {
+      recordSessionWebAppArtifacts(session, {
+        previewUrl,
+        devUrl: webAppProfile.devUrl,
+        screenshots: webAppSummary?.screenshots ?? webAppProfile.screenshots.map((shot) => shot.relativePath),
+        browserResultPath: webAppSummary?.browserResultPath ?? webAppProfile.artifactRelativePath,
+        artifactPath: webAppSummary?.artifactPath ?? webAppProfile.artifactRelativePath,
+        consoleErrors: webAppSummary?.consoleErrors ?? [],
+        networkErrors: webAppSummary?.networkErrors ?? [],
+      });
     }
   }
 
@@ -2143,6 +2341,45 @@ export async function processIssue(
   }
   stepsCompleted.push('learn');
 
+  const webAppPrContext: WebAppPRContext | undefined = webAppProfile
+    ? {
+        ...(webAppSummary ?? {
+          artifactPath: webAppProfile.artifactRelativePath,
+          browserResultPath: webAppProfile.artifactRelativePath,
+          screenshots: webAppProfile.screenshots.map((shot) => shot.relativePath),
+          previewUrl: webAppPreview?.url ?? (webAppProfile.preview.url || null),
+          devUrl: webAppProfile.devUrl,
+          consoleErrors: [],
+          networkErrors: [],
+          passed: verifyPassing,
+          skipped: verifySkipped,
+          summary: verifyOutput || 'Web app verification did not produce a browser artifact.',
+        }),
+        previewUrl: webAppPreview?.url ?? webAppSummary?.previewUrl ?? (webAppProfile.preview.url || null),
+        previewResolution: webAppPreview,
+      }
+    : undefined;
+  if (webAppProfile) {
+    webAppQaChecklist = buildWebAppQaChecklist({
+      issueNum,
+      profile: webAppProfile,
+      verification: webAppSummary,
+      planChecklist: plan.qa?.checklist,
+    });
+    const context = webAppPrContext as WebAppPRContext;
+    context.qaChecklist = webAppQaChecklist;
+    recordSessionWebAppArtifacts(session, {
+      previewUrl: context.previewUrl ?? null,
+      devUrl: webAppProfile.devUrl,
+      screenshots: context.screenshots ?? [],
+      browserResultPath: context.browserResultPath ?? null,
+      artifactPath: context.artifactPath ?? null,
+      consoleErrors: context.consoleErrors ?? [],
+      networkErrors: context.networkErrors ?? [],
+      qaChecklist: webAppQaChecklist,
+    });
+  }
+
   // --- Step 9: Create PR ---
   currentStep = 'pr';
   recordSessionStage(session, 'pr');
@@ -2151,7 +2388,7 @@ export async function processIssue(
 
   if (!config.dryRun) {
     const prBase = config.autoMerge ? session.branch : config.baseBranch;
-    const prBody = buildPRBody(issueNum, title, reviewGate, testOutput, testsPassing, verifyPassing, verifySkipped, body, session.epic);
+    const prBody = buildPRBody(issueNum, title, reviewGate, testOutput, testsPassing, verifyPassing, verifySkipped, body, session.epic, webAppPrContext);
 
     try {
       prUrl = createPR({
@@ -2296,7 +2533,10 @@ export async function processIssue(
     log.dry('Would update issue status to in-review');
   }
 
-  if (plan.qa?.needed) {
+  const shouldRequestQa = plan.qa?.needed || Boolean(webAppProfile);
+  if (shouldRequestQa) {
+    const qaChecklist = webAppProfile ? webAppQaChecklist : (plan.qa?.checklist ?? []);
+    const qaPreviewUrl = webAppPrContext?.previewUrl ?? plan.qa?.previewUrl;
     const qaPause = await pauseSessionForRequest({
       issueNum,
       title,
@@ -2304,10 +2544,12 @@ export async function processIssue(
       session,
       request: {
         type: 'qa',
-        reason: plan.qa.reason,
-        qaChecklist: plan.qa.checklist,
+        reason: plan.qa?.needed
+          ? (plan.qa.reason ?? 'Human QA requested by plan.')
+          : 'Web/app profile requires human browser QA before merge.',
+        qaChecklist,
         prUrl,
-        previewUrl: plan.qa.previewUrl,
+        previewUrl: qaPreviewUrl ?? undefined,
         resumeInstructions: `Complete the QA checklist for issue #${issueNum}, then reply with approval or requested changes.`,
       },
       startTime,
@@ -2399,6 +2641,12 @@ export async function processIssue(
     filesChanged,
     autoCommittedByPipeline: autoCommittedPaths.length > 0 ? true : undefined,
     autoCommittedPaths: autoCommittedPaths.length > 0 ? autoCommittedPaths : undefined,
+    previewUrl: webAppPrContext?.previewUrl ?? undefined,
+    screenshots: webAppPrContext?.screenshots,
+    browserResultPath: webAppPrContext?.browserResultPath,
+    webAppArtifactPath: webAppPrContext?.artifactPath,
+    consoleErrors: webAppPrContext?.consoleErrors,
+    networkErrors: webAppPrContext?.networkErrors,
     escalationEvents: escalationEvents.length > 0 ? escalationEvents : undefined,
   };
 
@@ -3438,6 +3686,7 @@ export function buildPRBody(
   verifySkipped: boolean,
   body: string,
   epicNum?: number,
+  webApp?: WebAppPRContext,
 ): string {
   const testSummary = extractTestSummary(testOutput);
 
@@ -3483,6 +3732,8 @@ export function buildPRBody(
   } else {
     lines.push('## Code Review', '', reviewGate.summary || 'No issues found', '');
   }
+
+  lines.push(...formatWebAppPRSection(webApp));
 
   // What to test — from issue body or generic
   const whatToTestMatch = body.match(/## Test Requirements[\s\S]*?(?=\n## |$)/);

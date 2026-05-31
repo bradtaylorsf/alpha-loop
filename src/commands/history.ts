@@ -459,6 +459,13 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
     } else if (durableManifest.lastKnownBranch) {
       console.log(`Recover:  branch ${durableManifest.lastKnownBranch}`);
     }
+    if (durableManifest.webApp) {
+      if (durableManifest.webApp.previewUrl) console.log(`Preview:  ${durableManifest.webApp.previewUrl}`);
+      if (durableManifest.webApp.artifactPath) console.log(`Browser:  ${durableManifest.webApp.artifactPath}`);
+      if (durableManifest.webApp.screenshots.length > 0) {
+        console.log(`Shots:    ${durableManifest.webApp.screenshots.length} screenshot(s)`);
+      }
+    }
     printDurableFeedbackSummary(durableManifest);
   }
   console.log('');
