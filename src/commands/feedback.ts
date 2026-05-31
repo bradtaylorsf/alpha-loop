@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { ingestFeedback, normalizeFeedbackIngestPayload, parseFeedbackPayloadText } from '../lib/feedback.js';
 import { loadConfig } from '../lib/config.js';
 import { log } from '../lib/logger.js';
+import { emitLifecycleEvent } from '../lib/events.js';
 
 export type FeedbackIngestCommandOptions = {
   bodyFile?: string;
@@ -100,6 +101,32 @@ export async function feedbackIngestCommand(
       readyLabel: config.labelReady,
       requestResume: options.requestResume,
     });
+
+    if (result.status === 'processed') {
+      await emitLifecycleEvent({
+        config,
+        type: 'feedback.received',
+        manifestPath: result.session.manifestPath,
+        context: {
+          issueNumber: result.githubComment.issueNumber,
+          prNumber: result.githubComment.prNumber,
+          feedback: {
+            idempotencyHash: result.idempotencyHash,
+            source: result.githubComment.marker.source,
+            externalEventId: result.githubComment.marker.externalEventId,
+            externalThreadId: result.githubComment.marker.externalThreadId,
+            externalMessageId: result.githubComment.marker.externalMessageId,
+            classification: result.classification,
+            resumeCommand: result.resumeCommand,
+          },
+          metadata: {
+            githubCommentTarget: result.githubComment.targetNumber,
+            sessionFound: result.session.found,
+            sessionLookup: result.session.lookup,
+          },
+        },
+      });
+    }
 
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));

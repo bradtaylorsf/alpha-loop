@@ -351,6 +351,42 @@ harnesses:
 #   review: true
 #   security_scan: true
 
+# === Lifecycle events =======================================================
+# Deliver typed session lifecycle events to logs, webhooks, or local commands.
+# See docs/hosted-events.md for Slack, Teams, Discord, email script, and custom
+# service examples.
+# events:
+#   include_prompt_text: false
+#   redact:
+#     - OPENAI_API_KEY
+#     - ANTHROPIC_API_KEY
+#   destinations:
+#     audit_log:
+#       type: log
+#       events: ['*']
+#     slack_qa:
+#       type: webhook
+#       events: [qa.requested, human_input.requested, session.failed]
+#       url_env: SLACK_WEBHOOK_URL
+#       format: slack
+#       required: false
+#     internal_service:
+#       type: webhook
+#       events: ['*']
+#       url_env: ALPHA_LOOP_EVENTS_URL
+#       secret_env: ALPHA_LOOP_EVENTS_SECRET
+#       format: json
+#       retries: 2
+#       timeout: 10
+#       required: true
+#     local_script:
+#       type: command
+#       events: [session.completed]
+#       command: ./scripts/on-alpha-loop-event.sh
+#       stdin: json
+#       timeout: 60
+#       required: false
+
 # === Logging ================================================================
 # log_dir: logs
 # verbose: false

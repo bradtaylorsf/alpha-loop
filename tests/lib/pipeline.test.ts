@@ -88,6 +88,10 @@ jest.mock('../../src/lib/telemetry', () => ({
   writeStageTelemetry: jest.fn(),
 }));
 
+jest.mock('../../src/lib/events', () => ({
+  emitLifecycleEvent: jest.fn().mockResolvedValue({ event: {}, deliveries: [] }),
+}));
+
 jest.mock('../../src/lib/config', () => ({
   estimateCost: jest.fn().mockReturnValue(0),
   getFallbackPolicy: jest.fn().mockReturnValue(null),
@@ -142,6 +146,7 @@ import {
 } from '../../src/lib/session';
 import { buildIssuePlanPrompt, buildImplementPrompt, buildReviewPrompt, buildBatchPlanPrompt, buildBatchImplementPrompt, buildBatchReviewPrompt } from '../../src/lib/prompts';
 import { writeTraceToSubdir } from '../../src/lib/traces';
+import { emitLifecycleEvent } from '../../src/lib/events';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
@@ -173,6 +178,7 @@ const mockBuildBatchPlanPrompt = buildBatchPlanPrompt as jest.MockedFunction<typ
 const mockBuildBatchImplementPrompt = buildBatchImplementPrompt as jest.MockedFunction<typeof buildBatchImplementPrompt>;
 const mockBuildBatchReviewPrompt = buildBatchReviewPrompt as jest.MockedFunction<typeof buildBatchReviewPrompt>;
 const mockWriteTraceToSubdir = writeTraceToSubdir as jest.MockedFunction<typeof writeTraceToSubdir>;
+const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 
 const epicContext = {
   number: 195,
@@ -402,6 +408,20 @@ describe('processIssue', () => {
       status: 'waiting',
       waitingStatus: 'human_input_requested',
     }));
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.paused',
+      context: expect.objectContaining({
+        issueNumber: 42,
+        question: 'Which copy variant should be used?',
+      }),
+    }));
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'human_input.requested',
+      context: expect.objectContaining({
+        issueNumber: 42,
+        question: 'Which copy variant should be used?',
+      }),
+    }));
   });
 
   test('requests human QA after PR creation when the plan includes a QA checklist', async () => {
@@ -447,6 +467,22 @@ describe('processIssue', () => {
     expect(commentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('- [ ] Open the PR preview'));
     expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
       sessionStatus: 'qa_requested',
+    }));
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.paused',
+      context: expect.objectContaining({
+        issueNumber: 42,
+        qaChecklist: ['Open the PR preview', 'Confirm the content renders correctly'],
+        previewUrl: 'https://preview.example.test',
+      }),
+    }));
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'qa.requested',
+      context: expect.objectContaining({
+        issueNumber: 42,
+        qaChecklist: ['Open the PR preview', 'Confirm the content renders correctly'],
+        previewUrl: 'https://preview.example.test',
+      }),
     }));
   });
 

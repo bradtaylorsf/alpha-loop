@@ -82,9 +82,66 @@ export type SessionRetentionConfig = {
   completedWorktreeDays: number;
 };
 
+export type EventName =
+  | 'session.started'
+  | 'session.paused'
+  | 'human_input.requested'
+  | 'qa.requested'
+  | 'feedback.received'
+  | 'session.resumed'
+  | 'session.completed'
+  | 'session.failed';
+
+export type EventFilter = EventName | '*';
+export type EventFormat = 'json' | 'slack' | 'teams' | 'discord';
+export type EventDestinationType = 'log' | 'webhook' | 'command';
+export type CommandEventStdinFormat = 'json';
+
+export type BaseEventDestinationConfig = {
+  type: EventDestinationType;
+  events: EventFilter[];
+  format: EventFormat;
+  required: boolean;
+  timeout: number;
+  retries: number;
+};
+
+export type LogEventDestinationConfig = BaseEventDestinationConfig & {
+  type: 'log';
+};
+
+export type WebhookEventDestinationConfig = BaseEventDestinationConfig & {
+  type: 'webhook';
+  urlEnv: string;
+  secretEnv?: string;
+};
+
+export type CommandEventDestinationConfig = BaseEventDestinationConfig & {
+  type: 'command';
+  command: string;
+  stdin: CommandEventStdinFormat;
+};
+
+export type EventDestinationConfig =
+  | LogEventDestinationConfig
+  | WebhookEventDestinationConfig
+  | CommandEventDestinationConfig;
+
+export type EventsConfig = {
+  includePromptText: boolean;
+  redact: string[];
+  destinations: Record<string, EventDestinationConfig>;
+};
+
 export const DEFAULT_SESSION_RETENTION: SessionRetentionConfig = {
   pausedWorktreeDays: 0,
   completedWorktreeDays: 30,
+};
+
+export const DEFAULT_EVENTS_CONFIG: EventsConfig = {
+  includePromptText: false,
+  redact: [],
+  destinations: {},
 };
 
 const VALID_ROUTING_STAGES: readonly RoutingStageName[] = [
@@ -107,6 +164,20 @@ const VALID_FALLBACK_MODES: readonly RoutingFallbackMode[] = [
   'retry',
   'fail',
 ] as const;
+
+const VALID_EVENT_NAMES: readonly EventName[] = [
+  'session.started',
+  'session.paused',
+  'human_input.requested',
+  'qa.requested',
+  'feedback.received',
+  'session.resumed',
+  'session.completed',
+  'session.failed',
+] as const;
+
+const VALID_EVENT_FORMATS: readonly EventFormat[] = ['json', 'slack', 'teams', 'discord'] as const;
+const VALID_EVENT_DESTINATION_TYPES: readonly EventDestinationType[] = ['log', 'webhook', 'command'] as const;
 
 /**
  * Estimate cost in USD from token counts and a pricing table.
@@ -185,6 +256,8 @@ export type Config = {
   evalIncludeSkills: boolean;
   /** Worktree retention policy for durable session state. */
   sessionRetention?: SessionRetentionConfig;
+  /** Lifecycle event destinations for hosted/session automation. */
+  events?: EventsConfig;
   /**
    * When there is exactly one open epic in the repo, the picker auto-selects
    * it instead of prompting. Default: false.
@@ -252,6 +325,7 @@ const DEFAULTS: Config = {
   evalIncludeAgentPrompts: true,
   evalIncludeSkills: true,
   sessionRetention: DEFAULT_SESSION_RETENTION,
+  events: DEFAULT_EVENTS_CONFIG,
   preferEpics: false,
 };
 
@@ -364,6 +438,133 @@ function parseSessionRetention(raw: unknown): Partial<SessionRetentionConfig> | 
   if (paused !== undefined) retention.pausedWorktreeDays = paused;
   if (completed !== undefined) retention.completedWorktreeDays = completed;
   return Object.keys(retention).length > 0 ? retention : undefined;
+}
+
+function parseEventList(raw: unknown, key: string): EventFilter[] {
+  if (raw === undefined) return ['*'];
+  const values = Array.isArray(raw) ? raw : [raw];
+  const filters: EventFilter[] = [];
+  for (const item of values) {
+    if (item === '*') {
+      filters.push('*');
+      continue;
+    }
+    if (typeof item === 'string' && VALID_EVENT_NAMES.includes(item as EventName)) {
+      filters.push(item as EventName);
+      continue;
+    }
+    console.warn(`[config] ${key}: unknown event "${String(item)}" (ignored)`);
+  }
+  return filters.length > 0 ? filters : ['*'];
+}
+
+function parseEventFormat(raw: unknown, key: string): EventFormat {
+  if (raw === undefined) return 'json';
+  if (typeof raw === 'string' && VALID_EVENT_FORMATS.includes(raw as EventFormat)) {
+    return raw as EventFormat;
+  }
+  console.warn(`[config] ${key}: invalid format "${String(raw)}" (expected one of ${VALID_EVENT_FORMATS.join(', ')})`);
+  return 'json';
+}
+
+function parseNonNegativeInteger(raw: unknown, key: string, fallback: number): number {
+  if (raw === undefined) return fallback;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+    return Math.floor(raw);
+  }
+  console.warn(`[config] ${key}: expected a non-negative number (got ${String(raw)})`);
+  return fallback;
+}
+
+function parseBoolean(raw: unknown, fallback: boolean): boolean {
+  return typeof raw === 'boolean' ? raw : fallback;
+}
+
+function parseEventsConfig(raw: unknown): EventsConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const destinations: Record<string, EventDestinationConfig> = {};
+
+  if (r.destinations !== undefined) {
+    if (!r.destinations || typeof r.destinations !== 'object' || Array.isArray(r.destinations)) {
+      console.warn('[config] events.destinations: expected an object keyed by destination name');
+    } else {
+      for (const [name, value] of Object.entries(r.destinations as Record<string, unknown>)) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          console.warn(`[config] events.destinations.${name}: expected an object`);
+          continue;
+        }
+        const entry = value as Record<string, unknown>;
+        const type = entry.type;
+        if (typeof type !== 'string' || !VALID_EVENT_DESTINATION_TYPES.includes(type as EventDestinationType)) {
+          console.warn(
+            `[config] events.destinations.${name}.type: invalid type "${String(type)}" (expected one of ${VALID_EVENT_DESTINATION_TYPES.join(', ')})`,
+          );
+          continue;
+        }
+
+        const base = {
+          events: parseEventList(entry.events, `events.destinations.${name}.events`),
+          format: parseEventFormat(entry.format, `events.destinations.${name}.format`),
+          required: parseBoolean(entry.required, false),
+          timeout: parseNonNegativeInteger(entry.timeout, `events.destinations.${name}.timeout`, 10),
+          retries: parseNonNegativeInteger(entry.retries, `events.destinations.${name}.retries`, 0),
+        };
+
+        if (type === 'log') {
+          destinations[name] = { ...base, type: 'log' };
+          continue;
+        }
+
+        if (type === 'webhook') {
+          if (typeof entry.url_env !== 'string' || !entry.url_env.trim()) {
+            console.warn(`[config] events.destinations.${name}.url_env: required for webhook destinations`);
+            continue;
+          }
+          destinations[name] = {
+            ...base,
+            type: 'webhook',
+            urlEnv: entry.url_env.trim(),
+            ...(typeof entry.secret_env === 'string' && entry.secret_env.trim()
+              ? { secretEnv: entry.secret_env.trim() }
+              : {}),
+          };
+          continue;
+        }
+
+        if (typeof entry.command !== 'string' || !entry.command.trim()) {
+          console.warn(`[config] events.destinations.${name}.command: required for command destinations`);
+          continue;
+        }
+        const stdin = entry.stdin === undefined || entry.stdin === 'json'
+          ? 'json'
+          : undefined;
+        if (!stdin) {
+          console.warn(`[config] events.destinations.${name}.stdin: invalid value "${String(entry.stdin)}" (expected json)`);
+          continue;
+        }
+        destinations[name] = {
+          ...base,
+          type: 'command',
+          command: entry.command.trim(),
+          stdin,
+        };
+      }
+    }
+  }
+
+  const redact = Array.isArray(r.redact)
+    ? r.redact.map(String).map((item) => item.trim()).filter(Boolean)
+    : [];
+  if (r.redact !== undefined && !Array.isArray(r.redact)) {
+    console.warn('[config] events.redact: expected a list of env var names or literal values');
+  }
+
+  return {
+    includePromptText: r.include_prompt_text === true,
+    redact,
+    destinations,
+  };
 }
 
 function coerce(value: string, current: unknown): unknown {
@@ -597,6 +798,14 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     }
   }
 
+  // Handle lifecycle event destinations.
+  if (parsed.events !== undefined) {
+    const events = parseEventsConfig(parsed.events);
+    if (events) {
+      result.events = events;
+    }
+  }
+
   // Handle pricing table (nested object, not in YAML_KEY_MAP)
   if (parsed.pricing && typeof parsed.pricing === 'object') {
     const pricing: Record<string, { input: number; output: number }> = {};
@@ -674,6 +883,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...envConfig.sessionRetention,
     ...overrides?.sessionRetention,
   };
+  const events = overrides?.events ?? yamlConfig.events ?? DEFAULTS.events;
 
   const merged: Config = {
     ...DEFAULTS,
@@ -685,6 +895,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     pipeline: mergedPipeline,
     routing,
     sessionRetention,
+    events,
   };
 
   // Validate agent is a known value

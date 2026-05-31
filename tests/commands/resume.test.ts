@@ -39,6 +39,10 @@ jest.mock('../../src/lib/learning', () => ({
   repairSessionSummaryArtifact: jest.fn(),
 }));
 
+jest.mock('../../src/lib/events', () => ({
+  emitLifecycleEvent: jest.fn().mockResolvedValue({ event: {}, deliveries: [] }),
+}));
+
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -54,6 +58,7 @@ import {
   repairSessionLearningArtifacts,
   repairSessionSummaryArtifact,
 } from '../../src/lib/learning';
+import { emitLifecycleEvent } from '../../src/lib/events';
 import type { DurableSessionManifest } from '../../src/lib/session';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
@@ -70,6 +75,7 @@ const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue
 const mockGenerateSessionSummary = generateSessionSummary as jest.MockedFunction<typeof generateSessionSummary>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
+const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 
 const ok = (stdout = '') => ({ stdout, stderr: '', exitCode: 0 });
 const repoRoot = process.cwd();
@@ -385,6 +391,23 @@ describe('resumeCommand', () => {
       286,
       expect.stringContaining('Feedback classification: `clarification`'),
     );
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.resumed',
+      manifestPath: expect.stringContaining('session.json'),
+      context: expect.objectContaining({
+        issueNumber: 286,
+        feedback: expect.objectContaining({ classification: 'clarification' }),
+        metadata: expect.objectContaining({ resumeStage: 'clarification' }),
+      }),
+    }));
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.completed',
+      manifestPath: expect.stringContaining('session.json'),
+      context: expect.objectContaining({
+        issueNumber: 286,
+        metadata: expect.objectContaining({ resumed: true }),
+      }),
+    }));
 
     const manifest = JSON.parse(readFileSync(join(sessionDir, 'session.json'), 'utf-8'));
     expect(manifest.status).toBe('completed');

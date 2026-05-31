@@ -378,6 +378,98 @@ pipeline:
     expect(config.pipeline.plan).toEqual({ model: 'claude-haiku-4-5' });
     expect((config.pipeline as any).invalid_step).toBeUndefined();
   });
+
+  it('loads lifecycle event destinations from YAML', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+events:
+  include_prompt_text: true
+  redact:
+    - OPENAI_API_KEY
+  destinations:
+    audit:
+      type: log
+      events: ['*']
+    slack_qa:
+      type: webhook
+      events: [qa.requested, human_input.requested, session.failed]
+      url_env: SLACK_WEBHOOK_URL
+      secret_env: ALPHA_LOOP_EVENTS_SECRET
+      format: slack
+      timeout: 5
+      retries: 2
+      required: false
+    local_script:
+      type: command
+      events: [session.completed]
+      command: ./scripts/on-alpha-loop-event.sh
+      stdin: json
+      timeout: 60
+      required: true
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.events?.includePromptText).toBe(true);
+    expect(config.events?.redact).toEqual(['OPENAI_API_KEY']);
+    expect(config.events?.destinations.audit).toEqual(expect.objectContaining({
+      type: 'log',
+      events: ['*'],
+      format: 'json',
+    }));
+    expect(config.events?.destinations.slack_qa).toEqual(expect.objectContaining({
+      type: 'webhook',
+      events: ['qa.requested', 'human_input.requested', 'session.failed'],
+      urlEnv: 'SLACK_WEBHOOK_URL',
+      secretEnv: 'ALPHA_LOOP_EVENTS_SECRET',
+      format: 'slack',
+      timeout: 5,
+      retries: 2,
+      required: false,
+    }));
+    expect(config.events?.destinations.local_script).toEqual(expect.objectContaining({
+      type: 'command',
+      command: './scripts/on-alpha-loop-event.sh',
+      stdin: 'json',
+      timeout: 60,
+      required: true,
+    }));
+  });
+
+  it('drops invalid lifecycle event destinations and warns', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+events:
+  destinations:
+    bad_type:
+      type: email
+    missing_url:
+      type: webhook
+    good:
+      type: webhook
+      url_env: EVENTS_URL
+      format: discord
+      events: [session.started, bogus.event]
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.events?.destinations.bad_type).toBeUndefined();
+    expect(config.events?.destinations.missing_url).toBeUndefined();
+    expect(config.events?.destinations.good).toEqual(expect.objectContaining({
+      type: 'webhook',
+      urlEnv: 'EVENTS_URL',
+      format: 'discord',
+      events: ['session.started'],
+    }));
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
 });
 
 describe('resolveStepConfig', () => {

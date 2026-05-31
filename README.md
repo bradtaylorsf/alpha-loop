@@ -411,6 +411,23 @@ post_session:
   review: true
   security_scan: true
 
+# Lifecycle events for hosted runs and automations
+events:
+  include_prompt_text: false
+  redact:
+    - OPENAI_API_KEY
+    - ANTHROPIC_API_KEY
+  destinations:
+    audit_log:
+      type: log
+      events: ['*']
+    slack_qa:
+      type: webhook
+      events: [qa.requested, human_input.requested, session.failed]
+      url_env: SLACK_WEBHOOK_URL
+      format: slack
+      required: false
+
 # Eval system
 auto_capture: true  # capture failures as eval cases
 eval_dir: .alpha-loop/evals
@@ -463,6 +480,17 @@ eval_dir: .alpha-loop/evals
 | `eval_include_skills` | `true` | Include repo-specific skills during eval runs |
 | `post_session.review` | `true` | Run holistic code review on full session diff |
 | `post_session.security_scan` | `true` | Include security scanning in post-session review |
+| `events.include_prompt_text` | `false` | Include redacted prompt text in lifecycle events; prompt paths and hashes are always retained when available |
+| `events.redact` | `[]` | Env var names or literal values to redact from lifecycle event payloads |
+| `events.destinations` | `{}` | Lifecycle event destinations (`log`, `webhook`, `command`) with per-destination event filters |
+
+### Lifecycle Events
+
+Alpha Loop emits typed lifecycle events for hosted sessions: `session.started`, `session.paused`, `human_input.requested`, `qa.requested`, `feedback.received`, `session.resumed`, `session.completed`, and `session.failed`.
+
+Destinations can write to the session history log, POST to webhooks, or run a local command with canonical JSON on stdin. Webhooks can use `format: json`, `slack`, `teams`, or `discord`; command destinations always receive canonical JSON. `--dry-run` prints matching destinations instead of sending.
+
+See [docs/hosted-events.md](docs/hosted-events.md) for Slack, Teams, Discord, email-via-script, and custom service examples.
 
 ### Environment Variables
 
