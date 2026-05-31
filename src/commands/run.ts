@@ -1614,8 +1614,9 @@ function exitForCliEpicValidationFailure(result: EpicExecutionResult): void {
   });
 }
 
-function exitForCliIssueValidationFailure(result: IssueExecutionResult): void {
-  const failure = result.failures.find((entry) => entry.exitCode !== undefined);
+function exitForCliIssueFailure(result: IssueExecutionResult): void {
+  if (result.status !== 'failure') return;
+  const failure = result.failures.find((entry) => entry.exitCode !== undefined) ?? result.failures[0];
   if (!failure) return;
   log.error(failure.message);
   throw new CommandExitError({
@@ -2033,7 +2034,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
         issueNumber: options.issue,
         options,
       });
-      exitForCliIssueValidationFailure(result);
+      exitForCliIssueFailure(result);
       return;
     }
 

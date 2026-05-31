@@ -1009,12 +1009,16 @@ describe('processBatch', () => {
     { number: 11, title: 'Issue 11', body: 'Body 11' },
   ];
 
-  test('passes epic context into batch plan, implementation, and review prompt builders', async () => {
-    await processBatch(batchIssues, makeConfig({ batch: true }), makeSession(), { epicContext });
+  test('passes epic context into batch prompts, learnings, and PR body', async () => {
+    await processBatch(batchIssues, makeConfig({ batch: true }), { ...makeSession(), epic: 195 }, { epicContext });
 
     expect(mockBuildBatchPlanPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildBatchImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildBatchReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+    expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+    expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringContaining('Part of #195'),
+    }));
   });
 
   test('dry run mode does not save batch results or traces', async () => {

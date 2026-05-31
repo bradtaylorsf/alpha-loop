@@ -1062,6 +1062,32 @@ Coordinate hosted work.
     expect(mockUpdateEpicChecklist).not.toHaveBeenCalled();
   });
 
+  test('--issue exits nonzero when the targeted issue pipeline fails', async () => {
+    mockGetIssueWithComments.mockReturnValue({
+      number: 42,
+      title: 'Target issue',
+      body: 'Target body',
+      labels: ['ready'],
+      state: 'OPEN',
+    });
+    mockListEpics.mockReturnValue([]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Target issue',
+      status: 'failure',
+      testsPassing: false,
+      verifyPassing: false,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 0,
+    });
+
+    await runCommand({ issue: 42, dryRun: true });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith('Issue #42 failed during processing');
+  });
+
   test.each([
     [{ issue: 42, epic: 293, dryRun: true }, '--epic'],
     [{ issue: 42, epics: '293,294', dryRun: true }, '--epics'],
