@@ -262,6 +262,28 @@ dev_command: ${answers.devCommand}
 # skip_learn: false           # Skip learning extraction
 # skip_install: false         # Skip auto-running setup_command on session start
 
+# === Web/app verification profile ==========================================
+# Browser QA profile for websites and web apps. Empty commands fall back to
+# package scripts where possible (Astro defaults to http://localhost:4321).
+# See docs/web-app-profile.md for preview providers and QA handoff details.
+# web_app:
+#   setup_command: ${answers.testCommand.startsWith('pnpm') ? 'pnpm install' : ''}
+#   build_command: pnpm build
+#   test_command: ${answers.testCommand}
+#   dev_command: ${answers.devCommand}
+#   dev_url: http://localhost:4321
+#   smoke_test: pnpm build
+#   screenshots:
+#     - name: home-desktop
+#       url: /
+#       viewport: desktop
+#     - name: home-mobile
+#       url: /
+#       viewport: mobile
+#   preview:
+#     command: ./scripts/get-preview-url.sh
+#     required: false
+
 # === Safety limits ==========================================================
 # Caps to keep an unattended loop from running away. 0 = unlimited.
 max_issues: ${answers.maxIssues}

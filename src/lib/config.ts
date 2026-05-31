@@ -200,6 +200,33 @@ export type DaemonConfig = {
   lock: DaemonLockConfig;
 };
 
+export type WebAppViewportPreset = 'desktop' | 'tablet' | 'mobile';
+
+export type WebAppScreenshotConfig = {
+  name: string;
+  url: string;
+  viewport: WebAppViewportPreset;
+  width?: number;
+  height?: number;
+};
+
+export type WebAppPreviewConfig = {
+  url: string;
+  command: string;
+  required: boolean;
+};
+
+export type WebAppConfig = {
+  setupCommand: string;
+  buildCommand: string;
+  testCommand: string;
+  devCommand: string;
+  devUrl: string;
+  smokeTest: string;
+  screenshots: WebAppScreenshotConfig[];
+  preview: WebAppPreviewConfig;
+};
+
 export const DEFAULT_SESSION_RETENTION: SessionRetentionConfig = {
   pausedWorktreeDays: 0,
   completedWorktreeDays: 30,
@@ -238,6 +265,21 @@ export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {
     enabled: true,
     staleAfterSeconds: 24 * 60 * 60,
     path: '',
+  },
+};
+
+export const DEFAULT_WEB_APP_CONFIG: WebAppConfig = {
+  setupCommand: '',
+  buildCommand: '',
+  testCommand: '',
+  devCommand: '',
+  devUrl: '',
+  smokeTest: '',
+  screenshots: [],
+  preview: {
+    url: '',
+    command: '',
+    required: false,
   },
 };
 
@@ -385,6 +427,8 @@ export type Config = {
   automationPolicy?: AutomationPolicyConfig;
   /** Long-running hosted daemon mode configuration. */
   daemon?: DaemonConfig;
+  /** Optional web/app verification and QA handoff profile. */
+  webApp?: WebAppConfig;
   /**
    * When there is exactly one open epic in the repo, the picker auto-selects
    * it instead of prompting. Default: false.
@@ -455,6 +499,7 @@ const DEFAULTS: Config = {
   events: DEFAULT_EVENTS_CONFIG,
   automationPolicy: DEFAULT_AUTOMATION_POLICY,
   daemon: DEFAULT_DAEMON_CONFIG,
+  webApp: undefined,
   preferEpics: false,
 };
 
@@ -625,6 +670,102 @@ function parseStringList(raw: unknown, key: string): string[] | undefined {
     return undefined;
   }
   return raw.map(String).map((item) => item.trim()).filter(Boolean);
+}
+
+function parseStringValue(raw: unknown, key: string): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'string') return raw.trim();
+  console.warn(`[config] ${key}: expected a string (got ${String(raw)})`);
+  return undefined;
+}
+
+function parseWebAppViewport(raw: unknown, key: string): WebAppViewportPreset {
+  if (raw === undefined) return 'desktop';
+  if (raw === 'desktop' || raw === 'tablet' || raw === 'mobile') return raw;
+  console.warn(`[config] ${key}: invalid viewport "${String(raw)}" (expected desktop, tablet, or mobile)`);
+  return 'desktop';
+}
+
+function parsePositiveDimension(raw: unknown, key: string): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return Math.floor(raw);
+  }
+  console.warn(`[config] ${key}: expected a positive number (got ${String(raw)})`);
+  return undefined;
+}
+
+function parseWebAppScreenshots(raw: unknown): WebAppScreenshotConfig[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.warn('[config] web_app.screenshots: expected a list of screenshot definitions');
+    return undefined;
+  }
+
+  const screenshots: WebAppScreenshotConfig[] = [];
+  raw.forEach((item, index) => {
+    const key = `web_app.screenshots[${index}]`;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      console.warn(`[config] ${key}: expected an object`);
+      return;
+    }
+    const entry = item as Record<string, unknown>;
+    const name = parseStringValue(entry.name, `${key}.name`);
+    if (!name) {
+      console.warn(`[config] ${key}.name: required`);
+      return;
+    }
+    const url = parseStringValue(entry.url, `${key}.url`) ?? '/';
+    const screenshot: WebAppScreenshotConfig = {
+      name,
+      url: url || '/',
+      viewport: parseWebAppViewport(entry.viewport, `${key}.viewport`),
+    };
+    const width = parsePositiveDimension(entry.width, `${key}.width`);
+    const height = parsePositiveDimension(entry.height, `${key}.height`);
+    if (width !== undefined) screenshot.width = width;
+    if (height !== undefined) screenshot.height = height;
+    screenshots.push(screenshot);
+  });
+
+  return screenshots;
+}
+
+function parseWebAppPreview(raw: unknown): WebAppPreviewConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn('[config] web_app.preview: expected an object');
+    return undefined;
+  }
+
+  const r = raw as Record<string, unknown>;
+  return {
+    ...DEFAULT_WEB_APP_CONFIG.preview,
+    url: parseStringValue(r.url, 'web_app.preview.url') ?? DEFAULT_WEB_APP_CONFIG.preview.url,
+    command: parseStringValue(r.command, 'web_app.preview.command') ?? DEFAULT_WEB_APP_CONFIG.preview.command,
+    required: parseBoolean(r.required, DEFAULT_WEB_APP_CONFIG.preview.required),
+  };
+}
+
+function parseWebAppConfig(raw: unknown): WebAppConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn('[config] web_app: expected an object');
+    return undefined;
+  }
+
+  const r = raw as Record<string, unknown>;
+  return {
+    ...DEFAULT_WEB_APP_CONFIG,
+    setupCommand: parseStringValue(r.setup_command, 'web_app.setup_command') ?? DEFAULT_WEB_APP_CONFIG.setupCommand,
+    buildCommand: parseStringValue(r.build_command, 'web_app.build_command') ?? DEFAULT_WEB_APP_CONFIG.buildCommand,
+    testCommand: parseStringValue(r.test_command, 'web_app.test_command') ?? DEFAULT_WEB_APP_CONFIG.testCommand,
+    devCommand: parseStringValue(r.dev_command, 'web_app.dev_command') ?? DEFAULT_WEB_APP_CONFIG.devCommand,
+    devUrl: parseStringValue(r.dev_url, 'web_app.dev_url') ?? DEFAULT_WEB_APP_CONFIG.devUrl,
+    smokeTest: parseStringValue(r.smoke_test, 'web_app.smoke_test') ?? DEFAULT_WEB_APP_CONFIG.smokeTest,
+    screenshots: parseWebAppScreenshots(r.screenshots) ?? DEFAULT_WEB_APP_CONFIG.screenshots,
+    preview: parseWebAppPreview(r.preview) ?? DEFAULT_WEB_APP_CONFIG.preview,
+  };
 }
 
 function parseAutomationPolicyCategories(raw: unknown): AutomationPolicyCategory[] | undefined {
@@ -1137,6 +1278,14 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     }
   }
 
+  // Handle web/app verification profile.
+  if (parsed.web_app !== undefined) {
+    const webApp = parseWebAppConfig(parsed.web_app);
+    if (webApp) {
+      result.webApp = webApp;
+    }
+  }
+
   // Handle pricing table (nested object, not in YAML_KEY_MAP)
   if (parsed.pricing && typeof parsed.pricing === 'object') {
     const pricing: Record<string, { input: number; output: number }> = {};
@@ -1215,6 +1364,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...overrides?.sessionRetention,
   };
   const events = overrides?.events ?? yamlConfig.events ?? DEFAULTS.events;
+  const webApp = overrides?.webApp ?? yamlConfig.webApp;
   const automationPolicy = {
     ...DEFAULT_AUTOMATION_POLICY,
     ...yamlConfig.automationPolicy,
@@ -1242,6 +1392,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     routing,
     sessionRetention,
     events,
+    webApp,
     automationPolicy,
     daemon,
   };

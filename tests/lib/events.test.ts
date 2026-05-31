@@ -150,6 +150,17 @@ function makeManifest(overrides: Partial<DurableSessionManifest> = {}): DurableS
     },
     screenshots: ['.alpha-loop/sessions/session/20260530-120000/screenshots/preview.png'],
     previewUrl: 'https://preview.example.test',
+    webApp: {
+      previewUrl: 'https://preview.example.test',
+      devUrl: 'http://localhost:4321',
+      screenshots: ['.alpha-loop/sessions/session/20260530-120000/screenshots/preview.png'],
+      browserResultPath: '.alpha-loop/sessions/session/20260530-120000/web-app-verification/issue-269.json',
+      artifactPath: '.alpha-loop/sessions/session/20260530-120000/web-app-verification/issue-269.json',
+      consoleErrors: [],
+      networkErrors: [],
+      qaChecklist: ['Open the preview', 'Confirm the copy'],
+      updatedAt: now,
+    },
     timestamps: {
       createdAt: now,
       startedAt: now,
@@ -214,6 +225,11 @@ describe('lifecycle events', () => {
     expect(event.screenshots).toHaveLength(1);
     expect(event.previewUrl).toBe('https://preview.example.test');
     expect(event.qaChecklist).toEqual(['Open the preview', 'Confirm the copy']);
+    expect(event.webApp).toEqual(expect.objectContaining({
+      devUrl: 'http://localhost:4321',
+      browserResultPath: expect.stringContaining('web-app-verification/issue-269.json'),
+      qaChecklist: ['Open the preview', 'Confirm the copy'],
+    }));
     expect(event.harness).toEqual(expect.objectContaining({
       agent: 'codex',
       model: 'gpt-5',

@@ -130,6 +130,18 @@ export type SessionCleanupManifest = {
   at: string;
 };
 
+export type SessionWebAppArtifacts = {
+  previewUrl: string | null;
+  devUrl?: string;
+  screenshots: string[];
+  browserResultPath: string | null;
+  artifactPath: string | null;
+  consoleErrors: string[];
+  networkErrors: string[];
+  qaChecklist: string[];
+  updatedAt: string;
+};
+
 export type DurableSessionManifest = {
   version: 1;
   sessionId: string;
@@ -171,6 +183,7 @@ export type DurableSessionManifest = {
   };
   screenshots: string[];
   previewUrl: string | null;
+  webApp?: SessionWebAppArtifacts;
   timestamps: {
     createdAt: string;
     startedAt: string;
@@ -549,6 +562,65 @@ export function recordSessionLogFile(
       files: Array.from(new Set([...manifest.logs.files, relPath])),
     },
   }));
+}
+
+export function recordSessionWebAppArtifacts(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'> | string,
+  artifacts: Partial<Omit<SessionWebAppArtifacts, 'updatedAt'>>,
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => {
+    const previous = manifest.webApp;
+    const screenshots = Array.from(new Set([
+      ...(manifest.screenshots ?? []),
+      ...(previous?.screenshots ?? []),
+      ...(artifacts.screenshots ?? []),
+    ]));
+    const consoleErrors = Array.from(new Set([
+      ...(previous?.consoleErrors ?? []),
+      ...(artifacts.consoleErrors ?? []),
+    ]));
+    const networkErrors = Array.from(new Set([
+      ...(previous?.networkErrors ?? []),
+      ...(artifacts.networkErrors ?? []),
+    ]));
+    const qaChecklist = Array.from(new Set([
+      ...(previous?.qaChecklist ?? []),
+      ...(artifacts.qaChecklist ?? []),
+    ]));
+    const previewUrl = artifacts.previewUrl !== undefined
+      ? artifacts.previewUrl
+      : previous?.previewUrl ?? manifest.previewUrl ?? null;
+    const webApp: SessionWebAppArtifacts = {
+      previewUrl,
+      devUrl: artifacts.devUrl ?? previous?.devUrl,
+      screenshots,
+      browserResultPath: artifacts.browserResultPath !== undefined
+        ? artifacts.browserResultPath
+        : previous?.browserResultPath ?? null,
+      artifactPath: artifacts.artifactPath !== undefined
+        ? artifacts.artifactPath
+        : previous?.artifactPath ?? null,
+      consoleErrors,
+      networkErrors,
+      qaChecklist,
+      updatedAt: new Date().toISOString(),
+    };
+
+    return {
+      ...manifest,
+      screenshots,
+      previewUrl,
+      webApp,
+      logs: {
+        ...manifest.logs,
+        files: Array.from(new Set([
+          ...manifest.logs.files,
+          ...(webApp.artifactPath ? [webApp.artifactPath] : []),
+          ...(webApp.browserResultPath ? [webApp.browserResultPath] : []),
+        ])),
+      },
+    };
+  });
 }
 
 export function recordSessionCleanup(
@@ -1157,6 +1229,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
       },
       screenshots: [],
       previewUrl: null,
+      webApp: undefined,
       timestamps: {
         createdAt: startedAt,
         startedAt,
@@ -1289,6 +1362,10 @@ export async function finalizeSession(
       recoveryMode: r.recoveryMode,
       autoCommittedByPipeline: r.autoCommittedByPipeline,
       autoCommittedPaths: r.autoCommittedPaths,
+      previewUrl: r.previewUrl,
+      screenshots: r.screenshots,
+      browserResultPath: r.browserResultPath,
+      webAppArtifactPath: r.webAppArtifactPath,
       duration: r.duration,
       filesChanged: r.filesChanged,
     })),
@@ -1371,6 +1448,28 @@ export async function finalizeSession(
   }
 
   prLines.push(...formatAutoCommittedResultsSection(session.results));
+
+  const webAppResults = session.results.filter((r) => (
+    r.previewUrl || r.screenshots?.length || r.browserResultPath || r.webAppArtifactPath || r.qaChecklist?.length
+  ));
+  if (webAppResults.length > 0) {
+    prLines.push('### Web App QA Artifacts');
+    prLines.push('');
+    for (const r of webAppResults) {
+      prLines.push(`- #${r.issueNum}: ${r.title}`);
+      if (r.previewUrl) prLines.push(`  - Preview: ${r.previewUrl}`);
+      if (r.browserResultPath || r.webAppArtifactPath) {
+        prLines.push(`  - Browser results: \`${r.browserResultPath ?? r.webAppArtifactPath}\``);
+      }
+      if (r.screenshots && r.screenshots.length > 0) {
+        prLines.push(`  - Screenshots: ${r.screenshots.map((path) => `\`${path}\``).join(', ')}`);
+      }
+      if (r.qaChecklist && r.qaChecklist.length > 0) {
+        prLines.push(`  - QA: ${r.qaChecklist.join('; ')}`);
+      }
+    }
+    prLines.push('');
+  }
 
   if (waitingResults.length > 0) {
     prLines.push('### Waiting for Human Feedback');

@@ -522,6 +522,73 @@ automation_policy:
     }));
   });
 
+  it('loads web app verification profile from YAML', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+web_app:
+  setup_command: pnpm install
+  build_command: pnpm build
+  test_command: pnpm test
+  dev_command: pnpm dev
+  dev_url: http://localhost:4321
+  smoke_test: pnpm build
+  screenshots:
+    - name: home-desktop
+      url: /
+      viewport: desktop
+    - name: home-mobile
+      url: /
+      viewport: mobile
+      width: 390
+      height: 844
+  preview:
+    command: ./scripts/get-preview-url.sh
+    required: false
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.webApp).toEqual(expect.objectContaining({
+      setupCommand: 'pnpm install',
+      buildCommand: 'pnpm build',
+      testCommand: 'pnpm test',
+      devCommand: 'pnpm dev',
+      devUrl: 'http://localhost:4321',
+      smokeTest: 'pnpm build',
+      preview: {
+        url: '',
+        command: './scripts/get-preview-url.sh',
+        required: false,
+      },
+    }));
+    expect(config.webApp?.screenshots).toEqual([
+      { name: 'home-desktop', url: '/', viewport: 'desktop' },
+      { name: 'home-mobile', url: '/', viewport: 'mobile', width: 390, height: 844 },
+    ]);
+  });
+
+  it('accepts an empty web app profile so package scripts can provide defaults', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+web_app: {}
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.webApp).toEqual(expect.objectContaining({
+      buildCommand: '',
+      testCommand: '',
+      devCommand: '',
+      devUrl: '',
+      screenshots: [],
+      preview: { url: '', command: '', required: false },
+    }));
+  });
+
   it('drops invalid lifecycle event destinations and warns', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     writeFileSync(

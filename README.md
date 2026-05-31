@@ -413,6 +413,20 @@ test_command: pnpm test
 dev_command: pnpm dev
 auto_merge: true
 
+# Optional browser QA profile for websites and web apps
+web_app:
+  build_command: pnpm build
+  test_command: pnpm test
+  dev_command: pnpm dev
+  dev_url: http://localhost:4321
+  smoke_test: pnpm build
+  screenshots:
+    - { name: home-desktop, url: /, viewport: desktop }
+    - { name: home-mobile, url: /, viewport: mobile }
+  preview:
+    command: ./scripts/get-preview-url.sh
+    required: false
+
 # Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
   - claude
@@ -513,6 +527,16 @@ eval_dir: .alpha-loop/evals
 | `batch` | `false` | Enable batch mode — process multiple issues per agent call |
 | `batch_size` | `5` | Number of issues per batch when batch mode is enabled |
 | `smoke_test` | (none) | Shell command to run as a final smoke test after session review |
+| `web_app.setup_command` | top-level `setup_command` | Optional setup command for website/app repos |
+| `web_app.build_command` | package `build` script | Build command captured as part of web/app verification |
+| `web_app.test_command` | top-level `test_command` | Test command for the web/app profile |
+| `web_app.dev_command` | top-level `dev_command` or package script | Dev server command used by browser verification |
+| `web_app.dev_url` | framework default | Local dev URL; Astro defaults to `http://localhost:4321`, Vite to `5173`, Next/generic to `3000` |
+| `web_app.smoke_test` | top-level `smoke_test` | Optional final smoke command for web/app handoff |
+| `web_app.screenshots` | home desktop/mobile for known web frameworks | Screenshot plan entries with `name`, `url`, and `viewport` (`desktop`, `tablet`, `mobile`) |
+| `web_app.preview.url` | (none) | Static preview URL, if a hosting service exposes one directly |
+| `web_app.preview.command` | (none) | Provider-agnostic command that prints an `http(s)` preview URL |
+| `web_app.preview.required` | `false` | Mark preview URL discovery as required for verification |
 | `pipeline` | `{}` | Per-step agent/model overrides (see below) |
 | `pricing` | (built-in) | Custom token pricing per model for cost tracking |
 | `eval_include_agent_prompts` | `true` | Include repo-specific agent prompts during eval runs |
@@ -548,6 +572,10 @@ eval_dir: .alpha-loop/evals
 ### Lifecycle Events
 
 Alpha Loop emits typed lifecycle events for hosted sessions and daemons: `session.started`, `session.paused`, `human_input.requested`, `qa.requested`, `feedback.received`, `session.resumed`, `session.completed`, `session.failed`, `daemon.started`, `daemon.idle`, `daemon.health`, `daemon.work.selected`, `daemon.work.skipped`, `daemon.resume.requested`, `daemon.shutdown`, and `daemon.failed`.
+
+### Web/App QA Profile
+
+`web_app` adds browser-oriented verification for Astro, React/Vite, Next, and similar repos. It records screenshot paths, browser console errors, failed network requests, preview URLs, and a human QA checklist in session history, PR bodies, and `qa.requested` events. Preview discovery is provider-agnostic: set `preview.url` or provide a command that prints the URL. See [docs/web-app-profile.md](docs/web-app-profile.md).
 
 Destinations can write to the session history log, POST to webhooks, or run a local command with canonical JSON on stdin. Webhooks can use `format: json`, `slack`, `teams`, or `discord`; command destinations always receive canonical JSON. `--dry-run` prints matching destinations instead of sending.
 

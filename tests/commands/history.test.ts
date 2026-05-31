@@ -435,6 +435,37 @@ describe('history', () => {
       expect(output).toContain('Recover:  recreate worktree from branch agent/issue-284');
     });
 
+    it('shows web app artifact paths from durable manifests', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createDurableManifest(sessionsDir, '20260530-120000', {
+        status: 'qa-requested',
+        stage: 'qa-requested',
+      });
+      const manifestPath = path.join(sessionsDir, 'session', '20260530-120000', 'session.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      manifest.webApp = {
+        previewUrl: 'https://preview.example.test',
+        devUrl: 'http://localhost:4321',
+        screenshots: ['.alpha-loop/sessions/session/20260530-120000/screenshots/issue-284/home.png'],
+        browserResultPath: '.alpha-loop/sessions/session/20260530-120000/web-app-verification/issue-284.json',
+        artifactPath: '.alpha-loop/sessions/session/20260530-120000/web-app-verification/issue-284.json',
+        consoleErrors: [],
+        networkErrors: [],
+        qaChecklist: ['Open the preview'],
+        updatedAt: '2026-05-30T12:00:00.000Z',
+      };
+      manifest.previewUrl = 'https://preview.example.test';
+      manifest.screenshots = manifest.webApp.screenshots;
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+      historyDetail(sessionsDir, 'session/20260530-120000', tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Preview:  https://preview.example.test');
+      expect(output).toContain('Browser:  .alpha-loop/sessions/session/20260530-120000/web-app-verification/issue-284.json');
+      expect(output).toContain('Shots:    1 screenshot(s)');
+    });
+
     it('shows latest feedback classification and resume command from durable manifests', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
       createDurableManifest(sessionsDir, '20260530-120000', {

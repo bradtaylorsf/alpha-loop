@@ -132,6 +132,14 @@ export type LifecycleEvent = {
   };
   screenshots: string[];
   previewUrl: string | null;
+  webApp: {
+    devUrl: string | null;
+    artifactPath: string | null;
+    browserResultPath: string | null;
+    consoleErrors: string[];
+    networkErrors: string[];
+    qaChecklist: string[];
+  } | null;
   qaChecklist: string[];
   harness: {
     agent: string | null;
@@ -293,6 +301,7 @@ export function buildLifecycleEvent(input: EmitLifecycleEventInput): LifecycleEv
     ?? null;
   const qaChecklist = context.qaChecklist
     ?? manifest?.feedback?.qaChecklist
+    ?? manifest?.webApp?.qaChecklist
     ?? [];
   const promptText = readPromptText(input.config, manifest);
   const policyDecisions = manifest?.policyDecisions ?? [];
@@ -358,6 +367,14 @@ export function buildLifecycleEvent(input: EmitLifecycleEventInput): LifecycleEv
     },
     screenshots: manifest?.screenshots ?? [],
     previewUrl,
+    webApp: manifest?.webApp ? {
+      devUrl: manifest.webApp.devUrl ?? null,
+      artifactPath: manifest.webApp.artifactPath,
+      browserResultPath: manifest.webApp.browserResultPath,
+      consoleErrors: manifest.webApp.consoleErrors,
+      networkErrors: manifest.webApp.networkErrors,
+      qaChecklist: manifest.webApp.qaChecklist,
+    } : null,
     qaChecklist,
     harness: {
       agent: manifest?.harness.agent ?? input.config.agent ?? null,
