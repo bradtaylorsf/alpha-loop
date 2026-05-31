@@ -117,6 +117,9 @@ describe('human feedback session state machine', () => {
     expect(classifyFeedback('QA failed: the checkout flow is broken')).toBe('change_request');
     expect(classifyFeedback('Also add a settings page as a follow-up')).toBe('new_scope');
     expect(classifyFeedback('Do not proceed with this')).toBe('rejection');
+    expect(classifyFeedback('Use the shorter CTA copy.')).toBe('clarification');
     expect(classifyFeedback('Which branch is this using?')).toBe('clarification');
+    expect(classifyFeedback('Thanks for the update.')).toBe('unknown');
+    expect(classifyFeedback('')).toBe('unknown');
   });
 });

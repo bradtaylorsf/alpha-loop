@@ -17,6 +17,7 @@ export const FEEDBACK_CLASSIFICATIONS = [
   'approval',
   'rejection',
   'new_scope',
+  'unknown',
 ] as const;
 
 export type FeedbackClassification = typeof FEEDBACK_CLASSIFICATIONS[number];
@@ -27,7 +28,41 @@ export type HumanFeedbackEventType =
   | 'feedback'
   | 'resume'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'feedback.received'
+  | 'feedback.classified'
+  | 'session.resume_requested';
+
+export type HumanFeedbackAttachment = string | {
+  url?: string;
+  title?: string;
+  filename?: string;
+  contentType?: string;
+};
+
+export type HumanFeedbackIngestRecord = {
+  idempotencyKey: string;
+  idempotencyHash: string;
+  repo: string;
+  issueNumber: number | null;
+  prNumber: number | null;
+  sessionId: string | null;
+  sessionName: string | null;
+  source: string;
+  externalEventId: string | null;
+  externalThreadId: string | null;
+  externalMessageId: string | null;
+  author: string | null;
+  body: string;
+  attachments: HumanFeedbackAttachment[];
+  eventTimestamp: string;
+  receivedAt: string;
+  classification: FeedbackClassification;
+  githubCommentTarget: number;
+  commentMarker: string;
+  resumeRequested: boolean;
+  resumeCommand: string | null;
+};
 
 export type HumanFeedbackTransitionRecord = {
   from: HumanFeedbackSessionStatus;
@@ -58,6 +93,8 @@ export type HumanFeedbackStateBlock = {
   followUpIssueUrl: string | null;
   transitionHistory: HumanFeedbackTransitionRecord[];
   events: HumanFeedbackEvent[];
+  latestFeedback?: HumanFeedbackIngestRecord | null;
+  feedbackHistory?: HumanFeedbackIngestRecord[];
   updatedAt: string;
 };
 
@@ -75,6 +112,14 @@ export type HumanFeedbackTransitionInput = {
   followUpIssueUrl?: string | null;
   eventType?: HumanFeedbackEventType;
   eventPayload?: Record<string, unknown>;
+  at?: string;
+};
+
+export type HumanFeedbackEventInput = {
+  type: HumanFeedbackEventType;
+  status?: HumanFeedbackSessionStatus;
+  issueNum?: number;
+  payload?: Record<string, unknown>;
   at?: string;
 };
 
@@ -97,6 +142,16 @@ export class InvalidSessionTransitionError extends Error {
 
 const CANONICAL_STATUS_SET = new Set<string>(HUMAN_FEEDBACK_SESSION_STATUSES);
 const FEEDBACK_CLASSIFICATION_SET = new Set<string>(FEEDBACK_CLASSIFICATIONS);
+
+const CLASSIFICATION_ALIASES: Record<string, FeedbackClassification> = {
+  clarification_answer: 'clarification',
+  qa_change_request: 'change_request',
+  change: 'change_request',
+  change_requested: 'change_request',
+  approved: 'approval',
+  rejected: 'rejection',
+  new_work: 'new_scope',
+};
 
 const STATUS_ALIASES: Record<string, HumanFeedbackSessionStatus> = {
   active: 'running',
@@ -126,6 +181,7 @@ export function normalizeHumanFeedbackStatus(status: string): HumanFeedbackSessi
 export function normalizeFeedbackClassification(value: string | undefined | null): FeedbackClassification | null {
   if (!value) return null;
   const normalized = value.trim().toLowerCase().replace(/[-\s]+/g, '_');
+  if (CLASSIFICATION_ALIASES[normalized]) return CLASSIFICATION_ALIASES[normalized];
   return FEEDBACK_CLASSIFICATION_SET.has(normalized) ? normalized as FeedbackClassification : null;
 }
 
@@ -163,8 +219,14 @@ export function initialHumanFeedbackState(
     followUpIssueUrl: null,
     transitionHistory: [],
     events: [],
+    latestFeedback: null,
+    feedbackHistory: [],
     updatedAt: at,
   };
+}
+
+function eventId(at: string, count: number): string {
+  return `feedback-${at.replace(/[^0-9A-Za-z]/g, '')}-${count}`;
 }
 
 export function applyHumanFeedbackTransition<T extends {
@@ -194,7 +256,7 @@ export function applyHumanFeedbackTransition<T extends {
   };
   const eventType = input.eventType ?? eventTypeForStatus(input.to);
   const event: HumanFeedbackEvent = {
-    id: `feedback-${at.replace(/[^0-9A-Za-z]/g, '')}-${prior.events.length + 1}`,
+    id: eventId(at, prior.events.length + 1),
     type: eventType,
     status: input.to,
     ...(input.issueNum !== undefined ? { issueNum: input.issueNum } : {}),
@@ -226,6 +288,40 @@ export function applyHumanFeedbackTransition<T extends {
       updatedAt: at,
     },
   } as T & { feedback: HumanFeedbackStateBlock; status: HumanFeedbackSessionStatus; stage: HumanFeedbackSessionStatus };
+}
+
+export function appendHumanFeedbackEvent<T extends {
+  status: string;
+  lastEventId?: string | null;
+  feedback?: HumanFeedbackStateBlock;
+}>(
+  manifest: T,
+  input: HumanFeedbackEventInput,
+): T & { feedback: HumanFeedbackStateBlock; lastEventId: string | null } {
+  const at = input.at ?? new Date().toISOString();
+  const currentStatus = input.status
+    ?? normalizeHumanFeedbackStatus(manifest.feedback?.currentStatus ?? manifest.status)
+    ?? 'running';
+  const prior = manifest.feedback ?? initialHumanFeedbackState(currentStatus, at);
+  const event: HumanFeedbackEvent = {
+    id: eventId(at, prior.events.length + 1),
+    type: input.type,
+    status: currentStatus,
+    ...(input.issueNum !== undefined ? { issueNum: input.issueNum } : {}),
+    createdAt: at,
+    payload: input.payload ?? {},
+  };
+
+  return {
+    ...manifest,
+    lastEventId: event.id,
+    feedback: {
+      ...prior,
+      currentStatus,
+      events: [...prior.events, event],
+      updatedAt: at,
+    },
+  } as T & { feedback: HumanFeedbackStateBlock; lastEventId: string | null };
 }
 
 export function mapLabelsToHumanFeedbackStatus(labels: string[], readyLabel = 'ready'): HumanFeedbackSessionStatus | null {
@@ -362,16 +458,19 @@ export function formatNewScopeComment(args: {
 }
 
 export function classifyFeedback(text: string): FeedbackClassification {
+  if (!text.trim()) return 'unknown';
   const lower = text.toLowerCase();
   if (/\b(lgtm|approved|approve|ship it|looks good)\b/.test(lower)) return 'approval';
   if (/\b(reject|rejected|not approved|decline|do not proceed|don't proceed)\b/.test(lower)) return 'rejection';
   if (/\b(new scope|follow[- ]?up|separate issue|another issue|also add|also include|while you're there)\b/.test(lower)) {
     return 'new_scope';
   }
+  if (/^\s*(thanks|thank you)( for the update)?[.!]*\s*$/.test(lower)) return 'unknown';
   if (/\b(change|fix|update|remove|revise|adjust|fail|failed|failing|broken)\b/.test(lower)) return 'change_request';
   if (/\b(does not work|doesn't work|not working)\b/.test(lower)) return 'change_request';
+  if (/\b(use|choose|selected|go with|answer|answered)\b/.test(lower)) return 'clarification';
   if (text.includes('?') || /\b(clarify|clarification|what i meant|answer)\b/.test(lower)) return 'clarification';
-  return 'clarification';
+  return 'unknown';
 }
 
 function eventTypeForStatus(status: HumanFeedbackSessionStatus): HumanFeedbackEventType {

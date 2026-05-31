@@ -270,6 +270,23 @@ Use `--issue <N>` to resume a specific issue.
 `alpha-loop history <session>` shows both unrecovered `crash-<N>.json` markers and recovered result files separately from normal successes and failures.
 Durable session manifests also show active, paused, waiting-for-feedback, QA-requested, resumed, completed, failed, and cleaned-up states, including the saved branch needed to recreate a missing worktree.
 
+### Feedback Ingestion (`alpha-loop feedback ingest`)
+
+Adapters for Slack, Teams, Discord, website forms, or custom services can send human feedback back into Alpha Loop without hard-coding those tools into the core loop. Ingestion writes a canonical GitHub comment with a hidden machine-readable marker, records an idempotency file under `.alpha-loop/feedback/ingested-events/`, classifies the feedback, and updates any matching session manifest.
+
+```bash
+# Structured JSON from stdin
+cat feedback.json | alpha-loop feedback ingest --json
+
+# JSON payload or plain body text from a file
+alpha-loop feedback ingest --body-file feedback.json
+
+# Record a resume request without running resume immediately
+alpha-loop feedback ingest --body-file feedback.json --request-resume
+```
+
+Payload fields include `repo`, `issueNumber`, `prNumber`, `sessionId`, `source`, `externalEventId`, `externalThreadId`, `externalMessageId`, `author`, `body`, `attachments`, `eventTimestamp`, `classification`, and `resumeRequested`. Duplicate external event ids are reported as already processed instead of creating another GitHub comment.
+
 ### Screenshots
 
 During live verification, the agent takes screenshots at key states and saves them to `.alpha-loop/sessions/<name>/screenshots/issue-<N>/`. These are kept locally (not committed to git) for debugging.
@@ -301,6 +318,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop sync --prune` | Sync templates and remove target-only harness files after logging each pruned path |
 | `alpha-loop resume` | Resume stranded work — push branches, review, open WIP PRs |
 | `alpha-loop resume --issue <N>` | Resume a specific issue |
+| `alpha-loop feedback ingest` | Ingest external human feedback from stdin or `--body-file` |
+| `alpha-loop feedback ingest --request-resume` | Mark the matching session resume-requested without running resume |
 | `alpha-loop review` | Analyze learnings and propose self-improvements |
 | `alpha-loop review --apply` | Apply proposed improvements and create a draft PR |
 | `alpha-loop eval` | Run the eval suite and compute composite score |
@@ -702,6 +721,7 @@ What needs to be done.
 | `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
 | `.alpha-loop/sessions/<session>/session.json` | No (gitignored) | Durable resumable session state with issue, branch, worktree, PR, stage, status, prompts, transcripts, and logs |
 | `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, session PRs, merge order, and stop reason |
+| `.alpha-loop/feedback/` | No (gitignored) | Local idempotency records for external feedback adapter events |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |
 

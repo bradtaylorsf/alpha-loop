@@ -154,6 +154,34 @@ program
     await resumeCommand(options);
   });
 
+const feedbackCmd = program
+  .command('feedback')
+  .description('Ingest external human feedback from adapters');
+
+feedbackCmd
+  .command('ingest')
+  .description('Ingest structured feedback from stdin or --body-file')
+  .option('--body-file <path>', 'Read feedback JSON or plain body text from a file')
+  .option('--json', 'Emit machine-readable JSON')
+  .option('--request-resume', 'Record a resume request without running alpha-loop resume')
+  .option('--repo <owner/repo>', 'GitHub repository; defaults to config repo')
+  .option('--issue <num>', 'Associated GitHub issue number')
+  .option('--pr <num>', 'Associated GitHub PR number')
+  .option('--session <id>', 'Associated Alpha Loop session id or name')
+  .option('--source <name>', 'External feedback source, such as slack or teams')
+  .option('--external-event-id <id>', 'Stable external event id for idempotency')
+  .option('--external-thread-id <id>', 'External thread/conversation id')
+  .option('--external-message-id <id>', 'External message id')
+  .option('--author <name>', 'External feedback author')
+  .option('--body <text>', 'Feedback body text')
+  .option('--attachment <value>', 'Attachment URL or label (repeatable)', (value, previous: string[] = []) => [...previous, value])
+  .option('--timestamp <iso>', 'External event timestamp')
+  .option('--classification <type>', 'Classification override: clarification, change_request, approval, rejection, new_scope, unknown')
+  .action(async (options) => {
+    const { feedbackIngestCommand } = await import('./commands/feedback.js');
+    await feedbackIngestCommand(options);
+  });
+
 program
   .command('learn')
   .description('Backfill learnings from existing session traces')

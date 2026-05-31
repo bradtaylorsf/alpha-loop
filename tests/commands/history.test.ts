@@ -435,6 +435,49 @@ describe('history', () => {
       expect(output).toContain('Recover:  recreate worktree from branch agent/issue-284');
     });
 
+    it('shows latest feedback classification and resume command from durable manifests', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createDurableManifest(sessionsDir, '20260530-120000', {
+        status: 'resume_requested',
+        stage: 'resume_requested',
+        issueNum: 287,
+        title: 'Add feedback ingestion',
+      });
+      const manifestPath = path.join(sessionsDir, 'session', '20260530-120000', 'session.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      manifest.feedback = {
+        currentStatus: 'resume_requested',
+        question: null,
+        resumeInstructions: null,
+        qaChecklist: [],
+        prUrl: null,
+        previewUrl: null,
+        classification: 'change_request',
+        followUpIssueNumber: null,
+        followUpIssueUrl: null,
+        transitionHistory: [],
+        events: [],
+        updatedAt: '2026-05-30T12:10:00.000Z',
+        latestFeedback: {
+          source: 'slack',
+          author: 'brad',
+          externalThreadId: 'thread-1',
+          externalMessageId: 'message-1',
+          classification: 'change_request',
+          resumeCommand: 'alpha-loop resume --issue 287',
+        },
+      };
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+      historyDetail(sessionsDir, 'session/20260530-120000', tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Feedback: change_request from slack');
+      expect(output).toContain('Author: brad');
+      expect(output).toContain('Thread: thread-1');
+      expect(output).toContain('Resume: alpha-loop resume --issue 287');
+    });
+
     it('shows error for non-existent session', () => {
       const errorSpy = jest.spyOn(console, 'error').mockImplementation();
       historyDetail(path.join(tmpDir, 'sessions'), 'nonexistent');

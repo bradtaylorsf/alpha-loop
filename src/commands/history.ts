@@ -358,6 +358,26 @@ function printSessionQueueSummary(queue: QueueSessionContext): void {
   }
 }
 
+function printDurableFeedbackSummary(manifest: DurableSessionManifest): void {
+  const feedback = manifest.feedback;
+  if (!feedback) return;
+  const latest = feedback.latestFeedback;
+  const classification = latest?.classification ?? feedback.classification;
+  if (!latest && !classification && feedback.currentStatus !== 'resume_requested') return;
+
+  const source = latest?.source ? ` from ${latest.source}` : '';
+  console.log(`Feedback: ${classification ?? 'unclassified'}${source}`);
+  if (latest?.author) console.log(`          Author: ${latest.author}`);
+  if (latest?.externalThreadId) console.log(`          Thread: ${latest.externalThreadId}`);
+  if (latest?.externalMessageId) console.log(`          Message: ${latest.externalMessageId}`);
+  if (latest?.resumeCommand) {
+    console.log(`          Resume: ${latest.resumeCommand}`);
+  } else if (feedback.currentStatus === 'resume_requested') {
+    const issueNum = manifest.currentIssue?.issueNum ?? manifest.issueNumber;
+    if (issueNum) console.log(`          Resume: alpha-loop resume --issue ${issueNum}`);
+  }
+}
+
 export function historyDetail(sessionsDir: string, sessionName: string, projectDir?: string): void {
   const queue = findQueueManifest(sessionsDir, sessionName);
   if (queue) {
@@ -439,6 +459,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
     } else if (durableManifest.lastKnownBranch) {
       console.log(`Recover:  branch ${durableManifest.lastKnownBranch}`);
     }
+    printDurableFeedbackSummary(durableManifest);
   }
   console.log('');
 
