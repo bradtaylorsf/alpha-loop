@@ -62,6 +62,7 @@ jest.mock('../../src/lib/session', () => ({
   recordSessionError: jest.fn(),
   recordSessionIssue: jest.fn(),
   recordSessionLogFile: jest.fn(),
+  recordSessionPolicyDecision: jest.fn(),
   recordSessionPrompt: jest.fn(),
   recordSessionStage: jest.fn(),
   recordSessionTranscript: jest.fn(),
@@ -139,6 +140,7 @@ import {
   writeCrashMarker,
   recordSessionCleanup,
   recordSessionIssue,
+  recordSessionPolicyDecision,
   recordSessionPrompt,
   recordSessionTranscript,
   recordSessionWorktree,
@@ -167,6 +169,7 @@ const mockGetPreviousResult = getPreviousResult as jest.MockedFunction<typeof ge
 const mockWriteCrashMarker = writeCrashMarker as jest.MockedFunction<typeof writeCrashMarker>;
 const mockRecordSessionCleanup = recordSessionCleanup as jest.MockedFunction<typeof recordSessionCleanup>;
 const mockRecordSessionIssue = recordSessionIssue as jest.MockedFunction<typeof recordSessionIssue>;
+const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
 const mockRecordSessionPrompt = recordSessionPrompt as jest.MockedFunction<typeof recordSessionPrompt>;
 const mockRecordSessionTranscript = recordSessionTranscript as jest.MockedFunction<typeof recordSessionTranscript>;
 const mockRecordSessionWorktree = recordSessionWorktree as jest.MockedFunction<typeof recordSessionWorktree>;
@@ -328,6 +331,75 @@ describe('processIssue', () => {
       autoCommittedByPipeline: true,
       autoCommittedPaths: ['src/lib/pipeline.ts', 'tests/lib/pipeline.test.ts'],
     }));
+  });
+
+  test('pauses before running a disallowed configured test command', async () => {
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({
+      skipInstall: true,
+      automationPolicy: {
+        requireLabels: [],
+        blockLabels: [],
+        allowedPaths: [],
+        protectedPaths: [],
+        allowedCommands: ['pnpm build'],
+        requireHumanFor: [],
+        maxActiveSessions: 0,
+        maxPausedSessions: 0,
+        maxIssuesPerSession: 0,
+        maxSessionMinutes: 0,
+        maxSessionCostUsd: 0,
+        maxIssueCostUsd: 0,
+      },
+    }), makeSession());
+
+    expect(result.status).toBe('waiting');
+    expect(result.waitingStatus).toBe('human_input_requested');
+    expect(result.policyDecision?.stage).toBe('command');
+    expect(mockRunTests).not.toHaveBeenCalled();
+    expect(mockCreatePR).not.toHaveBeenCalled();
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'needs-human-input', 'in-progress');
+    expect(commentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('allowed_commands'));
+    expect(mockRecordSessionPolicyDecision).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      stage: 'command',
+      command: 'pnpm test',
+    }));
+  });
+
+  test('pauses after implementation when the diff touches a protected path', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('git diff --name-only')) {
+        return { stdout: 'package.json\n', stderr: '', exitCode: 0 };
+      }
+      if (cmd === 'git diff "origin/master...HEAD"') {
+        return { stdout: 'diff --git a/package.json b/package.json', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({
+      skipInstall: true,
+      automationPolicy: {
+        requireLabels: [],
+        blockLabels: [],
+        allowedPaths: ['src/**', 'tests/**'],
+        protectedPaths: ['package.json'],
+        allowedCommands: ['pnpm test'],
+        requireHumanFor: [],
+        maxActiveSessions: 0,
+        maxPausedSessions: 0,
+        maxIssuesPerSession: 0,
+        maxSessionMinutes: 0,
+        maxSessionCostUsd: 0,
+        maxIssueCostUsd: 0,
+      },
+    }), makeSession());
+
+    expect(result.status).toBe('waiting');
+    expect(result.policyDecision?.stage).toBe('diff');
+    expect(result.policyDecision?.paths).toEqual(['package.json']);
+    expect(mockRunTests).not.toHaveBeenCalled();
+    expect(mockCreatePR).not.toHaveBeenCalled();
+    expect(commentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('Changed protected path'));
   });
 
   test('records durable manifest metadata for worktree, prompts, transcripts, PR, and cleanup', async () => {

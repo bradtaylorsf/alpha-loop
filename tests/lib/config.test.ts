@@ -438,6 +438,55 @@ events:
     }));
   });
 
+  it('loads automation policy guardrails from YAML', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+automation_policy:
+  require_labels: [ready]
+  block_labels: [do-not-automate, needs-human-input]
+  max_active_sessions: 1
+  max_paused_sessions: 10
+  max_issues_per_session: 1
+  max_session_minutes: 90
+  max_session_cost_usd: 25.5
+  max_issue_cost_usd: 5
+  allowed_paths:
+    - src/**
+    - content/**
+  protected_paths:
+    - package.json
+    - .github/workflows/**
+  allowed_commands:
+    - pnpm install
+    - pnpm test
+  require_human_for:
+    - auth
+    - billing
+    - production-deploy
+    - dependency-upgrade
+    - secrets
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.automationPolicy).toEqual(expect.objectContaining({
+      requireLabels: ['ready'],
+      blockLabels: ['do-not-automate', 'needs-human-input'],
+      maxActiveSessions: 1,
+      maxPausedSessions: 10,
+      maxIssuesPerSession: 1,
+      maxSessionMinutes: 90,
+      maxSessionCostUsd: 25.5,
+      maxIssueCostUsd: 5,
+      allowedPaths: ['src/**', 'content/**'],
+      protectedPaths: ['package.json', '.github/workflows/**'],
+      allowedCommands: ['pnpm install', 'pnpm test'],
+      requireHumanFor: ['auth', 'billing', 'production-deploy', 'dependency-upgrade', 'secrets'],
+    }));
+  });
+
   it('drops invalid lifecycle event destinations and warns', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     writeFileSync(

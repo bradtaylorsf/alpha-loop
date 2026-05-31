@@ -12,6 +12,7 @@ import {
   type DurableSessionManifest,
   type SessionContext,
 } from './session.js';
+import type { AutomationPolicyDecision } from './automation-policy.js';
 import {
   type CommandEventDestinationConfig,
   type Config,
@@ -151,6 +152,10 @@ export type LifecycleEvent = {
     reason: string | null;
   };
   feedback: Record<string, unknown> | null;
+  policy: {
+    latestDecision: AutomationPolicyDecision | null;
+    decisions: AutomationPolicyDecision[];
+  };
   error: string | null;
   metadata: Record<string, unknown>;
 };
@@ -253,6 +258,14 @@ function manifestIssue(
   return manifest.issues[0];
 }
 
+function contextPolicyDecision(context: LifecycleEventContext): AutomationPolicyDecision | null {
+  const decision = context.metadata?.policyDecision;
+  if (decision && typeof decision === 'object' && !Array.isArray(decision)) {
+    return decision as AutomationPolicyDecision;
+  }
+  return null;
+}
+
 export function buildLifecycleEvent(input: EmitLifecycleEventInput): LifecycleEvent {
   const manifest = loadManifest(input);
   const context = input.context ?? {};
@@ -282,6 +295,11 @@ export function buildLifecycleEvent(input: EmitLifecycleEventInput): LifecycleEv
     ?? manifest?.feedback?.qaChecklist
     ?? [];
   const promptText = readPromptText(input.config, manifest);
+  const policyDecisions = manifest?.policyDecisions ?? [];
+  const policyDecisionFromContext = contextPolicyDecision(context);
+  const allPolicyDecisions = policyDecisionFromContext && !policyDecisions.some((entry) => entry.id === policyDecisionFromContext.id)
+    ? [...policyDecisions, policyDecisionFromContext]
+    : policyDecisions;
 
   return {
     id: randomUUID(),
@@ -368,6 +386,10 @@ export function buildLifecycleEvent(input: EmitLifecycleEventInput): LifecycleEv
       externalMessageId: manifest.feedback.latestFeedback.externalMessageId,
       receivedAt: manifest.feedback.latestFeedback.receivedAt,
     } : null),
+    policy: {
+      latestDecision: policyDecisionFromContext ?? allPolicyDecisions.at(-1) ?? null,
+      decisions: allPolicyDecisions,
+    },
     error: context.error ?? manifest?.errors.at(-1)?.message ?? null,
     metadata: context.metadata ?? {},
   };

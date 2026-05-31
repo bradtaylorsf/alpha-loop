@@ -1,6 +1,7 @@
 # Hosted Lifecycle Events
 
 Alpha Loop can emit session lifecycle events to logs, webhooks, and local commands. The canonical event is JSON and includes repo, issue, PR, session, branch, worktree, logs, screenshots, preview URL, QA checklist, feedback, and harness metadata.
+When automation policy pauses work, the payload also includes `policy.latestDecision` and the session's `policy.decisions` history.
 
 Supported events:
 

@@ -820,6 +820,8 @@ describe('init merge logic for existing config', () => {
       'dev_command: pnpm dev',
       'max_issues: 20',
       'max_session_duration: 7200',
+      'automation_policy:',
+      '  block_labels: [do-not-automate, needs-human-input]',
       'harnesses:',
       '  - claude-code',
       '',
