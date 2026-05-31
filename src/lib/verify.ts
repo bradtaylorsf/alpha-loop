@@ -109,8 +109,10 @@ export async function runVerify(options: {
   verifyCommand?: string;
   /** Parent epic context for sub-issue verification. */
   epicContext?: EpicPromptContext;
+  /** Resume-specific human feedback and prior-session references. */
+  resumeContext?: string;
 }): Promise<VerifyResult> {
-  const { worktree, logFile, issueNum, title, body, config, sessionDir, verifyInstructions, verifyMethod, verifyCommand, epicContext } = options;
+  const { worktree, logFile, issueNum, title, body, config, sessionDir, verifyInstructions, verifyMethod, verifyCommand, epicContext, resumeContext } = options;
 
   if (config.skipVerify) {
     log.info('Verification skipped (skipVerify=true)');
@@ -206,6 +208,7 @@ export async function runVerify(options: {
 ${body}
 
 ${epicContext ? `${formatEpicPromptContext(epicContext)}\n\nUse the parent epic context to verify integration-sensitive behavior while keeping judgment focused on issue #${issueNum}.\n` : ''}
+${resumeContext ? `## Resume Context\n${resumeContext}\n` : ''}
 
 ## What Changed
 ${diffStat.stdout || 'No diff available'}

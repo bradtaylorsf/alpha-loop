@@ -197,6 +197,10 @@ export type ResumableSessionRef = {
   recoveryBranch: string | null;
 };
 
+export type FindResumableSessionOptions = {
+  statuses?: Iterable<SessionStatus>;
+};
+
 function isRecoveredSessionResult(
   result: PipelineResult,
 ): result is PipelineResult & { recoveryMode: NonNullable<PipelineResult['recoveryMode']> } {
@@ -573,9 +577,11 @@ function issueMatchesManifest(manifest: DurableSessionManifest, issueNum: number
 export function findLatestResumableSessionForIssue(
   issueNum: number,
   sessionsRoot = join(process.cwd(), '.alpha-loop', 'sessions'),
+  options: FindResumableSessionOptions = {},
 ): ResumableSessionRef | null {
   if (!existsSync(sessionsRoot)) return null;
   const refs: ResumableSessionRef[] = [];
+  const statuses = options.statuses ? new Set(options.statuses) : RESUMABLE_STATUSES;
 
   try {
     for (const group of readdirSync(sessionsRoot, { withFileTypes: true })) {
@@ -587,7 +593,8 @@ export function findLatestResumableSessionForIssue(
         const manifestPath = sessionManifestPath(sessionDir);
         const manifest = loadSessionManifest(manifestPath);
         if (!manifest) continue;
-        if (!RESUMABLE_STATUSES.has(manifest.status)) continue;
+        const feedbackStatus = manifest.feedback?.currentStatus;
+        if (!statuses.has(manifest.status) && (!feedbackStatus || !statuses.has(feedbackStatus))) continue;
         if (!issueMatchesManifest(manifest, issueNum)) continue;
         const worktreePath = manifest.worktree?.path ?? null;
         refs.push({
@@ -610,6 +617,43 @@ export function findLatestResumableSessionForIssue(
     return bTime.localeCompare(aTime);
   });
   return refs[0] ?? null;
+}
+
+function readSessionResults(sessionDir: string): PipelineResult[] {
+  try {
+    return readdirSync(sessionDir)
+      .filter((file) => file.startsWith('result-') && file.endsWith('.json'))
+      .sort()
+      .map((file) => {
+        try {
+          return JSON.parse(readFileSync(join(sessionDir, file), 'utf-8')) as PipelineResult;
+        } catch {
+          return null;
+        }
+      })
+      .filter((result): result is PipelineResult => result !== null);
+  } catch {
+    return [];
+  }
+}
+
+export function rehydrateSessionContextFromManifest(ref: ResumableSessionRef): SessionContext {
+  const { manifest, manifestPath, sessionDir } = ref;
+  return {
+    id: manifest.sessionId,
+    name: manifest.name,
+    branch: manifest.branch,
+    startedAt: manifest.timestamps.startedAt,
+    resultsDir: sessionDir,
+    logsDir: join(sessionDir, 'logs'),
+    manifestPath,
+    results: readSessionResults(sessionDir),
+    sessionPrUrl: manifest.sessionPrUrl ?? manifest.prUrl ?? undefined,
+    currentIssueNum: manifest.currentIssue?.issueNum ?? manifest.issueNumber ?? undefined,
+    parentEpicNum: manifest.parentEpicNumber ?? undefined,
+    epic: manifest.epic,
+    queue: manifest.queue,
+  };
 }
 
 function slugify(text: string): string {

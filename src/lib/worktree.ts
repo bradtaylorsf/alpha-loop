@@ -23,6 +23,8 @@ export type SetupWorktreeOptions = {
   autoMerge?: boolean;
   skipInstall?: boolean;
   setupCommand?: string;
+  savedBranch?: string | null;
+  savedPath?: string | null;
   dryRun?: boolean;
 };
 
@@ -31,6 +33,7 @@ export type CleanupWorktreeOptions = {
   projectDir: string;
   autoCleanup?: boolean;
   preserveIfCommits?: boolean;
+  worktreePath?: string;
   /** Preserve paused/waiting/QA worktrees unless retention explicitly expires them. */
   sessionStatus?: SessionStatus;
   /** Set by retention cleanup when it is intentionally expiring preserved work. */
@@ -57,10 +60,14 @@ const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.l
  * 3. Neither exists → create fresh worktree and branch
  */
 export async function setupWorktree(options: SetupWorktreeOptions): Promise<WorktreeResult> {
-  const { issueNum, projectDir, baseBranch, sessionBranch, autoMerge, skipInstall, setupCommand, dryRun } = options;
-  const branch = `agent/issue-${issueNum}`;
+  const { issueNum, projectDir, baseBranch, sessionBranch, autoMerge, skipInstall, setupCommand, savedBranch, savedPath, dryRun } = options;
+  const defaultBranch = `agent/issue-${issueNum}`;
+  const branch = savedBranch?.trim() || defaultBranch;
   const worktreesDir = resolve(projectDir, '.worktrees');
-  const worktreePath = resolve(worktreesDir, `issue-${issueNum}`);
+  const worktreePath = savedPath?.trim()
+    ? resolve(projectDir, savedPath)
+    : resolve(worktreesDir, `issue-${issueNum}`);
+  const requiresSavedBranch = Boolean(savedBranch?.trim());
 
   log.info(`Creating worktree at ${worktreePath} (branch: ${branch})`);
 
@@ -102,16 +109,37 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
         log.info(`Resumed worktree with ${commitCount} commit(s)`);
         resumed = true;
       } else {
-        // Can't reuse — force-delete branch and fall through to fresh creation
         log.warn(`Could not reuse branch ${branch}: ${reuseResult.stderr}`);
+        if (requiresSavedBranch) {
+          throw new Error(`Failed to recreate saved worktree from ${branch}: ${reuseResult.stderr}`);
+        }
+        // Can't reuse a disposable issue branch — force-delete and fall through to fresh creation.
         exec(`git branch -D "${branch}"`, { cwd: projectDir });
         exec('git worktree prune', { cwd: projectDir });
+      }
+    } else if (requiresSavedBranch) {
+      exec('git fetch origin', { cwd: projectDir });
+      const remoteBranchCheck = exec(`git rev-parse --verify "origin/${branch}"`, { cwd: projectDir });
+      if (remoteBranchCheck.exitCode === 0) {
+        log.info(`Found remote branch origin/${branch}, recreating worktree from it (resuming previous work)`);
+        const remoteReuseResult = exec(`git worktree add "${worktreePath}" -b "${branch}" "origin/${branch}"`, { cwd: projectDir });
+        if (remoteReuseResult.exitCode === 0) {
+          const commitCount = worktreeHasCommits(worktreePath);
+          log.info(`Resumed worktree with ${commitCount} commit(s)`);
+          resumed = true;
+        } else {
+          throw new Error(`Failed to recreate saved worktree from origin/${branch}: ${remoteReuseResult.stderr}`);
+        }
       }
     }
   }
 
   // --- Case 3: Fresh creation (no existing worktree or branch) ---
   if (!resumed) {
+    if (requiresSavedBranch) {
+      throw new Error(`Saved resume branch ${branch} was not found; cannot recreate paused worktree without losing context`);
+    }
+
     // Delete remote branch from previous failed runs
     exec(`git push origin --delete "${branch}"`, { cwd: projectDir });
 
@@ -226,7 +254,9 @@ export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<
     retentionExpired = false,
     dryRun,
   } = options;
-  const worktreePath = resolve(projectDir, '.worktrees', `issue-${issueNum}`);
+  const worktreePath = options.worktreePath
+    ? resolve(projectDir, options.worktreePath)
+    : resolve(projectDir, '.worktrees', `issue-${issueNum}`);
 
   if (!autoCleanup) {
     log.info('Skipping worktree cleanup (autoCleanup=false)');

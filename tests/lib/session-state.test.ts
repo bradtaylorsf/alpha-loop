@@ -114,6 +114,7 @@ describe('human feedback session state machine', () => {
   it('classifies common feedback intents', () => {
     expect(classifyFeedback('LGTM, approved')).toBe('approval');
     expect(classifyFeedback('Please change the button copy')).toBe('change_request');
+    expect(classifyFeedback('QA failed: the checkout flow is broken')).toBe('change_request');
     expect(classifyFeedback('Also add a settings page as a follow-up')).toBe('new_scope');
     expect(classifyFeedback('Do not proceed with this')).toBe('rejection');
     expect(classifyFeedback('Which branch is this using?')).toBe('clarification');

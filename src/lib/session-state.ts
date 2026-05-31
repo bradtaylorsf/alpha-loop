@@ -368,7 +368,8 @@ export function classifyFeedback(text: string): FeedbackClassification {
   if (/\b(new scope|follow[- ]?up|separate issue|another issue|also add|also include|while you're there)\b/.test(lower)) {
     return 'new_scope';
   }
-  if (/\b(change|fix|update|remove|revise|adjust)\b/.test(lower)) return 'change_request';
+  if (/\b(change|fix|update|remove|revise|adjust|fail|failed|failing|broken)\b/.test(lower)) return 'change_request';
+  if (/\b(does not work|doesn't work|not working)\b/.test(lower)) return 'change_request';
   if (text.includes('?') || /\b(clarify|clarification|what i meant|answer)\b/.test(lower)) return 'clarification';
   return 'clarification';
 }

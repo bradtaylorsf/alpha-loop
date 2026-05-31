@@ -20,10 +20,16 @@ jest.mock('../../src/lib/prompts', () => ({
   buildReviewPrompt: jest.fn(() => 'review prompt'),
 }));
 
+jest.mock('../../src/lib/pipeline', () => ({
+  isRecoveredResult: jest.fn((result: { recoveryMode?: string }) => result.recoveryMode !== undefined),
+  processIssue: jest.fn(),
+}));
+
 jest.mock('../../src/lib/github', () => ({
   labelIssue: jest.fn(),
   commentIssue: jest.fn(),
   createPR: jest.fn(),
+  getIssueWithComments: jest.fn(),
   updateProjectStatus: jest.fn(),
 }));
 
@@ -38,15 +44,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findStrandedBranches, resumeCommand } from '../../src/commands/resume';
 import { loadConfig, resolveStepConfig, type Config } from '../../src/lib/config';
-import { createPR, labelIssue, commentIssue, updateProjectStatus } from '../../src/lib/github';
+import { createPR, labelIssue, commentIssue, getIssueWithComments, updateProjectStatus } from '../../src/lib/github';
 import { ghExec } from '../../src/lib/rate-limit';
 import { spawnAgent } from '../../src/lib/agent';
 import { exec } from '../../src/lib/shell';
+import { processIssue } from '../../src/lib/pipeline';
 import {
   generateSessionSummary,
   repairSessionLearningArtifacts,
   repairSessionSummaryArtifact,
 } from '../../src/lib/learning';
+import type { DurableSessionManifest } from '../../src/lib/session';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLoadConfig = loadConfig as jest.MockedFunction<typeof loadConfig>;
@@ -55,8 +63,10 @@ const mockGhExec = ghExec as jest.MockedFunction<typeof ghExec>;
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockLabelIssue = labelIssue as jest.MockedFunction<typeof labelIssue>;
 const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue>;
+const mockGetIssueWithComments = getIssueWithComments as jest.MockedFunction<typeof getIssueWithComments>;
 const mockUpdateProjectStatus = updateProjectStatus as jest.MockedFunction<typeof updateProjectStatus>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
+const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue>;
 const mockGenerateSessionSummary = generateSessionSummary as jest.MockedFunction<typeof generateSessionSummary>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
@@ -71,6 +81,18 @@ beforeEach(() => {
   tempDir = undefined;
   mockResolveStepConfig.mockReturnValue({ agent: 'codex', model: 'gpt-5' });
   mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/269');
+  mockGetIssueWithComments.mockReturnValue(null);
+  mockProcessIssue.mockResolvedValue({
+    issueNum: 286,
+    title: 'Resume paused work',
+    status: 'success',
+    prUrl: 'https://github.com/owner/repo/pull/286',
+    testsPassing: true,
+    verifyPassing: true,
+    verifySkipped: false,
+    duration: 12,
+    filesChanged: 1,
+  });
   mockRepairSessionLearningArtifacts.mockReturnValue({ repaired: 0, created: 1, skipped: 0, failed: 0 });
 });
 
@@ -128,6 +150,100 @@ function baseConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
     preferEpics: false,
+    ...overrides,
+  };
+}
+
+function makeManifest(overrides: Partial<DurableSessionManifest> = {}): DurableSessionManifest {
+  const now = '2026-05-30T12:00:00.000Z';
+  return {
+    version: 1,
+    sessionId: 'session-20260530-120000',
+    name: 'session/20260530-120000',
+    issueNumber: 286,
+    issueNumbers: [286],
+    parentEpicNumber: 293,
+    parentEpicTitle: 'Hosted Alpha Loop',
+    branch: 'session/20260530-120000',
+    baseBranch: 'master',
+    prUrl: null,
+    sessionPrUrl: null,
+    status: 'human_input_requested',
+    stage: 'human_input_requested',
+    labels: ['needs-human-input'],
+    feedback: {
+      currentStatus: 'human_input_requested',
+      question: 'Which CTA copy should be used?',
+      resumeInstructions: 'Use the selected CTA copy and continue.',
+      qaChecklist: [],
+      prUrl: null,
+      previewUrl: null,
+      classification: null,
+      followUpIssueNumber: null,
+      followUpIssueUrl: null,
+      transitionHistory: [],
+      events: [],
+      updatedAt: now,
+    },
+    harness: {
+      agent: 'codex',
+      model: 'gpt-5',
+      reviewModel: 'gpt-5',
+      command: 'codex',
+      testCommand: 'pnpm test',
+    },
+    command: 'codex',
+    worktree: {
+      path: join(tmpdir(), 'alpha-loop-resume-worktree-286'),
+      branch: 'agent/issue-286',
+      resumed: false,
+      missing: false,
+      lastKnownBranch: 'agent/issue-286',
+      updatedAt: now,
+    },
+    lastKnownBranch: 'agent/issue-286',
+    currentIssue: { issueNum: 286, title: 'Resume paused work' },
+    issues: [{
+      issueNum: 286,
+      title: 'Resume paused work',
+      status: 'human_input_requested',
+      stage: 'human_input_requested',
+      branch: 'agent/issue-286',
+      worktreePath: join(tmpdir(), 'alpha-loop-resume-worktree-286'),
+      worktreeMissing: false,
+      updatedAt: now,
+    }],
+    prompts: [{
+      issueNum: 286,
+      stage: 'implement',
+      path: '.alpha-loop/traces/session-20260530-120000/prompts/issue-286-implement.md',
+      hash: '1234567890abcdef',
+      recordedAt: now,
+    }],
+    promptPath: '.alpha-loop/traces/session-20260530-120000/prompts/issue-286-implement.md',
+    promptHash: '1234567890abcdef',
+    transcripts: [{
+      issueNum: 286,
+      stage: 'implement',
+      path: '.alpha-loop/traces/session-20260530-120000/outputs/issue-286-implement.log',
+      recordedAt: now,
+    }],
+    transcriptPath: '.alpha-loop/traces/session-20260530-120000/outputs/issue-286-implement.log',
+    logs: {
+      sessionDir: '.alpha-loop/sessions/session/20260530-120000',
+      logsDir: '.alpha-loop/sessions/session/20260530-120000/logs',
+      traceDir: '.alpha-loop/traces/session-20260530-120000',
+      files: ['.alpha-loop/sessions/session/20260530-120000/logs/issue-286.log'],
+    },
+    screenshots: [],
+    previewUrl: null,
+    timestamps: {
+      createdAt: now,
+      startedAt: now,
+      updatedAt: now,
+    },
+    lastEventId: null,
+    errors: [],
     ...overrides,
   };
 }
@@ -195,6 +311,181 @@ describe('findStrandedBranches', () => {
 });
 
 describe('resumeCommand', () => {
+  test('resumes a paused clarification session with feedback and prior transcript context', async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'alpha-loop-resume-paused-'));
+    process.chdir(tempDir);
+
+    const sessionDir = join(tempDir, '.alpha-loop', 'sessions', 'session', '20260530-120000');
+    const worktreePath = join(tempDir, '.worktrees', 'issue-286');
+    mkdirSync(worktreePath, { recursive: true });
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, 'session.json'), JSON.stringify(makeManifest({
+      worktree: {
+        path: worktreePath,
+        branch: 'agent/issue-286',
+        resumed: false,
+        missing: false,
+        lastKnownBranch: 'agent/issue-286',
+        updatedAt: '2026-05-30T12:00:00.000Z',
+      },
+      issues: [{
+        issueNum: 286,
+        title: 'Resume paused work',
+        status: 'human_input_requested',
+        stage: 'human_input_requested',
+        branch: 'agent/issue-286',
+        worktreePath,
+        worktreeMissing: false,
+        updatedAt: '2026-05-30T12:00:00.000Z',
+      }],
+    }), null, 2));
+
+    mockLoadConfig.mockReturnValue(baseConfig());
+    mockGetIssueWithComments.mockReturnValue({
+      number: 286,
+      title: 'Resume paused work',
+      body: 'Issue body',
+      labels: ['needs-human-input'],
+      comments: [{
+        author: 'bradtaylorsf',
+        body: 'Use the shorter CTA copy.',
+        createdAt: '2026-05-30T12:05:00.000Z',
+      }],
+    });
+
+    await resumeCommand({ issue: '286' });
+
+    expect(mockProcessIssue).toHaveBeenCalledWith(
+      286,
+      'Resume paused work',
+      'Issue body',
+      expect.objectContaining({ repo: 'owner/repo' }),
+      expect.objectContaining({
+        name: 'session/20260530-120000',
+        resultsDir: expect.stringContaining('.alpha-loop/sessions/session/20260530-120000'),
+        logsDir: expect.stringContaining('.alpha-loop/sessions/session/20260530-120000/logs'),
+      }),
+      expect.objectContaining({
+        resumeStage: 'clarification',
+        existingPrUrl: null,
+        savedWorktree: {
+          branch: 'agent/issue-286',
+          path: expect.stringContaining('.worktrees/issue-286'),
+        },
+        resumeContext: expect.stringContaining('Use the shorter CTA copy.'),
+      }),
+    );
+    const options = mockProcessIssue.mock.calls[0][5] as any;
+    expect(options.resumeContext).toContain('issue-286-implement.md');
+    expect(options.resumeContext).toContain('issue-286-implement.log');
+    expect(mockLabelIssue).toHaveBeenCalledWith('owner/repo', 286, 'in-progress', 'ready');
+    expect(mockLabelIssue).toHaveBeenCalledWith('owner/repo', 286, 'in-progress', 'needs-human-input');
+    expect(mockCommentIssue).toHaveBeenCalledWith(
+      'owner/repo',
+      286,
+      expect.stringContaining('Feedback classification: `clarification`'),
+    );
+
+    const manifest = JSON.parse(readFileSync(join(sessionDir, 'session.json'), 'utf-8'));
+    expect(manifest.status).toBe('completed');
+    expect(manifest.feedback.transitionHistory.map((entry: any) => entry.to)).toEqual([
+      'feedback_received',
+      'resume_requested',
+      'resuming',
+      'completed',
+    ]);
+  });
+
+  test('resumes QA change requests at implementation stage and keeps the existing PR URL', async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'alpha-loop-resume-qa-'));
+    process.chdir(tempDir);
+
+    const sessionDir = join(tempDir, '.alpha-loop', 'sessions', 'session', '20260530-130000');
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, 'session.json'), JSON.stringify(makeManifest({
+      sessionId: 'session-20260530-130000',
+      name: 'session/20260530-130000',
+      status: 'qa_requested',
+      stage: 'qa_requested',
+      prUrl: 'https://github.com/owner/repo/pull/286',
+      feedback: {
+        ...makeManifest().feedback,
+        currentStatus: 'qa_requested',
+        question: null,
+        resumeInstructions: 'Complete QA, then reply with approval or requested changes.',
+        qaChecklist: ['Open preview', 'Confirm CTA copy'],
+        prUrl: 'https://github.com/owner/repo/pull/286',
+        updatedAt: '2026-05-30T12:00:00.000Z',
+      },
+      timestamps: {
+        createdAt: '2026-05-30T12:00:00.000Z',
+        startedAt: '2026-05-30T12:00:00.000Z',
+        updatedAt: '2026-05-30T12:00:00.000Z',
+      },
+    }), null, 2));
+
+    mockLoadConfig.mockReturnValue(baseConfig());
+    mockGetIssueWithComments.mockReturnValue({
+      number: 286,
+      title: 'Resume paused work',
+      body: 'Issue body',
+      labels: ['in-review', 'needs-human-input'],
+      comments: [{
+        author: 'bradtaylorsf',
+        body: 'QA failed: please change the button copy.',
+        createdAt: '2026-05-30T12:10:00.000Z',
+      }],
+    });
+
+    await resumeCommand({ issue: '286' });
+
+    expect(mockProcessIssue).toHaveBeenCalledWith(
+      286,
+      'Resume paused work',
+      'Issue body',
+      expect.any(Object),
+      expect.any(Object),
+      expect.objectContaining({
+        resumeStage: 'implementation',
+        existingPrUrl: 'https://github.com/owner/repo/pull/286',
+        resumeContext: expect.stringContaining('QA failed: please change the button copy.'),
+      }),
+    );
+    const options = mockProcessIssue.mock.calls[0][5] as any;
+    expect(options.resumeContext).toContain('QA checklist');
+  });
+
+  test('skips duplicate resume when the latest manifest is already resuming', async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'alpha-loop-resume-duplicate-'));
+    process.chdir(tempDir);
+
+    const sessionDir = join(tempDir, '.alpha-loop', 'sessions', 'session', '20260530-140000');
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, 'session.json'), JSON.stringify(makeManifest({
+      sessionId: 'session-20260530-140000',
+      name: 'session/20260530-140000',
+      status: 'resuming',
+      stage: 'resuming',
+      feedback: {
+        ...makeManifest().feedback,
+        currentStatus: 'resuming',
+      },
+      timestamps: {
+        createdAt: '2026-05-30T12:00:00.000Z',
+        startedAt: '2026-05-30T12:00:00.000Z',
+        updatedAt: '2026-05-30T14:00:00.000Z',
+      },
+    }), null, 2));
+
+    mockLoadConfig.mockReturnValue(baseConfig());
+
+    await resumeCommand({ issue: '286' });
+
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockGetIssueWithComments).not.toHaveBeenCalled();
+    expect(mockCreatePR).not.toHaveBeenCalled();
+  });
+
   test('prefers crash markers over branch walking and clears marker after saving recovered result', async () => {
     tempDir = mkdtempSync(join(tmpdir(), 'alpha-loop-resume-marker-'));
     process.chdir(tempDir);
