@@ -2241,9 +2241,9 @@ export async function processIssue(
       recordSessionWebAppArtifacts(session, {
         previewUrl,
         devUrl: webAppProfile.devUrl,
-        screenshots: webAppSummary?.screenshots ?? webAppProfile.screenshots.map((shot) => shot.relativePath),
-        browserResultPath: webAppSummary?.browserResultPath ?? webAppProfile.artifactRelativePath,
-        artifactPath: webAppSummary?.artifactPath ?? webAppProfile.artifactRelativePath,
+        screenshots: webAppSummary?.screenshots ?? [],
+        browserResultPath: webAppSummary?.browserResultPath ?? null,
+        artifactPath: webAppSummary?.artifactPath ?? null,
         consoleErrors: webAppSummary?.consoleErrors ?? [],
         networkErrors: webAppSummary?.networkErrors ?? [],
       });
@@ -2344,9 +2344,9 @@ export async function processIssue(
   const webAppPrContext: WebAppPRContext | undefined = webAppProfile
     ? {
         ...(webAppSummary ?? {
-          artifactPath: webAppProfile.artifactRelativePath,
-          browserResultPath: webAppProfile.artifactRelativePath,
-          screenshots: webAppProfile.screenshots.map((shot) => shot.relativePath),
+          artifactPath: verifySkipped ? undefined : webAppProfile.artifactRelativePath,
+          browserResultPath: verifySkipped ? undefined : webAppProfile.artifactRelativePath,
+          screenshots: verifySkipped ? [] : webAppProfile.screenshots.map((shot) => shot.relativePath),
           previewUrl: webAppPreview?.url ?? (webAppProfile.preview.url || null),
           devUrl: webAppProfile.devUrl,
           consoleErrors: [],

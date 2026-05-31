@@ -220,6 +220,40 @@ describe('feedback ingestion', () => {
     expect(mockCommentIssue).toHaveBeenCalledWith('owner/repo', 287, expect.any(String));
   });
 
+  it('comments on an explicitly supplied PR when feedback is PR-only', () => {
+    const sessionDir = join(tempDir, '.alpha-loop', 'sessions', 'session', '20260530-120000');
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, 'session.json'), JSON.stringify(makeManifest({
+      prUrl: 'https://github.com/owner/repo/pull/500',
+      feedback: {
+        ...makeManifest().feedback,
+        prUrl: 'https://github.com/owner/repo/pull/500',
+      },
+      issues: [{
+        ...makeManifest().issues[0],
+        prUrl: 'https://github.com/owner/repo/pull/500',
+      }],
+    }), null, 2));
+
+    const result = ingestFeedback({
+      projectDir: tempDir,
+      payload: {
+        repo: 'owner/repo',
+        prNumber: 500,
+        source: 'slack',
+        externalEventId: 'pr-only-500',
+        body: 'LGTM, approved.',
+      },
+    });
+
+    expect(result.status).toBe('processed');
+    if (result.status !== 'processed') throw new Error('expected processed feedback');
+    expect(result.githubComment.targetNumber).toBe(500);
+    expect(result.githubComment.issueNumber).toBe(287);
+    expect(result.githubComment.prNumber).toBe(500);
+    expect(mockCommentIssue).toHaveBeenCalledWith('owner/repo', 500, expect.any(String));
+  });
+
   it('formats and parses GitHub comments with attachments and machine-readable markers', () => {
     const payload = normalizeFeedbackIngestPayload({
       repo: 'owner/repo',

@@ -7,6 +7,7 @@ import {
   createDaemonScheduler,
   daemonLockPath,
   enabledDaemonTickKinds,
+  refreshDaemonLock,
   releaseDaemonLock,
   runDaemonLoop,
   runDaemonTick,
@@ -247,6 +248,21 @@ describe('daemon locking', () => {
 
     expect(lock.token).not.toBe('stale');
     expect(JSON.parse(readFileSync(lockPath, 'utf-8')).token).toBe(lock.token);
+  });
+
+  it('refreshes held repo locks so active daemons are not treated as stale', () => {
+    const daemon = makeDaemon({ lock: { ...DEFAULT_DAEMON_CONFIG.lock, path: join(tempDir, '.alpha-loop', 'daemon.lock') } });
+    const config = makeConfig({ daemon });
+    const lock = acquireDaemonLock(config, daemon, {
+      now: new Date('2026-05-30T12:00:00.000Z'),
+      isPidAlive: () => true,
+    });
+
+    expect(refreshDaemonLock(lock, new Date('2026-05-30T12:05:00.000Z'))).toBe(true);
+
+    const payload = JSON.parse(readFileSync(daemonLockPath(daemon), 'utf-8'));
+    expect(payload.token).toBe(lock.token);
+    expect(payload.updatedAt).toBe('2026-05-30T12:05:00.000Z');
   });
 });
 

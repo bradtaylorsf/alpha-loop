@@ -700,30 +700,53 @@ function retentionDaysForStatus(status: SessionStatus, retention: SessionRetenti
   return null;
 }
 
+function projectDirForSessionsDir(sessionsDir: string): string {
+  const resolved = path.resolve(sessionsDir);
+  if (path.basename(resolved) === 'sessions' && path.basename(path.dirname(resolved)) === '.alpha-loop') {
+    return path.dirname(path.dirname(resolved));
+  }
+  return path.dirname(resolved);
+}
+
+function resolveRetainedWorktreePath(worktreePath: string, sessionsDir: string): { path: string; safe: boolean } {
+  const projectDir = projectDirForSessionsDir(sessionsDir);
+  const worktreesRoot = path.resolve(projectDir, '.worktrees');
+  const candidate = path.isAbsolute(worktreePath)
+    ? path.resolve(worktreePath)
+    : path.resolve(projectDir, worktreePath);
+  const rel = path.relative(worktreesRoot, candidate);
+  return {
+    path: candidate,
+    safe: rel === '' || (rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel)),
+  };
+}
+
 function cleanManifestWorktree(
   session: { dir: string; name: string; timestamp: string },
   manifest: DurableSessionManifest,
   retention: SessionRetentionConfig,
+  sessionsDir: string,
 ): boolean {
   const days = retentionDaysForStatus(manifest.status, retention);
   if (days === null) return false;
   if (manifestAgeMs(manifest, session.timestamp) < days * 24 * 60 * 60 * 1000) return false;
 
   const worktreePath = manifest.worktree?.path;
-  const safeWorktreePath = worktreePath
-    ? path.resolve(worktreePath).includes(`${path.sep}.worktrees${path.sep}`)
-    : false;
-  if (worktreePath && safeWorktreePath && fs.existsSync(worktreePath)) {
-    fs.rmSync(worktreePath, { recursive: true, force: true });
+  const resolvedWorktree = worktreePath ? resolveRetainedWorktreePath(worktreePath, sessionsDir) : null;
+  const removedWorktree = Boolean(resolvedWorktree?.safe && fs.existsSync(resolvedWorktree.path));
+  if (resolvedWorktree?.safe && fs.existsSync(resolvedWorktree.path)) {
+    fs.rmSync(resolvedWorktree.path, { recursive: true, force: true });
   }
 
   transitionSessionStatus(session.dir, 'cleaned-up', 'cleanup');
   updateSessionManifest(session.dir, (current) => ({
     ...current,
     cleanup: {
-      status: worktreePath ? (safeWorktreePath ? 'removed' : 'preserved') : 'missing',
+      status: worktreePath
+        ? (resolvedWorktree?.safe ? (removedWorktree ? 'removed' : 'missing') : 'preserved')
+        : 'missing',
       worktreePath,
-      reason: worktreePath && !safeWorktreePath
+      reason: worktreePath && !resolvedWorktree?.safe
         ? `retention:${manifest.status}:${days}d:unsafe-worktree-path-skipped`
         : `retention:${manifest.status}:${days}d`,
       at: new Date().toISOString(),
@@ -731,7 +754,7 @@ function cleanManifestWorktree(
     worktree: current.worktree
       ? {
           ...current.worktree,
-          missing: true,
+          missing: resolvedWorktree?.safe ? true : current.worktree.missing,
           updatedAt: new Date().toISOString(),
         }
       : current.worktree,
@@ -756,7 +779,7 @@ export function historyClean(
   for (const session of sessions) {
     const durableManifest = loadSessionManifest(session.dir);
     if (durableManifest) {
-      if (cleanManifestWorktree(session, durableManifest, retention)) {
+      if (cleanManifestWorktree(session, durableManifest, retention, sessionsDir)) {
         removed++;
       }
       continue;

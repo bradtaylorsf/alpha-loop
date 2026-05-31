@@ -69,7 +69,7 @@ export function resolveDaemonConfig(config: Config, options: DaemonCommandOption
   return daemon;
 }
 
-function parseFeedbackPollOutput(stdout: string): Record<string, unknown>[] {
+export function parseFeedbackPollOutput(stdout: string): Record<string, unknown>[] {
   const trimmed = stdout.trim();
   if (!trimmed) return [];
 
@@ -85,6 +85,10 @@ function parseFeedbackPollOutput(stdout: string): Record<string, unknown>[] {
     throw new Error('Feedback poll JSON must be an object or array.');
   } catch (err) {
     if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      const lines = trimmed.split('\n').map((line) => line.trim()).filter(Boolean);
+      if (lines.length > 1) {
+        return lines.map((line) => parseFeedbackPayloadText(line));
+      }
       throw err instanceof Error ? err : new Error(String(err));
     }
   }

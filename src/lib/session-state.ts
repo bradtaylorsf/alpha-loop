@@ -238,7 +238,7 @@ export function applyHumanFeedbackTransition<T extends {
   manifest: T,
   input: HumanFeedbackTransitionInput,
 ): T & { feedback: HumanFeedbackStateBlock; status: HumanFeedbackSessionStatus; stage: HumanFeedbackSessionStatus } {
-  const from = normalizeHumanFeedbackStatus(manifest.feedback?.currentStatus ?? manifest.status);
+  const from = currentManifestStatus(manifest);
   if (!from) {
     throw new Error(`Unknown session status: ${manifest.feedback?.currentStatus ?? manifest.status}`);
   }
@@ -300,7 +300,7 @@ export function appendHumanFeedbackEvent<T extends {
 ): T & { feedback: HumanFeedbackStateBlock; lastEventId: string | null } {
   const at = input.at ?? new Date().toISOString();
   const currentStatus = input.status
-    ?? normalizeHumanFeedbackStatus(manifest.feedback?.currentStatus ?? manifest.status)
+    ?? currentManifestStatus(manifest)
     ?? 'running';
   const prior = manifest.feedback ?? initialHumanFeedbackState(currentStatus, at);
   const event: HumanFeedbackEvent = {
@@ -322,6 +322,16 @@ export function appendHumanFeedbackEvent<T extends {
       updatedAt: at,
     },
   } as T & { feedback: HumanFeedbackStateBlock; lastEventId: string | null };
+}
+
+function currentManifestStatus(manifest: {
+  status: string;
+  feedback?: HumanFeedbackStateBlock;
+}): HumanFeedbackSessionStatus | null {
+  const status = normalizeHumanFeedbackStatus(manifest.status);
+  const feedback = normalizeHumanFeedbackStatus(manifest.feedback?.currentStatus ?? '');
+  if (status && status !== 'running' && feedback === 'running') return status;
+  return feedback ?? status;
 }
 
 export function mapLabelsToHumanFeedbackStatus(labels: string[], readyLabel = 'ready'): HumanFeedbackSessionStatus | null {

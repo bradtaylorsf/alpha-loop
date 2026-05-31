@@ -235,8 +235,41 @@ describe('web app profile', () => {
     }));
     expect(checklist).toEqual(expect.arrayContaining([
       'Open https://preview.example.test and confirm issue #290 works in the browser.',
-      expect.stringContaining('Review home-desktop at desktop viewport'),
+      expect.stringContaining('Review captured screenshot'),
       'Confirm headline copy is correct.',
     ]));
+  });
+
+  it('does not report planned screenshots as captured when browser verification is skipped', () => {
+    const profile = normalizeWebAppProfile(makeConfig({
+      webApp: {
+        setupCommand: '',
+        buildCommand: '',
+        testCommand: '',
+        devCommand: 'pnpm dev',
+        devUrl: 'http://localhost:4321',
+        smokeTest: '',
+        screenshots: [{ name: 'home-desktop', url: '/', viewport: 'desktop' }],
+        preview: { url: '', command: '', required: false },
+      },
+    }), { worktree: tempDir, sessionDir: tempDir, issueNum: 290 })!;
+
+    const summary = collectWebAppVerificationSummary(profile, {
+      issueNum: 290,
+      passed: true,
+      skipped: true,
+      output: 'Verification skipped (playwright-cli not installed)',
+    });
+    const checklist = buildWebAppQaChecklist({
+      issueNum: 290,
+      profile,
+      verification: summary,
+    });
+
+    expect(summary.skipped).toBe(true);
+    expect(summary.screenshots).toEqual([]);
+    expect(JSON.parse(readFileSync(profile.artifactPath, 'utf-8')).screenshots).toEqual([]);
+    expect(checklist).toContain('Capture or review at least one browser screenshot before approving.');
+    expect(checklist.join('\n')).not.toContain('home-desktop.png');
   });
 });

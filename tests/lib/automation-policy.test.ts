@@ -203,10 +203,13 @@ describe('automation policy', () => {
   it('blocks configured commands outside the allowlist', () => {
     const allowed = evaluateCommandPolicy(makeConfig(), 'pnpm install --frozen-lockfile');
     const blocked = evaluateCommandPolicy(makeConfig(), 'rm -rf public');
+    const chained = evaluateCommandPolicy(makeConfig(), 'pnpm test && rm -rf public');
 
     expect(decisionAllowed(allowed)).toBe(true);
     expect(blocked.status).toBe('blocked');
     expect(blocked.reason).toContain('allowed_commands');
+    expect(chained.status).toBe('blocked');
+    expect(chained.reason).toContain('allowed_commands');
   });
 
   it('blocks when runtime exceeds max_session_minutes', () => {
@@ -230,7 +233,7 @@ describe('automation policy', () => {
       status: 'human_input_requested',
       feedback: {
         ...makeManifest().feedback,
-        currentStatus: 'human_input_requested',
+        currentStatus: 'running',
       },
     }), null, 2));
 

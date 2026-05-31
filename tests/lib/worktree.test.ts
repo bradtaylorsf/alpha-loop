@@ -3,6 +3,7 @@ import { setupWorktree, cleanupWorktree } from '../../src/lib/worktree';
 // Mock dependencies
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
+  shellQuote: (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`,
 }));
 
 jest.mock('../../src/lib/logger', () => ({
@@ -68,7 +69,7 @@ describe('setupWorktree', () => {
   test('branches from base branch when autoMerge is false', async () => {
     // No existing branch → fresh creation
     mockExec.mockImplementation((cmd: string) => {
-      if (cmd.includes('rev-parse --verify "agent/issue-42"')) {
+      if (cmd.includes("rev-parse --verify 'agent/issue-42'")) {
         return { stdout: '', stderr: 'error', exitCode: 1 };
       }
       return { stdout: '', stderr: '', exitCode: 0 };
@@ -86,11 +87,11 @@ describe('setupWorktree', () => {
   test('branches from session branch when autoMerge is true and session branch exists', async () => {
     mockExec.mockImplementation((cmd: string) => {
       // No existing agent branch
-      if (cmd.includes('rev-parse --verify "agent/issue-42"')) {
+      if (cmd.includes("rev-parse --verify 'agent/issue-42'")) {
         return { stdout: '', stderr: 'error', exitCode: 1 };
       }
       // Session branch exists on remote
-      if (cmd.includes('rev-parse --verify "origin/session/main"')) {
+      if (cmd.includes("rev-parse --verify 'origin/session/main'")) {
         return { stdout: 'abc123', stderr: '', exitCode: 0 };
       }
       return { stdout: '', stderr: '', exitCode: 0 };
@@ -167,7 +168,7 @@ describe('setupWorktree', () => {
         return { stdout: 'some-other-branch', stderr: '', exitCode: 0 };
       }
       // No existing agent branch after cleanup
-      if (cmd.includes('rev-parse --verify "agent/issue-42"')) {
+      if (cmd.includes("rev-parse --verify 'agent/issue-42'")) {
         return { stdout: '', stderr: 'error', exitCode: 1 };
       }
       return { stdout: '', stderr: '', exitCode: 0 };
@@ -185,7 +186,7 @@ describe('setupWorktree', () => {
     // No worktree dir, but branch exists
     mockExists.mockReturnValue(false);
     mockExec.mockImplementation((cmd: string) => {
-      if (cmd.includes('rev-parse --verify "agent/issue-42"')) {
+      if (cmd.includes("rev-parse --verify 'agent/issue-42'")) {
         return { stdout: 'abc123', stderr: '', exitCode: 0 };
       }
       if (cmd.includes('merge-base')) {
@@ -207,7 +208,7 @@ describe('setupWorktree', () => {
   test('recreates a missing saved worktree from the saved branch', async () => {
     mockExists.mockReturnValue(false);
     mockExec.mockImplementation((cmd: string) => {
-      if (cmd.includes('rev-parse --verify "agent/custom-286"')) {
+      if (cmd.includes("rev-parse --verify 'agent/custom-286'")) {
         return { stdout: 'abc123', stderr: '', exitCode: 0 };
       }
       if (cmd.includes('merge-base')) {
@@ -228,15 +229,23 @@ describe('setupWorktree', () => {
       resumed: true,
     });
     expect(mockExec).toHaveBeenCalledWith(
-      'git worktree add "/home/user/project/.worktrees/custom-286" "agent/custom-286"',
+      "git worktree add '/home/user/project/.worktrees/custom-286' 'agent/custom-286'",
       { cwd: '/home/user/project' },
     );
+  });
+
+  test('rejects saved worktree paths outside the repo worktrees directory', async () => {
+    await expect(setupWorktree({
+      ...baseOptions,
+      savedBranch: 'agent/custom-286',
+      savedPath: '/tmp/outside-worktree',
+    })).rejects.toThrow(/unsafe worktree path/);
   });
 
   test('deletes remote branch on fresh creation', async () => {
     // No existing branch
     mockExec.mockImplementation((cmd: string) => {
-      if (cmd.includes('rev-parse --verify "agent/issue-42"')) {
+      if (cmd.includes("rev-parse --verify 'agent/issue-42'")) {
         return { stdout: '', stderr: 'error', exitCode: 1 };
       }
       return { stdout: '', stderr: '', exitCode: 0 };
@@ -438,6 +447,25 @@ describe('cleanupWorktree', () => {
     expect(result.status).toBe('removed');
     expect(mockExec).toHaveBeenCalledWith(
       expect.stringContaining('git worktree remove'),
+      expect.anything(),
+    );
+  });
+
+  test('skips cleanup for worktree paths outside the repo worktrees directory', async () => {
+    mockExists.mockReturnValue(true);
+
+    const result = await cleanupWorktree({
+      ...baseOptions,
+      worktreePath: '/tmp/outside-worktree',
+    });
+
+    expect(result).toEqual({
+      status: 'skipped',
+      path: '/tmp/outside-worktree',
+      reason: 'unsafe-worktree-path',
+    });
+    expect(mockExec).not.toHaveBeenCalledWith(
+      expect.stringContaining('rm -rf'),
       expect.anything(),
     );
   });

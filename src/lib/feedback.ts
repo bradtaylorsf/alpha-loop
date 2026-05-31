@@ -417,7 +417,10 @@ function resolveFeedbackAssociation(payload: FeedbackIngestPayload, sessionsRoot
 
   const issueNumber = payload.issueNumber ?? (sessionRef ? manifestIssueNumber(sessionRef.manifest) : null);
   const prNumber = payload.prNumber ?? (sessionRef ? manifestPrNumber(sessionRef.manifest) : null);
-  const commentTarget = issueNumber ?? prNumber;
+  const commentTarget = payload.issueNumber
+    ?? payload.prNumber
+    ?? issueNumber
+    ?? prNumber;
 
   if (!commentTarget) {
     throw new Error('Feedback must include an issue number, PR number, or resolvable session id.');

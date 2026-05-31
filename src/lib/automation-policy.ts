@@ -373,14 +373,29 @@ function normalizeCommand(command: string): string {
   return command.trim().replace(/\s+/g, ' ');
 }
 
+function hasShellControlOperator(commandSuffix: string): boolean {
+  return /[;&|<>`]/.test(commandSuffix)
+    || commandSuffix.includes('$(')
+    || /[\r\n]/.test(commandSuffix);
+}
+
+function suffixAllowedAsArguments(commandSuffix: string): boolean {
+  const suffix = commandSuffix.trim();
+  return suffix.length === 0 || !hasShellControlOperator(suffix);
+}
+
 function commandAllowed(command: string, allowedCommand: string): boolean {
   const normalized = normalizeCommand(command);
   const allowed = normalizeCommand(allowedCommand);
   if (!allowed) return false;
   if (allowed.endsWith('*')) {
-    return normalized.startsWith(allowed.slice(0, -1).trimEnd());
+    const prefix = allowed.slice(0, -1).trimEnd();
+    if (!normalized.startsWith(prefix)) return false;
+    return suffixAllowedAsArguments(normalized.slice(prefix.length));
   }
-  return normalized === allowed || normalized.startsWith(`${allowed} `);
+  if (normalized === allowed) return true;
+  if (!normalized.startsWith(`${allowed} `)) return false;
+  return suffixAllowedAsArguments(normalized.slice(allowed.length));
 }
 
 export function evaluateCommandPolicy(
@@ -512,7 +527,11 @@ function countSessions(manifests: DurableSessionManifest[], excludeSessionId?: s
   let active = 0;
   let paused = 0;
   for (const manifest of filtered) {
-    const status = String(manifest.feedback?.currentStatus ?? manifest.status);
+    const manifestStatus = String(manifest.status);
+    const feedbackStatus = String(manifest.feedback?.currentStatus ?? '');
+    const status = manifestStatus !== 'running' && feedbackStatus === 'running'
+      ? manifestStatus
+      : (feedbackStatus || manifestStatus);
     if (ACTIVE_SESSION_STATUSES.has(status)) active++;
     if (isWaitingFeedbackStatus(status)) paused++;
   }

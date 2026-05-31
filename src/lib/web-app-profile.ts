@@ -280,9 +280,24 @@ function readExistingBrowserArtifact(filePath: string): Partial<WebAppVerificati
     const browser = parsed.browser && typeof parsed.browser === 'object'
       ? parsed.browser as Record<string, unknown>
       : {};
+    const screenshotEntries = Array.isArray(parsed.screenshots)
+      ? parsed.screenshots
+      : [];
+    const screenshots = screenshotEntries
+      .map((entry) => {
+        if (typeof entry === 'string') return entry;
+        if (entry && typeof entry === 'object') {
+          const path = (entry as Record<string, unknown>).path;
+          return typeof path === 'string' ? path : '';
+        }
+        return '';
+      })
+      .map((item) => item.trim())
+      .filter(Boolean);
     return {
       consoleErrors: stringList(parsed.consoleErrors ?? parsed.console_errors ?? browser.consoleErrors ?? browser.console_errors),
       networkErrors: stringList(parsed.networkErrors ?? parsed.network_errors ?? browser.networkErrors ?? browser.network_errors),
+      screenshots,
       summary: String(parsed.summary ?? browser.summary ?? ''),
       passed: parsed.passed === true || browser.passed === true,
       skipped: parsed.skipped === true || browser.skipped === true,
@@ -305,10 +320,11 @@ export function collectWebAppVerificationSummary(
 ): WebAppVerificationSummary {
   mkdirSync(dirname(profile.artifactPath), { recursive: true });
   const existing = readExistingBrowserArtifact(profile.artifactPath);
+  const screenshots = existing?.screenshots ?? (args.skipped ? [] : profile.screenshots.map((shot) => shot.relativePath));
   const summary: WebAppVerificationSummary = {
     artifactPath: profile.artifactRelativePath,
     browserResultPath: profile.artifactRelativePath,
-    screenshots: profile.screenshots.map((shot) => shot.relativePath),
+    screenshots,
     previewUrl: existing?.previewUrl ?? args.previewUrl ?? (profile.preview.url || null),
     devUrl: profile.devUrl,
     consoleErrors: existing?.consoleErrors ?? [],
@@ -324,7 +340,7 @@ export function collectWebAppVerificationSummary(
       issueNum: args.issueNum,
       devUrl: profile.devUrl,
       previewUrl: summary.previewUrl,
-      screenshots: profile.screenshots.map((shot) => ({
+      screenshots: args.skipped ? [] : profile.screenshots.map((shot) => ({
         name: shot.name,
         url: shot.fullUrl,
         viewport: shot.viewport,
@@ -363,10 +379,10 @@ export function buildWebAppQaChecklist(args: {
   planChecklist?: string[];
 }): string[] {
   const targetUrl = args.verification?.previewUrl ?? (args.profile.preview.url || args.profile.devUrl);
-  const screenshots = args.verification?.screenshots ?? args.profile.screenshots.map((shot) => shot.relativePath);
+  const screenshots = args.verification?.screenshots ?? [];
   return dedupe([
     ...(targetUrl ? [`Open ${targetUrl} and confirm issue #${args.issueNum} works in the browser.`] : []),
-    ...args.profile.screenshots.map((shot) => `Review ${shot.name} at ${shot.viewport.preset} viewport (${shot.relativePath}).`),
+    ...screenshots.map((screenshot) => `Review captured screenshot ${screenshot}.`),
     ...(screenshots.length === 0 ? ['Capture or review at least one browser screenshot before approving.'] : []),
     `Confirm the browser console has no unexpected errors (${args.profile.artifactRelativePath}).`,
     `Confirm network failures are expected or resolved (${args.profile.artifactRelativePath}).`,
@@ -376,6 +392,12 @@ export function buildWebAppQaChecklist(args: {
 
 function boolStatus(value: boolean | undefined, ok = 'none'): string {
   return value === undefined ? 'unknown' : value ? ok : 'see artifact';
+}
+
+function browserCheckStatus(context: WebAppPRContext, errors: string[] | undefined, ok: string): string {
+  if (errors && errors.length > 0) return errors.join('; ');
+  if (context.skipped) return 'not checked (verification skipped)';
+  return boolStatus(context.passed, ok);
 }
 
 export function formatWebAppPRSection(context: WebAppPRContext | null | undefined): string[] {
@@ -401,8 +423,8 @@ export function formatWebAppPRSection(context: WebAppPRContext | null | undefine
   }
 
   lines.push('### Browser Checks', '');
-  lines.push(`- Console errors: ${context.consoleErrors && context.consoleErrors.length > 0 ? context.consoleErrors.join('; ') : boolStatus(context.passed, 'none reported')}`);
-  lines.push(`- Network failures: ${context.networkErrors && context.networkErrors.length > 0 ? context.networkErrors.join('; ') : boolStatus(context.passed, 'none reported')}`);
+  lines.push(`- Console errors: ${browserCheckStatus(context, context.consoleErrors, 'none reported')}`);
+  lines.push(`- Network failures: ${browserCheckStatus(context, context.networkErrors, 'none reported')}`);
   lines.push('');
 
   if (context.qaChecklist && context.qaChecklist.length > 0) {

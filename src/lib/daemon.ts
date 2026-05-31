@@ -264,6 +264,25 @@ export function releaseDaemonLock(lock: DaemonLockHandle | null): boolean {
   }
 }
 
+export function refreshDaemonLock(lock: DaemonLockHandle | null, now = new Date()): boolean {
+  if (!lock) return false;
+  try {
+    const current = parseLock(readFileSync(lock.path, 'utf-8'));
+    if (current?.token !== lock.token) return false;
+    const payload: DaemonLockPayload = {
+      ...current,
+      updatedAt: now.toISOString(),
+    };
+    const tmpPath = `${lock.path}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(payload, null, 2) + '\n');
+    renameSync(tmpPath, lock.path);
+    lock.payload = payload;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function writeDaemonState(
   config: Config,
   daemon: DaemonConfig,
@@ -595,6 +614,7 @@ export async function runDaemonLoop(
   const scheduler = options.scheduler ?? createDaemonScheduler(daemon, nowMs());
   const shouldAcquireLock = options.acquireLock ?? daemon.lock.enabled;
   let lock: DaemonLockHandle | null = null;
+  let lockHeartbeat: NodeJS.Timeout | null = null;
   let ticksRun = 0;
   let shutdownRequested = false;
   const shutdownController = new AbortController();
@@ -613,6 +633,12 @@ export async function runDaemonLoop(
   try {
     if (shouldAcquireLock) {
       lock = acquireDaemonLock(config, daemon, { now: now(), isPidAlive: options.isPidAlive });
+      if (daemon.lock.staleAfterSeconds > 0) {
+        const heartbeatMs = Math.max(1000, Math.min(60_000, Math.floor(daemon.lock.staleAfterSeconds * 500)));
+        lockHeartbeat = setInterval(() => {
+          refreshDaemonLock(lock);
+        }, heartbeatMs);
+      }
     }
 
     writeDaemonState(config, daemon, {
@@ -630,6 +656,7 @@ export async function runDaemonLoop(
     while (!shutdownRequested) {
       const due = dueDaemonTicks(daemon, scheduler, nowMs());
       if (due.length === 0) {
+        refreshDaemonLock(lock, now());
         writeDaemonState(config, daemon, {
           status: 'idle',
           startedAt,
@@ -647,6 +674,7 @@ export async function runDaemonLoop(
       for (const kind of due) {
         if (shutdownRequested) break;
         if (options.maxTicks !== undefined && ticksRun >= options.maxTicks) break;
+        refreshDaemonLock(lock, now());
         writeDaemonState(config, daemon, {
           status: 'running',
           startedAt,
@@ -657,6 +685,7 @@ export async function runDaemonLoop(
         await runDaemonTick(config, daemon, kind, actions);
         markDaemonTickRun(scheduler, kind, nowMs());
         ticksRun += 1;
+        refreshDaemonLock(lock, now());
         writeDaemonState(config, daemon, {
           status: 'running',
           startedAt,
@@ -709,6 +738,7 @@ export async function runDaemonLoop(
     }
     throw err;
   } finally {
+    if (lockHeartbeat) clearInterval(lockHeartbeat);
     writeDaemonState(config, daemon, {
       status: 'stopped',
       startedAt,

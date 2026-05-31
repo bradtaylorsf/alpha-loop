@@ -57,6 +57,36 @@ describe('human feedback session state machine', () => {
     )).toThrow(InvalidSessionTransitionError);
   });
 
+  it('uses manifest status when legacy feedback status is still running', () => {
+    const next = applyHumanFeedbackTransition({
+      status: 'human_input_requested',
+      stage: 'human_input_requested',
+      feedback: {
+        currentStatus: 'running',
+        question: null,
+        resumeInstructions: null,
+        qaChecklist: [],
+        prUrl: null,
+        previewUrl: null,
+        classification: null,
+        followUpIssueNumber: null,
+        followUpIssueUrl: null,
+        transitionHistory: [] as any[],
+        events: [] as any[],
+        latestFeedback: null,
+        feedbackHistory: [],
+        updatedAt: '2026-05-30T12:00:00.000Z',
+      },
+    }, {
+      to: 'feedback_received',
+      reason: 'Feedback arrived for a status-only paused manifest',
+      at: '2026-05-30T12:05:00.000Z',
+    });
+
+    expect(next.feedback.transitionHistory[0].from).toBe('human_input_requested');
+    expect(next.feedback.currentStatus).toBe('feedback_received');
+  });
+
   it('can enter feedback_received from a waiting state with a classification', () => {
     const waiting = applyHumanFeedbackTransition(
       { status: 'running', stage: 'implement' },

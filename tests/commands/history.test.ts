@@ -720,6 +720,43 @@ describe('history', () => {
       expect(manifest.status).toBe('paused');
     });
 
+    it('does not remove retained worktree paths outside the repo worktrees directory', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const outsideDir = path.join(tmpDir, 'other-repo', '.worktrees', 'issue-284');
+      fs.mkdirSync(outsideDir, { recursive: true });
+      createDurableManifest(sessionsDir, '20250115-100000', {
+        status: 'paused',
+        stage: 'implement',
+        updatedAt: '2025-01-15T10:00:00.000Z',
+        worktreePath: outsideDir,
+      });
+
+      historyClean(sessionsDir, { pausedWorktreeDays: 1, completedWorktreeDays: 30 });
+
+      expect(fs.existsSync(outsideDir)).toBe(true);
+      const manifest = JSON.parse(fs.readFileSync(path.join(sessionsDir, 'session', '20250115-100000', 'session.json'), 'utf-8'));
+      expect(manifest.cleanup.status).toBe('preserved');
+      expect(manifest.cleanup.reason).toContain('unsafe-worktree-path-skipped');
+    });
+
+    it('resolves relative retained worktree paths inside the project worktrees directory', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const worktreePath = path.join(tmpDir, '.worktrees', 'issue-284');
+      fs.mkdirSync(worktreePath, { recursive: true });
+      createDurableManifest(sessionsDir, '20250115-100000', {
+        status: 'paused',
+        stage: 'implement',
+        updatedAt: '2025-01-15T10:00:00.000Z',
+        worktreePath: path.join('.worktrees', 'issue-284'),
+      });
+
+      historyClean(sessionsDir, { pausedWorktreeDays: 1, completedWorktreeDays: 30 });
+
+      expect(fs.existsSync(worktreePath)).toBe(false);
+      const manifest = JSON.parse(fs.readFileSync(path.join(sessionsDir, 'session', '20250115-100000', 'session.json'), 'utf-8'));
+      expect(manifest.cleanup.status).toBe('removed');
+    });
+
     it('removes sessions older than 30 days', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
 
