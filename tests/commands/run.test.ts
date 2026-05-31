@@ -867,6 +867,241 @@ describe('runCommand', () => {
     expect(mockGetEpicSubIssues).toHaveBeenCalledWith('owner/repo', 195);
   });
 
+  test('--issue dry-run processes exactly the requested standalone issue', async () => {
+    mockGetIssueWithComments.mockReturnValue({
+      number: 42,
+      title: 'Target issue',
+      body: 'Target body',
+      labels: ['ready'],
+      state: 'OPEN',
+    });
+    mockListEpics.mockReturnValue([]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Target issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({ issue: 42, dryRun: true });
+
+    expect(mockGetIssueWithComments).toHaveBeenCalledWith('owner/repo', 42);
+    expect(mockPollIssues).not.toHaveBeenCalled();
+    expect(mockProcessIssue).toHaveBeenCalledTimes(1);
+    expect(mockProcessIssue).toHaveBeenCalledWith(
+      42,
+      'Target issue',
+      'Target body',
+      expect.objectContaining({ dryRun: true }),
+      expect.any(Object),
+    );
+    expect(mockCreateSession).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      epicNum: undefined,
+      milestone: undefined,
+    }));
+    expect(mockLog.dry).toHaveBeenCalledWith('Resolved --issue #42: Target issue');
+    expect(mockLog.dry).toHaveBeenCalledWith(expect.stringContaining("Issue #42 is eligible: open, labeled 'ready', not blocked"));
+    expect(mockUpdateEpicChecklist).not.toHaveBeenCalled();
+  });
+
+  test('--issue passes one parent epic context and updates only that checklist item', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      skipPostSessionReview: true,
+      ...overrides,
+    }) as any);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 42) {
+        return {
+          number: 42,
+          title: 'Target child',
+          body: 'Child body',
+          labels: ['ready'],
+          state: 'OPEN',
+        };
+      }
+      return null;
+    });
+    mockListEpics.mockReturnValue([{
+      number: 293,
+      title: 'Parent Epic',
+      body: `## Goal
+Coordinate hosted work.
+
+## Acceptance Criteria
+- [ ] Child agents get parent context
+
+## Checklist
+- [ ] #42 Target child
+- [ ] #43 Other child`,
+      labels: ['epic'],
+      state: 'OPEN',
+    }]);
+    let capturedEpicContext: any;
+    mockProcessIssue.mockImplementation(async (_issueNum: number, _title: string, _body: string, _config: any, _session: any, options: any) => {
+      capturedEpicContext = JSON.parse(JSON.stringify(options.epicContext));
+      return {
+        issueNum: 42,
+        title: 'Target child',
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        duration: 60,
+        filesChanged: 5,
+      };
+    });
+
+    await runCommand({ issue: 42 });
+
+    expect(mockPollIssues).not.toHaveBeenCalled();
+    expect(mockGetIssueWithComments.mock.calls.map((call) => call[1])).toEqual([42]);
+    expect(mockCreateSession).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      epicNum: 293,
+      epicTitle: 'Parent Epic',
+    }));
+    expect(mockProcessIssue).toHaveBeenCalledTimes(1);
+    expect(capturedEpicContext).toEqual(expect.objectContaining({
+      number: 293,
+      title: 'Parent Epic',
+      bodySummary: expect.stringContaining('Coordinate hosted work'),
+      acceptanceCriteria: expect.arrayContaining(['- [ ] Child agents get parent context']),
+    }));
+    expect(capturedEpicContext.subIssues).toEqual([
+      { issueNum: 42, title: 'Target child', checked: false },
+      { issueNum: 43, title: 'Other child', checked: false },
+    ]);
+    expect(mockUpdateEpicChecklist).toHaveBeenCalledTimes(1);
+    expect(mockUpdateEpicChecklist).toHaveBeenCalledWith('owner/repo', 293, 42, true);
+  });
+
+  test('--issue rejects parent epic misuse with --epic guidance', async () => {
+    mockGetIssueWithComments.mockReturnValue({
+      number: 293,
+      title: 'Parent Epic',
+      body: '- [ ] #42',
+      labels: ['ready', 'epic'],
+      state: 'OPEN',
+    });
+
+    await runCommand({ issue: 293, dryRun: true });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith('Issue #293 is labeled \'epic\'. Use alpha-loop run --epic 293 instead.');
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+  });
+
+  test('--issue rejects blocked issues before session creation', async () => {
+    mockGetIssueWithComments.mockReturnValue({
+      number: 42,
+      title: 'Blocked issue',
+      body: 'Body',
+      labels: ['ready', 'blocked'],
+      state: 'OPEN',
+    });
+
+    await runCommand({ issue: 42, dryRun: true });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith('Issue #42 is blocked. Remove the \'blocked\' label before running --issue.');
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+  });
+
+  test('--issue rejects closed issues before session creation', async () => {
+    mockGetIssueWithComments.mockReturnValue({
+      number: 42,
+      title: 'Closed issue',
+      body: 'Body',
+      labels: ['ready'],
+      state: 'CLOSED',
+    });
+
+    await runCommand({ issue: 42, dryRun: true });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith('Issue #42 is closed. Reopen it before running --issue.');
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+  });
+
+  test('--issue rejects missing issues before session creation', async () => {
+    mockGetIssueWithComments.mockReturnValue(null);
+
+    await runCommand({ issue: 42, dryRun: true });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith('Could not fetch issue #42. Check the issue number and repository before running --issue.');
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+  });
+
+  test('--issue rejects ambiguous multi-parent child issues before mutation', async () => {
+    mockGetIssueWithComments.mockReturnValue({
+      number: 42,
+      title: 'Target child',
+      body: 'Child body',
+      labels: ['ready'],
+      state: 'OPEN',
+    });
+    mockListEpics.mockReturnValue([
+      { number: 293, title: 'Hosted Epic', body: '- [ ] #42 Target child', labels: ['epic'], state: 'OPEN' },
+      { number: 294, title: 'Other Epic', body: '- [ ] #42 Target child', labels: ['epic'], state: 'OPEN' },
+    ]);
+
+    await runCommand({ issue: 42, dryRun: true });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('Issue #42 is referenced by multiple open parent epics'));
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockUpdateEpicChecklist).not.toHaveBeenCalled();
+  });
+
+  test('--issue exits nonzero when the targeted issue pipeline fails', async () => {
+    mockGetIssueWithComments.mockReturnValue({
+      number: 42,
+      title: 'Target issue',
+      body: 'Target body',
+      labels: ['ready'],
+      state: 'OPEN',
+    });
+    mockListEpics.mockReturnValue([]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Target issue',
+      status: 'failure',
+      testsPassing: false,
+      verifyPassing: false,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 0,
+    });
+
+    await runCommand({ issue: 42, dryRun: true });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith('Issue #42 failed during processing');
+  });
+
+  test.each([
+    [{ issue: 42, epic: 293, dryRun: true }, '--epic'],
+    [{ issue: 42, epics: '293,294', dryRun: true }, '--epics'],
+    [{ issue: 42, verifyOnly: 293, dryRun: true }, '--verify-only'],
+  ])('--issue rejects incompatible flag %s before fetching issues', async (options, flag) => {
+    await runCommand(options as any);
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining(`--issue cannot be combined with ${flag}`));
+    expect(mockGetIssueWithComments).not.toHaveBeenCalled();
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+  });
+
   test('processes all matching issues and exits', async () => {
     mockPollIssues.mockReturnValue([
       { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },

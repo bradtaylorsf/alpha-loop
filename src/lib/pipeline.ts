@@ -1264,6 +1264,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     agentCwd: worktreePath,
     sessionLogsDir: session.logsDir,
     sessionName: session.name,
+    ...epicOption,
   });
 
   if (!config.dryRun) {
@@ -1921,6 +1922,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       agentCwd: worktreePath,
       sessionLogsDir: session.logsDir,
       sessionName: session.name,
+      ...epicOption,
     });
     learningFiles.push(learningFile);
   }
@@ -1946,6 +1948,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       reviewGate,
       testOutput,
       testsPassing,
+      session.epic,
     );
 
     try {
@@ -2209,13 +2212,15 @@ function buildBatchPRBody(
   reviewGate: GateResult,
   testOutput: string,
   testsPassing: boolean,
+  epicNum?: number,
 ): string {
   const testSummary = extractTestSummary(testOutput);
   const reviewStatus = reviewGate.passed ? 'PASS' : 'FAIL';
-  const closesRefs = issues.map((i) => `Closes #${i.issueNum}`).join('\n');
+  const refs = issues.map((i) => `Closes #${i.issueNum}`);
+  if (epicNum !== undefined) refs.push(`Part of #${epicNum}`);
 
   const lines: string[] = [
-    closesRefs,
+    refs.join('\n'),
     '',
     '## Summary',
     '',

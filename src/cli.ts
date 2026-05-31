@@ -39,6 +39,7 @@ program
   .option('--validate', 'Run pre-session validation on all queued issues before processing')
   .option('--fix', 'Auto-fix validation issues (reorder deps, comment on incomplete issues)')
   .option('--verbose', 'Stream live agent output to terminal')
+  .option('--issue <n>', 'Process exactly one issue by issue number (skips the picker)', parseInt)
   .option('--epic <n>', 'Process a specific epic by issue number (skips the picker)', parseInt)
   .option('--epics <ids>', 'Process multiple epics in order (comma-separated issue numbers)')
   .option('--queue-branch-mode <mode>', 'Branch mode for --epics: stacked or independent')

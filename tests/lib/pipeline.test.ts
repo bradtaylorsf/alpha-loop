@@ -408,12 +408,13 @@ describe('processIssue', () => {
     }));
   });
 
-  test('passes epic context into plan, implementation, and review prompt builders', async () => {
+  test('passes epic context into plan, implementation, review, and learning stages', async () => {
     await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession(), { epicContext });
 
     expect(mockBuildIssuePlanPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+    expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
   });
 
   test('does not pass epic context when pipeline options are omitted', async () => {
@@ -422,6 +423,7 @@ describe('processIssue', () => {
     expect(mockBuildIssuePlanPrompt.mock.calls[0][0]).not.toHaveProperty('epicContext');
     expect(mockBuildImplementPrompt.mock.calls[0][0]).not.toHaveProperty('epicContext');
     expect(mockBuildReviewPrompt.mock.calls[0][0]).not.toHaveProperty('epicContext');
+    expect(mockExtractLearnings.mock.calls[0][0]).not.toHaveProperty('epicContext');
   });
 
   test('prompt traces contain epic context only when provided', async () => {
@@ -1007,12 +1009,16 @@ describe('processBatch', () => {
     { number: 11, title: 'Issue 11', body: 'Body 11' },
   ];
 
-  test('passes epic context into batch plan, implementation, and review prompt builders', async () => {
-    await processBatch(batchIssues, makeConfig({ batch: true }), makeSession(), { epicContext });
+  test('passes epic context into batch prompts, learnings, and PR body', async () => {
+    await processBatch(batchIssues, makeConfig({ batch: true }), { ...makeSession(), epic: 195 }, { epicContext });
 
     expect(mockBuildBatchPlanPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildBatchImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
     expect(mockBuildBatchReviewPrompt).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+    expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
+    expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.stringContaining('Part of #195'),
+    }));
   });
 
   test('dry run mode does not save batch results or traces', async () => {
