@@ -16,6 +16,7 @@ export type ImplementPromptOptions = {
   projectContext?: string;
   previousResult?: string;
   learningContext?: string;
+  resumeContext?: string;
 };
 
 export type ReviewPromptOptions = {
@@ -208,7 +209,7 @@ export function buildIssuePlanPrompt(options: IssuePlanPromptOptions): string {
  * Build the implementation prompt for an AI agent.
  */
 export function buildImplementPrompt(options: ImplementPromptOptions): string {
-  const { issueNum, title, body, comments, planContent, epicContext, visionContext, projectContext, previousResult, learningContext } = options;
+  const { issueNum, title, body, comments, planContent, epicContext, visionContext, projectContext, previousResult, learningContext, resumeContext } = options;
 
   const sections: string[] = [
     `Implement GitHub issue #${issueNum}: ${title}`,
@@ -246,6 +247,10 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
 
   if (learningContext) {
     sections.push('', '', learningContext);
+  }
+
+  if (resumeContext) {
+    sections.push('', '', '## Resume Context', resumeContext);
   }
 
   sections.push(

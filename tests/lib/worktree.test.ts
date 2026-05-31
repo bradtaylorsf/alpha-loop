@@ -204,6 +204,35 @@ describe('setupWorktree', () => {
     expect(addCall).toBeDefined();
   });
 
+  test('recreates a missing saved worktree from the saved branch', async () => {
+    mockExists.mockReturnValue(false);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('rev-parse --verify "agent/custom-286"')) {
+        return { stdout: 'abc123', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('merge-base')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await setupWorktree({
+      ...baseOptions,
+      savedBranch: 'agent/custom-286',
+      savedPath: '/home/user/project/.worktrees/custom-286',
+    });
+
+    expect(result).toEqual({
+      path: '/home/user/project/.worktrees/custom-286',
+      branch: 'agent/custom-286',
+      resumed: true,
+    });
+    expect(mockExec).toHaveBeenCalledWith(
+      'git worktree add "/home/user/project/.worktrees/custom-286" "agent/custom-286"',
+      { cwd: '/home/user/project' },
+    );
+  });
+
   test('deletes remote branch on fresh creation', async () => {
     // No existing branch
     mockExec.mockImplementation((cmd: string) => {

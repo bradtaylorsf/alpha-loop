@@ -431,8 +431,17 @@ export function isRecoveredResult<T extends { recoveryMode?: PipelineRecoveryMod
   return result.recoveryMode !== undefined;
 }
 
+export type PipelineResumeStage = 'implementation' | 'verification' | 'clarification';
+
 export type PipelineOptions = {
   epicContext?: EpicPromptContext;
+  resumeContext?: string;
+  resumeStage?: PipelineResumeStage;
+  existingPrUrl?: string | null;
+  savedWorktree?: {
+    path?: string | null;
+    branch?: string | null;
+  };
 };
 
 const PAUSE_REQUEST_FILE = 'alpha-loop-pause-request.json';
@@ -648,6 +657,7 @@ async function pauseSessionForRequest(input: PauseSessionInput): Promise<Pipelin
     projectDir,
     autoCleanup: config.autoCleanup,
     preserveIfCommits: true,
+    worktreePath,
     sessionStatus: waitingStatus,
     dryRun: config.dryRun,
   });
@@ -1001,6 +1011,9 @@ export async function processIssue(
     statePath: defaultEscalationStatePath(projectDir),
   });
   const epicOption = epicPromptOption(pipelineOptions);
+  const resumeStage = pipelineOptions.resumeStage;
+  const resumeContext = pipelineOptions.resumeContext?.trim();
+  const resumeVerificationOnly = resumeStage === 'verification';
   let turnCounter = 0;
   const stageCtx = (stage: RoutingStageName): StageContext => ({
     stage,
@@ -1059,6 +1072,8 @@ export async function processIssue(
       autoMerge: config.autoMerge,
       skipInstall: config.skipInstall,
       setupCommand: config.setupCommand,
+      savedBranch: pipelineOptions.savedWorktree?.branch,
+      savedPath: pipelineOptions.savedWorktree?.path,
       dryRun: config.dryRun,
     });
     worktreePath = wt.path;
@@ -1135,11 +1150,29 @@ export async function processIssue(
   currentStep = 'plan';
   recordSessionStage(session, 'plan');
   log.step('Step 3: Planning');
-  let plan: IssuePlan = DEFAULT_PLAN;
+  let plan: IssuePlan = resumeVerificationOnly
+    ? {
+        ...DEFAULT_PLAN,
+        summary: 'Resume verification after human feedback',
+        implementation: 'No implementation requested by the resume classification; verify the saved branch and update the existing PR.',
+        testing: { needed: true, reason: 'Resumed QA approval still requires test confirmation.' },
+        verification: {
+          needed: true,
+          instructions: resumeContext
+            ? `Use the resume context and prior QA checklist while verifying the existing implementation.\n\n${resumeContext}`
+            : 'Verify the existing implementation after human QA approval.',
+          reason: 'Human feedback approved QA or requested verification without implementation changes.',
+        },
+        qa: { needed: false, checklist: [], reason: 'Resume path is consuming QA feedback, not requesting new QA yet.' },
+      }
+    : DEFAULT_PLAN;
   // Write plan inside the worktree (agents sandbox to their CWD), then move to sessions dir
   const planFileInWorktree = join(worktreePath, `plan-issue-${issueNum}.json`);
   const planFileInSession = join(session.logsDir, `plan-issue-${issueNum}.json`);
-  if (!config.dryRun) {
+  if (resumeVerificationOnly) {
+    log.info('Planning skipped: resume classified this feedback as verification-only');
+    stepsCompleted.push('plan-skipped');
+  } else if (!config.dryRun) {
     try {
       const planPrompt = buildIssuePlanPrompt({
         issueNum,
@@ -1170,7 +1203,7 @@ export async function processIssue(
       if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
         log.warn(`Agent hit a transient error during planning for #${issueNum} — re-queuing`);
         requeueIssue(config, issueNum);
-        const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+        const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, worktreePath });
         recordSessionCleanup(session, {
           status: cleanup.status,
           worktreePath: cleanup.path,
@@ -1215,21 +1248,28 @@ export async function processIssue(
   currentStep = 'implement';
   recordSessionStage(session, 'implement');
   log.step('Step 4: Implementing');
-  // Build resume context if worktree was recovered from a previous session
-  const resumeNote = worktreeResumed
-    ? `**IMPORTANT: This worktree contains work from a previous session that was interrupted.**
-Run \`git log --oneline -10\` to see what has already been done.
-Do NOT redo work that is already committed. Build on top of existing progress.\n\n`
-    : '';
+  const implementResumeContext = [
+    worktreeResumed
+      ? [
+          '**Recovered worktree:** this branch contains work from a previous session.',
+          'Run `git log --oneline -10` to see what has already been done.',
+          'Do not redo committed work; build on top of existing progress.',
+        ].join('\n')
+      : '',
+    resumeContext ?? '',
+  ].filter(Boolean).join('\n\n');
 
-  if (!config.dryRun) {
+  if (resumeVerificationOnly) {
+    log.info('Implementation skipped: human feedback was classified as approval/verification-only');
+    stepsCompleted.push('implement-skipped');
+  } else if (!config.dryRun) {
     // Load vision and project context
     const visionContext = loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md'));
     const projectContext = loadFileIfExists(join(projectDir, '.alpha-loop', 'context.md'));
     const previousResult = getPreviousResult(session);
     const learningContext = getLearningContext(join(projectDir, '.alpha-loop', 'learnings'));
 
-    const implementPrompt = resumeNote + buildImplementPrompt({
+    const implementPrompt = buildImplementPrompt({
       issueNum,
       title,
       body,
@@ -1240,6 +1280,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       projectContext: projectContext ?? undefined,
       previousResult: previousResult ?? undefined,
       learningContext: learningContext || undefined,
+      resumeContext: implementResumeContext || undefined,
     });
 
     // Trace the implement prompt
@@ -1275,7 +1316,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       if (isTransientError(implResult.output)) {
         log.warn(`Agent hit a transient error during implementation for #${issueNum} — re-queuing`);
         requeueIssue(config, issueNum);
-        const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
+        const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true, worktreePath });
         recordSessionCleanup(session, {
           status: cleanup.status,
           worktreePath: cleanup.path,
@@ -1289,7 +1330,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, 'Agent loop failed during implementation. See logs for details.');
       writeRecoverableCrashMarker(new Error('Implementation failed after writing commits'), 'implement');
-      const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
+      const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true, worktreePath });
       recordSessionCleanup(session, {
         status: cleanup.status,
         worktreePath: cleanup.path,
@@ -1561,6 +1602,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         verifyInstructions: plan.verification.instructions,
         verifyMethod: plan.verification.method,
         verifyCommand: plan.verification.command,
+        resumeContext: resumeContext || undefined,
         ...epicOption,
       });
       verifyOutput = verifyResult.output;
@@ -1724,7 +1766,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   currentStep = 'pr';
   recordSessionStage(session, 'pr');
   log.step('Step 9: Creating PR');
-  let prUrl: string | undefined;
+  let prUrl: string | undefined = pipelineOptions.existingPrUrl ?? undefined;
 
   if (!config.dryRun) {
     const prBase = config.autoMerge ? session.branch : config.baseBranch;
@@ -1939,6 +1981,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       projectDir,
       autoCleanup: config.autoCleanup,
       preserveIfCommits: true,
+      worktreePath,
       dryRun: config.dryRun,
     });
     recordSessionCleanup(session, {
@@ -1952,6 +1995,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       issueNum,
       projectDir,
       autoCleanup: config.autoCleanup,
+      worktreePath,
       dryRun: config.dryRun,
     });
     recordSessionCleanup(session, {

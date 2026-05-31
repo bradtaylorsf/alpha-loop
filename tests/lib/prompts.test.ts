@@ -133,6 +133,19 @@ describe('buildImplementPrompt', () => {
     expect(prompt).toContain('Keep the implementation narrowly scoped to issue #189');
     expect(prompt).toContain('Preserve contracts that sibling sub-issues depend on');
   });
+
+  test('includes resume context before scope rules', () => {
+    const prompt = buildImplementPrompt({
+      issueNum: 286,
+      title: 'Resume paused work',
+      body: 'Resume after human feedback',
+      resumeContext: 'Human asked for the CTA copy to change.\nPrior prompt: `.alpha-loop/traces/session/prompts/issue-286-implement.md`',
+    });
+
+    expect(prompt).toContain('## Resume Context');
+    expect(prompt).toContain('Human asked for the CTA copy to change.');
+    expect(prompt.indexOf('## Resume Context')).toBeLessThan(prompt.indexOf('## Scope Rules'));
+  });
 });
 
 describe('buildReviewPrompt', () => {

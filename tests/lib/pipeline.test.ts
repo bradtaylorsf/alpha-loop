@@ -620,6 +620,60 @@ describe('processIssue', () => {
     expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({ epicContext }));
   });
 
+  test('passes resume context and saved worktree hints into resumed implementation', async () => {
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession(), {
+      resumeStage: 'implementation',
+      resumeContext: '## New feedback\nPlease change the button copy.',
+      existingPrUrl: 'https://github.com/owner/repo/pull/42',
+      savedWorktree: {
+        branch: 'agent/custom-42',
+        path: '/tmp/worktrees/custom-42',
+      },
+    });
+
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      savedBranch: 'agent/custom-42',
+      savedPath: '/tmp/worktrees/custom-42',
+    }));
+    expect(mockBuildImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      resumeContext: '## New feedback\nPlease change the button copy.',
+    }));
+    expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
+      head: 'agent/issue-42',
+      body: expect.stringContaining('Test Results'),
+    }));
+  });
+
+  test('skips implementation and runs verification when resumed feedback is approval', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+
+    mockExistsSync.mockImplementation((path: any) => String(path).includes('verify-issue-42.json'));
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).includes('verify-issue-42.json')) {
+        return JSON.stringify({ passed: true, summary: 'QA approval verified', findings: [] });
+      }
+      return '';
+    });
+    mockRunVerify.mockResolvedValue({ passed: true, skipped: false, output: 'Status: PASS' });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({ skipVerify: false }), makeSession(), {
+      resumeStage: 'verification',
+      resumeContext: 'Human approved QA.',
+    });
+
+    expect(result.status).toBe('success');
+    expect(mockBuildImplementPrompt).not.toHaveBeenCalled();
+    expect(mockRunVerify).toHaveBeenCalledWith(expect.objectContaining({
+      resumeContext: 'Human approved QA.',
+    }));
+    const implementCalls = mockSpawnAgent.mock.calls.filter(
+      (call: any[]) => call[0].prompt === 'implement prompt',
+    );
+    expect(implementCalls).toHaveLength(0);
+  });
+
   test('does not pass epic context when pipeline options are omitted', async () => {
     await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
 
