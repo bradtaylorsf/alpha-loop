@@ -397,7 +397,7 @@ Options:
   --max-ticks <n>               Stop after this many daemon ticks
 ```
 
-For hosted website and web app operation, start with the [Hosted Alpha Loop Setup Guide](docs/hosted-alpha-loop.md). It covers server setup, GitHub labels and templates, safe starter config, lifecycle events, feedback ingestion, resume, QA handoff, health checks, cleanup, and troubleshooting.
+For hosted website and web app operation, start with the [Hosted Alpha Loop Setup Guide](docs/hosted-alpha-loop.md). It covers server setup, GitHub labels and templates, safe starter config, lifecycle events, feedback ingestion, resume, QA handoff, health checks, cleanup, and troubleshooting. For a concrete Astro/Sanity marketing-site reference workflow, see the [Aging Sidekick Hosted Pilot Blueprint](docs/aging-sidekick-hosted-pilot.md).
 
 ## Configuration
 
