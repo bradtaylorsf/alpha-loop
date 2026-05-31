@@ -160,6 +160,9 @@ jest.mock('../../src/lib/session', () => ({
     results: [],
   })),
   finalizeSession: jest.fn(),
+  recordSessionCleanup: jest.fn(),
+  transitionSessionStatus: jest.fn(),
+  updateSessionManifest: jest.fn(),
 }));
 
 jest.mock('../../src/lib/worktree', () => ({

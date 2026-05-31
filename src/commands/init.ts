@@ -268,6 +268,13 @@ max_issues: ${answers.maxIssues}
 max_session_duration: 7200    # Total session wall-clock budget, in seconds (2h)
 # poll_interval: 60           # Seconds between issue queue polls when running continuously
 
+# === Session retention ======================================================
+# Durable session manifests are kept in .alpha-loop/sessions/<session>/session.json.
+# Paused/waiting/QA worktrees are preserved unless paused_worktree_days is > 0.
+# session_retention:
+#   paused_worktree_days: 0
+#   completed_worktree_days: 30
+
 # === Harnesses ==============================================================
 # Coding harnesses to sync skills/agents to. When empty, alpha-loop picks one
 # based on \`agent\` above. Set explicitly if you use multiple harnesses.

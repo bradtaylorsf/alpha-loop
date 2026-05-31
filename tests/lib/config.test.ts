@@ -39,7 +39,8 @@ beforeEach(() => {
     'LABEL_READY', 'MAX_TEST_RETRIES', 'TEST_COMMAND', 'DEV_COMMAND',
     'SKIP_TESTS', 'SKIP_REVIEW', 'SKIP_INSTALL', 'SKIP_PREFLIGHT',
     'SKIP_VERIFY', 'SKIP_LEARN', 'SKIP_E2E', 'AUTO_MERGE', 'MERGE_TO',
-    'AUTO_CLEANUP', 'RUN_FULL',
+    'AUTO_CLEANUP', 'RUN_FULL', 'SESSION_RETENTION_PAUSED_WORKTREE_DAYS',
+    'SESSION_RETENTION_COMPLETED_WORKTREE_DAYS',
   ]) {
     delete process.env[key];
   }
@@ -132,6 +133,37 @@ max_test_retries: 5
     expect(config.skipTests).toBe(false);
     expect(config.autoMerge).toBe(true);
     expect(config.autoCleanup).toBe(true);
+    expect(config.sessionRetention).toEqual({
+      pausedWorktreeDays: 0,
+      completedWorktreeDays: 30,
+    });
+  });
+
+  it('loads session retention settings from nested config', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `session_retention:
+  paused_worktree_days: 14
+  completed_worktree_days: 45
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.sessionRetention).toEqual({
+      pausedWorktreeDays: 14,
+      completedWorktreeDays: 45,
+    });
+  });
+
+  it('applies session retention env overrides', () => {
+    process.env.SESSION_RETENTION_PAUSED_WORKTREE_DAYS = '7';
+    process.env.SESSION_RETENTION_COMPLETED_WORKTREE_DAYS = '21';
+
+    const config = loadConfig();
+    expect(config.sessionRetention).toEqual({
+      pausedWorktreeDays: 7,
+      completedWorktreeDays: 21,
+    });
   });
 
   it('loads agent from config file', () => {

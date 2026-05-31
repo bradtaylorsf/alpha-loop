@@ -388,4 +388,28 @@ describe('cleanupWorktree', () => {
 
     expect(log.dry).toHaveBeenCalledWith(expect.stringContaining('Would clean up'));
   });
+
+  test('preserves paused worktree unless retention has expired', async () => {
+    mockExists.mockReturnValue(true);
+
+    const result = await cleanupWorktree({ ...baseOptions, sessionStatus: 'paused' });
+
+    expect(result.status).toBe('preserved');
+    expect(mockExec).not.toHaveBeenCalledWith(
+      expect.stringContaining('git worktree remove'),
+      expect.anything(),
+    );
+  });
+
+  test('removes paused worktree when retention explicitly expires it', async () => {
+    mockExists.mockReturnValue(true);
+
+    const result = await cleanupWorktree({ ...baseOptions, sessionStatus: 'paused', retentionExpired: true });
+
+    expect(result.status).toBe('removed');
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('git worktree remove'),
+      expect.anything(),
+    );
+  });
 });
