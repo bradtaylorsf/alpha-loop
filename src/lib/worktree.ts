@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, symlinkSync, readlinkSync, unlinkSync, readFileS
 import { join, resolve, basename } from 'node:path';
 import { exec } from './shell.js';
 import { log } from './logger.js';
+import type { SessionStatus } from './session.js';
 
 export type WorktreeResult = {
   path: string;
@@ -29,7 +30,17 @@ export type CleanupWorktreeOptions = {
   projectDir: string;
   autoCleanup?: boolean;
   preserveIfCommits?: boolean;
+  /** Preserve paused/waiting/QA worktrees unless retention explicitly expires them. */
+  sessionStatus?: SessionStatus;
+  /** Set by retention cleanup when it is intentionally expiring preserved work. */
+  retentionExpired?: boolean;
   dryRun?: boolean;
+};
+
+export type CleanupWorktreeResult = {
+  status: 'removed' | 'preserved' | 'missing' | 'skipped' | 'dry-run';
+  path: string;
+  reason?: string;
 };
 
 const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.local'];
@@ -204,18 +215,36 @@ export function worktreeHasCommits(worktreePath: string): number {
  * When preserveIfCommits is true and the worktree has commits, skip cleanup
  * so the user can recover the work with `alpha-loop resume`.
  */
-export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<void> {
-  const { issueNum, projectDir, autoCleanup = true, preserveIfCommits = false, dryRun } = options;
+export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<CleanupWorktreeResult> {
+  const {
+    issueNum,
+    projectDir,
+    autoCleanup = true,
+    preserveIfCommits = false,
+    sessionStatus,
+    retentionExpired = false,
+    dryRun,
+  } = options;
   const worktreePath = resolve(projectDir, '.worktrees', `issue-${issueNum}`);
 
   if (!autoCleanup) {
     log.info('Skipping worktree cleanup (autoCleanup=false)');
-    return;
+    return { status: 'skipped', path: worktreePath, reason: 'autoCleanup=false' };
   }
 
   if (dryRun) {
     log.dry(`Would clean up worktree: ${worktreePath}`);
-    return;
+    return { status: 'dry-run', path: worktreePath };
+  }
+
+  const shouldPreserveForStatus = (
+    sessionStatus === 'paused' ||
+    sessionStatus === 'waiting-for-feedback' ||
+    sessionStatus === 'qa-requested'
+  ) && !retentionExpired;
+  if (shouldPreserveForStatus) {
+    log.warn(`Preserving ${sessionStatus} worktree at: ${worktreePath}`);
+    return { status: 'preserved', path: worktreePath, reason: `session-status:${sessionStatus}` };
   }
 
   if (preserveIfCommits && existsSync(worktreePath)) {
@@ -223,7 +252,7 @@ export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<
     if (commitCount > 0) {
       log.warn(`Preserving worktree with ${commitCount} commit(s) at: ${worktreePath}`);
       log.warn('Recover with: alpha-loop resume');
-      return;
+      return { status: 'preserved', path: worktreePath, reason: `commits:${commitCount}` };
     }
   }
 
@@ -235,9 +264,12 @@ export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<
       exec(`rm -rf "${worktreePath}"`, { cwd: projectDir });
       exec('git worktree prune', { cwd: projectDir });
     }
+    log.info('Worktree cleaned up');
+    return { status: 'removed', path: worktreePath };
   }
 
-  log.info('Worktree cleaned up');
+  log.info('Worktree already missing');
+  return { status: 'missing', path: worktreePath };
 }
 
 /**

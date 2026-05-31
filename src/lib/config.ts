@@ -75,6 +75,18 @@ export type RoutingConfig = {
   fallback?: RoutingFallback;
 };
 
+export type SessionRetentionConfig = {
+  /** 0 disables automatic cleanup for paused/waiting/QA worktrees. */
+  pausedWorktreeDays: number;
+  /** 0 disables automatic cleanup for completed worktrees. */
+  completedWorktreeDays: number;
+};
+
+export const DEFAULT_SESSION_RETENTION: SessionRetentionConfig = {
+  pausedWorktreeDays: 0,
+  completedWorktreeDays: 30,
+};
+
 const VALID_ROUTING_STAGES: readonly RoutingStageName[] = [
   'plan',
   'build',
@@ -171,6 +183,8 @@ export type Config = {
   evalIncludeAgentPrompts: boolean;
   /** Include repo-specific skills during eval runs (default: true). */
   evalIncludeSkills: boolean;
+  /** Worktree retention policy for durable session state. */
+  sessionRetention?: SessionRetentionConfig;
   /**
    * When there is exactly one open epic in the repo, the picker auto-selects
    * it instead of prompting. Default: false.
@@ -237,6 +251,7 @@ const DEFAULTS: Config = {
   pipeline: {},
   evalIncludeAgentPrompts: true,
   evalIncludeSkills: true,
+  sessionRetention: DEFAULT_SESSION_RETENTION,
   preferEpics: false,
 };
 
@@ -331,6 +346,25 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   AGENT_TIMEOUT: 'agentTimeout',
   PREFER_EPICS: 'preferEpics',
 };
+
+function parsePositiveDayValue(value: unknown, key: string): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    console.warn(`[config] ${key}: expected a non-negative number of days (got ${String(value)})`);
+    return undefined;
+  }
+  return Math.floor(value);
+}
+
+function parseSessionRetention(raw: unknown): Partial<SessionRetentionConfig> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const retention: Partial<SessionRetentionConfig> = {};
+  const paused = parsePositiveDayValue(r.paused_worktree_days, 'session_retention.paused_worktree_days');
+  const completed = parsePositiveDayValue(r.completed_worktree_days, 'session_retention.completed_worktree_days');
+  if (paused !== undefined) retention.pausedWorktreeDays = paused;
+  if (completed !== undefined) retention.completedWorktreeDays = completed;
+  return Object.keys(retention).length > 0 ? retention : undefined;
+}
 
 function coerce(value: string, current: unknown): unknown {
   if (typeof current === 'number') return Number(value);
@@ -544,6 +578,17 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     if (ev.include_skills === false) result.evalIncludeSkills = false;
   }
 
+  // Handle session retention nested config
+  if (parsed.session_retention !== undefined) {
+    const sessionRetention = parseSessionRetention(parsed.session_retention);
+    if (sessionRetention) {
+      result.sessionRetention = {
+        ...DEFAULT_SESSION_RETENTION,
+        ...sessionRetention,
+      };
+    }
+  }
+
   // Handle routing nested config (per-stage model + endpoint)
   if (parsed.routing !== undefined) {
     const routing = parseRoutingConfig(parsed.routing);
@@ -576,6 +621,15 @@ function loadEnvConfig(): Partial<Config> {
     if (val !== undefined) {
       (result as Record<string, unknown>)[configKey] = coerce(val, DEFAULTS[configKey]);
     }
+  }
+  const paused = process.env.SESSION_RETENTION_PAUSED_WORKTREE_DAYS;
+  const completed = process.env.SESSION_RETENTION_COMPLETED_WORKTREE_DAYS;
+  if (paused !== undefined || completed !== undefined) {
+    result.sessionRetention = {
+      ...DEFAULT_SESSION_RETENTION,
+      ...(paused !== undefined ? { pausedWorktreeDays: Number(paused) } : {}),
+      ...(completed !== undefined ? { completedWorktreeDays: Number(completed) } : {}),
+    };
   }
   return result;
 }
@@ -614,6 +668,12 @@ export function loadConfig(overrides?: Partial<Config>): Config {
 
   // Routing precedence is whole-object replacement (overrides > yaml > undefined).
   const routing = overrides?.routing ?? yamlConfig.routing;
+  const sessionRetention = {
+    ...DEFAULT_SESSION_RETENTION,
+    ...yamlConfig.sessionRetention,
+    ...envConfig.sessionRetention,
+    ...overrides?.sessionRetention,
+  };
 
   const merged: Config = {
     ...DEFAULTS,
@@ -624,6 +684,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     pricing: mergedPricing,
     pipeline: mergedPipeline,
     routing,
+    sessionRetention,
   };
 
   // Validate agent is a known value

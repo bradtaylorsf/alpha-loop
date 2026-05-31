@@ -257,7 +257,7 @@ batch_size: 5
 
 If the loop hangs or crashes mid-session, work can be stranded on local branches with no PR. Run `alpha-loop resume` to recover:
 
-1. Reads session crash markers first, then falls back to scanning local `agent/issue-*` branches with commits but no open PR
+1. Reads durable `.alpha-loop/sessions/<session>/session.json` manifests and crash markers first, then falls back to scanning local `agent/issue-*` branches with commits but no open PR
 2. Pushes each branch to origin
 3. Runs code review
 4. Creates WIP PRs, marks issues `In Review`, and updates the session PR with a verification caveat
@@ -268,6 +268,7 @@ Recovered PRs are written with `recoveryMode: "resume"` and are not marked compl
 Use `--issue <N>` to resume a specific issue.
 
 `alpha-loop history <session>` shows both unrecovered `crash-<N>.json` markers and recovered result files separately from normal successes and failures.
+Durable session manifests also show active, paused, waiting-for-feedback, QA-requested, resumed, completed, failed, and cleaned-up states, including the saved branch needed to recreate a missing worktree.
 
 ### Screenshots
 
@@ -381,6 +382,11 @@ harnesses:
 max_issues: 20
 max_session_duration: 7200  # 2 hours in seconds
 
+# Worktree retention for durable session manifests
+session_retention:
+  paused_worktree_days: 0       # keep paused/waiting/QA worktrees until explicit cleanup
+  completed_worktree_days: 30   # clean completed/failed worktrees after 30 days
+
 # Post-session review (runs after all issues, reviews full session diff)
 post_session:
   review: true
@@ -420,6 +426,8 @@ eval_dir: .alpha-loop/evals
 | `skip_install` | `false` | Skip `pnpm install` in worktrees |
 | `skip_preflight` | `false` | Skip pre-flight test validation |
 | `auto_cleanup` | `true` | Auto-remove worktrees after processing |
+| `session_retention.paused_worktree_days` | `0` | Days before `history --clean` removes paused/waiting/QA worktrees (`0` = never) |
+| `session_retention.completed_worktree_days` | `30` | Days before `history --clean` removes completed/failed worktrees (`0` = never) |
 | `run_full` | `false` | Run full pipeline without skipping any steps |
 | `verbose` | `false` | Enable verbose agent output |
 | `harnesses` | (auto from agent) | Coding harnesses to sync skills/agents to (e.g., `claude`, `codex`) |
@@ -466,6 +474,8 @@ All config options can be set via environment variables (uppercase, same names):
 | `SKIP_PREFLIGHT` | `skip_preflight` |
 | `AUTO_MERGE` | `auto_merge` |
 | `AUTO_CLEANUP` | `auto_cleanup` |
+| `SESSION_RETENTION_PAUSED_WORKTREE_DAYS` | `session_retention.paused_worktree_days` |
+| `SESSION_RETENTION_COMPLETED_WORKTREE_DAYS` | `session_retention.completed_worktree_days` |
 | `MERGE_TO` | `merge_to` |
 | `RUN_FULL` | `run_full` |
 | `VERBOSE` | `verbose` |
@@ -690,6 +700,7 @@ What needs to be done.
 | `.alpha-loop/evals/` | Yes | Eval cases (YAML) and score history (`scores.jsonl`) |
 | `.alpha-loop/traces/` | No (gitignored) | Meta-Harness style execution traces per session |
 | `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
+| `.alpha-loop/sessions/<session>/session.json` | No (gitignored) | Durable resumable session state with issue, branch, worktree, PR, stage, status, prompts, transcripts, and logs |
 | `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, session PRs, merge order, and stop reason |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |

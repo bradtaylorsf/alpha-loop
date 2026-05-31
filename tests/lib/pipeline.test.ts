@@ -57,6 +57,15 @@ jest.mock('../../src/lib/session', () => ({
   saveResult: jest.fn(),
   getPreviousResult: jest.fn(),
   writeCrashMarker: jest.fn(),
+  recordSessionCleanup: jest.fn(),
+  recordSessionError: jest.fn(),
+  recordSessionIssue: jest.fn(),
+  recordSessionLogFile: jest.fn(),
+  recordSessionPrompt: jest.fn(),
+  recordSessionStage: jest.fn(),
+  recordSessionTranscript: jest.fn(),
+  recordSessionWorktree: jest.fn(),
+  updateSessionManifest: jest.fn(),
 }));
 
 jest.mock('../../src/lib/traces', () => ({
@@ -118,7 +127,16 @@ import { labelIssue, commentIssue, createPR, mergePR, updateProjectStatus } from
 import { runTests } from '../../src/lib/testing';
 import { runVerify } from '../../src/lib/verify';
 import { extractLearnings, getLearningContext } from '../../src/lib/learning';
-import { saveResult, getPreviousResult, writeCrashMarker } from '../../src/lib/session';
+import {
+  saveResult,
+  getPreviousResult,
+  writeCrashMarker,
+  recordSessionCleanup,
+  recordSessionIssue,
+  recordSessionPrompt,
+  recordSessionTranscript,
+  recordSessionWorktree,
+} from '../../src/lib/session';
 import { buildIssuePlanPrompt, buildImplementPrompt, buildReviewPrompt, buildBatchPlanPrompt, buildBatchImplementPrompt, buildBatchReviewPrompt } from '../../src/lib/prompts';
 import { writeTraceToSubdir } from '../../src/lib/traces';
 import type { Config } from '../../src/lib/config';
@@ -138,6 +156,11 @@ const mockGetLearningContext = getLearningContext as jest.MockedFunction<typeof 
 const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGetPreviousResult = getPreviousResult as jest.MockedFunction<typeof getPreviousResult>;
 const mockWriteCrashMarker = writeCrashMarker as jest.MockedFunction<typeof writeCrashMarker>;
+const mockRecordSessionCleanup = recordSessionCleanup as jest.MockedFunction<typeof recordSessionCleanup>;
+const mockRecordSessionIssue = recordSessionIssue as jest.MockedFunction<typeof recordSessionIssue>;
+const mockRecordSessionPrompt = recordSessionPrompt as jest.MockedFunction<typeof recordSessionPrompt>;
+const mockRecordSessionTranscript = recordSessionTranscript as jest.MockedFunction<typeof recordSessionTranscript>;
+const mockRecordSessionWorktree = recordSessionWorktree as jest.MockedFunction<typeof recordSessionWorktree>;
 const mockBuildIssuePlanPrompt = buildIssuePlanPrompt as jest.MockedFunction<typeof buildIssuePlanPrompt>;
 const mockBuildImplementPrompt = buildImplementPrompt as jest.MockedFunction<typeof buildImplementPrompt>;
 const mockBuildReviewPrompt = buildReviewPrompt as jest.MockedFunction<typeof buildReviewPrompt>;
@@ -195,6 +218,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalTimeout: 300,
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
+    sessionRetention: { pausedWorktreeDays: 0, completedWorktreeDays: 30 },
     preferEpics: false,
     autoCapture: true,
     skipPostSessionReview: false,
@@ -234,7 +258,7 @@ beforeEach(() => {
   // Default: everything succeeds
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
   mockSetupWorktree.mockResolvedValue({ path: '/tmp/worktree', branch: 'agent/issue-42', resumed: false });
-  mockCleanupWorktree.mockResolvedValue();
+  mockCleanupWorktree.mockResolvedValue({ status: 'removed', path: '/tmp/worktree' });
   mockWorktreeHasCommits.mockReturnValue(0);
   mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: 'Agent output', duration: 5000 });
   mockRunTests.mockReturnValue({ passed: true, output: 'All tests passed' });
@@ -291,6 +315,36 @@ describe('processIssue', () => {
     expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       autoCommittedByPipeline: true,
       autoCommittedPaths: ['src/lib/pipeline.ts', 'tests/lib/pipeline.test.ts'],
+    }));
+  });
+
+  test('records durable manifest metadata for worktree, prompts, transcripts, PR, and cleanup', async () => {
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(mockRecordSessionWorktree).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      issueNum: 42,
+      path: '/tmp/worktree',
+      branch: 'agent/issue-42',
+      resumed: false,
+    }));
+    expect(mockRecordSessionPrompt).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      issueNum: 42,
+      stage: 'implement',
+      path: expect.stringContaining('issue-42-implement.md'),
+      prompt: 'implement prompt',
+    }));
+    expect(mockRecordSessionTranscript).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      issueNum: 42,
+      stage: 'implement',
+      path: expect.stringContaining('issue-42-implement.log'),
+    }));
+    expect(mockRecordSessionIssue).toHaveBeenCalledWith(expect.any(Object), 42, expect.objectContaining({
+      prUrl: 'https://github.com/owner/repo/pull/1',
+      stage: 'pr',
+    }));
+    expect(mockRecordSessionCleanup).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      status: 'removed',
+      worktreePath: '/tmp/worktree',
     }));
   });
 

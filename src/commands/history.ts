@@ -1,7 +1,17 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { log } from '../lib/logger.js';
-import { loadCrashMarkers, type CrashMarker } from '../lib/session.js';
+import {
+  loadCrashMarkers,
+  loadSessionManifest,
+  sessionManifestPath,
+  transitionSessionStatus,
+  updateSessionManifest,
+  type CrashMarker,
+  type DurableSessionManifest,
+  type SessionStatus,
+} from '../lib/session.js';
+import { DEFAULT_SESSION_RETENTION, loadConfig, type SessionRetentionConfig } from '../lib/config.js';
 import { readStageTelemetry } from '../lib/telemetry.js';
 import type { StageTelemetry } from '../lib/telemetry.js';
 import { isRecoveredResult } from '../lib/pipeline.js';
@@ -9,7 +19,7 @@ import type { PipelineResult } from '../lib/pipeline.js';
 import type { EscalationEvent } from '../lib/escalation.js';
 import type { EpicQueueManifest, QueueSessionContext } from '../lib/epic-queue.js';
 
-type SessionManifest = {
+type LearningSessionManifest = {
   name: string;
   branch: string;
   completed: string;
@@ -57,6 +67,22 @@ function loadResults(sessionDir: string): PipelineResult[] {
 function uniqueCrashMarkers(results: PipelineResult[], crashes: CrashMarker[]): CrashMarker[] {
   const resultIssues = new Set(results.map((result) => result.issueNum));
   return crashes.filter((marker) => !resultIssues.has(marker.issueNum));
+}
+
+function statusLabel(status: SessionStatus | undefined, results: PipelineResult[], crashes: CrashMarker[]): string {
+  if (status) return status;
+  const visibleCrashes = uniqueCrashMarkers(results, crashes);
+  if (visibleCrashes.length > 0) return 'failed';
+  if (results.length === 0) return 'active';
+  return results.some((result) => result.status === 'failure' && !isRecoveredResult(result))
+    ? 'failed'
+    : 'completed';
+}
+
+function sessionUpdatedAt(manifest: DurableSessionManifest | undefined, fallbackTimestamp: string): string {
+  return manifest?.timestamps.updatedAt
+    ?? manifest?.timestamps.startedAt
+    ?? fallbackTimestamp;
 }
 
 /**
@@ -140,16 +166,16 @@ function findQueueManifest(sessionsRoot: string, name: string): QueueManifestRef
  * Load session manifests from the learnings directory (checked into git, shared with team).
  * These are created during session finalization.
  */
-function loadManifests(projectDir?: string): Map<string, SessionManifest> {
+function loadManifests(projectDir?: string): Map<string, LearningSessionManifest> {
   const learningsDir = path.join(projectDir ?? process.cwd(), '.alpha-loop', 'learnings');
-  const manifests = new Map<string, SessionManifest>();
+  const manifests = new Map<string, LearningSessionManifest>();
   if (!fs.existsSync(learningsDir)) return manifests;
 
   for (const file of fs.readdirSync(learningsDir)) {
     if (!file.startsWith('session-') || !file.endsWith('.json')) continue;
     try {
       const content = fs.readFileSync(path.join(learningsDir, file), 'utf-8');
-      const manifest = JSON.parse(content) as SessionManifest;
+      const manifest = JSON.parse(content) as LearningSessionManifest;
       if (manifest.name) {
         manifests.set(manifest.name, manifest);
       }
@@ -171,17 +197,20 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
     timestamp: string;
     results: PipelineResult[];
     crashes: CrashMarker[];
+    manifest?: DurableSessionManifest;
     source: 'local' | 'manifest';
   };
   const entries: SessionEntry[] = [];
 
   // Add local sessions
   for (const session of localSessions) {
+    const durableManifest = loadSessionManifest(session.dir) ?? undefined;
     entries.push({
       name: session.name,
       timestamp: session.timestamp,
       results: loadResults(session.dir),
       crashes: loadCrashMarkers(session.dir),
+      manifest: durableManifest,
       source: 'local',
     });
   }
@@ -196,6 +225,7 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
       timestamp: ts,
       results: manifest.results,
       crashes: [],
+      manifest: undefined,
       source: 'manifest',
     });
   }
@@ -214,7 +244,7 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
 
     for (const entry of entries) {
       const crashCount = uniqueCrashMarkers(entry.results, entry.crashes).length;
-      const issueCount = entry.results.length + crashCount;
+      const issueCount = Math.max(entry.manifest?.issueNumbers.length ?? 0, entry.results.length + crashCount);
       const recoveredCount = entry.results.filter(isRecoveredResult).length;
       const successCount = entry.results.filter((r) => r.status === 'success' && !isRecoveredResult(r)).length;
       const failedCount = entry.results.filter((r) => r.status === 'failure' && !isRecoveredResult(r)).length;
@@ -230,12 +260,14 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
         : ts;
 
       const issueWord = issueCount === 1 ? 'issue' : 'issues';
+      const status = statusLabel(entry.manifest?.status, entry.results, entry.crashes);
       let statusParts = '';
       if (successCount > 0) statusParts += `${successCount} \u2713`;
       if (failedCount > 0) statusParts += ` ${failedCount} \u2717`;
       if (recoveredCount > 0) statusParts += ` ${recoveredCount} recovered`;
       if (crashCount > 0) statusParts += ` ${crashCount} crashed`;
       if (issueCount === 0) statusParts = '(empty)';
+      statusParts = `${status} ${statusParts}`.trim();
 
       console.log(
         `  ${entry.name.padEnd(30)} ${date}  ${String(issueCount).padStart(2)} ${issueWord.padEnd(7)} ${statusParts.padEnd(10)} ${durStr}`,
@@ -335,7 +367,8 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   let results: PipelineResult[] = [];
   let crashMarkers: CrashMarker[] = [];
   let sessionDir: string | undefined;
-  let manifest: SessionManifest | undefined;
+  let manifest: LearningSessionManifest | undefined;
+  let durableManifest: DurableSessionManifest | undefined;
   const root = projectDir ?? process.cwd();
   const manifests = loadManifests(root);
 
@@ -343,6 +376,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   const localDir = path.join(sessionsDir, sessionName);
   if (fs.existsSync(localDir)) {
     sessionDir = localDir;
+    durableManifest = loadSessionManifest(localDir) ?? undefined;
     results = loadResults(localDir);
     crashMarkers = loadCrashMarkers(localDir);
   } else {
@@ -350,6 +384,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
     const match = all.find((s) => s.name === sessionName || s.timestamp === sessionName);
     if (match) {
       sessionDir = match.dir;
+      durableManifest = loadSessionManifest(match.dir) ?? undefined;
       results = loadResults(match.dir);
       crashMarkers = loadCrashMarkers(match.dir);
     }
@@ -370,7 +405,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
 
   const visibleCrashes = uniqueCrashMarkers(results, crashMarkers);
 
-  if (results.length === 0 && visibleCrashes.length === 0) {
+  if (!durableManifest && results.length === 0 && visibleCrashes.length === 0) {
     log.error(`Session not found: ${sessionName}`);
     process.exitCode = 1;
     return;
@@ -381,11 +416,29 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   const successCount = naturalResults.filter((r) => r.status === 'success').length;
   const failureCount = naturalResults.filter((r) => r.status === 'failure').length;
   const recoveredCount = results.length - naturalResults.length;
-  const issueCount = results.length + visibleCrashes.length;
+  const issueCount = Math.max(durableManifest?.issueNumbers.length ?? 0, results.length + visibleCrashes.length);
+  const status = statusLabel(durableManifest?.status, results, crashMarkers);
 
   console.log(`Session:  ${sessionName}`);
+  console.log(`Status:   ${status}${durableManifest ? ` (${durableManifest.stage})` : ''}`);
   console.log(`Issues:   ${issueCount} (${successCount} succeeded, ${failureCount} failed, ${recoveredCount} recovered, ${visibleCrashes.length} crashed)`);
   console.log(`Duration: ${formatDuration(totalDuration)}`);
+  if (durableManifest) {
+    console.log(`Branch:   ${durableManifest.branch}`);
+    if (durableManifest.sessionPrUrl) console.log(`PR:       ${durableManifest.sessionPrUrl}`);
+    if (durableManifest.parentEpicNumber) console.log(`Epic:     #${durableManifest.parentEpicNumber}`);
+    console.log(`Manifest: ${path.relative(root, durableManifest ? sessionManifestPath(sessionDir ?? '') : '')}`);
+    if (durableManifest.worktree?.path) {
+      const worktreeExists = fs.existsSync(durableManifest.worktree.path);
+      console.log(`Worktree: ${durableManifest.worktree.path}${worktreeExists ? '' : ' (missing)'}`);
+      if (!worktreeExists) {
+        const recoveryBranch = durableManifest.worktree.lastKnownBranch ?? durableManifest.lastKnownBranch ?? durableManifest.branch;
+        console.log(`Recover:  recreate worktree from branch ${recoveryBranch}`);
+      }
+    } else if (durableManifest.lastKnownBranch) {
+      console.log(`Recover:  branch ${durableManifest.lastKnownBranch}`);
+    }
+  }
   console.log('');
 
   if (manifest?.queue) {
@@ -409,6 +462,18 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   }
 
   console.log('Issues:');
+  if (results.length === 0 && durableManifest?.issues.length) {
+    for (const issue of durableManifest.issues) {
+      const branch = issue.branch ? ` branch ${issue.branch}` : '';
+      const pr = issue.prUrl ? ` PR ${issue.prUrl.match(/(\d+)$/)?.[1] ?? issue.prUrl}` : '';
+      console.log(`  - #${String(issue.issueNum).padEnd(4)} ${issue.title ?? '(title unavailable)'}`);
+      console.log(`           ${(issue.status ?? durableManifest.status).toUpperCase()} ${issue.stage ?? durableManifest.stage}${branch}${pr}`);
+      if (issue.worktreePath && !fs.existsSync(issue.worktreePath)) {
+        console.log(`           missing worktree; recover from ${issue.branch ?? durableManifest.lastKnownBranch ?? durableManifest.branch}`);
+      }
+    }
+  }
+
   for (const result of results) {
     const recovered = isRecoveredResult(result);
     const symbol = recovered ? '~' : result.status === 'success' ? '\u2713' : '\u2717';
@@ -581,7 +646,73 @@ export function historyTelemetry(sessionName: string, projectDir?: string): void
   console.log(`Totals: ${entries.length} stage(s), ${fmtNumber(totalTokensIn)} in / ${fmtNumber(totalTokensOut)} out, $${totalCost.toFixed(4)}, ${totalWall.toFixed(1)}s wall, ${totalErrs} tool error(s)`);
 }
 
-export function historyClean(sessionsDir: string): void {
+function manifestAgeMs(manifest: DurableSessionManifest, fallbackTimestamp: string): number {
+  const timestamp = sessionUpdatedAt(manifest, fallbackTimestamp);
+  const time = Date.parse(timestamp);
+  if (!Number.isNaN(time)) return Date.now() - time;
+
+  if (fallbackTimestamp.length >= 8) {
+    const dateStr = `${fallbackTimestamp.slice(0, 4)}-${fallbackTimestamp.slice(4, 6)}-${fallbackTimestamp.slice(6, 8)}`;
+    const fallbackTime = new Date(dateStr).getTime();
+    if (!Number.isNaN(fallbackTime)) return Date.now() - fallbackTime;
+  }
+  return 0;
+}
+
+function retentionDaysForStatus(status: SessionStatus, retention: SessionRetentionConfig): number | null {
+  if (status === 'paused' || status === 'waiting-for-feedback' || status === 'qa-requested') {
+    return retention.pausedWorktreeDays > 0 ? retention.pausedWorktreeDays : null;
+  }
+  if (status === 'completed' || status === 'failed' || status === 'cleaned-up') {
+    return retention.completedWorktreeDays > 0 ? retention.completedWorktreeDays : null;
+  }
+  return null;
+}
+
+function cleanManifestWorktree(
+  session: { dir: string; name: string; timestamp: string },
+  manifest: DurableSessionManifest,
+  retention: SessionRetentionConfig,
+): boolean {
+  const days = retentionDaysForStatus(manifest.status, retention);
+  if (days === null) return false;
+  if (manifestAgeMs(manifest, session.timestamp) < days * 24 * 60 * 60 * 1000) return false;
+
+  const worktreePath = manifest.worktree?.path;
+  const safeWorktreePath = worktreePath
+    ? path.resolve(worktreePath).includes(`${path.sep}.worktrees${path.sep}`)
+    : false;
+  if (worktreePath && safeWorktreePath && fs.existsSync(worktreePath)) {
+    fs.rmSync(worktreePath, { recursive: true, force: true });
+  }
+
+  transitionSessionStatus(session.dir, 'cleaned-up', 'cleanup');
+  updateSessionManifest(session.dir, (current) => ({
+    ...current,
+    cleanup: {
+      status: worktreePath ? (safeWorktreePath ? 'removed' : 'preserved') : 'missing',
+      worktreePath,
+      reason: worktreePath && !safeWorktreePath
+        ? `retention:${manifest.status}:${days}d:unsafe-worktree-path-skipped`
+        : `retention:${manifest.status}:${days}d`,
+      at: new Date().toISOString(),
+    },
+    worktree: current.worktree
+      ? {
+          ...current.worktree,
+          missing: true,
+          updatedAt: new Date().toISOString(),
+        }
+      : current.worktree,
+  }));
+  console.log(`Cleaned: ${session.name}${worktreePath ? ` (${worktreePath})` : ''}`);
+  return true;
+}
+
+export function historyClean(
+  sessionsDir: string,
+  retention: SessionRetentionConfig = { pausedWorktreeDays: 0, completedWorktreeDays: 30 },
+): void {
   const sessions = findSessionDirs(sessionsDir);
 
   if (sessions.length === 0) {
@@ -589,18 +720,26 @@ export function historyClean(sessionsDir: string): void {
     return;
   }
 
-  const RETENTION_DAYS = 30;
-  const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let removed = 0;
 
   for (const session of sessions) {
+    const durableManifest = loadSessionManifest(session.dir);
+    if (durableManifest) {
+      if (cleanManifestWorktree(session, durableManifest, retention)) {
+        removed++;
+      }
+      continue;
+    }
+
     // Parse date from timestamp YYYYMMDD-HHMMSS
     const ts = session.timestamp;
     if (ts.length < 8) continue;
     const dateStr = `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`;
     const sessionDate = new Date(dateStr).getTime();
     if (isNaN(sessionDate)) continue;
+    if (retention.completedWorktreeDays <= 0) continue;
 
+    const cutoff = Date.now() - retention.completedWorktreeDays * 24 * 60 * 60 * 1000;
     if (sessionDate < cutoff) {
       fs.rmSync(session.dir, { recursive: true });
       console.log(`Removed: ${session.name}`);
@@ -609,9 +748,13 @@ export function historyClean(sessionsDir: string): void {
   }
 
   if (removed === 0) {
-    console.log('No sessions older than 30 days found.');
+    if (retention.completedWorktreeDays === 30 && retention.pausedWorktreeDays === 0) {
+      console.log('No sessions older than 30 days found.');
+    } else {
+      console.log('No sessions matched retention cleanup.');
+    }
   } else {
-    console.log(`Removed ${removed} session(s).`);
+    console.log(`Cleaned ${removed} session(s).`);
   }
 }
 
@@ -622,7 +765,7 @@ export function historyCommand(
   const sessionsDir = path.join(process.cwd(), '.alpha-loop', 'sessions');
 
   if (options.clean) {
-    historyClean(sessionsDir);
+    historyClean(sessionsDir, loadConfig().sessionRetention ?? DEFAULT_SESSION_RETENTION);
     return;
   }
 

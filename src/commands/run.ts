@@ -14,7 +14,15 @@ import {
 import { buildEpicSummary, parseSubIssues } from '../lib/epics.js';
 import { verifyEpic } from '../lib/verify-epic.js';
 import { processIssue, processBatch } from '../lib/pipeline.js';
-import { createSession, finalizeSession, type SessionContext } from '../lib/session.js';
+import {
+  createSession,
+  finalizeSession,
+  recordSessionCleanup,
+  transitionSessionStatus,
+  updateSessionManifest,
+  type SessionContext,
+  type SessionStatus,
+} from '../lib/session.js';
 import { cleanupWorktree } from '../lib/worktree.js';
 import {
   generateSessionSummary,
@@ -206,6 +214,14 @@ function isCommandExitError(err: unknown): err is CommandExitError {
 
 function isRecoveredRunResult(result: { recoveryMode?: unknown }): boolean {
   return result.recoveryMode !== undefined;
+}
+
+function sessionStatusFromFailures(failures: EpicExecutionFailure[]): SessionStatus {
+  if (failures.some((failure) => failure.code === 'epic-verification-failed')) {
+    return 'qa-requested';
+  }
+  if (failures.length > 0) return 'failed';
+  return 'completed';
 }
 
 /**
@@ -741,6 +757,10 @@ async function runIssueSession(
   // Create session (named after epic or milestone if selected)
   const session = createSession(config, {
     milestone: activeMilestone || undefined,
+    issueNum: target.type === 'issue' ? target.issue.number : undefined,
+    issueTitle: target.type === 'issue' ? target.issue.title : undefined,
+    parentEpicNum: target.type === 'issue' ? target.parentEpic?.number : undefined,
+    parentEpicTitle: target.type === 'issue' ? target.parentEpic?.title : undefined,
     epicNum: activeEpic,
     epicTitle: activeEpicTitle,
     queue: queueContext,
@@ -764,11 +784,22 @@ async function runIssueSession(
     if (activeIssueNum !== null) {
       log.info(`Cleaning up worktree for issue #${activeIssueNum}...`);
       try {
-        await cleanupWorktree({
+        transitionSessionStatus(session, 'paused', 'paused', {
+          lastEventId: 'signal',
+          currentIssue: { issueNum: activeIssueNum },
+        });
+        const cleanupResult = await cleanupWorktree({
           issueNum: activeIssueNum,
           projectDir: process.cwd(),
           autoCleanup: true,
           preserveIfCommits: true,
+          sessionStatus: 'paused',
+        });
+        recordSessionCleanup(session, {
+          status: cleanupResult.status,
+          worktreePath: cleanupResult.path,
+          reason: cleanupResult.reason,
+          at: new Date().toISOString(),
         });
       } catch {
         // Best effort cleanup
@@ -1004,6 +1035,24 @@ async function runIssueSession(
     } else {
       log.info(`Found ${issuesToProcess.length} issue(s) to process`);
     }
+    updateSessionManifest(session, (manifest) => ({
+      ...manifest,
+      issueNumbers: Array.from(new Set(issuesToProcess.map((issue) => issue.number))),
+      issueNumber: target.type === 'issue'
+        ? target.issue.number
+        : (issuesToProcess[0]?.number ?? manifest.issueNumber),
+      issues: issuesToProcess.map((issue) => {
+        const existing = manifest.issues.find((entry) => entry.issueNum === issue.number);
+        return {
+          ...existing,
+          issueNum: issue.number,
+          title: issue.title,
+          status: existing?.status ?? 'active',
+          stage: existing?.stage ?? 'created',
+          updatedAt: new Date().toISOString(),
+        };
+      }),
+    }));
 
     const sessionStartTime = Date.now();
 
@@ -1385,6 +1434,16 @@ async function runIssueSession(
   // Finalize session
   const finalizedPrUrl = await finalizeSession(session, config);
   const sessionPrUrl = finalizedPrUrl ?? session.sessionPrUrl ?? null;
+  const finalStatus = sessionStatusFromFailures(failures);
+  const finalStage: 'completed' | 'qa-requested' | 'failed' = finalStatus === 'completed'
+    ? 'completed'
+    : finalStatus === 'qa-requested'
+      ? 'qa-requested'
+      : 'failed';
+  transitionSessionStatus(session, finalStatus, finalStage, {
+    prUrl: sessionPrUrl,
+    sessionPrUrl,
+  });
 
   const successCount = session.results.filter((r) => r.status === 'success' && !isRecoveredRunResult(r)).length;
   log.info(`Session complete: ${successCount}/${session.results.length} issues succeeded`);

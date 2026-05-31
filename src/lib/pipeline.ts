@@ -41,7 +41,20 @@ import {
 import { runTests } from './testing.js';
 import { runVerify } from './verify.js';
 import { extractLearnings, getLearningContext } from './learning.js';
-import { saveResult, getPreviousResult, writeCrashMarker } from './session.js';
+import {
+  saveResult,
+  getPreviousResult,
+  writeCrashMarker,
+  recordSessionCleanup,
+  recordSessionError,
+  recordSessionIssue,
+  recordSessionLogFile,
+  recordSessionPrompt,
+  recordSessionStage,
+  recordSessionTranscript,
+  recordSessionWorktree,
+  updateSessionManifest,
+} from './session.js';
 import {
   writeTrace,
   writeTraceMetadata,
@@ -108,17 +121,47 @@ function agentForStep(config: Config, step: PipelineStepName): Pick<AgentOptions
 }
 
 /** Record a prompt trace to the prompts/ subdirectory. */
-function tracePrompt(session: string, issueNum: number, step: string, prompt: string): void {
+function tracePath(session: string, subdir: string, filename: string): string {
+  return relative(process.cwd(), join(runDir(session), subdir, filename));
+}
+
+function tracePrompt(session: SessionContext | string, issueNum: number, step: string, prompt: string): void {
+  const sessionName = typeof session === 'string' ? session : session.name;
+  const filename = `issue-${issueNum}-${step}.md`;
   try {
-    writeTraceToSubdir(session, 'prompts', `issue-${issueNum}-${step}.md`, prompt);
+    writeTraceToSubdir(sessionName, 'prompts', filename, prompt);
+    if (typeof session !== 'string') {
+      recordSessionPrompt(session, {
+        issueNum,
+        stage: step,
+        path: tracePath(sessionName, 'prompts', filename),
+        prompt,
+      });
+    }
   } catch { /* non-fatal */ }
 }
 
 /** Record an agent output trace to the outputs/ subdirectory. */
-function traceOutput(session: string, issueNum: number, step: string, output: string): void {
+function traceOutput(session: SessionContext | string, issueNum: number, step: string, output: string): void {
+  const sessionName = typeof session === 'string' ? session : session.name;
+  const filename = `issue-${issueNum}-${step}.log`;
   try {
-    writeTraceToSubdir(session, 'outputs', `issue-${issueNum}-${step}.log`, output);
+    writeTraceToSubdir(sessionName, 'outputs', filename, output);
+    if (typeof session !== 'string') {
+      recordSessionTranscript(session, {
+        issueNum,
+        stage: step,
+        path: tracePath(sessionName, 'outputs', filename),
+      });
+    }
   } catch { /* non-fatal */ }
+}
+
+function updateSessionManifestForPr(session: SessionContext, prUrl: string): void {
+  updateSessionManifest(session, {
+    prUrl,
+    sessionPrUrl: session.sessionPrUrl ?? null,
+  });
 }
 
 /** Record a diff trace to the diffs/ subdirectory. */
@@ -690,9 +733,20 @@ export async function processIssue(
   const logFile = join(session.logsDir, `issue-${issueNum}.log`);
 
   log.step(`Processing Issue #${issueNum}: ${title}`);
+  session.currentIssueNum = issueNum;
+  recordSessionLogFile(session, logFile);
+  recordSessionIssue(session, issueNum, {
+    title,
+    status: 'active',
+    stage: 'status',
+    labels: ['in-progress'],
+  });
 
   // --- Step 1: Update status ---
   currentStep = 'status';
+  recordSessionStage(session, 'status', {
+    currentIssue: { issueNum, title },
+  });
   log.step('Step 1: Updating issue status');
   if (!config.dryRun) {
     updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In progress');
@@ -704,6 +758,7 @@ export async function processIssue(
 
   // --- Step 2: Setup worktree ---
   currentStep = 'worktree';
+  recordSessionStage(session, 'worktree');
   log.step('Step 2: Setting up worktree');
   let worktreePath: string;
   let worktreeBranch: string;
@@ -723,8 +778,20 @@ export async function processIssue(
     worktreePath = wt.path;
     worktreeBranch = wt.branch;
     worktreeResumed = wt.resumed;
+    recordSessionWorktree(session, {
+      issueNum,
+      title,
+      path: worktreePath,
+      branch: worktreeBranch,
+      resumed: worktreeResumed,
+    });
   } catch (err) {
     log.error(`Failed to set up worktree for issue #${issueNum}: ${err}`);
+    recordSessionError(session, {
+      issueNum,
+      stage: 'worktree',
+      message: err instanceof Error ? err.message : String(err),
+    });
     if (!config.dryRun) {
       // Re-queue instead of marking failed — this is a setup issue, not an implementation failure
       requeueIssue(config, issueNum);
@@ -759,6 +826,7 @@ export async function processIssue(
   try {
   // --- Step 3: Plan (structured JSON — controls test/verify steps) ---
   currentStep = 'plan';
+  recordSessionStage(session, 'plan');
   log.step('Step 3: Planning');
   let plan: IssuePlan = DEFAULT_PLAN;
   // Write plan inside the worktree (agents sandbox to their CWD), then move to sessions dir
@@ -774,7 +842,7 @@ export async function processIssue(
       });
 
       // Trace the plan prompt
-      tracePrompt(session.name, issueNum, 'plan', planPrompt);
+      tracePrompt(session, issueNum, 'plan', planPrompt);
 
       const planCtx = stageCtx('plan');
       const planResult = await spawnStageAgent({
@@ -787,7 +855,7 @@ export async function processIssue(
       }, config, planCtx);
 
       // Trace the plan output and costs
-      traceOutput(session.name, issueNum, 'plan', planResult.output);
+      traceOutput(session, issueNum, 'plan', planResult.output);
       stepCosts.push(buildStepCost('plan', issueNum, planResult, config));
       recordStageTelemetry(session, issueNum, 'plan', planResult, config, planCtx);
 
@@ -795,7 +863,14 @@ export async function processIssue(
       if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
         log.warn(`Agent hit a transient error during planning for #${issueNum} — re-queuing`);
         requeueIssue(config, issueNum);
-        await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+        const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup });
+        recordSessionCleanup(session, {
+          status: cleanup.status,
+          worktreePath: cleanup.path,
+          reason: cleanup.reason,
+          at: new Date().toISOString(),
+        });
+        recordSessionIssue(session, issueNum, { status: 'failure', stage: 'plan', failureReason: 'transient' });
         return failureResult(issueNum, title, startTime, 'transient');
       }
 
@@ -817,6 +892,7 @@ export async function processIssue(
 
   // --- Step 3b: Fetch issue comments for full context ---
   currentStep = 'context';
+  recordSessionStage(session, 'context');
   let issueComments: Comment[] = [];
   if (!config.dryRun) {
     issueComments = getIssueComments(config.repo, issueNum);
@@ -827,6 +903,7 @@ export async function processIssue(
 
   // --- Step 4: Implement ---
   currentStep = 'implement';
+  recordSessionStage(session, 'implement');
   log.step('Step 4: Implementing');
   // Build resume context if worktree was recovered from a previous session
   const resumeNote = worktreeResumed
@@ -856,7 +933,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     });
 
     // Trace the implement prompt
-    tracePrompt(session.name, issueNum, 'implement', implementPrompt);
+    tracePrompt(session, issueNum, 'implement', implementPrompt);
 
     const implCtx = stageCtx('build');
     const implResult = await spawnStageAgent({
@@ -870,7 +947,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     }, config, implCtx);
 
     // Trace the implement output and costs
-    traceOutput(session.name, issueNum, 'implement', implResult.output);
+    traceOutput(session, issueNum, 'implement', implResult.output);
     stepCosts.push(buildStepCost('implement', issueNum, implResult, config));
     recordStageTelemetry(session, issueNum, 'implement', implResult, config, implCtx);
 
@@ -885,14 +962,28 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       if (isTransientError(implResult.output)) {
         log.warn(`Agent hit a transient error during implementation for #${issueNum} — re-queuing`);
         requeueIssue(config, issueNum);
-        await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
+        const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
+        recordSessionCleanup(session, {
+          status: cleanup.status,
+          worktreePath: cleanup.path,
+          reason: cleanup.reason,
+          at: new Date().toISOString(),
+        });
+        recordSessionIssue(session, issueNum, { status: 'failure', stage: 'implement', failureReason: 'transient' });
         return failureResult(issueNum, title, startTime, 'transient');
       }
       log.error(`Implementation failed for issue #${issueNum}`);
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, 'Agent loop failed during implementation. See logs for details.');
       writeRecoverableCrashMarker(new Error('Implementation failed after writing commits'), 'implement');
-      await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
+      const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
+      recordSessionCleanup(session, {
+        status: cleanup.status,
+        worktreePath: cleanup.path,
+        reason: cleanup.reason,
+        at: new Date().toISOString(),
+      });
+      recordSessionIssue(session, issueNum, { status: 'failure', stage: 'implement', failureReason: 'permanent' });
       return failureResult(issueNum, title, startTime, 'permanent');
     }
 
@@ -915,6 +1006,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 5: Test + retry loop ---
   currentStep = 'test';
+  recordSessionStage(session, 'test');
   log.step('Step 5: Running tests');
   let testOutput = '';
   let testsPassing = false;
@@ -951,7 +1043,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         const fixPrompt = `Tests are failing for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix ONLY code related to issue #${issueNum} — do NOT modify test infrastructure, build scripts, or unrelated files\n3. If tests fail due to environment issues (missing venv, wrong port, missing deps), fix only YOUR code — do NOT rewrite the test runner or package.json scripts\n4. Run the tests again to verify\n5. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed.\n   Format: fix(#${issueNum}): <what you changed> — <why it was failing>\n   Example: fix(#${issueNum}): use port 5435 for postgres — default 5432 conflicts with host service\n   DO NOT use generic messages like "fix: resolve test failures"`;
 
         // Trace fix prompt
-        tracePrompt(session.name, issueNum, `fix-${attempt}`, fixPrompt);
+        tracePrompt(session, issueNum, `fix-${attempt}`, fixPrompt);
 
         const fixCtx = stageCtx('test_write');
         const fixResult = await spawnStageAgent({
@@ -966,7 +1058,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         }, config, fixCtx);
 
         // Trace fix output and costs
-        traceOutput(session.name, issueNum, `fix-${attempt}`, fixResult.output);
+        traceOutput(session, issueNum, `fix-${attempt}`, fixResult.output);
         stepCosts.push(buildStepCost('test_fix', issueNum, fixResult, config));
         recordStageTelemetry(session, issueNum, 'test_fix', fixResult, config, fixCtx);
         stepsCompleted.push(`fix-${attempt}`);
@@ -992,6 +1084,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 6: Review gate (JSON-based) ---
   currentStep = 'review';
+  recordSessionStage(session, 'review');
   log.step('Step 6: Code review');
   let reviewOutput = '';
   let reviewGate: GateResult = DEFAULT_GATE;
@@ -1019,7 +1112,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         });
 
         // Trace review prompt
-        tracePrompt(session.name, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewPrompt);
+        tracePrompt(session, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewPrompt);
 
         const reviewCtx = stageCtx('review');
         const reviewResult = await spawnStageAgent({
@@ -1032,7 +1125,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         }, config, reviewCtx);
 
         // Trace review output and costs
-        traceOutput(session.name, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
+        traceOutput(session, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
         stepCosts.push(buildStepCost('review', issueNum, reviewResult, config));
         recordStageTelemetry(session, issueNum, 'review', reviewResult, config, reviewCtx);
 
@@ -1062,7 +1155,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         const fixPrompt = `The code review for issue #${issueNum} found problems that need to be fixed.\n\n${findings}${formatEpicFixContext(pipelineOptions, issueNum)}\n\nInstructions:\n1. Address each finding listed above\n2. Run tests to make sure nothing is broken\n3. Commit your fixes with: git commit -m "fix(#${issueNum}): address review findings"`;
 
         // Trace review-fix prompt
-        tracePrompt(session.name, issueNum, `review-fix-${attempt}`, fixPrompt);
+        tracePrompt(session, issueNum, `review-fix-${attempt}`, fixPrompt);
 
         const reviewFixCtx = stageCtx('build');
         const reviewFixResult = await spawnStageAgent({
@@ -1077,7 +1170,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         }, config, reviewFixCtx);
 
         // Trace review-fix output and costs
-        traceOutput(session.name, issueNum, `review-fix-${attempt}`, reviewFixResult.output);
+        traceOutput(session, issueNum, `review-fix-${attempt}`, reviewFixResult.output);
         stepCosts.push(buildStepCost('review', issueNum, reviewFixResult, config));
         recordStageTelemetry(session, issueNum, 'review_fix', reviewFixResult, config, reviewFixCtx);
 
@@ -1103,6 +1196,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 7: Verify gate (JSON-based) ---
   currentStep = 'verify';
+  recordSessionStage(session, 'verify');
   log.step('Step 7: Live verification');
   let verifyOutput = '';
   let verifyPassing = false;
@@ -1175,7 +1269,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           const fixPrompt = `Live verification failed for issue #${issueNum} (attempt ${attempt} of ${config.maxTestRetries}).\n\n${findings}${formatEpicFixContext(pipelineOptions, issueNum)}\n\nInstructions:\n1. Read the verification findings and identify the ROOT CAUSE\n2. Fix ONLY code related to issue #${issueNum}\n3. Run tests to make sure nothing is broken\n4. Commit your fixes with: git commit -m "fix(#${issueNum}): address verification findings"`;
 
           // Trace verify-fix prompt
-          tracePrompt(session.name, issueNum, `verify-fix-${attempt}`, fixPrompt);
+          tracePrompt(session, issueNum, `verify-fix-${attempt}`, fixPrompt);
 
           const verifyFixCtx = stageCtx('test_exec');
           const verifyFixResult = await spawnStageAgent({
@@ -1190,7 +1284,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           }, config, verifyFixCtx);
 
           // Trace verify-fix output and costs
-          traceOutput(session.name, issueNum, `verify-fix-${attempt}`, verifyFixResult.output);
+          traceOutput(session, issueNum, `verify-fix-${attempt}`, verifyFixResult.output);
           stepCosts.push(buildStepCost('verify', issueNum, verifyFixResult, config));
           recordStageTelemetry(session, issueNum, 'verify_fix', verifyFixResult, config, verifyFixCtx);
 
@@ -1222,6 +1316,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   // --- Step 7b: Smoke test (if configured) ---
   if (config.smokeTest && !config.dryRun) {
     currentStep = 'smoke';
+    recordSessionStage(session, 'smoke');
     log.step('Step 7b: Running smoke test');
     const smokeResult = exec(config.smokeTest, { cwd: worktreePath, timeout: 60_000 });
     if (smokeResult.exitCode === 0) {
@@ -1247,6 +1342,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 8: Extract learnings ---
   currentStep = 'learn';
+  recordSessionStage(session, 'learn');
   log.step('Step 8: Extracting learnings');
   const learningFile = await extractLearnings({
     issueNum,
@@ -1278,6 +1374,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 9: Create PR ---
   currentStep = 'pr';
+  recordSessionStage(session, 'pr');
   log.step('Step 9: Creating PR');
   let prUrl: string | undefined;
 
@@ -1295,9 +1392,16 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         cwd: worktreePath,
       });
       stepsCompleted.push('pr');
+      recordSessionIssue(session, issueNum, { prUrl, stage: 'pr' });
+      updateSessionManifestForPr(session, prUrl);
       log.success(`PR created: ${prUrl}`);
     } catch (err) {
       log.error(`Failed to create PR for issue #${issueNum}: ${err}`);
+      recordSessionError(session, {
+        issueNum,
+        stage: 'pr',
+        message: err instanceof Error ? err.message : String(err),
+      });
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, `Agent loop failed: could not create PR. Branch: ${worktreeBranch}`);
       writeRecoverableCrashMarker(err, 'pr');
@@ -1311,6 +1415,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   // --- Step 9b: Post assumptions/decisions comment ---
   if (!config.dryRun && prUrl) {
     currentStep = 'assumptions';
+    recordSessionStage(session, 'assumptions');
     try {
       const reviewSummary = reviewGate.summary || 'No review findings';
       const assumptionsPrompt = buildAssumptionsPrompt({
@@ -1321,7 +1426,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         reviewSummary,
       });
 
-      tracePrompt(session.name, issueNum, 'assumptions', assumptionsPrompt);
+      tracePrompt(session, issueNum, 'assumptions', assumptionsPrompt);
 
       const assumptionsResult = await spawnAgent({
         ...agentForStep(config, 'learn'),
@@ -1332,7 +1437,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         timeout: config.agentTimeout * 1000,
       });
 
-      traceOutput(session.name, issueNum, 'assumptions', assumptionsResult.output);
+      traceOutput(session, issueNum, 'assumptions', assumptionsResult.output);
       stepCosts.push(buildStepCost('assumptions', issueNum, assumptionsResult, config));
       recordStageTelemetry(session, issueNum, 'assumptions', assumptionsResult, config, {
         profile: selectRoutingProfile(config, issueNum),
@@ -1351,6 +1456,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 9c: Write full traces (Meta-Harness style) ---
   currentStep = 'trace';
+  recordSessionStage(session, 'trace');
   const filesChanged = runDiff ? (runDiff.match(/^diff --git/gm) ?? []).length : 0;
 
   if (!config.dryRun) {
@@ -1406,6 +1512,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 10: Update issue status ---
   currentStep = 'status';
+  recordSessionStage(session, 'status');
   log.step('Step 10: Updating issue status');
   if (!config.dryRun) {
     const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
@@ -1426,6 +1533,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     } else {
       log.step('Step 11: Auto-merging PR');
       currentStep = 'merge';
+      recordSessionStage(session, 'merge');
       try {
         mergePR(config.repo, worktreeBranch);
         mergeSucceeded = true;
@@ -1447,22 +1555,35 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   // --- Step 12: Cleanup ---
   currentStep = 'cleanup';
+  recordSessionStage(session, 'cleanup');
   log.step('Step 12: Cleanup');
   if (!mergeSucceeded && config.autoMerge && prUrl) {
     // Merge was expected but didn't happen (tests failing or merge failed) — preserve worktree for recovery
-    await cleanupWorktree({
+    const cleanup = await cleanupWorktree({
       issueNum,
       projectDir,
       autoCleanup: config.autoCleanup,
       preserveIfCommits: true,
       dryRun: config.dryRun,
     });
+    recordSessionCleanup(session, {
+      status: cleanup.status,
+      worktreePath: cleanup.path,
+      reason: cleanup.reason,
+      at: new Date().toISOString(),
+    });
   } else {
-    await cleanupWorktree({
+    const cleanup = await cleanupWorktree({
       issueNum,
       projectDir,
       autoCleanup: config.autoCleanup,
       dryRun: config.dryRun,
+    });
+    recordSessionCleanup(session, {
+      status: cleanup.status,
+      worktreePath: cleanup.path,
+      reason: cleanup.reason,
+      at: new Date().toISOString(),
     });
   }
 
@@ -1525,8 +1646,18 @@ export async function processBatch(
   const logFile = join(session.logsDir, `batch-${issueNums.join('-')}.log`);
 
   log.step(`Batch processing ${issues.length} issues: ${issueNums.map((n) => `#${n}`).join(', ')}`);
+  recordSessionLogFile(session, logFile);
+  for (const issue of issues) {
+    recordSessionIssue(session, issue.number, {
+      title: issue.title,
+      status: 'active',
+      stage: 'status',
+      labels: ['in-progress'],
+    });
+  }
 
   // --- Step 1: Update all issue statuses ---
+  recordSessionStage(session, 'status');
   log.step('Batch Step 1: Updating issue statuses');
   if (!config.dryRun) {
     for (const issue of issues) {
@@ -1537,6 +1668,7 @@ export async function processBatch(
   }
 
   // --- Step 2: Setup single worktree for the batch ---
+  recordSessionStage(session, 'worktree');
   log.step('Batch Step 2: Setting up worktree');
   const batchId = issueNums.join('-');
   let worktreePath: string;
@@ -1557,8 +1689,22 @@ export async function processBatch(
     worktreePath = wt.path;
     worktreeBranch = wt.branch;
     worktreeResumed = wt.resumed;
+    for (const issue of issues) {
+      recordSessionWorktree(session, {
+        issueNum: issue.number,
+        title: issue.title,
+        path: worktreePath,
+        branch: worktreeBranch,
+        resumed: worktreeResumed,
+      });
+    }
   } catch (err) {
     log.error(`Failed to set up worktree for batch: ${err}`);
+    recordSessionError(session, {
+      issueNum: issues[0]?.number,
+      stage: 'worktree',
+      message: err instanceof Error ? err.message : String(err),
+    });
     // Re-queue issues back to ready state so they aren't stuck as "In Progress"
     for (const issue of issues) requeueIssue(config, issue.number);
     return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
@@ -1589,6 +1735,7 @@ export async function processBatch(
   }));
 
   // --- Step 4: Batch plan ---
+  recordSessionStage(session, 'plan');
   log.step('Batch Step 3: Planning all issues');
   const plans = new Map<number, IssuePlan>();
 
@@ -1602,7 +1749,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   if (!config.dryRun) {
     try {
       const planPrompt = resumeNote + buildBatchPlanPrompt({ issues: batchIssues, ...epicOption });
-      tracePrompt(session.name, issues[0].number, 'batch-plan', planPrompt);
+      tracePrompt(session, issues[0].number, 'batch-plan', planPrompt);
 
       const planResult = await spawnAgent({
         ...agentForStep(config, 'plan'),
@@ -1613,7 +1760,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         timeout: config.agentTimeout * 1000,
       });
 
-      traceOutput(session.name, issues[0].number, 'batch-plan', planResult.output);
+      traceOutput(session, issues[0].number, 'batch-plan', planResult.output);
       stepCosts.push(buildStepCost('plan', issues[0].number, planResult, config));
       recordStageTelemetry(session, issues[0].number, 'batch-plan', planResult, config, {
         profile: selectRoutingProfile(config, issues[0].number),
@@ -1622,7 +1769,16 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
         log.warn('Agent hit a transient error during batch planning — re-queuing all issues');
         for (const issue of issues) requeueIssue(config, issue.number);
-        await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup });
+        const cleanup = await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup });
+        recordSessionCleanup(session, {
+          status: cleanup.status,
+          worktreePath: cleanup.path,
+          reason: cleanup.reason,
+          at: new Date().toISOString(),
+        });
+        for (const issue of issues) {
+          recordSessionIssue(session, issue.number, { status: 'failure', stage: 'plan', failureReason: 'transient' });
+        }
         return issues.map((i) => failureResult(i.number, i.title, startTime, 'transient'));
       }
 
@@ -1644,6 +1800,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 5: Batch implement ---
+  recordSessionStage(session, 'implement');
   log.step('Batch Step 4: Implementing all issues');
   if (!config.dryRun) {
     const visionContext = loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md'));
@@ -1665,7 +1822,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       learningContext: learningContext || undefined,
     });
 
-    tracePrompt(session.name, issues[0].number, 'batch-implement', implementPrompt);
+    tracePrompt(session, issues[0].number, 'batch-implement', implementPrompt);
 
     const implResult = await spawnAgent({
       ...agentForStep(config, 'implement'),
@@ -1676,7 +1833,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       timeout: config.agentTimeout * 1000,
     });
 
-    traceOutput(session.name, issues[0].number, 'batch-implement', implResult.output);
+    traceOutput(session, issues[0].number, 'batch-implement', implResult.output);
     stepCosts.push(buildStepCost('implement', issues[0].number, implResult, config));
     recordStageTelemetry(session, issues[0].number, 'batch-implement', implResult, config, {
       profile: selectRoutingProfile(config, issues[0].number),
@@ -1694,7 +1851,16 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       if (isTransientError(implResult.output)) {
         log.warn('Agent hit a transient error during batch implementation — re-queuing');
         for (const issue of issues) requeueIssue(config, issue.number);
-        await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
+        const cleanup = await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
+        recordSessionCleanup(session, {
+          status: cleanup.status,
+          worktreePath: cleanup.path,
+          reason: cleanup.reason,
+          at: new Date().toISOString(),
+        });
+        for (const issue of issues) {
+          recordSessionIssue(session, issue.number, { status: 'failure', stage: 'implement', failureReason: 'transient' });
+        }
         return issues.map((i) => failureResult(i.number, i.title, startTime, 'transient'));
       }
       log.error('Batch implementation failed');
@@ -1702,7 +1868,16 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         labelIssue(config.repo, issue.number, 'failed', 'in-progress');
         commentIssue(config.repo, issue.number, 'Agent loop failed during batch implementation. See logs.');
       }
-      await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
+      const cleanup = await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
+      recordSessionCleanup(session, {
+        status: cleanup.status,
+        worktreePath: cleanup.path,
+        reason: cleanup.reason,
+        at: new Date().toISOString(),
+      });
+      for (const issue of issues) {
+        recordSessionIssue(session, issue.number, { status: 'failure', stage: 'implement', failureReason: 'permanent' });
+      }
       return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
     }
 
@@ -1723,6 +1898,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 6: Test + retry loop ---
+  recordSessionStage(session, 'test');
   log.step('Batch Step 5: Running tests');
   let testOutput = '';
   let testsPassing = false;
@@ -1757,7 +1933,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
         const fixPrompt = `Tests are failing for batch implementation (issues ${issueRefs}, attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix ONLY code related to the batch issues — do NOT modify test infrastructure\n3. Run the tests again to verify\n4. Commit your fixes with a descriptive message`;
 
-        tracePrompt(session.name, issues[0].number, `batch-fix-${attempt}`, fixPrompt);
+        tracePrompt(session, issues[0].number, `batch-fix-${attempt}`, fixPrompt);
 
         const fixResult = await spawnAgent({
           ...agentForStep(config, 'test_fix'),
@@ -1770,7 +1946,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
         });
 
-        traceOutput(session.name, issues[0].number, `batch-fix-${attempt}`, fixResult.output);
+        traceOutput(session, issues[0].number, `batch-fix-${attempt}`, fixResult.output);
         stepCosts.push(buildStepCost('test_fix', issues[0].number, fixResult, config));
         recordStageTelemetry(session, issues[0].number, 'batch-test_fix', fixResult, config, {
           profile: selectRoutingProfile(config, issues[0].number),
@@ -1788,6 +1964,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 7: Batch review ---
+  recordSessionStage(session, 'review');
   log.step('Batch Step 6: Code review');
   let reviewOutput = '';
   let reviewGate: GateResult = DEFAULT_GATE;
@@ -1809,7 +1986,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           visionContext: loadFileIfExists(join(projectDir, '.alpha-loop', 'vision.md')) ?? undefined,
         });
 
-        tracePrompt(session.name, issues[0].number, `batch-review${attempt > 1 ? `-${attempt}` : ''}`, reviewPrompt);
+        tracePrompt(session, issues[0].number, `batch-review${attempt > 1 ? `-${attempt}` : ''}`, reviewPrompt);
 
         const reviewResult = await spawnAgent({
           ...agentForStep(config, 'review'),
@@ -1820,7 +1997,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           timeout: config.agentTimeout * 1000,
         });
 
-        traceOutput(session.name, issues[0].number, `batch-review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
+        traceOutput(session, issues[0].number, `batch-review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
         stepCosts.push(buildStepCost('review', issues[0].number, reviewResult, config));
         recordStageTelemetry(session, issues[0].number, 'batch-review', reviewResult, config, {
           profile: selectRoutingProfile(config, issues[0].number),
@@ -1850,7 +2027,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           : '';
         const fixPrompt = `The code review for the batch found problems that need to be fixed.\n\n${findings}${epicFixContext}\n\nInstructions:\n1. Address each finding listed above\n2. Run tests to make sure nothing is broken\n3. Commit your fixes`;
 
-        tracePrompt(session.name, issues[0].number, `batch-review-fix-${attempt}`, fixPrompt);
+        tracePrompt(session, issues[0].number, `batch-review-fix-${attempt}`, fixPrompt);
 
         const reviewFixResult = await spawnAgent({
           ...agentForStep(config, 'implement'),
@@ -1863,7 +2040,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
         });
 
-        traceOutput(session.name, issues[0].number, `batch-review-fix-${attempt}`, reviewFixResult.output);
+        traceOutput(session, issues[0].number, `batch-review-fix-${attempt}`, reviewFixResult.output);
         stepCosts.push(buildStepCost('review', issues[0].number, reviewFixResult, config));
         recordStageTelemetry(session, issues[0].number, 'batch-review_fix', reviewFixResult, config, {
           profile: selectRoutingProfile(config, issues[0].number),
@@ -1903,6 +2080,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   const filesChanged = runDiff ? (runDiff.match(/^diff --git/gm) ?? []).length : 0;
 
   // --- Step 8: Extract learnings ---
+  recordSessionStage(session, 'learn');
   log.step('Batch Step 7: Extracting learnings');
   const learningFiles: Array<string | null> = [];
   for (const issue of issues) {
@@ -1937,6 +2115,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   stepsCompleted.push('learn');
 
   // --- Step 9: Create single PR for the batch ---
+  recordSessionStage(session, 'pr');
   log.step('Batch Step 8: Creating PR');
   let prUrl: string | undefined;
 
@@ -1961,9 +2140,18 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         cwd: worktreePath,
       });
       stepsCompleted.push('pr');
+      for (const issue of issues) {
+        recordSessionIssue(session, issue.number, { prUrl, stage: 'pr' });
+      }
+      updateSessionManifestForPr(session, prUrl);
       log.success(`Batch PR created: ${prUrl}`);
     } catch (err) {
       log.error(`Failed to create batch PR: ${err}`);
+      recordSessionError(session, {
+        issueNum: issues[0]?.number,
+        stage: 'pr',
+        message: err instanceof Error ? err.message : String(err),
+      });
       for (const issue of issues) {
         labelIssue(config.repo, issue.number, 'failed', 'in-progress');
         commentIssue(config.repo, issue.number, `Agent loop failed: could not create PR. Branch: ${worktreeBranch}`);
@@ -1974,6 +2162,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 10: Update each issue individually ---
+  recordSessionStage(session, 'status');
   log.step('Batch Step 9: Updating individual issues');
   const results: PipelineResult[] = [];
 
@@ -2084,7 +2273,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     if (!testsPassing) {
       log.warn('Skipping auto-merge: tests are not passing');
     } else {
-        log.step('Batch Step 10: Auto-merging PR');
+      log.step('Batch Step 10: Auto-merging PR');
+      recordSessionStage(session, 'merge');
       try {
         mergePR(config.repo, worktreeBranch);
         mergeSucceeded = true;
@@ -2101,22 +2291,35 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   // --- Step 11: Cleanup ---
+  recordSessionStage(session, 'cleanup');
   log.step('Batch Step 11: Cleanup');
   if (!mergeSucceeded && config.autoMerge && prUrl) {
     // Merge was expected but didn't happen (tests failing or merge failed) — preserve worktree for recovery
-    await cleanupWorktree({
+    const cleanup = await cleanupWorktree({
       issueNum: issues[0].number,
       projectDir,
       autoCleanup: config.autoCleanup,
       preserveIfCommits: true,
       dryRun: config.dryRun,
     });
+    recordSessionCleanup(session, {
+      status: cleanup.status,
+      worktreePath: cleanup.path,
+      reason: cleanup.reason,
+      at: new Date().toISOString(),
+    });
   } else {
-    await cleanupWorktree({
+    const cleanup = await cleanupWorktree({
       issueNum: issues[0].number,
       projectDir,
       autoCleanup: config.autoCleanup,
       dryRun: config.dryRun,
+    });
+    recordSessionCleanup(session, {
+      status: cleanup.status,
+      worktreePath: cleanup.path,
+      reason: cleanup.reason,
+      at: new Date().toISOString(),
     });
   }
 

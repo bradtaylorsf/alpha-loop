@@ -45,6 +45,9 @@ jest.mock('../../src/lib/pipeline', () => ({
 jest.mock('../../src/lib/session', () => ({
   createSession: jest.fn(),
   finalizeSession: jest.fn(),
+  recordSessionCleanup: jest.fn(),
+  transitionSessionStatus: jest.fn(),
+  updateSessionManifest: jest.fn(),
 }));
 
 jest.mock('../../src/lib/verify-epic', () => ({
