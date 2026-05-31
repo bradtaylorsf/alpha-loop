@@ -494,6 +494,7 @@ function saveResumedResult(
 
 function formatSessionIssueStatus(result: PipelineResult): string {
   if (isRecoveredResult(result)) return `RECOVERED BY ${result.recoveryMode?.toUpperCase()}`;
+  if (result.status === 'waiting') return result.waitingStatus?.toUpperCase() ?? 'WAITING';
   return result.status === 'success' ? 'SUCCESS' : 'FAILURE';
 }
 

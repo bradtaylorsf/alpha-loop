@@ -21,6 +21,7 @@ import {
   transitionSessionStatus,
   updateSessionManifest,
   type SessionContext,
+  type SessionStage,
   type SessionStatus,
 } from '../lib/session.js';
 import { cleanupWorktree } from '../lib/worktree.js';
@@ -120,7 +121,7 @@ export type EpicExecutionResult = {
   sessionName: string | null;
   sessionBranch: string | null;
   sessionPrUrl: string | null;
-  status: 'success' | 'failure';
+  status: 'success' | 'failure' | 'waiting';
   failures: EpicExecutionFailure[];
   verificationClosedEpic: boolean;
 };
@@ -131,7 +132,7 @@ export type IssueExecutionResult = {
   sessionName: string | null;
   sessionBranch: string | null;
   sessionPrUrl: string | null;
-  status: 'success' | 'failure';
+  status: 'success' | 'failure' | 'waiting';
   failures: EpicExecutionFailure[];
   verificationClosedEpic: boolean;
 };
@@ -154,6 +155,7 @@ type SessionExecutionResult = {
   sessionPrUrl: string | null;
   failures: EpicExecutionFailure[];
   verificationClosedEpic: boolean;
+  waiting: boolean;
 };
 
 type CommandExitErrorCode =
@@ -218,10 +220,20 @@ function isRecoveredRunResult(result: { recoveryMode?: unknown }): boolean {
 
 function sessionStatusFromFailures(failures: EpicExecutionFailure[]): SessionStatus {
   if (failures.some((failure) => failure.code === 'epic-verification-failed')) {
-    return 'qa-requested';
+    return 'qa_requested';
   }
   if (failures.length > 0) return 'failed';
   return 'completed';
+}
+
+function sessionStatusFromResults(session: SessionContext, failures: EpicExecutionFailure[]): SessionStatus {
+  if (failures.length > 0) return sessionStatusFromFailures(failures);
+  const waiting = session.results.find((result) => result.status === 'waiting' && !isRecoveredRunResult(result));
+  return waiting?.waitingStatus ?? 'completed';
+}
+
+function hasWaitingResults(session: SessionContext): boolean {
+  return session.results.some((result) => result.status === 'waiting' && !isRecoveredRunResult(result));
 }
 
 /**
@@ -784,7 +796,7 @@ async function runIssueSession(
     if (activeIssueNum !== null) {
       log.info(`Cleaning up worktree for issue #${activeIssueNum}...`);
       try {
-        transitionSessionStatus(session, 'paused', 'paused', {
+        transitionSessionStatus(session, 'human_input_requested', 'human_input_requested', {
           lastEventId: 'signal',
           currentIssue: { issueNum: activeIssueNum },
         });
@@ -793,7 +805,7 @@ async function runIssueSession(
           projectDir: process.cwd(),
           autoCleanup: true,
           preserveIfCommits: true,
-          sessionStatus: 'paused',
+          sessionStatus: 'human_input_requested',
         });
         recordSessionCleanup(session, {
           status: cleanupResult.status,
@@ -1047,7 +1059,7 @@ async function runIssueSession(
           ...existing,
           issueNum: issue.number,
           title: issue.title,
-          status: existing?.status ?? 'active',
+          status: existing?.status ?? 'running',
           stage: existing?.stage ?? 'created',
           updatedAt: new Date().toISOString(),
         };
@@ -1434,12 +1446,8 @@ async function runIssueSession(
   // Finalize session
   const finalizedPrUrl = await finalizeSession(session, config);
   const sessionPrUrl = finalizedPrUrl ?? session.sessionPrUrl ?? null;
-  const finalStatus = sessionStatusFromFailures(failures);
-  const finalStage: 'completed' | 'qa-requested' | 'failed' = finalStatus === 'completed'
-    ? 'completed'
-    : finalStatus === 'qa-requested'
-      ? 'qa-requested'
-      : 'failed';
+  const finalStatus = sessionStatusFromResults(session, failures);
+  const finalStage = finalStatus as SessionStage;
   transitionSessionStatus(session, finalStatus, finalStage, {
     prUrl: sessionPrUrl,
     sessionPrUrl,
@@ -1455,6 +1463,7 @@ async function runIssueSession(
     sessionPrUrl,
     failures,
     verificationClosedEpic,
+    waiting: hasWaitingResults(session),
   };
 }
 
@@ -1599,7 +1608,7 @@ export async function runSingleIssueExecution(args: {
     sessionName: sessionResult.session.name,
     sessionBranch: sessionResult.session.branch,
     sessionPrUrl: sessionResult.sessionPrUrl,
-    status: sessionResult.failures.length > 0 ? 'failure' : 'success',
+    status: sessionResult.failures.length > 0 ? 'failure' : sessionResult.waiting ? 'waiting' : 'success',
     failures: sessionResult.failures,
     verificationClosedEpic: sessionResult.verificationClosedEpic,
   };
@@ -1655,7 +1664,7 @@ export async function runSingleEpicExecution(args: {
     sessionName: sessionResult.session.name,
     sessionBranch: sessionResult.session.branch,
     sessionPrUrl: sessionResult.sessionPrUrl,
-    status: sessionResult.failures.length > 0 ? 'failure' : 'success',
+    status: sessionResult.failures.length > 0 ? 'failure' : sessionResult.waiting ? 'waiting' : 'success',
     failures: sessionResult.failures,
     verificationClosedEpic: sessionResult.verificationClosedEpic,
   };
@@ -2036,7 +2045,7 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
     manifestEntry.endedAt = new Date().toISOString();
     manifestEntry.status = result.status === 'success' ? 'success' : 'failure';
 
-    if (result.status === 'failure') {
+    if (result.status !== 'success') {
       manifest.status = 'stopped';
       manifest.stopReason = stopReasonForEpicResult(result);
       manifest.endedAt = manifestEntry.endedAt;

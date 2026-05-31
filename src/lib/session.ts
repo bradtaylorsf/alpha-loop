@@ -11,6 +11,13 @@ import { createPR, updateProjectStatus } from './github.js';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from './learning.js';
 import { readStageTelemetry } from './telemetry.js';
 import { runDir } from './traces.js';
+import {
+  applyHumanFeedbackTransition,
+  initialHumanFeedbackState,
+  type HumanFeedbackSessionStatus,
+  type HumanFeedbackStateBlock,
+  type HumanFeedbackTransitionInput,
+} from './session-state.js';
 import type { Config } from './config.js';
 import type { PipelineResult, GateResult } from './pipeline.js';
 import type { QueueEpicLink, QueueSessionContext } from './epic-queue.js';
@@ -38,6 +45,7 @@ export type SessionContext = {
 };
 
 export type SessionStatus =
+  | HumanFeedbackSessionStatus
   | 'active'
   | 'paused'
   | 'waiting-for-feedback'
@@ -48,6 +56,7 @@ export type SessionStatus =
   | 'cleaned-up';
 
 export type SessionStage =
+  | HumanFeedbackSessionStatus
   | 'created'
   | 'status'
   | 'worktree'
@@ -135,6 +144,7 @@ export type DurableSessionManifest = {
   status: SessionStatus;
   stage: SessionStage;
   labels: string[];
+  feedback: HumanFeedbackStateBlock;
   harness: {
     agent: Config['agent'];
     model: string;
@@ -232,6 +242,12 @@ export type CreateSessionOptions = {
 };
 
 const RESUMABLE_STATUSES = new Set<SessionStatus>([
+  'running',
+  'human_input_requested',
+  'qa_requested',
+  'feedback_received',
+  'resume_requested',
+  'resuming',
   'active',
   'paused',
   'waiting-for-feedback',
@@ -309,6 +325,12 @@ function mergeManifest(
       ...current.timestamps,
       ...(patch.timestamps ?? {}),
     },
+    feedback: patch.feedback ? {
+      ...(current.feedback ?? initialHumanFeedbackState()),
+      ...patch.feedback,
+      transitionHistory: patch.feedback.transitionHistory ?? current.feedback?.transitionHistory ?? [],
+      events: patch.feedback.events ?? current.feedback?.events ?? [],
+    } : current.feedback,
   };
 }
 
@@ -397,6 +419,13 @@ export function transitionSessionStatus(
   }));
 }
 
+export function transitionHumanFeedbackSessionStatus(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'> | string,
+  input: HumanFeedbackTransitionInput,
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => applyHumanFeedbackTransition(manifest, input));
+}
+
 export function recordSessionError(
   session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
   args: { issueNum?: number; stage: string; message: string },
@@ -425,7 +454,7 @@ export function recordSessionWorktree(
   return updateSessionManifest(session, (manifest) => {
     const updated = upsertIssue(manifest, args.issueNum, {
       title: args.title,
-      status: args.resumed ? 'resumed' : 'active',
+      status: args.resumed ? 'resuming' : 'running',
       stage: 'worktree',
       branch: args.branch,
       worktreePath: args.path,
@@ -434,7 +463,7 @@ export function recordSessionWorktree(
     });
     return {
       ...updated,
-      status: args.resumed ? 'resumed' : updated.status,
+      status: args.resumed ? 'resuming' : 'running',
       stage: 'worktree',
       worktree: {
         path: args.path,
@@ -1011,7 +1040,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
     const initialIssues: SessionIssueManifest[] = initialIssueNumbers.map((issueNum) => ({
       issueNum,
       ...(issueNum === options?.issueNum && options.issueTitle ? { title: options.issueTitle } : {}),
-      status: 'active',
+      status: 'running',
       stage: 'created',
       startedAt,
       updatedAt: startedAt,
@@ -1028,9 +1057,10 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
       baseBranch: config.baseBranch,
       prUrl: sessionPrUrl ?? null,
       sessionPrUrl: sessionPrUrl ?? null,
-      status: 'active',
+      status: 'running',
       stage: 'created',
       labels: [],
+      feedback: initialHumanFeedbackState('running', startedAt),
       harness: {
         agent: config.agent,
         model: config.model,
@@ -1222,6 +1252,7 @@ export async function finalizeSession(
   const successes = naturalResults.filter((r) => r.status === 'success');
   const permanentFailures = naturalResults.filter((r) => r.status === 'failure' && r.failureReason !== 'transient');
   const transientFailures = naturalResults.filter((r) => r.status === 'failure' && r.failureReason === 'transient');
+  const waitingResults = naturalResults.filter((r) => r.status === 'waiting');
   const totalDuration = naturalResults.reduce((sum, r) => sum + r.duration, 0);
 
   // Only count completed issues (not transient failures that were re-queued)
@@ -1235,7 +1266,7 @@ export async function finalizeSession(
     '## Session Summary',
     '',
     `**Branch:** ${session.branch}`,
-    `**Issues processed:** ${session.results.length} (${successes.length} succeeded, ${permanentFailures.length} failed, ${recovered.length} recovered)`,
+    `**Issues processed:** ${session.results.length} (${successes.length} succeeded, ${permanentFailures.length} failed, ${waitingResults.length} waiting, ${recovered.length} recovered)`,
     `**Total duration:** ${Math.round(totalDuration / 60)} minutes`,
     `**Completed:** ${new Date().toISOString()}`,
     '',
@@ -1270,6 +1301,20 @@ export async function finalizeSession(
   }
 
   prLines.push(...formatAutoCommittedResultsSection(session.results));
+
+  if (waitingResults.length > 0) {
+    prLines.push('### Waiting for Human Feedback');
+    for (const r of waitingResults) {
+      const state = r.waitingStatus ? ` (${r.waitingStatus})` : '';
+      prLines.push(`- #${r.issueNum}: ${r.title}${state}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`);
+      if (r.humanInputQuestion) prLines.push(`  - Question: ${r.humanInputQuestion}`);
+      if (r.qaChecklist && r.qaChecklist.length > 0) {
+        prLines.push(`  - QA: ${r.qaChecklist.join('; ')}`);
+      }
+      if (r.followUpIssueUrl) prLines.push(`  - Follow-up: ${r.followUpIssueUrl}`);
+    }
+    prLines.push('');
+  }
 
   // Permanent failures — collapsed
   if (permanentFailures.length > 0) {

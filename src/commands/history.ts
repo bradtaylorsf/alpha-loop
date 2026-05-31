@@ -12,6 +12,7 @@ import {
   type SessionStatus,
 } from '../lib/session.js';
 import { DEFAULT_SESSION_RETENTION, loadConfig, type SessionRetentionConfig } from '../lib/config.js';
+import { isWaitingFeedbackStatus } from '../lib/session-state.js';
 import { readStageTelemetry } from '../lib/telemetry.js';
 import type { StageTelemetry } from '../lib/telemetry.js';
 import { isRecoveredResult } from '../lib/pipeline.js';
@@ -73,7 +74,7 @@ function statusLabel(status: SessionStatus | undefined, results: PipelineResult[
   if (status) return status;
   const visibleCrashes = uniqueCrashMarkers(results, crashes);
   if (visibleCrashes.length > 0) return 'failed';
-  if (results.length === 0) return 'active';
+  if (results.length === 0) return 'running';
   return results.some((result) => result.status === 'failure' && !isRecoveredResult(result))
     ? 'failed'
     : 'completed';
@@ -476,7 +477,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
 
   for (const result of results) {
     const recovered = isRecoveredResult(result);
-    const symbol = recovered ? '~' : result.status === 'success' ? '\u2713' : '\u2717';
+    const symbol = recovered ? '~' : result.status === 'success' ? '\u2713' : result.status === 'waiting' ? '?' : '\u2717';
     let statusText: string;
 
     if (recovered) {
@@ -486,6 +487,8 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
       statusText = `PR #${prNum}`;
     } else if (result.status === 'success') {
       statusText = 'SUCCESS';
+    } else if (result.status === 'waiting') {
+      statusText = result.waitingStatus?.toUpperCase() ?? 'WAITING';
     } else {
       statusText = 'FAILED';
     }
@@ -660,7 +663,7 @@ function manifestAgeMs(manifest: DurableSessionManifest, fallbackTimestamp: stri
 }
 
 function retentionDaysForStatus(status: SessionStatus, retention: SessionRetentionConfig): number | null {
-  if (status === 'paused' || status === 'waiting-for-feedback' || status === 'qa-requested') {
+  if (isWaitingFeedbackStatus(status)) {
     return retention.pausedWorktreeDays > 0 ? retention.pausedWorktreeDays : null;
   }
   if (status === 'completed' || status === 'failed' || status === 'cleaned-up') {

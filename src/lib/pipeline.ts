@@ -21,6 +21,7 @@ import {
   labelIssue,
   commentIssue,
   createPR,
+  createIssue,
   mergePR,
   updateProjectStatus,
   getIssueComments,
@@ -53,8 +54,20 @@ import {
   recordSessionStage,
   recordSessionTranscript,
   recordSessionWorktree,
+  transitionHumanFeedbackSessionStatus,
   updateSessionManifest,
 } from './session.js';
+import {
+  classifyFeedback,
+  formatHumanInputComment,
+  formatNewScopeComment,
+  formatQaRequestComment,
+  githubLabelChangesForStatus,
+  normalizeFeedbackClassification,
+  normalizeHumanFeedbackStatus,
+  type FeedbackClassification,
+  type HumanFeedbackSessionStatus,
+} from './session-state.js';
 import {
   writeTrace,
   writeTraceMetadata,
@@ -240,6 +253,12 @@ export type IssuePlan = {
     /** Shell command for script/cli/boot/api verification methods. */
     command?: string;
   };
+  qa?: {
+    needed: boolean;
+    checklist: string[];
+    reason: string;
+    previewUrl?: string;
+  };
 };
 
 /**
@@ -271,6 +290,7 @@ const DEFAULT_PLAN: IssuePlan = {
   implementation: '',
   testing: { needed: true, reason: 'Default: run project test command' },
   verification: { needed: false, reason: 'Default: skip verification unless plan requests it' },
+  qa: { needed: false, checklist: [], reason: 'Default: no human QA handoff requested' },
 };
 
 /**
@@ -285,6 +305,7 @@ function readPlan(planFile: string): IssuePlan {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
 
     const verificationRaw = parsed.verification as any;
+    const qaRaw = parsed.qa as any;
     const validMethods = ['playwright', 'cli', 'api', 'boot', 'script'];
     const verifyMethod = validMethods.includes(verificationRaw?.method) ? verificationRaw.method : undefined;
 
@@ -302,6 +323,12 @@ function readPlan(planFile: string): IssuePlan {
         reason: String(verificationRaw?.reason ?? 'No reason given'),
         method: verifyMethod,
         command: verificationRaw?.command ? String(verificationRaw.command) : undefined,
+      },
+      qa: {
+        needed: qaRaw?.needed === true,
+        checklist: Array.isArray(qaRaw?.checklist) ? qaRaw.checklist.map(String).filter(Boolean) : [],
+        reason: String(qaRaw?.reason ?? 'No reason given'),
+        previewUrl: qaRaw?.previewUrl ? String(qaRaw.previewUrl) : undefined,
       },
     };
   } catch {
@@ -370,7 +397,16 @@ export type PipelineRecoveryMode = 'resume' | 'manual';
 export type PipelineResult = {
   issueNum: number;
   title: string;
-  status: 'success' | 'failure';
+  status: 'success' | 'failure' | 'waiting';
+  /** Canonical session state when status is waiting. */
+  waitingStatus?: HumanFeedbackSessionStatus;
+  waitingReason?: string;
+  humanInputQuestion?: string;
+  resumeInstructions?: string;
+  qaChecklist?: string[];
+  feedbackClassification?: FeedbackClassification;
+  followUpIssueNumber?: number;
+  followUpIssueUrl?: string;
   /** Set when the result was synthesized after out-of-band recovery instead of produced by the normal pipeline. */
   recoveryMode?: PipelineRecoveryMode;
   /** Set when the pipeline committed dirty work left behind by a successful implementation agent. */
@@ -398,6 +434,256 @@ export function isRecoveredResult<T extends { recoveryMode?: PipelineRecoveryMod
 export type PipelineOptions = {
   epicContext?: EpicPromptContext;
 };
+
+const PAUSE_REQUEST_FILE = 'alpha-loop-pause-request.json';
+
+type PauseRequestType = 'human_input' | 'qa' | 'feedback' | 'new_scope';
+
+type PauseRequest = {
+  type: PauseRequestType;
+  status?: HumanFeedbackSessionStatus;
+  reason: string;
+  question?: string;
+  resumeInstructions?: string;
+  qaChecklist: string[];
+  prUrl?: string;
+  previewUrl?: string;
+  feedback?: string;
+  classification?: FeedbackClassification;
+  summary?: string;
+  followUp?: {
+    title?: string;
+    body?: string;
+    labels?: string[];
+    milestone?: string;
+  };
+};
+
+type PauseSessionInput = {
+  issueNum: number;
+  title: string;
+  config: Config;
+  session: SessionContext;
+  request: PauseRequest;
+  startTime: number;
+  projectDir: string;
+  worktreePath: string;
+  worktreeBranch: string;
+  testsPassing?: boolean;
+  verifyPassing?: boolean;
+  verifySkipped?: boolean;
+  filesChanged?: number;
+  prUrl?: string;
+};
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String).map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function normalizePauseRequest(raw: unknown): PauseRequest | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const data = raw as Record<string, unknown>;
+  const rawType = String(data.type ?? data.kind ?? 'human_input').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  const type = (['human_input', 'qa', 'feedback', 'new_scope'].includes(rawType) ? rawType : 'human_input') as PauseRequestType;
+  const status = normalizeHumanFeedbackStatus(String(data.status ?? '')) ?? undefined;
+  const classification = normalizeFeedbackClassification(String(data.classification ?? '')) ?? undefined;
+  const followUpRaw = data.followUp ?? data.follow_up;
+  const followUp = followUpRaw && typeof followUpRaw === 'object'
+    ? followUpRaw as Record<string, unknown>
+    : undefined;
+
+  return {
+    type,
+    status,
+    reason: String(data.reason ?? data.summary ?? 'Agent requested a human feedback pause'),
+    question: data.question ? String(data.question) : undefined,
+    resumeInstructions: data.resumeInstructions || data.resume_instructions
+      ? String(data.resumeInstructions ?? data.resume_instructions)
+      : undefined,
+    qaChecklist: stringArray(data.qaChecklist ?? data.qa_checklist ?? data.checklist),
+    prUrl: data.prUrl || data.pr_url ? String(data.prUrl ?? data.pr_url) : undefined,
+    previewUrl: data.previewUrl || data.preview_url ? String(data.previewUrl ?? data.preview_url) : undefined,
+    feedback: data.feedback ? String(data.feedback) : undefined,
+    classification,
+    summary: data.summary ? String(data.summary) : undefined,
+    followUp: followUp ? {
+      title: followUp.title ? String(followUp.title) : undefined,
+      body: followUp.body ? String(followUp.body) : undefined,
+      labels: stringArray(followUp.labels),
+      milestone: followUp.milestone ? String(followUp.milestone) : undefined,
+    } : undefined,
+  };
+}
+
+function readPauseRequest(worktreePath: string, session: SessionContext, issueNum: number, stage: string): PauseRequest | null {
+  const requestPath = join(worktreePath, PAUSE_REQUEST_FILE);
+  if (!existsSync(requestPath)) return null;
+
+  try {
+    const request = normalizePauseRequest(JSON.parse(readFileSync(requestPath, 'utf-8')));
+    moveToSessionLogs(requestPath, join(session.logsDir, `pause-issue-${issueNum}-${stage}.json`));
+    return request;
+  } catch (err) {
+    log.warn(`Ignoring invalid ${PAUSE_REQUEST_FILE}: ${err instanceof Error ? err.message : err}`);
+    moveToSessionLogs(requestPath, join(session.logsDir, `pause-issue-${issueNum}-${stage}.invalid.json`));
+    return null;
+  }
+}
+
+function statusForPauseRequest(request: PauseRequest): HumanFeedbackSessionStatus {
+  if (request.status === 'human_input_requested' || request.status === 'qa_requested') return request.status;
+  if (request.type === 'qa') return 'qa_requested';
+  return 'human_input_requested';
+}
+
+function labelSessionState(config: Config, issueNum: number, status: HumanFeedbackSessionStatus): void {
+  for (const change of githubLabelChangesForStatus(status, config.labelReady)) {
+    labelIssue(config.repo, issueNum, change.add, change.remove);
+  }
+}
+
+function followUpIssueUrl(repo: string, issueNumber: number): string {
+  return `https://github.com/${repo}/issues/${issueNumber}`;
+}
+
+async function pauseSessionForRequest(input: PauseSessionInput): Promise<PipelineResult> {
+  const {
+    issueNum,
+    title,
+    config,
+    session,
+    request,
+    startTime,
+    projectDir,
+    worktreePath,
+    worktreeBranch,
+  } = input;
+  const duration = Math.round((Date.now() - startTime) / 1000);
+  const classification = request.classification
+    ?? (request.type === 'new_scope' ? 'new_scope' : undefined)
+    ?? (request.feedback ? classifyFeedback(request.feedback) : undefined);
+
+  let followUpIssueNumber: number | undefined;
+  let followUpUrl: string | undefined;
+  if (!config.dryRun && classification === 'new_scope' && request.followUp?.title && request.followUp.body) {
+    followUpIssueNumber = createIssue(
+      config.repo,
+      request.followUp.title,
+      request.followUp.body,
+      request.followUp.labels && request.followUp.labels.length > 0 ? request.followUp.labels : [config.labelReady],
+      request.followUp.milestone,
+    ) || undefined;
+    if (followUpIssueNumber) followUpUrl = followUpIssueUrl(config.repo, followUpIssueNumber);
+  }
+
+  const waitingStatus = statusForPauseRequest(request);
+  const question = request.question
+    ?? (classification === 'new_scope'
+      ? 'Please confirm whether the new scope should stay in a separate follow-up issue or be handled another way.'
+      : 'Please provide the clarification Alpha Loop needs before continuing.');
+  const resumeInstructions = request.resumeInstructions
+    ?? `Reply with the requested feedback, then resume this session for issue #${issueNum}.`;
+  const prUrl = request.prUrl ?? input.prUrl;
+  const previewUrl = request.previewUrl ?? input.request.previewUrl;
+  const qaChecklist = request.qaChecklist;
+
+  transitionHumanFeedbackSessionStatus(session, {
+    to: waitingStatus,
+    reason: request.reason,
+    issueNum,
+    question,
+    resumeInstructions,
+    qaChecklist,
+    prUrl,
+    previewUrl,
+    classification: classification ?? null,
+    followUpIssueNumber: followUpIssueNumber ?? null,
+    followUpIssueUrl: followUpUrl ?? null,
+    eventPayload: {
+      branch: worktreeBranch,
+      worktreePath,
+      requestType: request.type,
+      followUpTitle: request.followUp?.title,
+    },
+  });
+  recordSessionIssue(session, issueNum, {
+    title,
+    status: waitingStatus,
+    stage: waitingStatus,
+    labels: waitingStatus === 'qa_requested' ? ['in-review', 'needs-human-input'] : ['needs-human-input'],
+    branch: worktreeBranch,
+    worktreePath,
+    prUrl,
+  });
+
+  if (!config.dryRun) {
+    labelSessionState(config, issueNum, waitingStatus);
+    if (classification === 'new_scope') {
+      commentIssue(config.repo, issueNum, formatNewScopeComment({
+        summary: request.summary ?? request.reason,
+        followUpIssueNumber,
+        followUpIssueUrl: followUpUrl,
+        question,
+      }));
+    } else if (waitingStatus === 'qa_requested') {
+      commentIssue(config.repo, issueNum, formatQaRequestComment({
+        checklist: qaChecklist,
+        prUrl,
+        previewUrl,
+        resumeInstructions,
+      }));
+    } else {
+      commentIssue(config.repo, issueNum, formatHumanInputComment({
+        question,
+        resumeInstructions,
+        sessionName: session.name,
+        branch: worktreeBranch,
+        worktreePath,
+      }));
+    }
+  }
+
+  const cleanup = await cleanupWorktree({
+    issueNum,
+    projectDir,
+    autoCleanup: config.autoCleanup,
+    preserveIfCommits: true,
+    sessionStatus: waitingStatus,
+    dryRun: config.dryRun,
+  });
+  recordSessionCleanup(session, {
+    status: cleanup.status,
+    worktreePath: cleanup.path,
+    reason: cleanup.reason,
+    at: new Date().toISOString(),
+  });
+
+  const result: PipelineResult = {
+    issueNum,
+    title,
+    status: 'waiting',
+    waitingStatus,
+    waitingReason: request.reason,
+    humanInputQuestion: waitingStatus === 'human_input_requested' ? question : undefined,
+    resumeInstructions,
+    qaChecklist: qaChecklist.length > 0 ? qaChecklist : undefined,
+    feedbackClassification: classification,
+    followUpIssueNumber,
+    followUpIssueUrl: followUpUrl,
+    prUrl,
+    testsPassing: input.testsPassing ?? false,
+    verifyPassing: input.verifyPassing ?? false,
+    verifySkipped: input.verifySkipped ?? true,
+    duration,
+    filesChanged: input.filesChanged ?? 0,
+  };
+
+  if (!config.dryRun) {
+    saveResult(session, result);
+  }
+  log.warn(`Issue #${issueNum} paused in ${waitingStatus}: ${request.reason}`);
+  return result;
+}
 
 function resolvePipelineOptions(
   trackerOrOptions?: EscalationTracker | PipelineOptions,
@@ -737,7 +1023,7 @@ export async function processIssue(
   recordSessionLogFile(session, logFile);
   recordSessionIssue(session, issueNum, {
     title,
-    status: 'active',
+    status: 'running',
     stage: 'status',
     labels: ['in-progress'],
   });
@@ -823,6 +1109,27 @@ export async function processIssue(
     }
   };
 
+  const pauseIfRequested = async (
+    stage: string,
+    partial: Partial<Pick<PauseSessionInput, 'testsPassing' | 'verifyPassing' | 'verifySkipped' | 'filesChanged' | 'prUrl'>> = {},
+  ): Promise<PipelineResult | null> => {
+    if (config.dryRun) return null;
+    const request = readPauseRequest(worktreePath, session, issueNum, stage);
+    if (!request) return null;
+    return pauseSessionForRequest({
+      issueNum,
+      title,
+      config,
+      session,
+      request,
+      startTime,
+      projectDir,
+      worktreePath,
+      worktreeBranch,
+      ...partial,
+    });
+  };
+
   try {
   // --- Step 3: Plan (structured JSON — controls test/verify steps) ---
   currentStep = 'plan';
@@ -873,6 +1180,9 @@ export async function processIssue(
         recordSessionIssue(session, issueNum, { status: 'failure', stage: 'plan', failureReason: 'transient' });
         return failureResult(issueNum, title, startTime, 'transient');
       }
+
+      const pauseResult = await pauseIfRequested('plan');
+      if (pauseResult) return pauseResult;
 
       plan = readPlan(planFileInWorktree);
       stepsCompleted.push('plan');
@@ -950,6 +1260,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     traceOutput(session, issueNum, 'implement', implResult.output);
     stepCosts.push(buildStepCost('implement', issueNum, implResult, config));
     recordStageTelemetry(session, issueNum, 'implement', implResult, config, implCtx);
+
+    const pauseResult = await pauseIfRequested('implement');
+    if (pauseResult) return pauseResult;
 
     if (implResult.exitCode !== 0) {
       // Auto-commit any uncommitted work before deciding on cleanup
@@ -1063,6 +1376,13 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         recordStageTelemetry(session, issueNum, 'test_fix', fixResult, config, fixCtx);
         stepsCompleted.push(`fix-${attempt}`);
 
+        const pauseResult = await pauseIfRequested(`test-fix-${attempt}`, {
+          testsPassing: false,
+          verifyPassing: false,
+          verifySkipped: true,
+        });
+        if (pauseResult) return pauseResult;
+
         // Auto-commit fixes
         const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
         if (fixStatus.stdout.trim()) {
@@ -1136,6 +1456,13 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         break;
       }
 
+      const pauseResult = await pauseIfRequested(`review${attempt > 1 ? `-${attempt}` : ''}`, {
+        testsPassing,
+        verifyPassing: false,
+        verifySkipped: true,
+      });
+      if (pauseResult) return pauseResult;
+
       // Read the gate JSON
       reviewGate = readGateResult(reviewFileInWorktree);
       moveToSessionLogs(reviewFileInWorktree, reviewFileInSession);
@@ -1173,6 +1500,13 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         traceOutput(session, issueNum, `review-fix-${attempt}`, reviewFixResult.output);
         stepCosts.push(buildStepCost('review', issueNum, reviewFixResult, config));
         recordStageTelemetry(session, issueNum, 'review_fix', reviewFixResult, config, reviewFixCtx);
+
+        const pauseResult = await pauseIfRequested(`review-fix-${attempt}`, {
+          testsPassing,
+          verifyPassing: false,
+          verifySkipped: true,
+        });
+        if (pauseResult) return pauseResult;
 
         // Auto-commit if agent didn't
         const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
@@ -1234,6 +1568,13 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       // Trace verify output
       traceVerify(session.name, issueNum, attempt, verifyOutput);
 
+      const pauseResult = await pauseIfRequested(`verify-${attempt}`, {
+        testsPassing,
+        verifyPassing: false,
+        verifySkipped: false,
+      });
+      if (pauseResult) return pauseResult;
+
       if (verifyResult.skipped) {
         verifyPassing = true;
         verifySkipped = true;
@@ -1287,6 +1628,13 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           traceOutput(session, issueNum, `verify-fix-${attempt}`, verifyFixResult.output);
           stepCosts.push(buildStepCost('verify', issueNum, verifyFixResult, config));
           recordStageTelemetry(session, issueNum, 'verify_fix', verifyFixResult, config, verifyFixCtx);
+
+          const pauseResult = await pauseIfRequested(`verify-fix-${attempt}`, {
+            testsPassing,
+            verifyPassing: false,
+            verifySkipped: false,
+          });
+          if (pauseResult) return pauseResult;
 
           // Auto-commit if agent didn't
           const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
@@ -1525,6 +1873,33 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     log.dry('Would update issue status to in-review');
   }
 
+  if (plan.qa?.needed) {
+    const qaPause = await pauseSessionForRequest({
+      issueNum,
+      title,
+      config,
+      session,
+      request: {
+        type: 'qa',
+        reason: plan.qa.reason,
+        qaChecklist: plan.qa.checklist,
+        prUrl,
+        previewUrl: plan.qa.previewUrl,
+        resumeInstructions: `Complete the QA checklist for issue #${issueNum}, then reply with approval or requested changes.`,
+      },
+      startTime,
+      projectDir,
+      worktreePath,
+      worktreeBranch,
+      testsPassing,
+      verifyPassing,
+      verifySkipped,
+      filesChanged,
+      prUrl,
+    });
+    return qaPause;
+  }
+
   // --- Step 11: Auto-merge ---
   let mergeSucceeded = false;
   if (config.autoMerge && !config.dryRun && prUrl) {
@@ -1650,7 +2025,7 @@ export async function processBatch(
   for (const issue of issues) {
     recordSessionIssue(session, issue.number, {
       title: issue.title,
-      status: 'active',
+      status: 'running',
       stage: 'status',
       labels: ['in-progress'],
     });
@@ -2240,18 +2615,22 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   // Write aggregate scores and costs
   if (!config.dryRun) {
     try {
-      const scoreResults: PipelineResultForScores[] = results.map((r) => ({
-        issueNum: r.issueNum,
-        status: r.status,
-        recoveryMode: r.recoveryMode,
-        testsPassing: r.testsPassing,
-        verifyPassing: r.verifyPassing,
-        verifySkipped: r.verifySkipped,
-        retries: 0,
-        duration: r.duration,
-        filesChanged: r.filesChanged,
-        stepsCompleted,
-      }));
+      const scoreResults: PipelineResultForScores[] = results
+        .filter((r): r is PipelineResult & { status: 'success' | 'failure' } => (
+          r.status === 'success' || r.status === 'failure'
+        ))
+        .map((r) => ({
+          issueNum: r.issueNum,
+          status: r.status,
+          recoveryMode: r.recoveryMode,
+          testsPassing: r.testsPassing,
+          verifyPassing: r.verifyPassing,
+          verifySkipped: r.verifySkipped,
+          retries: 0,
+          duration: r.duration,
+          filesChanged: r.filesChanged,
+          stepsCompleted,
+        }));
       writeScores(session.name, computeScores(scoreResults));
       writeCosts(session.name, computeCosts(stepCosts));
 
