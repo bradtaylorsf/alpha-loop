@@ -294,6 +294,10 @@ max_session_duration: 7200    # Total session wall-clock budget, in seconds (2h)
 # Repo-level safety policy for unattended hosted runs. Keep this narrow before
 # enabling daemon mode. See docs/hosted-policy.md for marketing-site and web-app
 # starter profiles.
+# Conservative defaults apply when unset: max_issue_cost_usd 25, max_session_cost_usd 75,
+# max_active_sessions 3, max_paused_sessions 50 (max_session_minutes stays 0/unlimited).
+# allowed_commands / allowed_paths / protected_paths default to EMPTY — the agent has
+# full shell access, so set these before running unattended to bound what it can do.
 automation_policy:
   block_labels: [do-not-automate, needs-human-input]
 #   require_labels: [ready]
@@ -338,6 +342,7 @@ automation_policy:
 #   health_interval: 300       # Seconds between health lifecycle events
 #   idle_sleep: 30             # Seconds to sleep when no tick is due
 #   feedback_poll_command: ""  # Optional adapter command returning JSON/NDJSON
+#   session_retention_days: 14 # Prune terminal session dirs older than N days (0 disables)
 #   lock:
 #     enabled: true
 #     stale_after: 86400

@@ -199,6 +199,12 @@ export type DaemonConfig = {
   healthIntervalSeconds: number;
   idleSleepSeconds: number;
   feedbackPollCommand: string;
+  /**
+   * Delete terminal (completed/failed/cleaned-up) session directories older than
+   * this many days during the health tick, so logs/screenshots do not grow without
+   * bound over weeks of 24/7 operation. 0 disables retention pruning.
+   */
+  sessionRetentionDays: number;
   lock: DaemonLockConfig;
 };
 
@@ -247,12 +253,17 @@ export const DEFAULT_AUTOMATION_POLICY: AutomationPolicyConfig = {
   protectedPaths: [],
   allowedCommands: [],
   requireHumanFor: [],
-  maxActiveSessions: 0,
-  maxPausedSessions: 0,
+  // Conservative defaults so unattended 24/7 operation is bounded out of the box.
+  // Cost caps prevent runaway API spend; session caps bound work pileup. Command
+  // and path allowlists stay empty because they are project-specific — set them
+  // in .alpha-loop.yaml before running unattended (see docs/hosted-alpha-loop.md).
+  maxActiveSessions: 3,
+  maxPausedSessions: 50,
   maxIssuesPerSession: 0,
+  // Runtime cap stays disabled: epic/multi-issue sessions legitimately run for hours.
   maxSessionMinutes: 0,
-  maxSessionCostUsd: 0,
-  maxIssueCostUsd: 0,
+  maxSessionCostUsd: 75,
+  maxIssueCostUsd: 25,
 };
 
 export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {
@@ -263,6 +274,7 @@ export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {
   healthIntervalSeconds: 5 * 60,
   idleSleepSeconds: 30,
   feedbackPollCommand: '',
+  sessionRetentionDays: 14,
   lock: {
     enabled: true,
     staleAfterSeconds: 24 * 60 * 60,
@@ -910,6 +922,12 @@ function parseDaemonConfig(raw: unknown): DaemonConfig | undefined {
   } else if (r.feedback_poll_command !== undefined) {
     console.warn(`[config] daemon.feedback_poll_command: expected a string (got ${String(r.feedback_poll_command)})`);
   }
+
+  daemon.sessionRetentionDays = parseNonNegativeInteger(
+    r.session_retention_days,
+    'daemon.session_retention_days',
+    daemon.sessionRetentionDays,
+  );
 
   if (typeof r.lock === 'boolean') {
     daemon.lock.enabled = r.lock;

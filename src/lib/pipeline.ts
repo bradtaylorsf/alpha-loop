@@ -95,6 +95,7 @@ import {
   evaluateCommandPolicy,
   evaluateCostPolicy,
   evaluateDiffPolicy,
+  evaluateRuntimePolicy,
   formatAutomationPolicyComment,
   parseDiffNameOnly,
   type AutomationPolicyDecision,
@@ -1410,11 +1411,41 @@ export async function processIssue(
     }
   };
 
+  type PauseSessionPartial = Partial<Pick<PauseSessionInput, 'testsPassing' | 'verifyPassing' | 'verifySkipped' | 'filesChanged' | 'prUrl'>>;
+
+  // Enforce cost/runtime budgets *between* stages, not just once at the very end.
+  // The end-of-pipeline cost gate still runs, but checking here stops a runaway
+  // agent from burning through every remaining stage before the cap is noticed.
+  const pauseIfOverBudget = async (partial: PauseSessionPartial = {}): Promise<PipelineResult | null> => {
+    if (config.dryRun) return null;
+    const issueCostUsd = stepCosts.reduce((sum, step) => sum + step.cost_usd, 0);
+    const costDecision = evaluateCostPolicy(config, { issueNum, title, issueCostUsd, sessionCostUsd: issueCostUsd });
+    const runtimeDecision = evaluateRuntimePolicy(config, Date.now() - startTime);
+    const blocked = !decisionAllowed(costDecision)
+      ? costDecision
+      : (!decisionAllowed(runtimeDecision) ? runtimeDecision : null);
+    if (!blocked) return null;
+    return pauseSessionForAutomationPolicy({
+      issueNum,
+      title,
+      config,
+      session,
+      decision: blocked,
+      startTime,
+      projectDir,
+      worktreePath,
+      worktreeBranch,
+      ...partial,
+    });
+  };
+
   const pauseIfRequested = async (
     stage: string,
-    partial: Partial<Pick<PauseSessionInput, 'testsPassing' | 'verifyPassing' | 'verifySkipped' | 'filesChanged' | 'prUrl'>> = {},
+    partial: PauseSessionPartial = {},
   ): Promise<PipelineResult | null> => {
     if (config.dryRun) return null;
+    const overBudget = await pauseIfOverBudget(partial);
+    if (overBudget) return overBudget;
     const request = readPauseRequest(worktreePath, session, issueNum, stage);
     if (!request) return null;
     return pauseSessionForRequest({

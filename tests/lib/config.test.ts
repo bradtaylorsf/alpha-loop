@@ -177,6 +177,7 @@ max_test_retries: 5
   health_interval: 300
   idle_sleep: 5
   feedback_poll_command: ./scripts/poll-feedback.sh
+  session_retention_days: 30
   lock:
     enabled: false
     stale_after: 600
@@ -193,6 +194,7 @@ max_test_retries: 5
       healthIntervalSeconds: 300,
       idleSleepSeconds: 5,
       feedbackPollCommand: './scripts/poll-feedback.sh',
+      sessionRetentionDays: 30,
       lock: {
         enabled: false,
         staleAfterSeconds: 600,

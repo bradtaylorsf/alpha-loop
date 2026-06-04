@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { decisionAllowed, evaluateIssuePolicy, evaluateSessionCapacityPolicy, type AutomationPolicyDecision } from './automation-policy.js';
 import type { Config, DaemonConfig, DaemonMode } from './config.js';
 import { emitLifecycleEvent, type EventDeliverySummary } from './events.js';
@@ -49,6 +49,8 @@ export type DaemonFeedbackPollResult = {
   status: 'processed' | 'skipped';
   processed: number;
   alreadyProcessed?: number;
+  /** Payloads that threw during ingestion and were skipped so the tick could continue. */
+  failed?: number;
   reason?: string;
   policyDecision?: AutomationPolicyDecision;
 };
@@ -79,7 +81,21 @@ export type DaemonRunLoopOptions = {
   isPidAlive?: (pid: number) => boolean;
   scheduler?: DaemonSchedulerState;
   installSignalHandlers?: boolean;
+  /**
+   * How many consecutive tick failures the loop tolerates before giving up and
+   * exiting (so a process supervisor can restart with a clean slate / alert).
+   * A single transient failure no longer kills the daemon.
+   */
+  maxConsecutiveTickFailures?: number;
 };
+
+/** Default number of consecutive failing ticks tolerated before the loop exits. */
+export const DEFAULT_MAX_CONSECUTIVE_TICK_FAILURES = 5;
+
+/** Exponential backoff (capped at 60s) applied after a failing tick. */
+function tickFailureBackoffMs(consecutiveFailures: number): number {
+  return Math.min(60_000, 1000 * 2 ** Math.max(0, consecutiveFailures - 1));
+}
 
 export class DaemonLockError extends Error {
   readonly path: string;
@@ -319,24 +335,32 @@ function writeDaemonState(
   renameSync(tmpPath, filePath);
 }
 
-function emitDaemonEvent(
+async function emitDaemonEvent(
   actions: DaemonActions,
   config: Config,
   type: Parameters<typeof emitLifecycleEvent>[0]['type'],
   metadata: Record<string, unknown> = {},
-): Promise<EventDeliverySummary> {
+): Promise<EventDeliverySummary | null> {
   const emit = actions.emitEvent ?? emitLifecycleEvent;
-  return emit({
-    config,
-    type,
-    context: {
-      metadata,
-      reason: typeof metadata.reason === 'string' ? metadata.reason : null,
-      error: typeof metadata.error === 'string' ? metadata.error : null,
-      issueNumber: typeof metadata.issueNumber === 'number' ? metadata.issueNumber : undefined,
-      issueTitle: typeof metadata.issueTitle === 'string' ? metadata.issueTitle : undefined,
-    },
-  });
+  // Notification delivery must never take the daemon loop down. A required
+  // destination that is misconfigured or transiently down would otherwise throw
+  // straight through the tick path (including the daemon.failed handler itself).
+  try {
+    return await emit({
+      config,
+      type,
+      context: {
+        metadata,
+        reason: typeof metadata.reason === 'string' ? metadata.reason : null,
+        error: typeof metadata.error === 'string' ? metadata.error : null,
+        issueNumber: typeof metadata.issueNumber === 'number' ? metadata.issueNumber : undefined,
+        issueTitle: typeof metadata.issueTitle === 'string' ? metadata.issueTitle : undefined,
+      },
+    });
+  } catch (err) {
+    log.warn(`Daemon event "${type}" delivery failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
 }
 
 function sessionsRoot(cwd = process.cwd()): string {
@@ -374,6 +398,41 @@ function currentManifestStatus(manifest: DurableSessionManifest): string {
   const feedback = normalizeHumanFeedbackStatus(manifest.feedback?.currentStatus ?? '');
   if (status && status !== 'running' && feedback === 'running') return status;
   return feedback ?? status ?? manifest.status;
+}
+
+const TERMINAL_SESSION_STATUSES = new Set(['completed', 'failed', 'cleaned-up']);
+
+/**
+ * Delete terminal session directories older than `retentionDays` so logs,
+ * screenshots, and result files do not grow without bound over weeks of 24/7
+ * operation. Only completed/failed/cleaned-up sessions are removed — active,
+ * paused, and waiting-for-feedback sessions are always preserved so resumable
+ * work is never destroyed. Returns the removed directories for observability.
+ */
+export function pruneTerminalSessions(
+  args: { retentionDays: number; now?: Date; root?: string } = { retentionDays: 0 },
+): { removed: string[]; scanned: number } {
+  const removed: string[] = [];
+  if (!args.retentionDays || args.retentionDays <= 0) return { removed, scanned: 0 };
+  const root = args.root ?? sessionsRoot();
+  const now = args.now ?? new Date();
+  const cutoffMs = now.getTime() - args.retentionDays * 24 * 60 * 60 * 1000;
+  const refs = listDaemonSessionManifests(root);
+  for (const ref of refs) {
+    if (!TERMINAL_SESSION_STATUSES.has(currentManifestStatus(ref.manifest))) continue;
+    const updated = Date.parse(ref.manifest.timestamps.updatedAt ?? ref.manifest.timestamps.startedAt);
+    if (!Number.isFinite(updated) || updated > cutoffMs) continue;
+    // Safety: never remove anything outside the sessions root.
+    const rel = relative(root, ref.sessionDir);
+    if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) continue;
+    try {
+      rmSync(ref.sessionDir, { recursive: true, force: true });
+      removed.push(ref.sessionDir);
+    } catch (err) {
+      log.warn(`Failed to prune session ${ref.sessionDir}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return { removed, scanned: refs.length };
 }
 
 function manifestIssueNumbers(manifest: DurableSessionManifest): number[] {
@@ -587,9 +646,17 @@ export async function runDaemonTick(
     else if (kind === 'resume') await runResumeTick(config, actions);
     else if (kind === 'run') await runWorkTick(config, actions);
     else {
+      const retention = config.dryRun
+        ? { removed: [], scanned: 0 }
+        : pruneTerminalSessions({ retentionDays: daemon.sessionRetentionDays });
+      if (retention.removed.length > 0) {
+        log.info(`Pruned ${retention.removed.length} terminal session(s) older than ${daemon.sessionRetentionDays}d`);
+      }
       await emitDaemonEvent(actions, config, 'daemon.health', {
         tick: 'health',
         mode: daemon.mode,
+        sessionsScanned: retention.scanned,
+        sessionsPruned: retention.removed.length,
       });
     }
   } catch (err) {
@@ -616,6 +683,8 @@ export async function runDaemonLoop(
   let lock: DaemonLockHandle | null = null;
   let lockHeartbeat: NodeJS.Timeout | null = null;
   let ticksRun = 0;
+  let consecutiveFailures = 0;
+  const maxConsecutiveTickFailures = options.maxConsecutiveTickFailures ?? DEFAULT_MAX_CONSECUTIVE_TICK_FAILURES;
   let shutdownRequested = false;
   const shutdownController = new AbortController();
   const installSignals = options.installSignalHandlers ?? true;
@@ -682,7 +751,38 @@ export async function runDaemonLoop(
           ticksRun,
           currentTick: kind,
         }, now());
-        await runDaemonTick(config, daemon, kind, actions);
+        // Isolate per-tick failures: one transient error (GitHub blip, network
+        // hiccup, a single bad issue or payload) must not take the 24/7 daemon
+        // down. Record it, mark the tick run so it respects its interval, back
+        // off, and continue. Only a sustained run of failures trips the breaker.
+        try {
+          await runDaemonTick(config, daemon, kind, actions);
+          consecutiveFailures = 0;
+        } catch (err) {
+          consecutiveFailures += 1;
+          const message = err instanceof Error ? err.message : String(err);
+          log.error(`Daemon ${kind} tick failed (${consecutiveFailures}/${maxConsecutiveTickFailures}): ${message}`);
+          markDaemonTickRun(scheduler, kind, nowMs());
+          ticksRun += 1;
+          writeDaemonState(config, daemon, {
+            status: 'running',
+            startedAt,
+            lockPath: lock?.path ?? null,
+            ticksRun,
+            currentTick: null,
+            error: message,
+          }, now());
+          if (consecutiveFailures >= maxConsecutiveTickFailures) {
+            throw err instanceof Error ? err : new Error(message);
+          }
+          if (options.onceTick) {
+            shutdownRequested = true;
+            break;
+          }
+          refreshDaemonLock(lock, now());
+          await sleep(tickFailureBackoffMs(consecutiveFailures), shutdownController.signal);
+          continue;
+        }
         markDaemonTickRun(scheduler, kind, nowMs());
         ticksRun += 1;
         refreshDaemonLock(lock, now());

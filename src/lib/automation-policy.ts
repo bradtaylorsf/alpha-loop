@@ -390,8 +390,11 @@ function commandAllowed(command: string, allowedCommand: string): boolean {
   if (!allowed) return false;
   if (allowed.endsWith('*')) {
     const prefix = allowed.slice(0, -1).trimEnd();
-    if (!normalized.startsWith(prefix)) return false;
-    return suffixAllowedAsArguments(normalized.slice(prefix.length));
+    // A bare "*" means "allow any command" (still rejecting shell-control suffixes).
+    // For a real prefix, require it to be a whole token — either the entire command
+    // or immediately followed by a space — so "pnpm *" cannot match "pnpmster build".
+    if (prefix && normalized !== prefix && !normalized.startsWith(`${prefix} `)) return false;
+    return suffixAllowedAsArguments(prefix ? normalized.slice(prefix.length) : normalized);
   }
   if (normalized === allowed) return true;
   if (!normalized.startsWith(`${allowed} `)) return false;

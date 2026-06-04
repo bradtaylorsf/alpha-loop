@@ -384,6 +384,10 @@ describe('resumeCommand', () => {
     const options = mockProcessIssue.mock.calls[0][5] as any;
     expect(options.resumeContext).toContain('issue-286-implement.md');
     expect(options.resumeContext).toContain('issue-286-implement.log');
+    // Untrusted feedback must be fenced so it cannot be treated as agent instructions.
+    expect(options.resumeContext).toContain('<untrusted-human-feedback>');
+    expect(options.resumeContext).toContain('</untrusted-human-feedback>');
+    expect(options.resumeContext).toContain('UNTRUSTED input from external feedback channels');
     expect(mockLabelIssue).toHaveBeenCalledWith('owner/repo', 286, 'in-progress', 'ready');
     expect(mockLabelIssue).toHaveBeenCalledWith('owner/repo', 286, 'in-progress', 'needs-human-input');
     expect(mockCommentIssue).toHaveBeenCalledWith(

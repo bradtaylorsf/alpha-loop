@@ -409,6 +409,45 @@ describe('processIssue', () => {
     expect(commentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('Changed protected path'));
   });
 
+  test('pauses mid-pipeline when accumulated cost exceeds the issue budget', async () => {
+    // A costly stage result so the running total trips the budget cap before later stages run.
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: 'Agent output',
+      duration: 5000,
+      costUsd: 50,
+      inputTokens: 100,
+      outputTokens: 100,
+      model: 'opus',
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({
+      skipInstall: true,
+      automationPolicy: {
+        requireLabels: [],
+        blockLabels: [],
+        allowedPaths: [],
+        protectedPaths: [],
+        allowedCommands: [],
+        requireHumanFor: [],
+        maxActiveSessions: 0,
+        maxPausedSessions: 0,
+        maxIssuesPerSession: 0,
+        maxSessionMinutes: 0,
+        maxSessionCostUsd: 0,
+        maxIssueCostUsd: 1,
+      },
+    }), makeSession());
+
+    expect(result.status).toBe('waiting');
+    expect(result.waitingStatus).toBe('human_input_requested');
+    expect(result.policyDecision?.stage).toBe('budget');
+    // The budget guard stops further spend: tests and PR creation never run.
+    expect(mockRunTests).not.toHaveBeenCalled();
+    expect(mockCreatePR).not.toHaveBeenCalled();
+    expect(commentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('budget'));
+  });
+
   test('records durable manifest metadata for worktree, prompts, transcripts, PR, and cleanup', async () => {
     await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
 

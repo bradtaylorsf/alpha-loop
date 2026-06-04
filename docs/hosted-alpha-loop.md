@@ -191,6 +191,11 @@ daemon:
   health_interval: 300
   idle_sleep: 30
   feedback_poll_command: ""
+  # Delete terminal (completed/failed/cleaned-up) session directories older than
+  # this many days on the health tick, so logs/screenshots do not grow without
+  # bound. Active, paused, and waiting-for-feedback sessions are never pruned.
+  # 0 disables pruning. Default: 14.
+  session_retention_days: 14
   lock:
     enabled: true
     stale_after: 86400
@@ -596,6 +601,24 @@ Budget controls live in `automation_policy`:
 - `max_session_minutes`
 - `max_session_cost_usd`
 - `max_issue_cost_usd`
+
+Cost and session caps ship with conservative defaults so unattended operation is
+bounded out of the box (`max_issue_cost_usd: 25`, `max_session_cost_usd: 75`,
+`max_active_sessions: 3`, `max_paused_sessions: 50`; `max_session_minutes: 0`
+stays disabled because epic/multi-issue sessions legitimately run for hours).
+These budgets are now enforced **between pipeline stages**, not only at the end,
+so a runaway issue pauses for human input before it can burn the whole budget.
+
+> **Set the command and path allowlists yourself before running unattended.**
+> `allowed_commands`, `allowed_paths`, and `protected_paths` ship empty because they
+> are project-specific, and the implementation agent otherwise has full shell access.
+> Leaving them empty means any command and any file change is permitted. Populate
+> them (see the examples above) so the daemon can only run and touch what you expect.
+
+The daemon survives transient failures: a single failing tick (a GitHub blip, a
+network hiccup, one bad issue or feedback payload) is logged and skipped, and the
+loop keeps running. After several consecutive failures it exits non-zero so your
+process supervisor restarts it with a clean slate — keep `Restart=on-failure` set.
 
 Worktree cleanup is controlled separately:
 

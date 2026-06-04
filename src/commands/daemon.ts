@@ -140,7 +140,7 @@ async function emitFeedbackPollEvents(
   }
 }
 
-async function pollFeedback(config: Config, daemon: DaemonConfig): Promise<DaemonFeedbackPollResult> {
+export async function pollFeedback(config: Config, daemon: DaemonConfig): Promise<DaemonFeedbackPollResult> {
   if (!daemon.feedbackPollCommand) {
     return {
       status: 'skipped',
@@ -167,28 +167,38 @@ async function pollFeedback(config: Config, daemon: DaemonConfig): Promise<Daemo
   const payloads = parseFeedbackPollOutput(result.stdout);
   let processed = 0;
   let alreadyProcessed = 0;
+  let failed = 0;
   for (const payload of payloads) {
-    const ingestResult = ingestFeedback({
-      payload: {
-        ...payload,
-        repo: payload.repo ?? payload.repository ?? config.repo,
-      },
-      repo: config.repo,
-      readyLabel: config.labelReady,
-      requestResume: true,
-    });
-    if (ingestResult.status === 'already_processed') {
-      alreadyProcessed += 1;
-      continue;
+    // Isolate each payload: one malformed/forged message (empty body, missing
+    // repo, unresolvable target, GitHub error) must not block the valid payloads
+    // behind it or crash the feedback tick on every poll cycle.
+    try {
+      const ingestResult = ingestFeedback({
+        payload: {
+          ...payload,
+          repo: payload.repo ?? payload.repository ?? config.repo,
+        },
+        repo: config.repo,
+        readyLabel: config.labelReady,
+        requestResume: true,
+      });
+      if (ingestResult.status === 'already_processed') {
+        alreadyProcessed += 1;
+        continue;
+      }
+      processed += 1;
+      await emitFeedbackPollEvents(config, ingestResult);
+    } catch (err) {
+      failed += 1;
+      log.warn(`Skipping feedback payload that failed to ingest: ${err instanceof Error ? err.message : String(err)}`);
     }
-    processed += 1;
-    await emitFeedbackPollEvents(config, ingestResult);
   }
 
   return {
     status: 'processed',
     processed,
     alreadyProcessed,
+    failed,
   };
 }
 

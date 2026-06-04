@@ -9,6 +9,7 @@ import {
   enabledDaemonTickKinds,
   refreshDaemonLock,
   releaseDaemonLock,
+  pruneTerminalSessions,
   runDaemonLoop,
   runDaemonTick,
   type DaemonActions,
@@ -397,6 +398,133 @@ describe('daemon manifest behavior', () => {
         }),
       }),
     }));
+  });
+});
+
+describe('daemon tick resilience', () => {
+  it('continues running after a single failing tick instead of crashing', async () => {
+    const daemon = makeDaemon({
+      mode: 'triage-only',
+      lock: { ...DEFAULT_DAEMON_CONFIG.lock, enabled: false },
+    });
+    const config = makeConfig({ daemon });
+    const actions = makeActions({
+      triage: jest.fn().mockRejectedValueOnce(new Error('triage blip')).mockResolvedValue(undefined),
+    });
+
+    const result = await runDaemonLoop(config, daemon, actions, {
+      maxTicks: 2,
+      acquireLock: false,
+      installSignalHandlers: false,
+      sleep: jest.fn().mockResolvedValue(undefined),
+    });
+
+    expect(actions.triage).toHaveBeenCalledTimes(1);
+    expect(result.ticksRun).toBe(2);
+    // The failed tick is reported but the health tick still runs.
+    expect(actions.emitEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'daemon.failed' }));
+    expect(actions.emitEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'daemon.health' }));
+  });
+
+  it('does not crash when a required event destination throws', async () => {
+    const daemon = makeDaemon({ mode: 'triage-only', lock: { ...DEFAULT_DAEMON_CONFIG.lock, enabled: false } });
+    const config = makeConfig({ daemon });
+    const actions = makeActions({
+      // A destination that always throws must not take the loop down.
+      emitEvent: jest.fn().mockRejectedValue(new Error('required webhook down')),
+    });
+
+    const result = await runDaemonLoop(config, daemon, actions, {
+      maxTicks: 2,
+      acquireLock: false,
+      installSignalHandlers: false,
+      sleep: jest.fn().mockResolvedValue(undefined),
+    });
+
+    expect(result.ticksRun).toBe(2);
+    expect(actions.triage).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up after too many consecutive tick failures (circuit breaker)', async () => {
+    let nowMs = 0;
+    const daemon = makeDaemon({
+      mode: 'run-only',
+      runIntervalSeconds: 1,
+      healthIntervalSeconds: 1_000_000,
+      lock: { ...DEFAULT_DAEMON_CONFIG.lock, enabled: false },
+    });
+    const config = makeConfig({ daemon });
+    const actions = makeActions({
+      runIssue: jest.fn().mockRejectedValue(new Error('boom')),
+      pollIssues: jest.fn().mockReturnValue([{ number: 1, title: 'X', body: '', labels: ['ready'] }]),
+    });
+
+    await expect(
+      runDaemonLoop(config, daemon, actions, {
+        scheduler: { lastRunAtMs: { health: 0 } },
+        now: () => new Date(nowMs),
+        nowMs: () => nowMs,
+        sleep: jest.fn(async () => { nowMs += 2000; }),
+        acquireLock: false,
+        installSignalHandlers: false,
+        maxConsecutiveTickFailures: 3,
+      }),
+    ).rejects.toThrow('boom');
+
+    expect(actions.runIssue).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('daemon session retention', () => {
+  it('prunes old terminal sessions but preserves active, paused, and recent ones', () => {
+    const root = join(tempDir, '.alpha-loop', 'sessions');
+    const now = new Date('2026-06-01T00:00:00.000Z');
+    const old = '2026-05-01T00:00:00.000Z';
+    const recent = '2026-05-31T00:00:00.000Z';
+
+    writeManifest(tempDir, makeManifest({
+      sessionId: 'old-done', name: 'session/old-done', status: 'completed',
+      feedback: { ...makeManifest().feedback, currentStatus: 'completed' },
+      timestamps: { createdAt: old, startedAt: old, updatedAt: old },
+    }));
+    writeManifest(tempDir, makeManifest({
+      sessionId: 'recent-done', name: 'session/recent-done', status: 'completed',
+      feedback: { ...makeManifest().feedback, currentStatus: 'completed' },
+      timestamps: { createdAt: recent, startedAt: recent, updatedAt: recent },
+    }));
+    writeManifest(tempDir, makeManifest({
+      sessionId: 'old-active', name: 'session/old-active', status: 'running',
+      feedback: { ...makeManifest().feedback, currentStatus: 'running' },
+      timestamps: { createdAt: old, startedAt: old, updatedAt: old },
+    }));
+    writeManifest(tempDir, makeManifest({
+      sessionId: 'old-paused', name: 'session/old-paused', status: 'human_input_requested',
+      feedback: { ...makeManifest().feedback, currentStatus: 'human_input_requested' },
+      timestamps: { createdAt: old, startedAt: old, updatedAt: old },
+    }));
+
+    const result = pruneTerminalSessions({ retentionDays: 7, now, root });
+
+    expect(result.scanned).toBe(4);
+    expect(result.removed).toHaveLength(1);
+    expect(existsSync(join(root, 'session', 'old-done'))).toBe(false);
+    expect(existsSync(join(root, 'session', 'recent-done'))).toBe(true);
+    expect(existsSync(join(root, 'session', 'old-active'))).toBe(true);
+    expect(existsSync(join(root, 'session', 'old-paused'))).toBe(true);
+  });
+
+  it('does nothing when retention is disabled (0 days)', () => {
+    const root = join(tempDir, '.alpha-loop', 'sessions');
+    writeManifest(tempDir, makeManifest({
+      sessionId: 'old-done', name: 'session/old-done', status: 'completed',
+      feedback: { ...makeManifest().feedback, currentStatus: 'completed' },
+      timestamps: { createdAt: '2020-01-01T00:00:00.000Z', startedAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-01T00:00:00.000Z' },
+    }));
+
+    const result = pruneTerminalSessions({ retentionDays: 0, root });
+
+    expect(result).toEqual({ removed: [], scanned: 0 });
+    expect(existsSync(join(root, 'session', 'old-done'))).toBe(true);
   });
 });
 
