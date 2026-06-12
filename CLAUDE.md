@@ -136,12 +136,23 @@ When editing skills or agent prompts, make sure you're editing the right one:
 
 ## Release Process -- DO NOT manually publish or bump versions
 
-Releases are fully automated via `.github/workflows/release.yml`:
-- **Trigger**: Any push to `master` (excluding docs-only changes)
-- **Versioning**: Automatic from commit messages — `feat:` → minor, `fix:` → patch, `BREAKING CHANGE` → major
-- **Publishing**: CI publishes to npm, creates git tag, and GitHub Release
-- **To release**: Just merge the PR to master. That's it.
-- **DO NOT** run `pnpm publish`, `npm publish`, or manually edit `package.json` version
+Releases use a **bump-in-PR** model: the version that ships is whatever is in
+`package.json` when a commit lands on `master`. CI (`.github/workflows/release.yml`)
+publishes it only if that version differs from the latest git tag.
+
+- **Cut a release**: Run `pnpm release` locally (`scripts/deploy.mjs`). It computes
+  the next semver from Conventional Commits since the last tag (`feat:` → minor,
+  `fix:`/`chore:`/`docs:`/other → patch, `BREAKING CHANGE` or `!` → major), stamps
+  `package.json`, and opens a `chore/release-vX.Y.Z` PR. Flags: `--patch` /
+  `--minor` / `--major` to force a bump, `--dry-run` to preview.
+- **Publish**: Merging that release PR to `master` triggers the release workflow,
+  which gates on `package.json` version ≠ latest tag, then publishes to npm (with
+  provenance), creates the `vX.Y.Z` tag, and a GitHub Release.
+- **Merging a normal feature PR does NOT release** — `package.json` is unchanged,
+  so the gate skips publishing. You must run `pnpm release` to ship.
+- **After merge**: `pnpm release:watch` tails CI and verifies local == npm == tag.
+- **DO NOT** run `pnpm publish` / `npm publish` or hand-edit the `package.json`
+  version — always go through `pnpm release`.
 
 ## Testing Rules
 
