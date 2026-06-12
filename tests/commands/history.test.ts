@@ -64,6 +64,96 @@ function createCrashMarker(
   );
 }
 
+function createDurableManifest(
+  sessionsDir: string,
+  timestamp: string,
+  overrides: Partial<{
+    status: string;
+    stage: string;
+    updatedAt: string;
+    worktreePath: string;
+    worktreeBranch: string;
+    issueNum: number;
+    title: string;
+  }> = {},
+): void {
+  const issueNum = overrides.issueNum ?? 284;
+  const title = overrides.title ?? 'Persist resumable state';
+  const status = overrides.status ?? 'paused';
+  const stage = overrides.stage ?? 'implement';
+  const updatedAt = overrides.updatedAt ?? '2026-05-30T12:00:00.000Z';
+  const worktreePath = overrides.worktreePath ?? path.join(sessionsDir, '..', '..', '.worktrees', `issue-${issueNum}`);
+  const worktreeBranch = overrides.worktreeBranch ?? `agent/issue-${issueNum}`;
+  const dir = path.join(sessionsDir, 'session', timestamp);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'session.json'),
+    JSON.stringify({
+      version: 1,
+      sessionId: `session-${timestamp}`,
+      name: `session/${timestamp}`,
+      issueNumber: issueNum,
+      issueNumbers: [issueNum],
+      parentEpicNumber: 293,
+      branch: `session/${timestamp}`,
+      baseBranch: 'master',
+      prUrl: null,
+      sessionPrUrl: 'https://github.com/owner/repo/pull/284',
+      status,
+      stage,
+      labels: ['in-progress'],
+      harness: {
+        agent: 'claude',
+        model: 'sonnet',
+        reviewModel: 'opus',
+        command: 'claude',
+        testCommand: 'pnpm test',
+      },
+      command: 'claude',
+      worktree: {
+        path: worktreePath,
+        branch: worktreeBranch,
+        resumed: false,
+        missing: !fs.existsSync(worktreePath),
+        lastKnownBranch: worktreeBranch,
+        updatedAt,
+      },
+      lastKnownBranch: worktreeBranch,
+      currentIssue: { issueNum, title },
+      issues: [{
+        issueNum,
+        title,
+        status,
+        stage,
+        branch: worktreeBranch,
+        worktreePath,
+        worktreeMissing: !fs.existsSync(worktreePath),
+        updatedAt,
+      }],
+      prompts: [],
+      promptPath: null,
+      promptHash: null,
+      transcripts: [],
+      transcriptPath: null,
+      logs: {
+        sessionDir: `.alpha-loop/sessions/session/${timestamp}`,
+        logsDir: `.alpha-loop/sessions/session/${timestamp}/logs`,
+        traceDir: `.alpha-loop/traces/session-${timestamp}`,
+        files: [],
+      },
+      screenshots: [],
+      previewUrl: null,
+      timestamps: {
+        createdAt: updatedAt,
+        startedAt: updatedAt,
+        updatedAt,
+      },
+      lastEventId: null,
+      errors: [],
+    }, null, 2),
+  );
+}
+
 function createQueueManifest(sessionsDir: string): void {
   const queueDir = path.join(sessionsDir, 'queue-20260521T101112Z');
   fs.mkdirSync(queueDir, { recursive: true });
@@ -249,6 +339,19 @@ describe('history', () => {
       expect(output).not.toContain('1 ✗');
     });
 
+    it('shows durable manifest status for paused and waiting sessions', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createDurableManifest(sessionsDir, '20260530-120000', { status: 'paused', stage: 'implement' });
+      createDurableManifest(sessionsDir, '20260530-130000', { status: 'waiting-for-feedback', stage: 'waiting-for-feedback', issueNum: 285 });
+
+      historyList(sessionsDir, tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('paused');
+      expect(output).toContain('waiting-for-feedback');
+      expect(output).toContain('1 issue');
+    });
+
     it('lists multi-epic queue manifests with status and pending counts', () => {
       const sessionsDir = path.join(tmpDir, '.alpha-loop', 'sessions');
       createQueueManifest(sessionsDir);
@@ -312,6 +415,98 @@ describe('history', () => {
       expect(output).toContain('0 succeeded, 0 failed, 1 recovered');
       expect(output).toContain('~ #216');
       expect(output).toContain('RECOVERED:RESUME');
+    });
+
+    it('shows missing durable worktree recovery metadata in detail', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createDurableManifest(sessionsDir, '20260530-120000', {
+        status: 'qa-requested',
+        stage: 'qa-requested',
+        worktreePath: path.join(tmpDir, '.worktrees', 'issue-284'),
+        worktreeBranch: 'agent/issue-284',
+      });
+
+      historyDetail(sessionsDir, 'session/20260530-120000', tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Status:   qa-requested (qa-requested)');
+      expect(output).toContain('Worktree:');
+      expect(output).toContain('(missing)');
+      expect(output).toContain('Recover:  recreate worktree from branch agent/issue-284');
+    });
+
+    it('shows web app artifact paths from durable manifests', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createDurableManifest(sessionsDir, '20260530-120000', {
+        status: 'qa-requested',
+        stage: 'qa-requested',
+      });
+      const manifestPath = path.join(sessionsDir, 'session', '20260530-120000', 'session.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      manifest.webApp = {
+        previewUrl: 'https://preview.example.test',
+        devUrl: 'http://localhost:4321',
+        screenshots: ['.alpha-loop/sessions/session/20260530-120000/screenshots/issue-284/home.png'],
+        browserResultPath: '.alpha-loop/sessions/session/20260530-120000/web-app-verification/issue-284.json',
+        artifactPath: '.alpha-loop/sessions/session/20260530-120000/web-app-verification/issue-284.json',
+        consoleErrors: [],
+        networkErrors: [],
+        qaChecklist: ['Open the preview'],
+        updatedAt: '2026-05-30T12:00:00.000Z',
+      };
+      manifest.previewUrl = 'https://preview.example.test';
+      manifest.screenshots = manifest.webApp.screenshots;
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+      historyDetail(sessionsDir, 'session/20260530-120000', tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Preview:  https://preview.example.test');
+      expect(output).toContain('Browser:  .alpha-loop/sessions/session/20260530-120000/web-app-verification/issue-284.json');
+      expect(output).toContain('Shots:    1 screenshot(s)');
+    });
+
+    it('shows latest feedback classification and resume command from durable manifests', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createDurableManifest(sessionsDir, '20260530-120000', {
+        status: 'resume_requested',
+        stage: 'resume_requested',
+        issueNum: 287,
+        title: 'Add feedback ingestion',
+      });
+      const manifestPath = path.join(sessionsDir, 'session', '20260530-120000', 'session.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      manifest.feedback = {
+        currentStatus: 'resume_requested',
+        question: null,
+        resumeInstructions: null,
+        qaChecklist: [],
+        prUrl: null,
+        previewUrl: null,
+        classification: 'change_request',
+        followUpIssueNumber: null,
+        followUpIssueUrl: null,
+        transitionHistory: [],
+        events: [],
+        updatedAt: '2026-05-30T12:10:00.000Z',
+        latestFeedback: {
+          source: 'slack',
+          author: 'brad',
+          externalThreadId: 'thread-1',
+          externalMessageId: 'message-1',
+          classification: 'change_request',
+          resumeCommand: 'alpha-loop resume --issue 287',
+        },
+      };
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+      historyDetail(sessionsDir, 'session/20260530-120000', tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Feedback: change_request from slack');
+      expect(output).toContain('Author: brad');
+      expect(output).toContain('Thread: thread-1');
+      expect(output).toContain('Resume: alpha-loop resume --issue 287');
     });
 
     it('shows error for non-existent session', () => {
@@ -487,6 +682,81 @@ describe('history', () => {
   });
 
   describe('historyClean', () => {
+    it('cleans expired paused worktrees using retention settings and keeps branch recovery metadata', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const worktreePath = path.join(tmpDir, '.worktrees', 'issue-284');
+      fs.mkdirSync(worktreePath, { recursive: true });
+      createDurableManifest(sessionsDir, '20250115-100000', {
+        status: 'paused',
+        stage: 'implement',
+        updatedAt: '2025-01-15T10:00:00.000Z',
+        worktreePath,
+      });
+
+      historyClean(sessionsDir, { pausedWorktreeDays: 1, completedWorktreeDays: 30 });
+
+      expect(fs.existsSync(worktreePath)).toBe(false);
+      const manifest = JSON.parse(fs.readFileSync(path.join(sessionsDir, 'session', '20250115-100000', 'session.json'), 'utf-8'));
+      expect(manifest.status).toBe('cleaned-up');
+      expect(manifest.cleanup.reason).toContain('retention:paused:1d');
+      expect(manifest.lastKnownBranch).toBe('agent/issue-284');
+    });
+
+    it('keeps paused worktrees when paused retention is disabled', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const worktreePath = path.join(tmpDir, '.worktrees', 'issue-284');
+      fs.mkdirSync(worktreePath, { recursive: true });
+      createDurableManifest(sessionsDir, '20250115-100000', {
+        status: 'paused',
+        stage: 'implement',
+        updatedAt: '2025-01-15T10:00:00.000Z',
+        worktreePath,
+      });
+
+      historyClean(sessionsDir, { pausedWorktreeDays: 0, completedWorktreeDays: 30 });
+
+      expect(fs.existsSync(worktreePath)).toBe(true);
+      const manifest = JSON.parse(fs.readFileSync(path.join(sessionsDir, 'session', '20250115-100000', 'session.json'), 'utf-8'));
+      expect(manifest.status).toBe('paused');
+    });
+
+    it('does not remove retained worktree paths outside the repo worktrees directory', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const outsideDir = path.join(tmpDir, 'other-repo', '.worktrees', 'issue-284');
+      fs.mkdirSync(outsideDir, { recursive: true });
+      createDurableManifest(sessionsDir, '20250115-100000', {
+        status: 'paused',
+        stage: 'implement',
+        updatedAt: '2025-01-15T10:00:00.000Z',
+        worktreePath: outsideDir,
+      });
+
+      historyClean(sessionsDir, { pausedWorktreeDays: 1, completedWorktreeDays: 30 });
+
+      expect(fs.existsSync(outsideDir)).toBe(true);
+      const manifest = JSON.parse(fs.readFileSync(path.join(sessionsDir, 'session', '20250115-100000', 'session.json'), 'utf-8'));
+      expect(manifest.cleanup.status).toBe('preserved');
+      expect(manifest.cleanup.reason).toContain('unsafe-worktree-path-skipped');
+    });
+
+    it('resolves relative retained worktree paths inside the project worktrees directory', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      const worktreePath = path.join(tmpDir, '.worktrees', 'issue-284');
+      fs.mkdirSync(worktreePath, { recursive: true });
+      createDurableManifest(sessionsDir, '20250115-100000', {
+        status: 'paused',
+        stage: 'implement',
+        updatedAt: '2025-01-15T10:00:00.000Z',
+        worktreePath: path.join('.worktrees', 'issue-284'),
+      });
+
+      historyClean(sessionsDir, { pausedWorktreeDays: 1, completedWorktreeDays: 30 });
+
+      expect(fs.existsSync(worktreePath)).toBe(false);
+      const manifest = JSON.parse(fs.readFileSync(path.join(sessionsDir, 'session', '20250115-100000', 'session.json'), 'utf-8'));
+      expect(manifest.cleanup.status).toBe('removed');
+    });
+
     it('removes sessions older than 30 days', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
 

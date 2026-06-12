@@ -2,9 +2,11 @@
  * Worktree Manager — create and clean up isolated git worktrees.
  */
 import { existsSync, mkdirSync, symlinkSync, readlinkSync, unlinkSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-import { join, resolve, basename } from 'node:path';
-import { exec } from './shell.js';
+import { join, resolve, basename, relative, isAbsolute } from 'node:path';
+import { exec, shellQuote } from './shell.js';
 import { log } from './logger.js';
+import { isWaitingFeedbackStatus } from './session-state.js';
+import type { SessionStatus } from './session.js';
 
 export type WorktreeResult = {
   path: string;
@@ -21,6 +23,8 @@ export type SetupWorktreeOptions = {
   autoMerge?: boolean;
   skipInstall?: boolean;
   setupCommand?: string;
+  savedBranch?: string | null;
+  savedPath?: string | null;
   dryRun?: boolean;
 };
 
@@ -29,10 +33,42 @@ export type CleanupWorktreeOptions = {
   projectDir: string;
   autoCleanup?: boolean;
   preserveIfCommits?: boolean;
+  worktreePath?: string;
+  /** Preserve paused/waiting/QA worktrees unless retention explicitly expires them. */
+  sessionStatus?: SessionStatus;
+  /** Set by retention cleanup when it is intentionally expiring preserved work. */
+  retentionExpired?: boolean;
   dryRun?: boolean;
 };
 
+export type CleanupWorktreeResult = {
+  status: 'removed' | 'preserved' | 'missing' | 'skipped' | 'dry-run';
+  path: string;
+  reason?: string;
+};
+
 const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.local'];
+
+function isInsidePath(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function resolveWorktreeLocation(
+  projectDir: string,
+  issueNum: number,
+  savedPath?: string | null,
+): { worktreesDir: string; worktreePath: string; safe: boolean } {
+  const worktreesDir = resolve(projectDir, '.worktrees');
+  const worktreePath = savedPath?.trim()
+    ? resolve(projectDir, savedPath)
+    : resolve(worktreesDir, `issue-${issueNum}`);
+  return {
+    worktreesDir,
+    worktreePath,
+    safe: isInsidePath(worktreesDir, worktreePath),
+  };
+}
 
 /**
  * Create an isolated git worktree for processing an issue.
@@ -45,10 +81,15 @@ const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.l
  * 3. Neither exists → create fresh worktree and branch
  */
 export async function setupWorktree(options: SetupWorktreeOptions): Promise<WorktreeResult> {
-  const { issueNum, projectDir, baseBranch, sessionBranch, autoMerge, skipInstall, setupCommand, dryRun } = options;
-  const branch = `agent/issue-${issueNum}`;
-  const worktreesDir = resolve(projectDir, '.worktrees');
-  const worktreePath = resolve(worktreesDir, `issue-${issueNum}`);
+  const { issueNum, projectDir, baseBranch, sessionBranch, autoMerge, skipInstall, setupCommand, savedBranch, savedPath, dryRun } = options;
+  const defaultBranch = `agent/issue-${issueNum}`;
+  const branch = savedBranch?.trim() || defaultBranch;
+  const { worktreesDir, worktreePath, safe } = resolveWorktreeLocation(projectDir, issueNum, savedPath);
+  const requiresSavedBranch = Boolean(savedBranch?.trim());
+
+  if (!safe) {
+    throw new Error(`Refusing unsafe worktree path outside ${worktreesDir}: ${worktreePath}`);
+  }
 
   log.info(`Creating worktree at ${worktreePath} (branch: ${branch})`);
 
@@ -71,7 +112,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
     } else {
       // Worktree exists but on wrong branch or broken — remove and recreate
       log.warn(`Worktree at ${worktreePath} is on wrong branch, removing...`);
-      exec(`git worktree remove "${worktreePath}" --force`, { cwd: projectDir });
+      exec(`git worktree remove ${shellQuote(worktreePath)} --force`, { cwd: projectDir });
       exec('git worktree prune', { cwd: projectDir });
     }
   }
@@ -81,33 +122,54 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
     // Prune first so git doesn't think the branch is still checked out in a deleted worktree
     exec('git worktree prune', { cwd: projectDir });
 
-    const localBranchCheck = exec(`git rev-parse --verify "${branch}"`, { cwd: projectDir });
+    const localBranchCheck = exec(`git rev-parse --verify ${shellQuote(branch)}`, { cwd: projectDir });
     if (localBranchCheck.exitCode === 0) {
       log.info(`Found existing branch ${branch}, recreating worktree from it (resuming previous work)`);
-      const reuseResult = exec(`git worktree add "${worktreePath}" "${branch}"`, { cwd: projectDir });
+      const reuseResult = exec(`git worktree add ${shellQuote(worktreePath)} ${shellQuote(branch)}`, { cwd: projectDir });
       if (reuseResult.exitCode === 0) {
         const commitCount = worktreeHasCommits(worktreePath);
         log.info(`Resumed worktree with ${commitCount} commit(s)`);
         resumed = true;
       } else {
-        // Can't reuse — force-delete branch and fall through to fresh creation
         log.warn(`Could not reuse branch ${branch}: ${reuseResult.stderr}`);
-        exec(`git branch -D "${branch}"`, { cwd: projectDir });
+        if (requiresSavedBranch) {
+          throw new Error(`Failed to recreate saved worktree from ${branch}: ${reuseResult.stderr}`);
+        }
+        // Can't reuse a disposable issue branch — force-delete and fall through to fresh creation.
+        exec(`git branch -D ${shellQuote(branch)}`, { cwd: projectDir });
         exec('git worktree prune', { cwd: projectDir });
+      }
+    } else if (requiresSavedBranch) {
+      exec('git fetch origin', { cwd: projectDir });
+      const remoteBranchCheck = exec(`git rev-parse --verify ${shellQuote(`origin/${branch}`)}`, { cwd: projectDir });
+      if (remoteBranchCheck.exitCode === 0) {
+        log.info(`Found remote branch origin/${branch}, recreating worktree from it (resuming previous work)`);
+        const remoteReuseResult = exec(`git worktree add ${shellQuote(worktreePath)} -b ${shellQuote(branch)} ${shellQuote(`origin/${branch}`)}`, { cwd: projectDir });
+        if (remoteReuseResult.exitCode === 0) {
+          const commitCount = worktreeHasCommits(worktreePath);
+          log.info(`Resumed worktree with ${commitCount} commit(s)`);
+          resumed = true;
+        } else {
+          throw new Error(`Failed to recreate saved worktree from origin/${branch}: ${remoteReuseResult.stderr}`);
+        }
       }
     }
   }
 
   // --- Case 3: Fresh creation (no existing worktree or branch) ---
   if (!resumed) {
+    if (requiresSavedBranch) {
+      throw new Error(`Saved resume branch ${branch} was not found; cannot recreate paused worktree without losing context`);
+    }
+
     // Delete remote branch from previous failed runs
-    exec(`git push origin --delete "${branch}"`, { cwd: projectDir });
+    exec(`git push origin --delete ${shellQuote(branch)}`, { cwd: projectDir });
 
     // Determine source branch: use session branch when auto-merging and it exists
     let fromBranch = baseBranch;
     if (autoMerge && sessionBranch && sessionBranch !== baseBranch) {
-      const remoteCheck = exec(`git rev-parse --verify "origin/${sessionBranch}"`, { cwd: projectDir });
-      const localCheck = exec(`git rev-parse --verify "${sessionBranch}"`, { cwd: projectDir });
+      const remoteCheck = exec(`git rev-parse --verify ${shellQuote(`origin/${sessionBranch}`)}`, { cwd: projectDir });
+      const localCheck = exec(`git rev-parse --verify ${shellQuote(sessionBranch)}`, { cwd: projectDir });
       if (remoteCheck.exitCode === 0 || localCheck.exitCode === 0) {
         fromBranch = sessionBranch;
       }
@@ -119,12 +181,12 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
     // Create worktree from the appropriate branch (try origin/ first, fall back to local)
     log.info(`Branching worktree from: ${fromBranch}`);
     const remoteResult = exec(
-      `git worktree add "${worktreePath}" -b "${branch}" "origin/${fromBranch}"`,
+      `git worktree add ${shellQuote(worktreePath)} -b ${shellQuote(branch)} ${shellQuote(`origin/${fromBranch}`)}`,
       { cwd: projectDir },
     );
     if (remoteResult.exitCode !== 0) {
       const localResult = exec(
-        `git worktree add "${worktreePath}" -b "${branch}" "${fromBranch}"`,
+        `git worktree add ${shellQuote(worktreePath)} -b ${shellQuote(branch)} ${shellQuote(fromBranch)}`,
         { cwd: projectDir },
       );
       if (localResult.exitCode !== 0) {
@@ -204,18 +266,42 @@ export function worktreeHasCommits(worktreePath: string): number {
  * When preserveIfCommits is true and the worktree has commits, skip cleanup
  * so the user can recover the work with `alpha-loop resume`.
  */
-export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<void> {
-  const { issueNum, projectDir, autoCleanup = true, preserveIfCommits = false, dryRun } = options;
-  const worktreePath = resolve(projectDir, '.worktrees', `issue-${issueNum}`);
+export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<CleanupWorktreeResult> {
+  const {
+    issueNum,
+    projectDir,
+    autoCleanup = true,
+    preserveIfCommits = false,
+    sessionStatus,
+    retentionExpired = false,
+    dryRun,
+  } = options;
+  const worktreePath = options.worktreePath
+    ? resolve(projectDir, options.worktreePath)
+    : resolve(projectDir, '.worktrees', `issue-${issueNum}`);
+  const worktreesDir = resolve(projectDir, '.worktrees');
+
+  if (!isInsidePath(worktreesDir, worktreePath)) {
+    log.warn(`Refusing to clean unsafe worktree path outside ${worktreesDir}: ${worktreePath}`);
+    return { status: 'skipped', path: worktreePath, reason: 'unsafe-worktree-path' };
+  }
 
   if (!autoCleanup) {
     log.info('Skipping worktree cleanup (autoCleanup=false)');
-    return;
+    return { status: 'skipped', path: worktreePath, reason: 'autoCleanup=false' };
   }
 
   if (dryRun) {
     log.dry(`Would clean up worktree: ${worktreePath}`);
-    return;
+    return { status: 'dry-run', path: worktreePath };
+  }
+
+  const shouldPreserveForStatus = sessionStatus !== undefined
+    && isWaitingFeedbackStatus(sessionStatus)
+    && !retentionExpired;
+  if (shouldPreserveForStatus) {
+    log.warn(`Preserving ${sessionStatus} worktree at: ${worktreePath}`);
+    return { status: 'preserved', path: worktreePath, reason: `session-status:${sessionStatus}` };
   }
 
   if (preserveIfCommits && existsSync(worktreePath)) {
@@ -223,21 +309,24 @@ export async function cleanupWorktree(options: CleanupWorktreeOptions): Promise<
     if (commitCount > 0) {
       log.warn(`Preserving worktree with ${commitCount} commit(s) at: ${worktreePath}`);
       log.warn('Recover with: alpha-loop resume');
-      return;
+      return { status: 'preserved', path: worktreePath, reason: `commits:${commitCount}` };
     }
   }
 
   if (existsSync(worktreePath)) {
     log.info(`Removing worktree: ${worktreePath}`);
-    const result = exec(`git worktree remove "${worktreePath}" --force`, { cwd: projectDir });
+    const result = exec(`git worktree remove ${shellQuote(worktreePath)} --force`, { cwd: projectDir });
     if (result.exitCode !== 0) {
       log.warn('Could not remove worktree cleanly, forcing...');
-      exec(`rm -rf "${worktreePath}"`, { cwd: projectDir });
+      exec(`rm -rf ${shellQuote(worktreePath)}`, { cwd: projectDir });
       exec('git worktree prune', { cwd: projectDir });
     }
+    log.info('Worktree cleaned up');
+    return { status: 'removed', path: worktreePath };
   }
 
-  log.info('Worktree cleaned up');
+  log.info('Worktree already missing');
+  return { status: 'missing', path: worktreePath };
 }
 
 /**

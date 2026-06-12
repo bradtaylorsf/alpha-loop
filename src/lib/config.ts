@@ -75,6 +75,228 @@ export type RoutingConfig = {
   fallback?: RoutingFallback;
 };
 
+export type SessionRetentionConfig = {
+  /** 0 disables automatic cleanup for paused/waiting/QA worktrees. */
+  pausedWorktreeDays: number;
+  /** 0 disables automatic cleanup for completed worktrees. */
+  completedWorktreeDays: number;
+};
+
+export type EventName =
+  | 'session.started'
+  | 'session.paused'
+  | 'human_input.requested'
+  | 'qa.requested'
+  | 'feedback.received'
+  | 'feedback.classified'
+  | 'session.resume_requested'
+  | 'session.resumed'
+  | 'session.completed'
+  | 'session.failed'
+  | 'daemon.started'
+  | 'daemon.idle'
+  | 'daemon.health'
+  | 'daemon.work.selected'
+  | 'daemon.work.skipped'
+  | 'daemon.resume.requested'
+  | 'daemon.shutdown'
+  | 'daemon.failed';
+
+export type EventFilter = EventName | '*';
+export type EventFormat = 'json' | 'slack' | 'teams' | 'discord';
+export type EventDestinationType = 'log' | 'webhook' | 'command';
+export type CommandEventStdinFormat = 'json';
+
+export type BaseEventDestinationConfig = {
+  type: EventDestinationType;
+  events: EventFilter[];
+  format: EventFormat;
+  required: boolean;
+  timeout: number;
+  retries: number;
+};
+
+export type LogEventDestinationConfig = BaseEventDestinationConfig & {
+  type: 'log';
+};
+
+export type WebhookEventDestinationConfig = BaseEventDestinationConfig & {
+  type: 'webhook';
+  urlEnv: string;
+  secretEnv?: string;
+};
+
+export type CommandEventDestinationConfig = BaseEventDestinationConfig & {
+  type: 'command';
+  command: string;
+  stdin: CommandEventStdinFormat;
+};
+
+export type EventDestinationConfig =
+  | LogEventDestinationConfig
+  | WebhookEventDestinationConfig
+  | CommandEventDestinationConfig;
+
+export type EventsConfig = {
+  includePromptText: boolean;
+  redact: string[];
+  destinations: Record<string, EventDestinationConfig>;
+};
+
+export type AutomationPolicyCategory =
+  | 'auth'
+  | 'billing'
+  | 'production-deploy'
+  | 'dependency-upgrade'
+  | 'sanity-schema'
+  | 'secrets'
+  | 'migrations'
+  | 'destructive-content'
+  | 'ambiguous';
+
+export type AutomationPolicyConfig = {
+  /** Labels that must be present before hosted automation can start an issue. */
+  requireLabels: string[];
+  /** Labels that always block automation and request human input. */
+  blockLabels: string[];
+  /** If set, changed files must match one of these globs. Empty means no allowlist. */
+  allowedPaths: string[];
+  /** Changed files matching these globs require human input. */
+  protectedPaths: string[];
+  /** Configured shell commands allowed to run. Empty means no command allowlist. */
+  allowedCommands: string[];
+  /** Categories that require a human before automation can proceed. */
+  requireHumanFor: AutomationPolicyCategory[];
+  /** Maximum active session manifests allowed. 0 disables the cap. */
+  maxActiveSessions: number;
+  /** Maximum paused/waiting session manifests allowed. 0 disables the cap. */
+  maxPausedSessions: number;
+  /** Maximum issues to process in one session. 0 disables the cap. */
+  maxIssuesPerSession: number;
+  /** Maximum wall-clock runtime in minutes. 0 disables the cap. */
+  maxSessionMinutes: number;
+  /** Maximum estimated cost for one session. 0 disables the cap. */
+  maxSessionCostUsd: number;
+  /** Maximum estimated cost for one issue. 0 disables the cap. */
+  maxIssueCostUsd: number;
+};
+
+export type DaemonMode = 'full' | 'triage-only' | 'feedback-only' | 'run-only';
+
+export type DaemonLockConfig = {
+  enabled: boolean;
+  /** Seconds before a still-live lock can be treated as stale. 0 disables age-based staleness. */
+  staleAfterSeconds: number;
+  /** Optional override for the repo lock path. Defaults to .alpha-loop/daemon.lock. */
+  path: string;
+};
+
+export type DaemonConfig = {
+  mode: DaemonMode;
+  triageIntervalSeconds: number;
+  feedbackIntervalSeconds: number;
+  runIntervalSeconds: number;
+  healthIntervalSeconds: number;
+  idleSleepSeconds: number;
+  feedbackPollCommand: string;
+  /**
+   * Delete terminal (completed/failed/cleaned-up) session directories older than
+   * this many days during the health tick, so logs/screenshots do not grow without
+   * bound over weeks of 24/7 operation. 0 disables retention pruning.
+   */
+  sessionRetentionDays: number;
+  lock: DaemonLockConfig;
+};
+
+export type WebAppViewportPreset = 'desktop' | 'tablet' | 'mobile';
+
+export type WebAppScreenshotConfig = {
+  name: string;
+  url: string;
+  viewport: WebAppViewportPreset;
+  width?: number;
+  height?: number;
+};
+
+export type WebAppPreviewConfig = {
+  url: string;
+  command: string;
+  required: boolean;
+};
+
+export type WebAppConfig = {
+  setupCommand: string;
+  buildCommand: string;
+  testCommand: string;
+  devCommand: string;
+  devUrl: string;
+  smokeTest: string;
+  screenshots: WebAppScreenshotConfig[];
+  preview: WebAppPreviewConfig;
+};
+
+export const DEFAULT_SESSION_RETENTION: SessionRetentionConfig = {
+  pausedWorktreeDays: 0,
+  completedWorktreeDays: 30,
+};
+
+export const DEFAULT_EVENTS_CONFIG: EventsConfig = {
+  includePromptText: false,
+  redact: [],
+  destinations: {},
+};
+
+export const DEFAULT_AUTOMATION_POLICY: AutomationPolicyConfig = {
+  requireLabels: [],
+  blockLabels: ['do-not-automate', 'needs-human-input'],
+  allowedPaths: [],
+  protectedPaths: [],
+  allowedCommands: [],
+  requireHumanFor: [],
+  // Conservative defaults so unattended 24/7 operation is bounded out of the box.
+  // Cost caps prevent runaway API spend; session caps bound work pileup. Command
+  // and path allowlists stay empty because they are project-specific — set them
+  // in .alpha-loop.yaml before running unattended (see docs/hosted-alpha-loop.md).
+  maxActiveSessions: 3,
+  maxPausedSessions: 50,
+  maxIssuesPerSession: 0,
+  // Runtime cap stays disabled: epic/multi-issue sessions legitimately run for hours.
+  maxSessionMinutes: 0,
+  maxSessionCostUsd: 75,
+  maxIssueCostUsd: 25,
+};
+
+export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {
+  mode: 'full',
+  triageIntervalSeconds: 15 * 60,
+  feedbackIntervalSeconds: 60,
+  runIntervalSeconds: 2 * 60,
+  healthIntervalSeconds: 5 * 60,
+  idleSleepSeconds: 30,
+  feedbackPollCommand: '',
+  sessionRetentionDays: 14,
+  lock: {
+    enabled: true,
+    staleAfterSeconds: 24 * 60 * 60,
+    path: '',
+  },
+};
+
+export const DEFAULT_WEB_APP_CONFIG: WebAppConfig = {
+  setupCommand: '',
+  buildCommand: '',
+  testCommand: '',
+  devCommand: '',
+  devUrl: '',
+  smokeTest: '',
+  screenshots: [],
+  preview: {
+    url: '',
+    command: '',
+    required: false,
+  },
+};
+
 const VALID_ROUTING_STAGES: readonly RoutingStageName[] = [
   'plan',
   'build',
@@ -94,6 +316,48 @@ const VALID_FALLBACK_MODES: readonly RoutingFallbackMode[] = [
   'escalate',
   'retry',
   'fail',
+] as const;
+
+const VALID_EVENT_NAMES: readonly EventName[] = [
+  'session.started',
+  'session.paused',
+  'human_input.requested',
+  'qa.requested',
+  'feedback.received',
+  'feedback.classified',
+  'session.resume_requested',
+  'session.resumed',
+  'session.completed',
+  'session.failed',
+  'daemon.started',
+  'daemon.idle',
+  'daemon.health',
+  'daemon.work.selected',
+  'daemon.work.skipped',
+  'daemon.resume.requested',
+  'daemon.shutdown',
+  'daemon.failed',
+] as const;
+
+const VALID_DAEMON_MODES: readonly DaemonMode[] = [
+  'full',
+  'triage-only',
+  'feedback-only',
+  'run-only',
+] as const;
+
+const VALID_EVENT_FORMATS: readonly EventFormat[] = ['json', 'slack', 'teams', 'discord'] as const;
+const VALID_EVENT_DESTINATION_TYPES: readonly EventDestinationType[] = ['log', 'webhook', 'command'] as const;
+const VALID_AUTOMATION_POLICY_CATEGORIES: readonly AutomationPolicyCategory[] = [
+  'auth',
+  'billing',
+  'production-deploy',
+  'dependency-upgrade',
+  'sanity-schema',
+  'secrets',
+  'migrations',
+  'destructive-content',
+  'ambiguous',
 ] as const;
 
 /**
@@ -171,6 +435,16 @@ export type Config = {
   evalIncludeAgentPrompts: boolean;
   /** Include repo-specific skills during eval runs (default: true). */
   evalIncludeSkills: boolean;
+  /** Worktree retention policy for durable session state. */
+  sessionRetention?: SessionRetentionConfig;
+  /** Lifecycle event destinations for hosted/session automation. */
+  events?: EventsConfig;
+  /** Hosted automation guardrails for issue selection, commands, diffs, runtime, and budget. */
+  automationPolicy?: AutomationPolicyConfig;
+  /** Long-running hosted daemon mode configuration. */
+  daemon?: DaemonConfig;
+  /** Optional web/app verification and QA handoff profile. */
+  webApp?: WebAppConfig;
   /**
    * When there is exactly one open epic in the repo, the picker auto-selects
    * it instead of prompting. Default: false.
@@ -237,6 +511,11 @@ const DEFAULTS: Config = {
   pipeline: {},
   evalIncludeAgentPrompts: true,
   evalIncludeSkills: true,
+  sessionRetention: DEFAULT_SESSION_RETENTION,
+  events: DEFAULT_EVENTS_CONFIG,
+  automationPolicy: DEFAULT_AUTOMATION_POLICY,
+  daemon: DEFAULT_DAEMON_CONFIG,
+  webApp: undefined,
   preferEpics: false,
 };
 
@@ -331,6 +610,440 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   AGENT_TIMEOUT: 'agentTimeout',
   PREFER_EPICS: 'preferEpics',
 };
+
+function parsePositiveDayValue(value: unknown, key: string): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    console.warn(`[config] ${key}: expected a non-negative number of days (got ${String(value)})`);
+    return undefined;
+  }
+  return Math.floor(value);
+}
+
+function parseSessionRetention(raw: unknown): Partial<SessionRetentionConfig> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const retention: Partial<SessionRetentionConfig> = {};
+  const paused = parsePositiveDayValue(r.paused_worktree_days, 'session_retention.paused_worktree_days');
+  const completed = parsePositiveDayValue(r.completed_worktree_days, 'session_retention.completed_worktree_days');
+  if (paused !== undefined) retention.pausedWorktreeDays = paused;
+  if (completed !== undefined) retention.completedWorktreeDays = completed;
+  return Object.keys(retention).length > 0 ? retention : undefined;
+}
+
+function parseEventList(raw: unknown, key: string): EventFilter[] {
+  if (raw === undefined) return ['*'];
+  const values = Array.isArray(raw) ? raw : [raw];
+  const filters: EventFilter[] = [];
+  for (const item of values) {
+    if (item === '*') {
+      filters.push('*');
+      continue;
+    }
+    if (typeof item === 'string' && VALID_EVENT_NAMES.includes(item as EventName)) {
+      filters.push(item as EventName);
+      continue;
+    }
+    console.warn(`[config] ${key}: unknown event "${String(item)}" (ignored)`);
+  }
+  return filters.length > 0 ? filters : ['*'];
+}
+
+function parseEventFormat(raw: unknown, key: string): EventFormat {
+  if (raw === undefined) return 'json';
+  if (typeof raw === 'string' && VALID_EVENT_FORMATS.includes(raw as EventFormat)) {
+    return raw as EventFormat;
+  }
+  console.warn(`[config] ${key}: invalid format "${String(raw)}" (expected one of ${VALID_EVENT_FORMATS.join(', ')})`);
+  return 'json';
+}
+
+function parseNonNegativeInteger(raw: unknown, key: string, fallback: number): number {
+  if (raw === undefined) return fallback;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+    return Math.floor(raw);
+  }
+  console.warn(`[config] ${key}: expected a non-negative number (got ${String(raw)})`);
+  return fallback;
+}
+
+function parsePositiveInteger(raw: unknown, key: string, fallback: number): number {
+  if (raw === undefined) return fallback;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return Math.floor(raw);
+  }
+  console.warn(`[config] ${key}: expected a positive number (got ${String(raw)})`);
+  return fallback;
+}
+
+function parseBoolean(raw: unknown, fallback: boolean): boolean {
+  return typeof raw === 'boolean' ? raw : fallback;
+}
+
+function parseStringList(raw: unknown, key: string): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.warn(`[config] ${key}: expected a list of strings`);
+    return undefined;
+  }
+  return raw.map(String).map((item) => item.trim()).filter(Boolean);
+}
+
+function parseStringValue(raw: unknown, key: string): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'string') return raw.trim();
+  console.warn(`[config] ${key}: expected a string (got ${String(raw)})`);
+  return undefined;
+}
+
+function parseWebAppViewport(raw: unknown, key: string): WebAppViewportPreset {
+  if (raw === undefined) return 'desktop';
+  if (raw === 'desktop' || raw === 'tablet' || raw === 'mobile') return raw;
+  console.warn(`[config] ${key}: invalid viewport "${String(raw)}" (expected desktop, tablet, or mobile)`);
+  return 'desktop';
+}
+
+function parsePositiveDimension(raw: unknown, key: string): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return Math.floor(raw);
+  }
+  console.warn(`[config] ${key}: expected a positive number (got ${String(raw)})`);
+  return undefined;
+}
+
+function parseWebAppScreenshots(raw: unknown): WebAppScreenshotConfig[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.warn('[config] web_app.screenshots: expected a list of screenshot definitions');
+    return undefined;
+  }
+
+  const screenshots: WebAppScreenshotConfig[] = [];
+  raw.forEach((item, index) => {
+    const key = `web_app.screenshots[${index}]`;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      console.warn(`[config] ${key}: expected an object`);
+      return;
+    }
+    const entry = item as Record<string, unknown>;
+    const name = parseStringValue(entry.name, `${key}.name`);
+    if (!name) {
+      console.warn(`[config] ${key}.name: required`);
+      return;
+    }
+    const url = parseStringValue(entry.url, `${key}.url`) ?? '/';
+    const screenshot: WebAppScreenshotConfig = {
+      name,
+      url: url || '/',
+      viewport: parseWebAppViewport(entry.viewport, `${key}.viewport`),
+    };
+    const width = parsePositiveDimension(entry.width, `${key}.width`);
+    const height = parsePositiveDimension(entry.height, `${key}.height`);
+    if (width !== undefined) screenshot.width = width;
+    if (height !== undefined) screenshot.height = height;
+    screenshots.push(screenshot);
+  });
+
+  return screenshots;
+}
+
+function parseWebAppPreview(raw: unknown): WebAppPreviewConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn('[config] web_app.preview: expected an object');
+    return undefined;
+  }
+
+  const r = raw as Record<string, unknown>;
+  return {
+    ...DEFAULT_WEB_APP_CONFIG.preview,
+    url: parseStringValue(r.url, 'web_app.preview.url') ?? DEFAULT_WEB_APP_CONFIG.preview.url,
+    command: parseStringValue(r.command, 'web_app.preview.command') ?? DEFAULT_WEB_APP_CONFIG.preview.command,
+    required: parseBoolean(r.required, DEFAULT_WEB_APP_CONFIG.preview.required),
+  };
+}
+
+function parseWebAppConfig(raw: unknown): WebAppConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn('[config] web_app: expected an object');
+    return undefined;
+  }
+
+  const r = raw as Record<string, unknown>;
+  return {
+    ...DEFAULT_WEB_APP_CONFIG,
+    setupCommand: parseStringValue(r.setup_command, 'web_app.setup_command') ?? DEFAULT_WEB_APP_CONFIG.setupCommand,
+    buildCommand: parseStringValue(r.build_command, 'web_app.build_command') ?? DEFAULT_WEB_APP_CONFIG.buildCommand,
+    testCommand: parseStringValue(r.test_command, 'web_app.test_command') ?? DEFAULT_WEB_APP_CONFIG.testCommand,
+    devCommand: parseStringValue(r.dev_command, 'web_app.dev_command') ?? DEFAULT_WEB_APP_CONFIG.devCommand,
+    devUrl: parseStringValue(r.dev_url, 'web_app.dev_url') ?? DEFAULT_WEB_APP_CONFIG.devUrl,
+    smokeTest: parseStringValue(r.smoke_test, 'web_app.smoke_test') ?? DEFAULT_WEB_APP_CONFIG.smokeTest,
+    screenshots: parseWebAppScreenshots(r.screenshots) ?? DEFAULT_WEB_APP_CONFIG.screenshots,
+    preview: parseWebAppPreview(r.preview) ?? DEFAULT_WEB_APP_CONFIG.preview,
+  };
+}
+
+function parseAutomationPolicyCategories(raw: unknown): AutomationPolicyCategory[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    console.warn('[config] automation_policy.require_human_for: expected a list of category names');
+    return undefined;
+  }
+
+  const categories: AutomationPolicyCategory[] = [];
+  for (const item of raw) {
+    const category = String(item).trim().toLowerCase().replace(/_/g, '-') as AutomationPolicyCategory;
+    if (!VALID_AUTOMATION_POLICY_CATEGORIES.includes(category)) {
+      console.warn(
+        `[config] automation_policy.require_human_for: unknown category "${String(item)}" (ignored)`,
+      );
+      continue;
+    }
+    categories.push(category);
+  }
+  return categories;
+}
+
+function parseNonNegativeMoney(raw: unknown, key: string): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+    return raw;
+  }
+  console.warn(`[config] ${key}: expected a non-negative number (got ${String(raw)})`);
+  return undefined;
+}
+
+function parseAutomationPolicy(raw: unknown): AutomationPolicyConfig | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const policy: AutomationPolicyConfig = { ...DEFAULT_AUTOMATION_POLICY };
+
+  const requireLabels = parseStringList(r.require_labels, 'automation_policy.require_labels');
+  if (requireLabels !== undefined) policy.requireLabels = requireLabels;
+
+  const blockLabels = parseStringList(r.block_labels, 'automation_policy.block_labels');
+  if (blockLabels !== undefined) policy.blockLabels = blockLabels;
+
+  const allowedPaths = parseStringList(r.allowed_paths, 'automation_policy.allowed_paths');
+  if (allowedPaths !== undefined) policy.allowedPaths = allowedPaths;
+
+  const protectedPaths = parseStringList(r.protected_paths, 'automation_policy.protected_paths');
+  if (protectedPaths !== undefined) policy.protectedPaths = protectedPaths;
+
+  const allowedCommands = parseStringList(r.allowed_commands, 'automation_policy.allowed_commands');
+  if (allowedCommands !== undefined) policy.allowedCommands = allowedCommands;
+
+  const requireHumanFor = parseAutomationPolicyCategories(r.require_human_for);
+  if (requireHumanFor !== undefined) policy.requireHumanFor = requireHumanFor;
+
+  policy.maxActiveSessions = parseNonNegativeInteger(
+    r.max_active_sessions,
+    'automation_policy.max_active_sessions',
+    policy.maxActiveSessions,
+  );
+  policy.maxPausedSessions = parseNonNegativeInteger(
+    r.max_paused_sessions,
+    'automation_policy.max_paused_sessions',
+    policy.maxPausedSessions,
+  );
+  policy.maxIssuesPerSession = parseNonNegativeInteger(
+    r.max_issues_per_session,
+    'automation_policy.max_issues_per_session',
+    policy.maxIssuesPerSession,
+  );
+  policy.maxSessionMinutes = parseNonNegativeInteger(
+    r.max_session_minutes,
+    'automation_policy.max_session_minutes',
+    policy.maxSessionMinutes,
+  );
+
+  const maxSessionCost = parseNonNegativeMoney(
+    r.max_session_cost_usd,
+    'automation_policy.max_session_cost_usd',
+  );
+  if (maxSessionCost !== undefined) policy.maxSessionCostUsd = maxSessionCost;
+
+  const maxIssueCost = parseNonNegativeMoney(
+    r.max_issue_cost_usd,
+    'automation_policy.max_issue_cost_usd',
+  );
+  if (maxIssueCost !== undefined) policy.maxIssueCostUsd = maxIssueCost;
+
+  return policy;
+}
+
+function parseDaemonMode(raw: unknown, fallback: DaemonMode): DaemonMode {
+  if (raw === undefined) return fallback;
+  if (typeof raw === 'string' && VALID_DAEMON_MODES.includes(raw as DaemonMode)) {
+    return raw as DaemonMode;
+  }
+  console.warn(`[config] daemon.mode: invalid mode "${String(raw)}" (expected one of ${VALID_DAEMON_MODES.join(', ')})`);
+  return fallback;
+}
+
+function parseDaemonConfig(raw: unknown): DaemonConfig | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const daemon: DaemonConfig = {
+    ...DEFAULT_DAEMON_CONFIG,
+    lock: { ...DEFAULT_DAEMON_CONFIG.lock },
+  };
+
+  daemon.mode = parseDaemonMode(r.mode, daemon.mode);
+  daemon.triageIntervalSeconds = parsePositiveInteger(
+    r.triage_interval,
+    'daemon.triage_interval',
+    daemon.triageIntervalSeconds,
+  );
+  daemon.feedbackIntervalSeconds = parsePositiveInteger(
+    r.feedback_interval,
+    'daemon.feedback_interval',
+    daemon.feedbackIntervalSeconds,
+  );
+  daemon.runIntervalSeconds = parsePositiveInteger(
+    r.run_interval,
+    'daemon.run_interval',
+    daemon.runIntervalSeconds,
+  );
+  daemon.healthIntervalSeconds = parsePositiveInteger(
+    r.health_interval,
+    'daemon.health_interval',
+    daemon.healthIntervalSeconds,
+  );
+  daemon.idleSleepSeconds = parsePositiveInteger(
+    r.idle_sleep,
+    'daemon.idle_sleep',
+    daemon.idleSleepSeconds,
+  );
+
+  if (typeof r.feedback_poll_command === 'string') {
+    daemon.feedbackPollCommand = r.feedback_poll_command.trim();
+  } else if (r.feedback_poll_command !== undefined) {
+    console.warn(`[config] daemon.feedback_poll_command: expected a string (got ${String(r.feedback_poll_command)})`);
+  }
+
+  daemon.sessionRetentionDays = parseNonNegativeInteger(
+    r.session_retention_days,
+    'daemon.session_retention_days',
+    daemon.sessionRetentionDays,
+  );
+
+  if (typeof r.lock === 'boolean') {
+    daemon.lock.enabled = r.lock;
+  } else if (r.lock !== undefined && r.lock && typeof r.lock === 'object' && !Array.isArray(r.lock)) {
+    const lock = r.lock as Record<string, unknown>;
+    daemon.lock.enabled = parseBoolean(lock.enabled, daemon.lock.enabled);
+    daemon.lock.staleAfterSeconds = parseNonNegativeInteger(
+      lock.stale_after,
+      'daemon.lock.stale_after',
+      daemon.lock.staleAfterSeconds,
+    );
+    if (typeof lock.path === 'string') daemon.lock.path = lock.path.trim();
+    else if (lock.path !== undefined) console.warn(`[config] daemon.lock.path: expected a string (got ${String(lock.path)})`);
+  } else if (r.lock !== undefined) {
+    console.warn('[config] daemon.lock: expected a boolean or object');
+  }
+
+  if (r.lock_enabled !== undefined) {
+    daemon.lock.enabled = parseBoolean(r.lock_enabled, daemon.lock.enabled);
+  }
+  daemon.lock.staleAfterSeconds = parseNonNegativeInteger(
+    r.lock_stale_after,
+    'daemon.lock_stale_after',
+    daemon.lock.staleAfterSeconds,
+  );
+  if (typeof r.lock_path === 'string') daemon.lock.path = r.lock_path.trim();
+
+  return daemon;
+}
+
+function parseEventsConfig(raw: unknown): EventsConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const destinations: Record<string, EventDestinationConfig> = {};
+
+  if (r.destinations !== undefined) {
+    if (!r.destinations || typeof r.destinations !== 'object' || Array.isArray(r.destinations)) {
+      console.warn('[config] events.destinations: expected an object keyed by destination name');
+    } else {
+      for (const [name, value] of Object.entries(r.destinations as Record<string, unknown>)) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          console.warn(`[config] events.destinations.${name}: expected an object`);
+          continue;
+        }
+        const entry = value as Record<string, unknown>;
+        const type = entry.type;
+        if (typeof type !== 'string' || !VALID_EVENT_DESTINATION_TYPES.includes(type as EventDestinationType)) {
+          console.warn(
+            `[config] events.destinations.${name}.type: invalid type "${String(type)}" (expected one of ${VALID_EVENT_DESTINATION_TYPES.join(', ')})`,
+          );
+          continue;
+        }
+
+        const base = {
+          events: parseEventList(entry.events, `events.destinations.${name}.events`),
+          format: parseEventFormat(entry.format, `events.destinations.${name}.format`),
+          required: parseBoolean(entry.required, false),
+          timeout: parseNonNegativeInteger(entry.timeout, `events.destinations.${name}.timeout`, 10),
+          retries: parseNonNegativeInteger(entry.retries, `events.destinations.${name}.retries`, 0),
+        };
+
+        if (type === 'log') {
+          destinations[name] = { ...base, type: 'log' };
+          continue;
+        }
+
+        if (type === 'webhook') {
+          if (typeof entry.url_env !== 'string' || !entry.url_env.trim()) {
+            console.warn(`[config] events.destinations.${name}.url_env: required for webhook destinations`);
+            continue;
+          }
+          destinations[name] = {
+            ...base,
+            type: 'webhook',
+            urlEnv: entry.url_env.trim(),
+            ...(typeof entry.secret_env === 'string' && entry.secret_env.trim()
+              ? { secretEnv: entry.secret_env.trim() }
+              : {}),
+          };
+          continue;
+        }
+
+        if (typeof entry.command !== 'string' || !entry.command.trim()) {
+          console.warn(`[config] events.destinations.${name}.command: required for command destinations`);
+          continue;
+        }
+        const stdin = entry.stdin === undefined || entry.stdin === 'json'
+          ? 'json'
+          : undefined;
+        if (!stdin) {
+          console.warn(`[config] events.destinations.${name}.stdin: invalid value "${String(entry.stdin)}" (expected json)`);
+          continue;
+        }
+        destinations[name] = {
+          ...base,
+          type: 'command',
+          command: entry.command.trim(),
+          stdin,
+        };
+      }
+    }
+  }
+
+  const redact = Array.isArray(r.redact)
+    ? r.redact.map(String).map((item) => item.trim()).filter(Boolean)
+    : [];
+  if (r.redact !== undefined && !Array.isArray(r.redact)) {
+    console.warn('[config] events.redact: expected a list of env var names or literal values');
+  }
+
+  return {
+    includePromptText: r.include_prompt_text === true,
+    redact,
+    destinations,
+  };
+}
 
 function coerce(value: string, current: unknown): unknown {
   if (typeof current === 'number') return Number(value);
@@ -544,11 +1257,54 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     if (ev.include_skills === false) result.evalIncludeSkills = false;
   }
 
+  // Handle session retention nested config
+  if (parsed.session_retention !== undefined) {
+    const sessionRetention = parseSessionRetention(parsed.session_retention);
+    if (sessionRetention) {
+      result.sessionRetention = {
+        ...DEFAULT_SESSION_RETENTION,
+        ...sessionRetention,
+      };
+    }
+  }
+
   // Handle routing nested config (per-stage model + endpoint)
   if (parsed.routing !== undefined) {
     const routing = parseRoutingConfig(parsed.routing);
     if (routing) {
       result.routing = routing;
+    }
+  }
+
+  // Handle lifecycle event destinations.
+  if (parsed.events !== undefined) {
+    const events = parseEventsConfig(parsed.events);
+    if (events) {
+      result.events = events;
+    }
+  }
+
+  // Handle hosted automation policy guardrails.
+  if (parsed.automation_policy !== undefined) {
+    const automationPolicy = parseAutomationPolicy(parsed.automation_policy);
+    if (automationPolicy) {
+      result.automationPolicy = automationPolicy;
+    }
+  }
+
+  // Handle hosted daemon mode configuration.
+  if (parsed.daemon !== undefined) {
+    const daemon = parseDaemonConfig(parsed.daemon);
+    if (daemon) {
+      result.daemon = daemon;
+    }
+  }
+
+  // Handle web/app verification profile.
+  if (parsed.web_app !== undefined) {
+    const webApp = parseWebAppConfig(parsed.web_app);
+    if (webApp) {
+      result.webApp = webApp;
     }
   }
 
@@ -576,6 +1332,15 @@ function loadEnvConfig(): Partial<Config> {
     if (val !== undefined) {
       (result as Record<string, unknown>)[configKey] = coerce(val, DEFAULTS[configKey]);
     }
+  }
+  const paused = process.env.SESSION_RETENTION_PAUSED_WORKTREE_DAYS;
+  const completed = process.env.SESSION_RETENTION_COMPLETED_WORKTREE_DAYS;
+  if (paused !== undefined || completed !== undefined) {
+    result.sessionRetention = {
+      ...DEFAULT_SESSION_RETENTION,
+      ...(paused !== undefined ? { pausedWorktreeDays: Number(paused) } : {}),
+      ...(completed !== undefined ? { completedWorktreeDays: Number(completed) } : {}),
+    };
   }
   return result;
 }
@@ -614,6 +1379,29 @@ export function loadConfig(overrides?: Partial<Config>): Config {
 
   // Routing precedence is whole-object replacement (overrides > yaml > undefined).
   const routing = overrides?.routing ?? yamlConfig.routing;
+  const sessionRetention = {
+    ...DEFAULT_SESSION_RETENTION,
+    ...yamlConfig.sessionRetention,
+    ...envConfig.sessionRetention,
+    ...overrides?.sessionRetention,
+  };
+  const events = overrides?.events ?? yamlConfig.events ?? DEFAULTS.events;
+  const webApp = overrides?.webApp ?? yamlConfig.webApp;
+  const automationPolicy = {
+    ...DEFAULT_AUTOMATION_POLICY,
+    ...yamlConfig.automationPolicy,
+    ...overrides?.automationPolicy,
+  };
+  const daemon = {
+    ...DEFAULT_DAEMON_CONFIG,
+    ...yamlConfig.daemon,
+    ...overrides?.daemon,
+    lock: {
+      ...DEFAULT_DAEMON_CONFIG.lock,
+      ...yamlConfig.daemon?.lock,
+      ...overrides?.daemon?.lock,
+    },
+  };
 
   const merged: Config = {
     ...DEFAULTS,
@@ -624,6 +1412,11 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     pricing: mergedPricing,
     pipeline: mergedPipeline,
     routing,
+    sessionRetention,
+    events,
+    webApp,
+    automationPolicy,
+    daemon,
   };
 
   // Validate agent is a known value

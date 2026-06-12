@@ -14,11 +14,17 @@ import { spawnAgent } from './agent.js';
 import { resolveStepConfig } from './config.js';
 import type { Config } from './config.js';
 import { formatEpicPromptContext, type EpicPromptContext } from './prompts.js';
+import {
+  collectWebAppVerificationSummary,
+  type WebAppProfile,
+  type WebAppVerificationSummary,
+} from './web-app-profile.js';
 
 export type VerifyResult = {
   passed: boolean;
   skipped: boolean;
   output: string;
+  webApp?: WebAppVerificationSummary;
 };
 
 /** Verification method — how to validate the implementation. */
@@ -109,8 +115,12 @@ export async function runVerify(options: {
   verifyCommand?: string;
   /** Parent epic context for sub-issue verification. */
   epicContext?: EpicPromptContext;
+  /** Resume-specific human feedback and prior-session references. */
+  resumeContext?: string;
+  /** Optional normalized web/app verification profile. */
+  webAppProfile?: WebAppProfile | null;
 }): Promise<VerifyResult> {
-  const { worktree, logFile, issueNum, title, body, config, sessionDir, verifyInstructions, verifyMethod, verifyCommand, epicContext } = options;
+  const { worktree, logFile, issueNum, title, body, config, sessionDir, verifyInstructions, verifyMethod, verifyCommand, epicContext, resumeContext, webAppProfile } = options;
 
   if (config.skipVerify) {
     log.info('Verification skipped (skipVerify=true)');
@@ -136,25 +146,38 @@ export async function runVerify(options: {
     return runScriptVerify(verifyCommand, worktree);
   }
 
+  const withWebAppSummary = (result: VerifyResult): VerifyResult => {
+    if (!webAppProfile) return result;
+    return {
+      ...result,
+      webApp: collectWebAppVerificationSummary(webAppProfile, {
+        issueNum,
+        passed: result.passed,
+        skipped: result.skipped,
+        output: result.output,
+      }),
+    };
+  };
+
   // Playwright path — check prerequisites
   // Check if playwright-cli is available
   const whichResult = exec('which playwright-cli');
   if (whichResult.exitCode !== 0) {
     log.warn('playwright-cli not installed — skipping verification');
-    return { passed: true, skipped: true, output: 'Verification skipped (playwright-cli not installed)' };
+    return withWebAppSummary({ passed: true, skipped: true, output: 'Verification skipped (playwright-cli not installed)' });
   }
 
   // Check if the diff only touches non-UI files
   const diffStat = exec(`git diff --stat "origin/${config.baseBranch}...HEAD"`, { cwd: worktree });
-  if (isNonUiChange(diffStat.stdout)) {
+  if (!webAppProfile && isNonUiChange(diffStat.stdout)) {
     log.info('Changes are non-UI (config, docs, tests) — skipping verification');
-    return { passed: true, skipped: true, output: 'Verification skipped (non-UI changes only)' };
+    return withWebAppSummary({ passed: true, skipped: true, output: 'Verification skipped (non-UI changes only)' });
   }
 
   log.step(`Running live verification for issue #${issueNum}`);
 
   // Detect dev command
-  let devCmd = config.devCommand;
+  let devCmd = webAppProfile?.devCommand || config.devCommand;
   if (!devCmd) {
     const pkgJsonPath = join(worktree, 'package.json');
     if (existsSync(pkgJsonPath)) {
@@ -171,7 +194,7 @@ export async function runVerify(options: {
 
   if (!devCmd) {
     log.info('No dev/start/preview command found, skipping verification');
-    return { passed: true, skipped: true, output: 'Verification skipped (no start command)' };
+    return withWebAppSummary({ passed: true, skipped: true, output: 'Verification skipped (no start command)' });
   }
 
   // Save screenshots to session directory
@@ -190,12 +213,41 @@ export async function runVerify(options: {
   }
 
   // Build the verification prompt — use plan instructions if available, otherwise generic
+  const webAppSteps = webAppProfile
+    ? `## Web App Profile
+
+Start command: \`${webAppProfile.devCommand}\`
+Expected local URL: ${webAppProfile.devUrl}
+Verification artifact JSON: ${webAppProfile.artifactPath}
+
+Take these screenshots exactly:
+${webAppProfile.screenshots.map((shot) => `- ${shot.name}: open ${shot.fullUrl}, set viewport ${shot.viewport.width}x${shot.viewport.height}, save screenshot to ${shot.path}`).join('\n')}
+
+Also run \`playwright-cli console\` and \`playwright-cli network\`. Record browser console errors and failed network requests in the verification artifact JSON using this shape:
+
+{
+  "version": 1,
+  "issueNum": ${issueNum},
+  "devUrl": "${webAppProfile.devUrl}",
+  "previewUrl": null,
+  "screenshots": [{ "name": "home-desktop", "path": "path/to/screenshot.png" }],
+  "browser": {
+    "passed": true,
+    "skipped": false,
+    "summary": "What was verified",
+    "consoleErrors": [],
+    "networkErrors": []
+  }
+}
+`
+    : '';
+
   const verifySteps = verifyInstructions
     ? `## Verification Steps (from plan)\n\n${verifyInstructions}`
     : `## Your Task
 
 1. Start the dev server: \`${devCmd}\`
-2. Read the server output to find what URL/port it starts on
+2. Read the server output to find what URL/port it starts on${webAppProfile ? `, preferring ${webAppProfile.devUrl}` : ''}
 3. Use playwright-cli to open the app and test the feature
 4. When done, kill the dev server process`;
 
@@ -206,12 +258,15 @@ export async function runVerify(options: {
 ${body}
 
 ${epicContext ? `${formatEpicPromptContext(epicContext)}\n\nUse the parent epic context to verify integration-sensitive behavior while keeping judgment focused on issue #${issueNum}.\n` : ''}
+${resumeContext ? `## Resume Context\n${resumeContext}\n` : ''}
 
 ## What Changed
 ${diffStat.stdout || 'No diff available'}
 
 ${visionContext ? `## Product Vision\n${visionContext}\n` : ''}
 ${verifySteps}
+
+${webAppSteps}
 
 ### Playwright CLI Commands
 - \`playwright-cli open <url>\` — Open the app
@@ -225,6 +280,7 @@ ${verifySteps}
 
 ### Screenshots
 Save to: ${screenshotDir}
+${webAppProfile ? `Configured screenshot paths:\n${webAppProfile.screenshots.map((shot) => `- ${shot.path}`).join('\n')}` : ''}
 
 ## Gate Result (REQUIRED)
 
@@ -277,15 +333,15 @@ Also output a human-readable summary:
 
   if (/Status:.*FAIL/i.test(verifyOutput)) {
     log.error('Live verification FAILED');
-    return { passed: false, skipped: false, output: verifyOutput };
+    return withWebAppSummary({ passed: false, skipped: false, output: verifyOutput });
   } else if (/Status:.*PASS/i.test(verifyOutput)) {
     log.success('Live verification PASSED');
-    return { passed: true, skipped: false, output: verifyOutput };
+    return withWebAppSummary({ passed: true, skipped: false, output: verifyOutput });
   } else if (agentResult.exitCode === 0) {
     log.success('Verification completed (agent exit 0)');
-    return { passed: true, skipped: false, output: verifyOutput };
+    return withWebAppSummary({ passed: true, skipped: false, output: verifyOutput });
   } else {
     log.warn(`Verification unclear (agent exit ${agentResult.exitCode})`);
-    return { passed: false, skipped: false, output: verifyOutput };
+    return withWebAppSummary({ passed: false, skipped: false, output: verifyOutput });
   }
 }

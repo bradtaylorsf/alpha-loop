@@ -45,6 +45,13 @@ jest.mock('../../src/lib/pipeline', () => ({
 jest.mock('../../src/lib/session', () => ({
   createSession: jest.fn(),
   finalizeSession: jest.fn(),
+  recordSessionIssue: jest.fn(),
+  recordSessionPolicyDecision: jest.fn(),
+  saveResult: jest.fn(),
+  transitionHumanFeedbackSessionStatus: jest.fn(),
+  recordSessionCleanup: jest.fn(),
+  transitionSessionStatus: jest.fn(),
+  updateSessionManifest: jest.fn(),
 }));
 
 jest.mock('../../src/lib/verify-epic', () => ({
@@ -78,6 +85,10 @@ jest.mock('../../src/lib/preflight', () => ({
   runPortCheck: jest.fn().mockReturnValue([]),
 }));
 
+jest.mock('../../src/lib/events', () => ({
+  emitLifecycleEvent: jest.fn().mockResolvedValue({ event: {}, deliveries: [] }),
+}));
+
 jest.mock('../../src/lib/eval', () => ({
   saveCapturedCase: jest.fn(),
   detectFailureStep: jest.fn(() => 'implement'),
@@ -100,13 +111,14 @@ jest.mock('node:fs', () => ({
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
-import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist } from '../../src/lib/github';
+import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
 import { processIssue, processBatch } from '../../src/lib/pipeline';
-import { createSession, finalizeSession } from '../../src/lib/session';
+import { createSession, finalizeSession, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
 import { syncAgentAssets } from '../../src/commands/sync';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { emitLifecycleEvent } from '../../src/lib/events';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
@@ -116,10 +128,15 @@ const mockListEpics = listEpics as jest.MockedFunction<typeof listEpics>;
 const mockGetEpicSubIssues = getEpicSubIssues as jest.MockedFunction<typeof getEpicSubIssues>;
 const mockGetIssueWithComments = getIssueWithComments as jest.MockedFunction<typeof getIssueWithComments>;
 const mockUpdateEpicChecklist = updateEpicChecklist as jest.MockedFunction<typeof updateEpicChecklist>;
+const mockLabelIssue = labelIssue as jest.MockedFunction<typeof labelIssue>;
+const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue>;
 const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue>;
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
+const mockTransitionSessionStatus = transitionSessionStatus as jest.MockedFunction<typeof transitionSessionStatus>;
+const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
+const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGenerateSessionSummary = generateSessionSummary as jest.MockedFunction<typeof generateSessionSummary>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
@@ -128,6 +145,7 @@ const mockSyncAgentAssets = syncAgentAssets as jest.MockedFunction<typeof syncAg
 const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
+const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -278,6 +296,16 @@ describe('runCommand', () => {
       verificationClosedEpic: true,
     }));
     expect(mockUpdateEpicChecklist).toHaveBeenCalledWith('owner/repo', 195, 201, true);
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.started',
+      session: expect.objectContaining({ name: 'session/20260330-143000' }),
+    }));
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.completed',
+      context: expect.objectContaining({
+        prUrl: 'https://github.com/owner/repo/pull/500',
+      }),
+    }));
     expect(mockExit).not.toHaveBeenCalled();
   });
 
@@ -434,6 +462,44 @@ describe('runCommand', () => {
       expect.any(Object),
       expect.any(Object),
     );
+  });
+
+  test('automation policy pauses blocked-label issues before agent execution', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      automationPolicy: {
+        requireLabels: [],
+        blockLabels: ['do-not-automate'],
+        allowedPaths: [],
+        protectedPaths: [],
+        allowedCommands: [],
+        requireHumanFor: [],
+        maxActiveSessions: 0,
+        maxPausedSessions: 0,
+        maxIssuesPerSession: 0,
+        maxSessionMinutes: 0,
+        maxSessionCostUsd: 0,
+        maxIssueCostUsd: 0,
+      },
+      ...overrides,
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Unsafe issue', body: 'Body', labels: ['ready', 'do-not-automate'] },
+    ]);
+
+    await runCommand({ skipEpic: true });
+
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockLabelIssue).toHaveBeenCalledWith('owner/repo', 42, 'needs-human-input', 'ready');
+    expect(mockCommentIssue).toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('blocked label'));
+    expect(mockRecordSessionPolicyDecision).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      stage: 'issue_start',
+      issueNum: 42,
+    }));
+    expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      issueNum: 42,
+      status: 'waiting',
+      waitingStatus: 'human_input_requested',
+    }));
   });
 
   test('--epics dry-run previews non-epic labels as warnings without mutating', async () => {
@@ -1128,6 +1194,43 @@ Coordinate hosted work.
     expect(mockRepairSessionSummaryArtifact).not.toHaveBeenCalled();
     expect(mockLog.info).toHaveBeenCalledWith('Skipping parent learning artifact repair; issue learnings are committed in child PRs');
     expect(mockFinalizeSession).toHaveBeenCalled();
+  });
+
+  test('continues other eligible work when one issue is waiting for human feedback', async () => {
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Needs clarification', body: 'Body', labels: ['ready'] },
+      { number: 43, title: 'Still eligible', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue
+      .mockResolvedValueOnce({
+        issueNum: 42,
+        title: 'Needs clarification',
+        status: 'waiting',
+        waitingStatus: 'human_input_requested',
+        waitingReason: 'Need a decision',
+        humanInputQuestion: 'Which option should be used?',
+        testsPassing: false,
+        verifyPassing: false,
+        verifySkipped: true,
+        duration: 10,
+        filesChanged: 0,
+      })
+      .mockResolvedValueOnce({
+        issueNum: 43,
+        title: 'Still eligible',
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        duration: 60,
+        filesChanged: 5,
+      });
+
+    await runCommand({ dryRun: true });
+
+    expect(mockProcessIssue.mock.calls.map((call) => call[0])).toEqual([42, 43]);
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(expect.any(Object), 'human_input_requested', 'human_input_requested', expect.any(Object));
+    expect(process.exitCode).toBeUndefined();
   });
 
   test('repairs session learning artifacts only when auto-merge uses a session branch', async () => {

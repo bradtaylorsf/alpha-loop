@@ -16,6 +16,7 @@ export type ImplementPromptOptions = {
   projectContext?: string;
   previousResult?: string;
   learningContext?: string;
+  resumeContext?: string;
 };
 
 export type ReviewPromptOptions = {
@@ -179,6 +180,12 @@ export function buildIssuePlanPrompt(options: IssuePlanPromptOptions): string {
     '    "command": "optional shell command for script/cli/boot/api methods",',
     '    "instructions": "If needed: specific steps to verify the feature. If not needed: omit this field.",',
     '    "reason": "Why verification is or isn\'t needed"',
+    '  },',
+    '  "qa": {',
+    '    "needed": false,',
+    '    "checklist": ["Specific human QA step", "..."],',
+    '    "reason": "Why human QA is or isn\'t needed",',
+    '    "previewUrl": "optional preview URL if known"',
     '  }',
     '}',
     '',
@@ -189,6 +196,8 @@ export function buildIssuePlanPrompt(options: IssuePlanPromptOptions): string {
     '- verification.command: required for script/cli/boot/api methods - the shell command to run. Exit code 0 = pass.',
     '- verification.command must be executable by /bin/sh after JSON parsing. Do not double-escape quotes as \\\\"; prefer single quotes around inline Node snippets or a checked-in helper script.',
     '- verification.instructions: for playwright method, list the exact playwright-cli commands to verify.',
+    '- qa.needed: true only when a human must inspect subjective UI/content/product behavior after the PR is open.',
+    '- qa.checklist: concrete, checkable human QA steps. Do not use vague items like "verify it works".',
     '- implementation: be concise and actionable. List files to modify and what to change in each.',
     '- Write ONLY the JSON file. Do not create any other files or make any code changes.',
   );
@@ -200,7 +209,7 @@ export function buildIssuePlanPrompt(options: IssuePlanPromptOptions): string {
  * Build the implementation prompt for an AI agent.
  */
 export function buildImplementPrompt(options: ImplementPromptOptions): string {
-  const { issueNum, title, body, comments, planContent, epicContext, visionContext, projectContext, previousResult, learningContext } = options;
+  const { issueNum, title, body, comments, planContent, epicContext, visionContext, projectContext, previousResult, learningContext, resumeContext } = options;
 
   const sections: string[] = [
     `Implement GitHub issue #${issueNum}: ${title}`,
@@ -240,6 +249,10 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
     sections.push('', '', learningContext);
   }
 
+  if (resumeContext) {
+    sections.push('', '', '## Resume Context', resumeContext);
+  }
+
   sections.push(
     '',
     '## Scope Rules (CRITICAL)',
@@ -248,6 +261,18 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
     '- Do NOT fix unrelated code, even if you notice problems',
     '- Do NOT modify dev server config, build config, fonts, or styling unless the issue specifically requires it',
     '- If the issue lists "Affected Files/Areas", stay within that scope',
+    '',
+    '## Human Feedback Pause Requests',
+    'If you cannot proceed safely, do not guess. Write `alpha-loop-pause-request.json` in the repo root and stop.',
+    'Use this exact JSON shape:',
+    '{',
+    '  "type": "human_input",',
+    '  "reason": "Why Alpha Loop must pause",',
+    '  "question": "The exact question a human must answer",',
+    '  "resumeInstructions": "What Alpha Loop should do after the human replies"',
+    '}',
+    'For human QA after a PR is open, use type "qa" with "qaChecklist": ["step", "..."].',
+    'For scope-expanding feedback, use type "new_scope" and include followUp.title and followUp.body when a separate issue can be created.',
     '',
     '## Before You Start',
     '1. Read the product vision and technical context above',
@@ -580,6 +605,11 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     '- Do UI changes match the target user profile?',
     '- Are error states handled (loading, empty, error)?',
     '- Is the feature discoverable (can users find it)?',
+    '',
+    '### 6. Human Feedback Pause',
+    '- If review depends on a product/design decision only a human can answer, write `alpha-loop-pause-request.json` with type "human_input", a concrete question, and resumeInstructions.',
+    '- If the change is ready but needs subjective/manual QA, write `alpha-loop-pause-request.json` with type "qa" and qaChecklist.',
+    '- If feedback expands scope beyond this issue, write `alpha-loop-pause-request.json` with type "new_scope"; include followUp.title and followUp.body if a separate issue should be created.',
     '',
     '## Actions',
     '',

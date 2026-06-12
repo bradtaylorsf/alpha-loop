@@ -36,12 +36,13 @@ jest.mock('node:fs', () => ({
   readdirSync: jest.fn(),
   readFileSync: jest.fn(),
   unlinkSync: jest.fn(),
+  renameSync: jest.fn(),
 }));
 
 import { exec } from '../../src/lib/shell';
 import { createPR } from '../../src/lib/github';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
-import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync, renameSync } from 'node:fs';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
@@ -52,6 +53,7 @@ const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReaddirSync = readdirSync as jest.MockedFunction<typeof readdirSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 const mockUnlinkSync = unlinkSync as jest.MockedFunction<typeof unlinkSync>;
+const mockRenameSync = renameSync as jest.MockedFunction<typeof renameSync>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
 
@@ -94,6 +96,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalTimeout: 300,
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
+    sessionRetention: { pausedWorktreeDays: 0, completedWorktreeDays: 30 },
     preferEpics: false,
     autoCapture: true,
     skipPostSessionReview: false,
@@ -166,6 +169,43 @@ describe('createSession', () => {
     expect(mockMkdirSync).toHaveBeenCalledWith(
       expect.stringContaining('/logs'),
       { recursive: true },
+    );
+  });
+
+  test('writes durable session manifest for non-dry-run targeted sessions', () => {
+    createSession(makeConfig(), {
+      issueNum: 284,
+      issueTitle: 'Persist resumable session state',
+      parentEpicNum: 293,
+      parentEpicTitle: 'Hosted Alpha Loop',
+    });
+
+    const manifestWrite = mockWriteFileSync.mock.calls.find((call) => String(call[0]).endsWith('session.json.tmp'));
+    expect(manifestWrite).toBeDefined();
+    const manifest = JSON.parse(String(manifestWrite?.[1]));
+    expect(manifest).toEqual(expect.objectContaining({
+      version: 1,
+      issueNumber: 284,
+      issueNumbers: [284],
+      parentEpicNumber: 293,
+      status: 'running',
+      stage: 'created',
+      branch: 'session/20260101-000000',
+    }));
+    expect(manifest.feedback).toEqual(expect.objectContaining({
+      currentStatus: 'running',
+      transitionHistory: [],
+      events: [],
+    }));
+    expect(manifest.harness).toEqual(expect.objectContaining({
+      agent: 'claude',
+      model: 'opus',
+      command: 'claude',
+      testCommand: 'pnpm test',
+    }));
+    expect(mockRenameSync).toHaveBeenCalledWith(
+      expect.stringContaining('session.json.tmp'),
+      expect.stringContaining('session.json'),
     );
   });
 
@@ -699,7 +739,7 @@ describe('finalizeSession', () => {
     const title = finalPrCall.title;
     const body = finalPrCall.body;
     expect(title).toContain('1/1 succeeded, 1 recovered');
-    expect(body).toContain('1 succeeded, 0 failed, 1 recovered');
+    expect(body).toContain('1 succeeded, 0 failed, 0 waiting, 1 recovered');
     expect(body).toContain('### Recovered Issues');
     expect(body).toContain('#2: Recovered issue — RECOVERED BY RESUME');
     expect(body).toContain('Closes #1');

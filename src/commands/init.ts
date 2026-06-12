@@ -262,11 +262,98 @@ dev_command: ${answers.devCommand}
 # skip_learn: false           # Skip learning extraction
 # skip_install: false         # Skip auto-running setup_command on session start
 
+# === Web/app verification profile ==========================================
+# Browser QA profile for websites and web apps. Empty commands fall back to
+# package scripts where possible (Astro defaults to http://localhost:4321).
+# See docs/web-app-profile.md for preview providers and QA handoff details.
+# web_app:
+#   setup_command: ${answers.testCommand.startsWith('pnpm') ? 'pnpm install' : ''}
+#   build_command: pnpm build
+#   test_command: ${answers.testCommand}
+#   dev_command: ${answers.devCommand}
+#   dev_url: http://localhost:4321
+#   smoke_test: pnpm build
+#   screenshots:
+#     - name: home-desktop
+#       url: /
+#       viewport: desktop
+#     - name: home-mobile
+#       url: /
+#       viewport: mobile
+#   preview:
+#     command: ./scripts/get-preview-url.sh
+#     required: false
+
 # === Safety limits ==========================================================
 # Caps to keep an unattended loop from running away. 0 = unlimited.
 max_issues: ${answers.maxIssues}
 max_session_duration: 7200    # Total session wall-clock budget, in seconds (2h)
 # poll_interval: 60           # Seconds between issue queue polls when running continuously
+
+# === Automation policy (hosted guardrails) =================================
+# Repo-level safety policy for unattended hosted runs. Keep this narrow before
+# enabling daemon mode. See docs/hosted-policy.md for marketing-site and web-app
+# starter profiles.
+# Conservative defaults apply when unset: max_issue_cost_usd 25, max_session_cost_usd 75,
+# max_active_sessions 3, max_paused_sessions 50 (max_session_minutes stays 0/unlimited).
+# allowed_commands / allowed_paths / protected_paths default to EMPTY — the agent has
+# full shell access, so set these before running unattended to bound what it can do.
+automation_policy:
+  block_labels: [do-not-automate, needs-human-input]
+#   require_labels: [ready]
+#   max_active_sessions: 1
+#   max_paused_sessions: 10
+#   max_issues_per_session: 1
+#   max_session_minutes: 90
+#   max_session_cost_usd: 25
+#   max_issue_cost_usd: 5
+#   allowed_paths:
+#     - src/**
+#     - content/**
+#     - public/**
+#   protected_paths:
+#     - package.json
+#     - pnpm-lock.yaml
+#     - .github/workflows/**
+#     - sanity/schema/**
+#   allowed_commands:
+#     - pnpm install
+#     - pnpm test
+#     - pnpm build
+#     - pnpm dev
+#   require_human_for:
+#     - auth
+#     - billing
+#     - production-deploy
+#     - dependency-upgrade
+#     - sanity-schema
+#     - secrets
+#     - migrations
+#     - destructive-content
+#     - ambiguous
+
+# === Hosted daemon ==========================================================
+# Long-running repo steward. Modes: full, triage-only, feedback-only, run-only.
+# daemon:
+#   mode: full
+#   triage_interval: 900       # Seconds between intake triage passes
+#   feedback_interval: 60      # Seconds between feedback poll/resume passes
+#   run_interval: 120          # Seconds between ready-work selection passes
+#   health_interval: 300       # Seconds between health lifecycle events
+#   idle_sleep: 30             # Seconds to sleep when no tick is due
+#   feedback_poll_command: ""  # Optional adapter command returning JSON/NDJSON
+#   session_retention_days: 14 # Prune terminal session dirs older than N days (0 disables)
+#   lock:
+#     enabled: true
+#     stale_after: 86400
+#     path: ""                 # Defaults to .alpha-loop/daemon.lock
+
+# === Session retention ======================================================
+# Durable session manifests are kept in .alpha-loop/sessions/<session>/session.json.
+# Paused/waiting/QA worktrees are preserved unless paused_worktree_days is > 0.
+# session_retention:
+#   paused_worktree_days: 0
+#   completed_worktree_days: 30
 
 # === Harnesses ==============================================================
 # Coding harnesses to sync skills/agents to. When empty, alpha-loop picks one
@@ -343,6 +430,42 @@ harnesses:
 # post_session:
 #   review: true
 #   security_scan: true
+
+# === Lifecycle events =======================================================
+# Deliver typed session lifecycle events to logs, webhooks, or local commands.
+# See docs/hosted-events.md for Slack, Teams, Discord, email script, and custom
+# service examples.
+# events:
+#   include_prompt_text: false
+#   redact:
+#     - OPENAI_API_KEY
+#     - ANTHROPIC_API_KEY
+#   destinations:
+#     audit_log:
+#       type: log
+#       events: ['*']
+#     slack_qa:
+#       type: webhook
+#       events: [qa.requested, human_input.requested, session.failed]
+#       url_env: SLACK_WEBHOOK_URL
+#       format: slack
+#       required: false
+#     internal_service:
+#       type: webhook
+#       events: ['*']
+#       url_env: ALPHA_LOOP_EVENTS_URL
+#       secret_env: ALPHA_LOOP_EVENTS_SECRET
+#       format: json
+#       retries: 2
+#       timeout: 10
+#       required: true
+#     local_script:
+#       type: command
+#       events: [session.completed]
+#       command: ./scripts/on-alpha-loop-event.sh
+#       stdin: json
+#       timeout: 60
+#       required: false
 
 # === Logging ================================================================
 # log_dir: logs

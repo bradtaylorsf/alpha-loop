@@ -39,7 +39,8 @@ beforeEach(() => {
     'LABEL_READY', 'MAX_TEST_RETRIES', 'TEST_COMMAND', 'DEV_COMMAND',
     'SKIP_TESTS', 'SKIP_REVIEW', 'SKIP_INSTALL', 'SKIP_PREFLIGHT',
     'SKIP_VERIFY', 'SKIP_LEARN', 'SKIP_E2E', 'AUTO_MERGE', 'MERGE_TO',
-    'AUTO_CLEANUP', 'RUN_FULL',
+    'AUTO_CLEANUP', 'RUN_FULL', 'SESSION_RETENTION_PAUSED_WORKTREE_DAYS',
+    'SESSION_RETENTION_COMPLETED_WORKTREE_DAYS',
   ]) {
     delete process.env[key];
   }
@@ -132,6 +133,74 @@ max_test_retries: 5
     expect(config.skipTests).toBe(false);
     expect(config.autoMerge).toBe(true);
     expect(config.autoCleanup).toBe(true);
+    expect(config.sessionRetention).toEqual({
+      pausedWorktreeDays: 0,
+      completedWorktreeDays: 30,
+    });
+  });
+
+  it('loads session retention settings from nested config', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `session_retention:
+  paused_worktree_days: 14
+  completed_worktree_days: 45
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.sessionRetention).toEqual({
+      pausedWorktreeDays: 14,
+      completedWorktreeDays: 45,
+    });
+  });
+
+  it('applies session retention env overrides', () => {
+    process.env.SESSION_RETENTION_PAUSED_WORKTREE_DAYS = '7';
+    process.env.SESSION_RETENTION_COMPLETED_WORKTREE_DAYS = '21';
+
+    const config = loadConfig();
+    expect(config.sessionRetention).toEqual({
+      pausedWorktreeDays: 7,
+      completedWorktreeDays: 21,
+    });
+  });
+
+  it('loads hosted daemon mode settings from nested config', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `daemon:
+  mode: feedback-only
+  triage_interval: 900
+  feedback_interval: 30
+  run_interval: 120
+  health_interval: 300
+  idle_sleep: 5
+  feedback_poll_command: ./scripts/poll-feedback.sh
+  session_retention_days: 30
+  lock:
+    enabled: false
+    stale_after: 600
+    path: .alpha-loop/custom-daemon.lock
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.daemon).toEqual({
+      mode: 'feedback-only',
+      triageIntervalSeconds: 900,
+      feedbackIntervalSeconds: 30,
+      runIntervalSeconds: 120,
+      healthIntervalSeconds: 300,
+      idleSleepSeconds: 5,
+      feedbackPollCommand: './scripts/poll-feedback.sh',
+      sessionRetentionDays: 30,
+      lock: {
+        enabled: false,
+        staleAfterSeconds: 600,
+        path: '.alpha-loop/custom-daemon.lock',
+      },
+    });
   });
 
   it('loads agent from config file', () => {
@@ -345,6 +414,214 @@ pipeline:
     const config = loadConfig();
     expect(config.pipeline.plan).toEqual({ model: 'claude-haiku-4-5' });
     expect((config.pipeline as any).invalid_step).toBeUndefined();
+  });
+
+  it('loads lifecycle event destinations from YAML', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+events:
+  include_prompt_text: true
+  redact:
+    - OPENAI_API_KEY
+  destinations:
+    audit:
+      type: log
+      events: ['*']
+    slack_qa:
+      type: webhook
+      events: [qa.requested, human_input.requested, session.failed]
+      url_env: SLACK_WEBHOOK_URL
+      secret_env: ALPHA_LOOP_EVENTS_SECRET
+      format: slack
+      timeout: 5
+      retries: 2
+      required: false
+    local_script:
+      type: command
+      events: [session.completed]
+      command: ./scripts/on-alpha-loop-event.sh
+      stdin: json
+      timeout: 60
+      required: true
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.events?.includePromptText).toBe(true);
+    expect(config.events?.redact).toEqual(['OPENAI_API_KEY']);
+    expect(config.events?.destinations.audit).toEqual(expect.objectContaining({
+      type: 'log',
+      events: ['*'],
+      format: 'json',
+    }));
+    expect(config.events?.destinations.slack_qa).toEqual(expect.objectContaining({
+      type: 'webhook',
+      events: ['qa.requested', 'human_input.requested', 'session.failed'],
+      urlEnv: 'SLACK_WEBHOOK_URL',
+      secretEnv: 'ALPHA_LOOP_EVENTS_SECRET',
+      format: 'slack',
+      timeout: 5,
+      retries: 2,
+      required: false,
+    }));
+    expect(config.events?.destinations.local_script).toEqual(expect.objectContaining({
+      type: 'command',
+      command: './scripts/on-alpha-loop-event.sh',
+      stdin: 'json',
+      timeout: 60,
+      required: true,
+    }));
+  });
+
+  it('loads automation policy guardrails from YAML', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+automation_policy:
+  require_labels: [ready]
+  block_labels: [do-not-automate, needs-human-input]
+  max_active_sessions: 1
+  max_paused_sessions: 10
+  max_issues_per_session: 1
+  max_session_minutes: 90
+  max_session_cost_usd: 25.5
+  max_issue_cost_usd: 5
+  allowed_paths:
+    - src/**
+    - content/**
+  protected_paths:
+    - package.json
+    - .github/workflows/**
+  allowed_commands:
+    - pnpm install
+    - pnpm test
+  require_human_for:
+    - auth
+    - billing
+    - production-deploy
+    - dependency-upgrade
+    - secrets
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.automationPolicy).toEqual(expect.objectContaining({
+      requireLabels: ['ready'],
+      blockLabels: ['do-not-automate', 'needs-human-input'],
+      maxActiveSessions: 1,
+      maxPausedSessions: 10,
+      maxIssuesPerSession: 1,
+      maxSessionMinutes: 90,
+      maxSessionCostUsd: 25.5,
+      maxIssueCostUsd: 5,
+      allowedPaths: ['src/**', 'content/**'],
+      protectedPaths: ['package.json', '.github/workflows/**'],
+      allowedCommands: ['pnpm install', 'pnpm test'],
+      requireHumanFor: ['auth', 'billing', 'production-deploy', 'dependency-upgrade', 'secrets'],
+    }));
+  });
+
+  it('loads web app verification profile from YAML', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+web_app:
+  setup_command: pnpm install
+  build_command: pnpm build
+  test_command: pnpm test
+  dev_command: pnpm dev
+  dev_url: http://localhost:4321
+  smoke_test: pnpm build
+  screenshots:
+    - name: home-desktop
+      url: /
+      viewport: desktop
+    - name: home-mobile
+      url: /
+      viewport: mobile
+      width: 390
+      height: 844
+  preview:
+    command: ./scripts/get-preview-url.sh
+    required: false
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.webApp).toEqual(expect.objectContaining({
+      setupCommand: 'pnpm install',
+      buildCommand: 'pnpm build',
+      testCommand: 'pnpm test',
+      devCommand: 'pnpm dev',
+      devUrl: 'http://localhost:4321',
+      smokeTest: 'pnpm build',
+      preview: {
+        url: '',
+        command: './scripts/get-preview-url.sh',
+        required: false,
+      },
+    }));
+    expect(config.webApp?.screenshots).toEqual([
+      { name: 'home-desktop', url: '/', viewport: 'desktop' },
+      { name: 'home-mobile', url: '/', viewport: 'mobile', width: 390, height: 844 },
+    ]);
+  });
+
+  it('accepts an empty web app profile so package scripts can provide defaults', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+web_app: {}
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.webApp).toEqual(expect.objectContaining({
+      buildCommand: '',
+      testCommand: '',
+      devCommand: '',
+      devUrl: '',
+      screenshots: [],
+      preview: { url: '', command: '', required: false },
+    }));
+  });
+
+  it('drops invalid lifecycle event destinations and warns', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+events:
+  destinations:
+    bad_type:
+      type: email
+    missing_url:
+      type: webhook
+    good:
+      type: webhook
+      url_env: EVENTS_URL
+      format: discord
+      events: [session.started, bogus.event]
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.events?.destinations.bad_type).toBeUndefined();
+    expect(config.events?.destinations.missing_url).toBeUndefined();
+    expect(config.events?.destinations.good).toEqual(expect.objectContaining({
+      type: 'webhook',
+      urlEnv: 'EVENTS_URL',
+      format: 'discord',
+      events: ['session.started'],
+    }));
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 });
 

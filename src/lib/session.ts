@@ -1,8 +1,9 @@
 /**
  * Session Management — create sessions, save results, finalize with PR.
  */
-import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync, renameSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import { log } from './logger.js';
 import { exec, formatTimestamp } from './shell.js';
 import { ghExec } from './rate-limit.js';
@@ -10,22 +11,209 @@ import { createPR, updateProjectStatus } from './github.js';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from './learning.js';
 import { readStageTelemetry } from './telemetry.js';
 import { runDir } from './traces.js';
+import {
+  applyHumanFeedbackTransition,
+  initialHumanFeedbackState,
+  type HumanFeedbackSessionStatus,
+  type HumanFeedbackStateBlock,
+  type HumanFeedbackTransitionInput,
+} from './session-state.js';
 import type { Config } from './config.js';
 import type { PipelineResult, GateResult } from './pipeline.js';
 import type { QueueEpicLink, QueueSessionContext } from './epic-queue.js';
+import type { AutomationPolicyDecision } from './automation-policy.js';
 
 export type SessionContext = {
+  /** Stable id used in durable manifests and trace joins. */
+  id?: string;
   name: string;
   branch: string;
+  startedAt?: string;
   resultsDir: string;
   logsDir: string;
+  manifestPath?: string;
   results: PipelineResult[];
   sessionReviewFindings?: GateResult;
   sessionPrUrl?: string;
+  /** Issue currently being processed, when known. */
+  currentIssueNum?: number;
+  /** Parent epic for targeted child-issue sessions, when known. */
+  parentEpicNum?: number;
   /** When set, this session processes sub-issues of the given epic. */
   epic?: number;
   /** Queue metadata for multi-epic queue sessions. */
   queue?: QueueSessionContext;
+};
+
+export type SessionStatus =
+  | HumanFeedbackSessionStatus
+  | 'active'
+  | 'paused'
+  | 'waiting-for-feedback'
+  | 'qa-requested'
+  | 'resumed'
+  | 'completed'
+  | 'failed'
+  | 'cleaned-up';
+
+export type SessionStage =
+  | HumanFeedbackSessionStatus
+  | 'created'
+  | 'status'
+  | 'worktree'
+  | 'plan'
+  | 'context'
+  | 'implement'
+  | 'test'
+  | 'review'
+  | 'verify'
+  | 'smoke'
+  | 'learn'
+  | 'pr'
+  | 'assumptions'
+  | 'trace'
+  | 'merge'
+  | 'cleanup'
+  | 'finalize'
+  | 'session-review'
+  | 'completed'
+  | 'failed'
+  | 'paused'
+  | 'waiting-for-feedback'
+  | 'qa-requested';
+
+export type SessionPromptRef = {
+  issueNum?: number;
+  stage: string;
+  path: string;
+  hash: string;
+  recordedAt: string;
+};
+
+export type SessionTranscriptRef = {
+  issueNum?: number;
+  stage: string;
+  path: string;
+  recordedAt: string;
+};
+
+export type SessionIssueManifest = {
+  issueNum: number;
+  title?: string;
+  status?: SessionStatus | PipelineResult['status'];
+  stage?: SessionStage;
+  labels?: string[];
+  branch?: string;
+  worktreePath?: string;
+  worktreeMissing?: boolean;
+  resumed?: boolean;
+  prUrl?: string;
+  startedAt?: string;
+  updatedAt?: string;
+  endedAt?: string;
+  failureReason?: PipelineResult['failureReason'];
+};
+
+export type SessionWorktreeManifest = {
+  path: string;
+  branch: string;
+  resumed: boolean;
+  missing: boolean;
+  lastKnownBranch: string;
+  updatedAt: string;
+};
+
+export type SessionCleanupManifest = {
+  status: 'removed' | 'preserved' | 'missing' | 'skipped' | 'dry-run';
+  worktreePath?: string;
+  reason?: string;
+  at: string;
+};
+
+export type SessionWebAppArtifacts = {
+  previewUrl: string | null;
+  devUrl?: string;
+  screenshots: string[];
+  browserResultPath: string | null;
+  artifactPath: string | null;
+  consoleErrors: string[];
+  networkErrors: string[];
+  qaChecklist: string[];
+  updatedAt: string;
+};
+
+export type DurableSessionManifest = {
+  version: 1;
+  sessionId: string;
+  name: string;
+  issueNumber: number | null;
+  issueNumbers: number[];
+  parentEpicNumber: number | null;
+  parentEpicTitle?: string | null;
+  branch: string;
+  baseBranch: string;
+  prUrl: string | null;
+  sessionPrUrl: string | null;
+  status: SessionStatus;
+  stage: SessionStage;
+  labels: string[];
+  feedback: HumanFeedbackStateBlock;
+  harness: {
+    agent: Config['agent'];
+    model: string;
+    reviewModel: string;
+    command: string;
+    testCommand: string;
+  };
+  command: string;
+  worktree: SessionWorktreeManifest | null;
+  lastKnownBranch: string | null;
+  currentIssue: { issueNum: number; title?: string } | null;
+  issues: SessionIssueManifest[];
+  prompts: SessionPromptRef[];
+  promptPath: string | null;
+  promptHash: string | null;
+  transcripts: SessionTranscriptRef[];
+  transcriptPath: string | null;
+  logs: {
+    sessionDir: string;
+    logsDir: string;
+    traceDir: string;
+    files: string[];
+  };
+  screenshots: string[];
+  previewUrl: string | null;
+  webApp?: SessionWebAppArtifacts;
+  timestamps: {
+    createdAt: string;
+    startedAt: string;
+    updatedAt: string;
+    endedAt?: string;
+  };
+  lastEventId: string | null;
+  policyDecisions?: AutomationPolicyDecision[];
+  errors: Array<{
+    issueNum?: number;
+    stage: string;
+    message: string;
+    timestamp: string;
+  }>;
+  cleanup?: SessionCleanupManifest;
+  epic?: number;
+  queue?: QueueSessionContext;
+};
+
+export type ResumableSessionRef = {
+  manifest: DurableSessionManifest;
+  manifestPath: string;
+  sessionDir: string;
+  worktreePath: string | null;
+  worktreeExists: boolean;
+  recoveryBranch: string | null;
+};
+
+export type FindResumableSessionOptions = {
+  statuses?: Iterable<SessionStatus>;
 };
 
 function isRecoveredSessionResult(
@@ -56,6 +244,14 @@ export type WriteCrashMarkerInput = Omit<CrashMarker, 'timestamp'> & {
 
 export type CreateSessionOptions = {
   milestone?: string;
+  /** Targeted issue metadata, when this session was created for one issue. */
+  issueNum?: number;
+  issueTitle?: string;
+  /** Parent epic metadata for targeted child-issue sessions. */
+  parentEpicNum?: number;
+  parentEpicTitle?: string;
+  /** Selected issue queue once known. */
+  selectedIssueNums?: number[];
   /** When set, session is scoped to an epic — drives the name slug and PR title. */
   epicNum?: number;
   /** Title of the epic, used to form a human-readable session slug. */
@@ -63,6 +259,499 @@ export type CreateSessionOptions = {
   /** Queue metadata when this session belongs to an ordered epic queue. */
   queue?: QueueSessionContext;
 };
+
+const RESUMABLE_STATUSES = new Set<SessionStatus>([
+  'running',
+  'human_input_requested',
+  'qa_requested',
+  'feedback_received',
+  'resume_requested',
+  'resuming',
+  'active',
+  'paused',
+  'waiting-for-feedback',
+  'qa-requested',
+  'resumed',
+  'failed',
+]);
+
+function projectRelative(filePath: string, projectDir = process.cwd()): string {
+  const rel = relative(projectDir, filePath);
+  return rel && !rel.startsWith('..') ? rel : filePath;
+}
+
+function sessionIdFromName(name: string): string {
+  return name.replace(/\//g, '-');
+}
+
+export function sessionManifestPath(sessionOrDir: Pick<SessionContext, 'resultsDir'> | string): string {
+  const sessionDir = typeof sessionOrDir === 'string' ? sessionOrDir : sessionOrDir.resultsDir;
+  return join(sessionDir, 'session.json');
+}
+
+function writeManifestFile(filePath: string, manifest: DurableSessionManifest): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(manifest, null, 2) + '\n');
+  renameSync(tmpPath, filePath);
+}
+
+export function hashPromptText(prompt: string): string {
+  return createHash('sha256').update(prompt).digest('hex');
+}
+
+function parseSessionManifest(raw: unknown): DurableSessionManifest | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const data = raw as Record<string, unknown>;
+  if (data.version !== 1) return null;
+  if (typeof data.sessionId !== 'string' || !data.sessionId) return null;
+  if (typeof data.name !== 'string' || !data.name) return null;
+  if (typeof data.branch !== 'string' || !data.branch) return null;
+  if (typeof data.status !== 'string' || !data.status) return null;
+  if (typeof data.stage !== 'string' || !data.stage) return null;
+  return data as DurableSessionManifest;
+}
+
+export function loadSessionManifest(sessionOrPath: Pick<SessionContext, 'resultsDir' | 'manifestPath'> | string): DurableSessionManifest | null {
+  const filePath = typeof sessionOrPath === 'string'
+    ? (sessionOrPath.endsWith('.json') ? sessionOrPath : sessionManifestPath(sessionOrPath))
+    : (sessionOrPath.manifestPath ?? sessionManifestPath(sessionOrPath));
+  try {
+    if (!existsSync(filePath)) return null;
+    return parseSessionManifest(JSON.parse(readFileSync(filePath, 'utf-8')));
+  } catch {
+    return null;
+  }
+}
+
+function mergeManifest(
+  current: DurableSessionManifest,
+  patch: Partial<DurableSessionManifest>,
+): DurableSessionManifest {
+  return {
+    ...current,
+    ...patch,
+    harness: {
+      ...current.harness,
+      ...(patch.harness ?? {}),
+    },
+    logs: {
+      ...current.logs,
+      ...(patch.logs ?? {}),
+      files: patch.logs?.files ?? current.logs.files,
+    },
+    timestamps: {
+      ...current.timestamps,
+      ...(patch.timestamps ?? {}),
+    },
+    feedback: patch.feedback ? {
+      ...(current.feedback ?? initialHumanFeedbackState()),
+      ...patch.feedback,
+      transitionHistory: patch.feedback.transitionHistory ?? current.feedback?.transitionHistory ?? [],
+      events: patch.feedback.events ?? current.feedback?.events ?? [],
+    } : current.feedback,
+  };
+}
+
+export function updateSessionManifest(
+  sessionOrPath: Pick<SessionContext, 'resultsDir' | 'manifestPath'> | string,
+  updater: Partial<DurableSessionManifest> | ((manifest: DurableSessionManifest) => DurableSessionManifest),
+): DurableSessionManifest | null {
+  const filePath = typeof sessionOrPath === 'string'
+    ? (sessionOrPath.endsWith('.json') ? sessionOrPath : sessionManifestPath(sessionOrPath))
+    : (sessionOrPath.manifestPath ?? sessionManifestPath(sessionOrPath));
+  const current = loadSessionManifest(filePath);
+  if (!current) return null;
+
+  const next = typeof updater === 'function'
+    ? updater({ ...current })
+    : mergeManifest(current, updater);
+  next.timestamps = {
+    ...next.timestamps,
+    updatedAt: new Date().toISOString(),
+  };
+  writeManifestFile(filePath, next);
+  return next;
+}
+
+function upsertIssue(
+  manifest: DurableSessionManifest,
+  issueNum: number,
+  patch: Partial<SessionIssueManifest>,
+): DurableSessionManifest {
+  const now = new Date().toISOString();
+  const existingIndex = manifest.issues.findIndex((issue) => issue.issueNum === issueNum);
+  const issue: SessionIssueManifest = {
+    ...(existingIndex >= 0 ? manifest.issues[existingIndex] : { issueNum, startedAt: now }),
+    ...patch,
+    issueNum,
+    updatedAt: now,
+  };
+  const issues = existingIndex >= 0
+    ? manifest.issues.map((entry, index) => index === existingIndex ? issue : entry)
+    : [...manifest.issues, issue];
+  const issueNumbers = Array.from(new Set([...manifest.issueNumbers, issueNum]));
+  return {
+    ...manifest,
+    issues,
+    issueNumbers,
+    issueNumber: manifest.issueNumber ?? issueNum,
+  };
+}
+
+export function recordSessionIssue(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
+  issueNum: number,
+  patch: Partial<SessionIssueManifest>,
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => upsertIssue(manifest, issueNum, patch));
+}
+
+export function recordSessionStage(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
+  stage: SessionStage,
+  patch: Partial<DurableSessionManifest> = {},
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, {
+    ...patch,
+    stage,
+  });
+}
+
+export function transitionSessionStatus(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'> | string,
+  status: SessionStatus,
+  stage?: SessionStage,
+  patch: Partial<DurableSessionManifest> = {},
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => ({
+    ...mergeManifest(manifest, patch),
+    status,
+    ...(stage ? { stage } : {}),
+    timestamps: {
+      ...manifest.timestamps,
+      ...(patch.timestamps ?? {}),
+      ...(status === 'completed' || status === 'failed' || status === 'cleaned-up'
+        ? { endedAt: new Date().toISOString() }
+        : {}),
+    },
+  }));
+}
+
+export function transitionHumanFeedbackSessionStatus(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'> | string,
+  input: HumanFeedbackTransitionInput,
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => applyHumanFeedbackTransition(manifest, input));
+}
+
+export function recordSessionError(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
+  args: { issueNum?: number; stage: string; message: string },
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => ({
+    ...manifest,
+    status: manifest.status === 'cleaned-up' ? manifest.status : 'failed',
+    stage: 'failed',
+    errors: [
+      ...manifest.errors,
+      {
+        issueNum: args.issueNum,
+        stage: args.stage,
+        message: args.message,
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  }));
+}
+
+export function recordSessionWorktree(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
+  args: { issueNum: number; title?: string; path: string; branch: string; resumed: boolean },
+): DurableSessionManifest | null {
+  const now = new Date().toISOString();
+  return updateSessionManifest(session, (manifest) => {
+    const updated = upsertIssue(manifest, args.issueNum, {
+      title: args.title,
+      status: args.resumed ? 'resuming' : 'running',
+      stage: 'worktree',
+      branch: args.branch,
+      worktreePath: args.path,
+      worktreeMissing: !existsSync(args.path),
+      resumed: args.resumed,
+    });
+    return {
+      ...updated,
+      status: args.resumed ? 'resuming' : 'running',
+      stage: 'worktree',
+      worktree: {
+        path: args.path,
+        branch: args.branch,
+        resumed: args.resumed,
+        missing: !existsSync(args.path),
+        lastKnownBranch: args.branch,
+        updatedAt: now,
+      },
+      lastKnownBranch: args.branch,
+      currentIssue: { issueNum: args.issueNum, title: args.title },
+    };
+  });
+}
+
+export function recordSessionPrompt(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
+  args: { issueNum?: number; stage: string; path: string; prompt: string },
+): DurableSessionManifest | null {
+  const promptRef: SessionPromptRef = {
+    issueNum: args.issueNum,
+    stage: args.stage,
+    path: args.path,
+    hash: hashPromptText(args.prompt),
+    recordedAt: new Date().toISOString(),
+  };
+  return updateSessionManifest(session, (manifest) => {
+    const prompts = manifest.prompts.filter((entry) => !(
+      entry.issueNum === promptRef.issueNum &&
+      entry.stage === promptRef.stage &&
+      entry.path === promptRef.path
+    ));
+    prompts.push(promptRef);
+    return {
+      ...manifest,
+      prompts,
+      promptPath: promptRef.path,
+      promptHash: promptRef.hash,
+    };
+  });
+}
+
+export function recordSessionTranscript(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
+  args: { issueNum?: number; stage: string; path: string },
+): DurableSessionManifest | null {
+  const transcriptRef: SessionTranscriptRef = {
+    issueNum: args.issueNum,
+    stage: args.stage,
+    path: args.path,
+    recordedAt: new Date().toISOString(),
+  };
+  return updateSessionManifest(session, (manifest) => {
+    const transcripts = manifest.transcripts.filter((entry) => !(
+      entry.issueNum === transcriptRef.issueNum &&
+      entry.stage === transcriptRef.stage &&
+      entry.path === transcriptRef.path
+    ));
+    transcripts.push(transcriptRef);
+    return {
+      ...manifest,
+      transcripts,
+      transcriptPath: transcriptRef.path,
+    };
+  });
+}
+
+export function recordSessionLogFile(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'> | string,
+  filePath: string,
+): DurableSessionManifest | null {
+  const relPath = projectRelative(filePath);
+  return updateSessionManifest(session, (manifest) => ({
+    ...manifest,
+    logs: {
+      ...manifest.logs,
+      files: Array.from(new Set([...manifest.logs.files, relPath])),
+    },
+  }));
+}
+
+export function recordSessionWebAppArtifacts(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'> | string,
+  artifacts: Partial<Omit<SessionWebAppArtifacts, 'updatedAt'>>,
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => {
+    const previous = manifest.webApp;
+    const screenshots = Array.from(new Set([
+      ...(manifest.screenshots ?? []),
+      ...(previous?.screenshots ?? []),
+      ...(artifacts.screenshots ?? []),
+    ]));
+    const consoleErrors = Array.from(new Set([
+      ...(previous?.consoleErrors ?? []),
+      ...(artifacts.consoleErrors ?? []),
+    ]));
+    const networkErrors = Array.from(new Set([
+      ...(previous?.networkErrors ?? []),
+      ...(artifacts.networkErrors ?? []),
+    ]));
+    const qaChecklist = Array.from(new Set([
+      ...(previous?.qaChecklist ?? []),
+      ...(artifacts.qaChecklist ?? []),
+    ]));
+    const previewUrl = artifacts.previewUrl !== undefined
+      ? artifacts.previewUrl
+      : previous?.previewUrl ?? manifest.previewUrl ?? null;
+    const webApp: SessionWebAppArtifacts = {
+      previewUrl,
+      devUrl: artifacts.devUrl ?? previous?.devUrl,
+      screenshots,
+      browserResultPath: artifacts.browserResultPath !== undefined
+        ? artifacts.browserResultPath
+        : previous?.browserResultPath ?? null,
+      artifactPath: artifacts.artifactPath !== undefined
+        ? artifacts.artifactPath
+        : previous?.artifactPath ?? null,
+      consoleErrors,
+      networkErrors,
+      qaChecklist,
+      updatedAt: new Date().toISOString(),
+    };
+
+    return {
+      ...manifest,
+      screenshots,
+      previewUrl,
+      webApp,
+      logs: {
+        ...manifest.logs,
+        files: Array.from(new Set([
+          ...manifest.logs.files,
+          ...(webApp.artifactPath ? [webApp.artifactPath] : []),
+          ...(webApp.browserResultPath ? [webApp.browserResultPath] : []),
+        ])),
+      },
+    };
+  });
+}
+
+export function recordSessionCleanup(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
+  cleanup: SessionCleanupManifest,
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => ({
+    ...manifest,
+    stage: 'cleanup',
+    cleanup,
+    worktree: manifest.worktree
+      ? {
+          ...manifest.worktree,
+          missing: cleanup.status === 'removed' || cleanup.status === 'missing',
+          updatedAt: cleanup.at,
+        }
+      : manifest.worktree,
+  }));
+}
+
+export function recordSessionPolicyDecision(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'> | string,
+  decision: AutomationPolicyDecision,
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => {
+    const currentPolicyDecisions = manifest.policyDecisions ?? [];
+    const policyDecisions = currentPolicyDecisions.some((entry) => entry.id === decision.id)
+      ? currentPolicyDecisions
+      : [...currentPolicyDecisions, decision];
+    if (decision.issueNum === undefined) {
+      return { ...manifest, policyDecisions };
+    }
+    const issuePatch: Partial<SessionIssueManifest> = {
+      title: decision.title,
+      status: decision.status === 'allowed' ? 'running' : 'human_input_requested',
+      stage: decision.stage === 'diff' ? 'review' : 'paused',
+      ...(decision.status === 'allowed' ? {} : { labels: ['needs-human-input'] }),
+    };
+    const updated = upsertIssue(manifest, decision.issueNum, issuePatch);
+    return { ...updated, policyDecisions };
+  });
+}
+
+function issueMatchesManifest(manifest: DurableSessionManifest, issueNum: number): boolean {
+  return manifest.issueNumber === issueNum
+    || manifest.currentIssue?.issueNum === issueNum
+    || manifest.issueNumbers.includes(issueNum)
+    || manifest.issues.some((issue) => issue.issueNum === issueNum);
+}
+
+export function findLatestResumableSessionForIssue(
+  issueNum: number,
+  sessionsRoot = join(process.cwd(), '.alpha-loop', 'sessions'),
+  options: FindResumableSessionOptions = {},
+): ResumableSessionRef | null {
+  if (!existsSync(sessionsRoot)) return null;
+  const refs: ResumableSessionRef[] = [];
+  const statuses = options.statuses ? new Set(options.statuses) : RESUMABLE_STATUSES;
+
+  try {
+    for (const group of readdirSync(sessionsRoot, { withFileTypes: true })) {
+      if (!group.isDirectory()) continue;
+      const groupDir = join(sessionsRoot, group.name);
+      for (const entry of readdirSync(groupDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const sessionDir = join(groupDir, entry.name);
+        const manifestPath = sessionManifestPath(sessionDir);
+        const manifest = loadSessionManifest(manifestPath);
+        if (!manifest) continue;
+        const feedbackStatus = manifest.feedback?.currentStatus;
+        if (!statuses.has(manifest.status) && (!feedbackStatus || !statuses.has(feedbackStatus))) continue;
+        if (!issueMatchesManifest(manifest, issueNum)) continue;
+        const worktreePath = manifest.worktree?.path ?? null;
+        refs.push({
+          manifest,
+          manifestPath,
+          sessionDir,
+          worktreePath,
+          worktreeExists: worktreePath ? existsSync(worktreePath) : false,
+          recoveryBranch: manifest.worktree?.lastKnownBranch ?? manifest.lastKnownBranch ?? manifest.branch ?? null,
+        });
+      }
+    }
+  } catch {
+    return refs[0] ?? null;
+  }
+
+  refs.sort((a, b) => {
+    const aTime = a.manifest.timestamps.updatedAt ?? a.manifest.timestamps.startedAt;
+    const bTime = b.manifest.timestamps.updatedAt ?? b.manifest.timestamps.startedAt;
+    return bTime.localeCompare(aTime);
+  });
+  return refs[0] ?? null;
+}
+
+function readSessionResults(sessionDir: string): PipelineResult[] {
+  try {
+    return readdirSync(sessionDir)
+      .filter((file) => file.startsWith('result-') && file.endsWith('.json'))
+      .sort()
+      .map((file) => {
+        try {
+          return JSON.parse(readFileSync(join(sessionDir, file), 'utf-8')) as PipelineResult;
+        } catch {
+          return null;
+        }
+      })
+      .filter((result): result is PipelineResult => result !== null);
+  } catch {
+    return [];
+  }
+}
+
+export function rehydrateSessionContextFromManifest(ref: ResumableSessionRef): SessionContext {
+  const { manifest, manifestPath, sessionDir } = ref;
+  return {
+    id: manifest.sessionId,
+    name: manifest.name,
+    branch: manifest.branch,
+    startedAt: manifest.timestamps.startedAt,
+    resultsDir: sessionDir,
+    logsDir: join(sessionDir, 'logs'),
+    manifestPath,
+    results: readSessionResults(sessionDir),
+    sessionPrUrl: manifest.sessionPrUrl ?? manifest.prUrl ?? undefined,
+    currentIssueNum: manifest.currentIssue?.issueNum ?? manifest.issueNumber ?? undefined,
+    parentEpicNum: manifest.parentEpicNumber ?? undefined,
+    epic: manifest.epic,
+    queue: manifest.queue,
+  };
+}
 
 function slugify(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -155,6 +844,17 @@ export function writeCrashMarker(session: SessionContext, marker: WriteCrashMark
   mkdirSync(session.resultsDir, { recursive: true });
   const filePath = crashMarkerPath(session.resultsDir, crash.issueNum);
   writeFileSync(filePath, JSON.stringify(crash, null, 2) + '\n');
+  recordSessionError(session, {
+    issueNum: crash.issueNum,
+    stage: crash.step,
+    message: crash.error,
+  });
+  recordSessionIssue(session, crash.issueNum, {
+    status: 'failed',
+    stage: 'failed',
+    branch: crash.branch,
+    worktreeMissing: false,
+  });
   log.warn(`Crash marker saved: ${filePath}`);
 }
 
@@ -325,6 +1025,7 @@ function buildDraftSessionPrBody(args: {
 export function createSession(config: Config, options?: CreateSessionOptions): SessionContext {
   const now = new Date();
   const timestamp = formatTimestamp(now);
+  const startedAt = now.toISOString();
   const milestone = options?.milestone;
   const epicNum = options?.epicNum;
   const epicTitle = options?.epicTitle;
@@ -345,6 +1046,8 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
   const projectDir = process.cwd();
   const resultsDir = join(projectDir, '.alpha-loop', 'sessions', name);
   const logsDir = join(resultsDir, 'logs');
+  const manifestPath = sessionManifestPath(resultsDir);
+  const id = sessionIdFromName(name);
   let sessionPrUrl: string | undefined;
   const branchSource = queue?.branchedFromBranch ?? config.baseBranch;
 
@@ -453,7 +1156,96 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
     }
   }
 
-  return { name, branch, resultsDir, logsDir, results: [], sessionPrUrl, epic: epicNum, queue };
+  const session: SessionContext = {
+    id,
+    name,
+    branch,
+    startedAt,
+    resultsDir,
+    logsDir,
+    manifestPath,
+    results: [],
+    sessionPrUrl,
+    currentIssueNum: options?.issueNum,
+    parentEpicNum: options?.parentEpicNum,
+    epic: epicNum,
+    queue,
+  };
+
+  if (!config.dryRun) {
+    const traceDir = runDir(name, projectDir);
+    const initialIssueNumbers = Array.from(new Set([
+      ...(options?.selectedIssueNums ?? []),
+      ...(options?.issueNum !== undefined ? [options.issueNum] : []),
+    ]));
+    const initialIssues: SessionIssueManifest[] = initialIssueNumbers.map((issueNum) => ({
+      issueNum,
+      ...(issueNum === options?.issueNum && options.issueTitle ? { title: options.issueTitle } : {}),
+      status: 'running',
+      stage: 'created',
+      startedAt,
+      updatedAt: startedAt,
+    }));
+    const manifest: DurableSessionManifest = {
+      version: 1,
+      sessionId: id,
+      name,
+      issueNumber: options?.issueNum ?? null,
+      issueNumbers: initialIssueNumbers,
+      parentEpicNumber: options?.parentEpicNum ?? epicNum ?? null,
+      parentEpicTitle: options?.parentEpicTitle ?? epicTitle ?? null,
+      branch,
+      baseBranch: config.baseBranch,
+      prUrl: sessionPrUrl ?? null,
+      sessionPrUrl: sessionPrUrl ?? null,
+      status: 'running',
+      stage: 'created',
+      labels: [],
+      feedback: initialHumanFeedbackState('running', startedAt),
+      harness: {
+        agent: config.agent,
+        model: config.model,
+        reviewModel: config.reviewModel,
+        command: config.agent,
+        testCommand: config.testCommand,
+      },
+      command: config.agent,
+      worktree: null,
+      lastKnownBranch: branch,
+      currentIssue: options?.issueNum !== undefined
+        ? { issueNum: options.issueNum, title: options.issueTitle }
+        : null,
+      issues: initialIssues,
+      prompts: [],
+      promptPath: null,
+      promptHash: null,
+      transcripts: [],
+      transcriptPath: null,
+      logs: {
+        sessionDir: projectRelative(resultsDir, projectDir),
+        logsDir: projectRelative(logsDir, projectDir),
+        traceDir: projectRelative(traceDir, projectDir),
+        files: [],
+      },
+      screenshots: [],
+      previewUrl: null,
+      webApp: undefined,
+      timestamps: {
+        createdAt: startedAt,
+        startedAt,
+        updatedAt: startedAt,
+      },
+      lastEventId: null,
+      policyDecisions: [],
+      errors: [],
+      ...(epicNum !== undefined ? { epic: epicNum } : {}),
+      ...(queue ? { queue } : {}),
+    };
+    writeManifestFile(manifestPath, manifest);
+    log.info(`Session manifest saved: ${manifestPath}`);
+  }
+
+  return session;
 }
 
 /**
@@ -462,6 +1254,13 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
 export function saveResult(session: SessionContext, result: PipelineResult): void {
   const filePath = join(session.resultsDir, `result-${result.issueNum}.json`);
   writeFileSync(filePath, JSON.stringify(result, null, 2) + '\n');
+  recordSessionIssue(session, result.issueNum, {
+    title: result.title,
+    status: result.status,
+    prUrl: result.prUrl,
+    failureReason: result.failureReason,
+    endedAt: new Date().toISOString(),
+  });
   log.info(`Session result saved: ${filePath}`);
   clearCrashMarker(session, result.issueNum);
 }
@@ -503,6 +1302,7 @@ export async function finalizeSession(
   }
 
   log.step(`Finalizing session: ${session.branch}`);
+  recordSessionStage(session, 'finalize');
 
   const projectDir = process.cwd();
 
@@ -562,6 +1362,10 @@ export async function finalizeSession(
       recoveryMode: r.recoveryMode,
       autoCommittedByPipeline: r.autoCommittedByPipeline,
       autoCommittedPaths: r.autoCommittedPaths,
+      previewUrl: r.previewUrl,
+      screenshots: r.screenshots,
+      browserResultPath: r.browserResultPath,
+      webAppArtifactPath: r.webAppArtifactPath,
       duration: r.duration,
       filesChanged: r.filesChanged,
     })),
@@ -595,6 +1399,7 @@ export async function finalizeSession(
   const successes = naturalResults.filter((r) => r.status === 'success');
   const permanentFailures = naturalResults.filter((r) => r.status === 'failure' && r.failureReason !== 'transient');
   const transientFailures = naturalResults.filter((r) => r.status === 'failure' && r.failureReason === 'transient');
+  const waitingResults = naturalResults.filter((r) => r.status === 'waiting');
   const totalDuration = naturalResults.reduce((sum, r) => sum + r.duration, 0);
 
   // Only count completed issues (not transient failures that were re-queued)
@@ -608,7 +1413,7 @@ export async function finalizeSession(
     '## Session Summary',
     '',
     `**Branch:** ${session.branch}`,
-    `**Issues processed:** ${session.results.length} (${successes.length} succeeded, ${permanentFailures.length} failed, ${recovered.length} recovered)`,
+    `**Issues processed:** ${session.results.length} (${successes.length} succeeded, ${permanentFailures.length} failed, ${waitingResults.length} waiting, ${recovered.length} recovered)`,
     `**Total duration:** ${Math.round(totalDuration / 60)} minutes`,
     `**Completed:** ${new Date().toISOString()}`,
     '',
@@ -643,6 +1448,42 @@ export async function finalizeSession(
   }
 
   prLines.push(...formatAutoCommittedResultsSection(session.results));
+
+  const webAppResults = session.results.filter((r) => (
+    r.previewUrl || r.screenshots?.length || r.browserResultPath || r.webAppArtifactPath || r.qaChecklist?.length
+  ));
+  if (webAppResults.length > 0) {
+    prLines.push('### Web App QA Artifacts');
+    prLines.push('');
+    for (const r of webAppResults) {
+      prLines.push(`- #${r.issueNum}: ${r.title}`);
+      if (r.previewUrl) prLines.push(`  - Preview: ${r.previewUrl}`);
+      if (r.browserResultPath || r.webAppArtifactPath) {
+        prLines.push(`  - Browser results: \`${r.browserResultPath ?? r.webAppArtifactPath}\``);
+      }
+      if (r.screenshots && r.screenshots.length > 0) {
+        prLines.push(`  - Screenshots: ${r.screenshots.map((path) => `\`${path}\``).join(', ')}`);
+      }
+      if (r.qaChecklist && r.qaChecklist.length > 0) {
+        prLines.push(`  - QA: ${r.qaChecklist.join('; ')}`);
+      }
+    }
+    prLines.push('');
+  }
+
+  if (waitingResults.length > 0) {
+    prLines.push('### Waiting for Human Feedback');
+    for (const r of waitingResults) {
+      const state = r.waitingStatus ? ` (${r.waitingStatus})` : '';
+      prLines.push(`- #${r.issueNum}: ${r.title}${state}${r.prUrl ? ` ([PR](${r.prUrl}))` : ''}`);
+      if (r.humanInputQuestion) prLines.push(`  - Question: ${r.humanInputQuestion}`);
+      if (r.qaChecklist && r.qaChecklist.length > 0) {
+        prLines.push(`  - QA: ${r.qaChecklist.join('; ')}`);
+      }
+      if (r.followUpIssueUrl) prLines.push(`  - Follow-up: ${r.followUpIssueUrl}`);
+    }
+    prLines.push('');
+  }
 
   // Permanent failures — collapsed
   if (permanentFailures.length > 0) {
@@ -697,6 +1538,11 @@ export async function finalizeSession(
       cwd: projectDir,
     });
     session.sessionPrUrl = prUrl;
+    updateSessionManifest(session, {
+      prUrl,
+      sessionPrUrl: prUrl,
+      stage: 'finalize',
+    });
     log.success(`Session PR: ${prUrl}`);
 
     // Mark successful issues on the project board
@@ -721,6 +1567,11 @@ export async function finalizeSession(
       if (fallback.exitCode === 0 && fallback.stdout.trim()) {
         const fallbackPrUrl = fallback.stdout.trim();
         session.sessionPrUrl = fallbackPrUrl;
+        updateSessionManifest(session, {
+          prUrl: fallbackPrUrl,
+          sessionPrUrl: fallbackPrUrl,
+          stage: 'finalize',
+        });
         log.success(`Session PR (fallback): ${fallbackPrUrl}`);
         return fallbackPrUrl;
       }

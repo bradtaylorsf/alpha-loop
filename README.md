@@ -257,7 +257,7 @@ batch_size: 5
 
 If the loop hangs or crashes mid-session, work can be stranded on local branches with no PR. Run `alpha-loop resume` to recover:
 
-1. Reads session crash markers first, then falls back to scanning local `agent/issue-*` branches with commits but no open PR
+1. Reads durable `.alpha-loop/sessions/<session>/session.json` manifests and crash markers first, then falls back to scanning local `agent/issue-*` branches with commits but no open PR
 2. Pushes each branch to origin
 3. Runs code review
 4. Creates WIP PRs, marks issues `In Review`, and updates the session PR with a verification caveat
@@ -268,6 +268,24 @@ Recovered PRs are written with `recoveryMode: "resume"` and are not marked compl
 Use `--issue <N>` to resume a specific issue.
 
 `alpha-loop history <session>` shows both unrecovered `crash-<N>.json` markers and recovered result files separately from normal successes and failures.
+Durable session manifests also show active, paused, waiting-for-feedback, QA-requested, resumed, completed, failed, and cleaned-up states, including the saved branch needed to recreate a missing worktree.
+
+### Feedback Ingestion (`alpha-loop feedback ingest`)
+
+Adapters for Slack, Teams, Discord, website forms, or custom services can send human feedback back into Alpha Loop without hard-coding those tools into the core loop. Ingestion writes a canonical GitHub comment with a hidden machine-readable marker, records an idempotency file under `.alpha-loop/feedback/ingested-events/`, classifies the feedback, and updates any matching session manifest.
+
+```bash
+# Structured JSON from stdin
+cat feedback.json | alpha-loop feedback ingest --json
+
+# JSON payload or plain body text from a file
+alpha-loop feedback ingest --body-file feedback.json
+
+# Record a resume request without running resume immediately
+alpha-loop feedback ingest --body-file feedback.json --request-resume
+```
+
+Payload fields include `repo`, `issueNumber`, `prNumber`, `sessionId`, `source`, `externalEventId`, `externalThreadId`, `externalMessageId`, `author`, `body`, `attachments`, `eventTimestamp`, `classification`, and `resumeRequested`. Duplicate external event ids are reported as already processed instead of creating another GitHub comment.
 
 ### Screenshots
 
@@ -285,6 +303,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run --epics <ids>` | Process an ordered comma-separated queue of epics, one session branch and PR per epic |
 | `alpha-loop run --epics <ids> --queue-branch-mode independent` | Run queued epics without stacking later session branches on earlier ones |
 | `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
+| `alpha-loop daemon` | Run hosted daemon mode continuously for repo stewardship |
+| `alpha-loop daemon --mode feedback-only` | Poll feedback and resume eligible sessions without triage or new work selection |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
 | `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
 | `alpha-loop auth` | Save authenticated browser state for verification |
@@ -300,6 +320,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop sync --prune` | Sync templates and remove target-only harness files after logging each pruned path |
 | `alpha-loop resume` | Resume stranded work — push branches, review, open WIP PRs |
 | `alpha-loop resume --issue <N>` | Resume a specific issue |
+| `alpha-loop feedback ingest` | Ingest external human feedback from stdin or `--body-file` |
+| `alpha-loop feedback ingest --request-resume` | Mark the matching session resume-requested without running resume |
 | `alpha-loop review` | Analyze learnings and propose self-improvements |
 | `alpha-loop review --apply` | Apply proposed improvements and create a draft PR |
 | `alpha-loop eval` | Run the eval suite and compute composite score |
@@ -357,6 +379,26 @@ Options:
   --verify-only <n>   Run only the verification pass on an existing epic
 ```
 
+### Daemon Options
+
+```bash
+alpha-loop daemon [options]
+
+Options:
+  --mode <mode>                 full, triage-only, feedback-only, or run-only
+  --triage-interval <seconds>   Seconds between intake triage ticks
+  --feedback-interval <seconds> Seconds between feedback poll/resume ticks
+  --run-interval <seconds>      Seconds between ready-work selection ticks
+  --health-interval <seconds>   Seconds between daemon health events
+  --idle-sleep <seconds>        Seconds to sleep when no tick is due
+  --feedback-command <command>  Adapter command returning feedback JSON/NDJSON
+  --no-lock                     Disable the repo-level daemon lock
+  --once-tick                   Run one due daemon tick and exit
+  --max-ticks <n>               Stop after this many daemon ticks
+```
+
+For hosted website and web app operation, start with the [Hosted Alpha Loop Setup Guide](docs/hosted-alpha-loop.md). It covers server setup, GitHub labels and templates, safe starter config, lifecycle events, feedback ingestion, resume, QA handoff, health checks, cleanup, and troubleshooting. For a concrete Astro/Sanity marketing-site reference workflow, see the [Aging Sidekick Hosted Pilot Blueprint](docs/aging-sidekick-hosted-pilot.md).
+
 ## Configuration
 
 Running `alpha-loop init` creates a `.alpha-loop.yaml` file:
@@ -373,6 +415,20 @@ test_command: pnpm test
 dev_command: pnpm dev
 auto_merge: true
 
+# Optional browser QA profile for websites and web apps
+web_app:
+  build_command: pnpm build
+  test_command: pnpm test
+  dev_command: pnpm dev
+  dev_url: http://localhost:4321
+  smoke_test: pnpm build
+  screenshots:
+    - { name: home-desktop, url: /, viewport: desktop }
+    - { name: home-mobile, url: /, viewport: mobile }
+  preview:
+    command: ./scripts/get-preview-url.sh
+    required: false
+
 # Coding harnesses to sync skills/agents to (auto-derived from agent if empty)
 harnesses:
   - claude
@@ -381,10 +437,51 @@ harnesses:
 max_issues: 20
 max_session_duration: 7200  # 2 hours in seconds
 
+# Hosted automation guardrails
+automation_policy:
+  block_labels: [do-not-automate, needs-human-input]
+  # See docs/hosted-policy.md for full marketing-site and web-app profiles.
+
+# Hosted daemon mode
+daemon:
+  mode: full
+  triage_interval: 900
+  feedback_interval: 60
+  run_interval: 120
+  health_interval: 300
+  idle_sleep: 30
+  feedback_poll_command: ""  # optional adapter command returning JSON/NDJSON
+  lock:
+    enabled: true
+    stale_after: 86400
+    path: ""                 # defaults to .alpha-loop/daemon.lock
+
+# Worktree retention for durable session manifests
+session_retention:
+  paused_worktree_days: 0       # keep paused/waiting/QA worktrees until explicit cleanup
+  completed_worktree_days: 30   # clean completed/failed worktrees after 30 days
+
 # Post-session review (runs after all issues, reviews full session diff)
 post_session:
   review: true
   security_scan: true
+
+# Lifecycle events for hosted runs and automations
+events:
+  include_prompt_text: false
+  redact:
+    - OPENAI_API_KEY
+    - ANTHROPIC_API_KEY
+  destinations:
+    audit_log:
+      type: log
+      events: ['*']
+    slack_qa:
+      type: webhook
+      events: [qa.requested, human_input.requested, session.failed]
+      url_env: SLACK_WEBHOOK_URL
+      format: slack
+      required: false
 
 # Eval system
 auto_capture: true  # capture failures as eval cases
@@ -420,6 +517,8 @@ eval_dir: .alpha-loop/evals
 | `skip_install` | `false` | Skip `pnpm install` in worktrees |
 | `skip_preflight` | `false` | Skip pre-flight test validation |
 | `auto_cleanup` | `true` | Auto-remove worktrees after processing |
+| `session_retention.paused_worktree_days` | `0` | Days before `history --clean` removes paused/waiting/QA worktrees (`0` = never) |
+| `session_retention.completed_worktree_days` | `30` | Days before `history --clean` removes completed/failed worktrees (`0` = never) |
 | `run_full` | `false` | Run full pipeline without skipping any steps |
 | `verbose` | `false` | Enable verbose agent output |
 | `harnesses` | (auto from agent) | Coding harnesses to sync skills/agents to (e.g., `claude`, `codex`) |
@@ -430,12 +529,65 @@ eval_dir: .alpha-loop/evals
 | `batch` | `false` | Enable batch mode — process multiple issues per agent call |
 | `batch_size` | `5` | Number of issues per batch when batch mode is enabled |
 | `smoke_test` | (none) | Shell command to run as a final smoke test after session review |
+| `web_app.setup_command` | top-level `setup_command` | Optional setup command for website/app repos |
+| `web_app.build_command` | package `build` script | Build command captured as part of web/app verification |
+| `web_app.test_command` | top-level `test_command` | Test command for the web/app profile |
+| `web_app.dev_command` | top-level `dev_command` or package script | Dev server command used by browser verification |
+| `web_app.dev_url` | framework default | Local dev URL; Astro defaults to `http://localhost:4321`, Vite to `5173`, Next/generic to `3000` |
+| `web_app.smoke_test` | top-level `smoke_test` | Optional final smoke command for web/app handoff |
+| `web_app.screenshots` | home desktop/mobile for known web frameworks | Screenshot plan entries with `name`, `url`, and `viewport` (`desktop`, `tablet`, `mobile`) |
+| `web_app.preview.url` | (none) | Static preview URL, if a hosting service exposes one directly |
+| `web_app.preview.command` | (none) | Provider-agnostic command that prints an `http(s)` preview URL |
+| `web_app.preview.required` | `false` | Mark preview URL discovery as required for verification |
 | `pipeline` | `{}` | Per-step agent/model overrides (see below) |
 | `pricing` | (built-in) | Custom token pricing per model for cost tracking |
 | `eval_include_agent_prompts` | `true` | Include repo-specific agent prompts during eval runs |
 | `eval_include_skills` | `true` | Include repo-specific skills during eval runs |
 | `post_session.review` | `true` | Run holistic code review on full session diff |
 | `post_session.security_scan` | `true` | Include security scanning in post-session review |
+| `events.include_prompt_text` | `false` | Include redacted prompt text in lifecycle events; prompt paths and hashes are always retained when available |
+| `events.redact` | `[]` | Env var names or literal values to redact from lifecycle event payloads |
+| `events.destinations` | `{}` | Lifecycle event destinations (`log`, `webhook`, `command`) with per-destination event filters |
+| `automation_policy.require_labels` | `[]` | Labels required before hosted automation may start an issue |
+| `automation_policy.block_labels` | `do-not-automate`, `needs-human-input` | Labels that pause automation and request human input |
+| `automation_policy.allowed_paths` | `[]` | Optional glob allowlist for changed files; empty means all paths are allowed unless protected |
+| `automation_policy.protected_paths` | `[]` | Glob list of paths that require human input when changed |
+| `automation_policy.allowed_commands` | `[]` | Optional allowlist for configured shell commands; entries match exact commands or subcommands |
+| `automation_policy.require_human_for` | `[]` | High-risk categories that require human input (`auth`, `billing`, `production-deploy`, `dependency-upgrade`, `sanity-schema`, `secrets`, `migrations`, `destructive-content`, `ambiguous`) |
+| `automation_policy.max_active_sessions` | `0` | Maximum active durable sessions (`0` = unlimited) |
+| `automation_policy.max_paused_sessions` | `0` | Maximum paused/waiting sessions (`0` = unlimited) |
+| `automation_policy.max_issues_per_session` | `0` | Maximum issues hosted automation may process in one session (`0` = unlimited) |
+| `automation_policy.max_session_minutes` | `0` | Runtime limit for hosted automation sessions (`0` = unlimited) |
+| `automation_policy.max_session_cost_usd` | `0` | Estimated session budget limit (`0` = unlimited) |
+| `automation_policy.max_issue_cost_usd` | `0` | Estimated per-issue budget limit (`0` = unlimited) |
+| `daemon.mode` | `full` | Hosted daemon mode: `full`, `triage-only`, `feedback-only`, or `run-only` |
+| `daemon.triage_interval` | `900` | Seconds between intake triage ticks |
+| `daemon.feedback_interval` | `60` | Seconds between feedback poll and resume ticks |
+| `daemon.run_interval` | `120` | Seconds between ready-work selection ticks |
+| `daemon.health_interval` | `300` | Seconds between daemon health lifecycle events |
+| `daemon.idle_sleep` | `30` | Seconds to sleep when no daemon tick is due |
+| `daemon.feedback_poll_command` | (none) | Optional adapter command that returns one feedback JSON object, an array, or NDJSON |
+| `daemon.lock.enabled` | `true` | Use `.alpha-loop/daemon.lock` to prevent concurrent daemon mutation in one repo |
+| `daemon.lock.stale_after` | `86400` | Seconds before a still-live lock can be treated as stale (`0` = PID-only stale checks) |
+| `daemon.lock.path` | (none) | Optional custom lock path; empty uses `.alpha-loop/daemon.lock` |
+
+### Lifecycle Events
+
+Alpha Loop emits typed lifecycle events for hosted sessions and daemons: `session.started`, `session.paused`, `human_input.requested`, `qa.requested`, `feedback.received`, `feedback.classified`, `session.resume_requested`, `session.resumed`, `session.completed`, `session.failed`, `daemon.started`, `daemon.idle`, `daemon.health`, `daemon.work.selected`, `daemon.work.skipped`, `daemon.resume.requested`, `daemon.shutdown`, and `daemon.failed`.
+
+### Web/App QA Profile
+
+`web_app` adds browser-oriented verification for Astro, React/Vite, Next, and similar repos. It records screenshot paths, browser console errors, failed network requests, preview URLs, and a human QA checklist in session history, PR bodies, and `qa.requested` events. Preview discovery is provider-agnostic: set `preview.url` or provide a command that prints the URL. See [docs/web-app-profile.md](docs/web-app-profile.md).
+
+Destinations can write to the session history log, POST to webhooks, or run a local command with canonical JSON on stdin. Webhooks can use `format: json`, `slack`, `teams`, or `discord`; command destinations always receive canonical JSON. `--dry-run` prints matching destinations instead of sending.
+
+See [docs/hosted-events.md](docs/hosted-events.md) for Slack, Teams, Discord, email-via-script, and custom service examples.
+
+### Hosted Automation Policy
+
+`automation_policy` constrains unattended hosted runs before issue work starts, before configured commands run, and before PR creation when diffs touch protected paths. Blocked work receives `needs-human-input`, a GitHub comment explaining the decision, and policy metadata in the session manifest and lifecycle event payloads.
+
+See [docs/hosted-policy.md](docs/hosted-policy.md) for ready-to-paste marketing-site and web-app policies.
 
 ### Environment Variables
 
@@ -466,6 +618,8 @@ All config options can be set via environment variables (uppercase, same names):
 | `SKIP_PREFLIGHT` | `skip_preflight` |
 | `AUTO_MERGE` | `auto_merge` |
 | `AUTO_CLEANUP` | `auto_cleanup` |
+| `SESSION_RETENTION_PAUSED_WORKTREE_DAYS` | `session_retention.paused_worktree_days` |
+| `SESSION_RETENTION_COMPLETED_WORKTREE_DAYS` | `session_retention.completed_worktree_days` |
 | `MERGE_TO` | `merge_to` |
 | `RUN_FULL` | `run_full` |
 | `VERBOSE` | `verbose` |
@@ -690,7 +844,9 @@ What needs to be done.
 | `.alpha-loop/evals/` | Yes | Eval cases (YAML) and score history (`scores.jsonl`) |
 | `.alpha-loop/traces/` | No (gitignored) | Meta-Harness style execution traces per session |
 | `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
+| `.alpha-loop/sessions/<session>/session.json` | No (gitignored) | Durable resumable session state with issue, branch, worktree, PR, stage, status, prompts, transcripts, and logs |
 | `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, session PRs, merge order, and stop reason |
+| `.alpha-loop/feedback/` | No (gitignored) | Local idempotency records for external feedback adapter events |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |
 
