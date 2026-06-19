@@ -2,7 +2,7 @@
 
 Agent-agnostic automated development loop. Fetches issues from your GitHub project board (optionally filtered by milestone), implements them with an AI coding agent, runs tests, reviews the code, and creates PRs — then moves to the next issue until all matching issues are done.
 
-**The Loop:** Plan (GitHub Issues) -> Build (AI Agent) -> Test -> Review -> Verify -> Learn -> Ship (PR)
+**The Loop:** Plan -> Build -> Test -> Review -> Verify -> Ship -> Learn -> Improve
 
 ## Installation
 
@@ -26,6 +26,25 @@ npx @bradtaylorsf/alpha-loop
 - **[Playwright CLI](https://www.npmjs.com/package/@playwright/cli)** (optional) — for live verification with screenshots
 
 ## Quick Start
+
+### Start With One Prompt
+
+If you already use a coding harness such as Claude Code, Codex, or OpenCode, the fastest path is to ask it to bootstrap Alpha Loop for the current repo:
+
+```text
+Install @bradtaylorsf/alpha-loop globally, inspect this repository, and set it up for Alpha Loop.
+
+Please:
+1. Confirm Node.js, git, GitHub CLI auth, and my coding-agent CLI are available.
+2. Run alpha-loop init from the repo root so it creates or refreshes .alpha-loop.yaml, issue templates, labels, skills/templates, .alpha-loop/vision.md, and .alpha-loop/context.md.
+3. Analyze the codebase and update the generated settings so test_command, build/dev commands, base branch, agent, model/routing, and web_app verification fit this project.
+4. Check whether this GitHub repo has open issues.
+5. If issues exist, run alpha-loop triage and alpha-loop roadmap --queue, then recommend the first safe loop command to run.
+6. If no useful issues exist, propose a small starter epic group with clear acceptance criteria, or recommend one starter issue that Alpha Loop can implement safely.
+7. Do not run alpha-loop run until I approve the first loop target.
+```
+
+That prompt lets the harness do the setup work while keeping the first autonomous run as an explicit human decision.
 
 ```bash
 # 1. Initialize — runs full onboarding (config, vision, scan, sync)
@@ -397,7 +416,7 @@ Options:
   --max-ticks <n>               Stop after this many daemon ticks
 ```
 
-For hosted website and web app operation, start with the [Hosted Alpha Loop Setup Guide](docs/hosted-alpha-loop.md). It covers server setup, GitHub labels and templates, safe starter config, lifecycle events, feedback ingestion, resume, QA handoff, health checks, cleanup, and troubleshooting. For a concrete Astro/Sanity marketing-site reference workflow, see the [Aging Sidekick Hosted Pilot Blueprint](docs/aging-sidekick-hosted-pilot.md).
+For hosted website and web app operation, start with the [Hosted Alpha Loop Setup Guide](docs/hosted-alpha-loop.md). It covers server setup, GitHub labels and templates, safe starter config, lifecycle events, feedback ingestion, resume, QA handoff, health checks, cleanup, and troubleshooting. For the broader documentation map, see the [docs index](docs/README.md).
 
 ## Configuration
 
@@ -803,6 +822,15 @@ The queue is validated before any work starts. Each listed issue must exist, be 
 Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
 
 See [docs/epics.md](docs/epics.md) for the full feature reference, including `--verify-only`, the `prefer_epics` config option, skip rules, and safety rails.
+
+## Documentation
+
+The [docs index](docs/README.md) groups the long-form guides by workflow:
+
+- Planning and execution: epics, queues, and issue flow.
+- Hosted operation: daemon setup, policy, lifecycle events, and browser verification.
+- Models and routing: local model setup, routing profiles, and telemetry.
+- Evaluation and benchmarking: eval concepts, benchmark design, and methodology notes.
 
 ### GitHub Project Board
 

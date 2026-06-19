@@ -273,11 +273,7 @@ automation_policy:
     - ambiguous
 ```
 
-Keep dependency, workflow, schema, migration, and secret paths protected. See [Hosted Automation Policy](hosted-policy.md) for ready-to-paste marketing-site and web-app variants.
-
-See [Web/App Verification Profile](web-app-profile.md) for browser screenshots, preview URLs, QA checklist output, and provider-agnostic preview discovery.
-
-For a concrete Astro/Sanity marketing-site pilot with Slack and website feedback loops, see the [Aging Sidekick Hosted Pilot Blueprint](aging-sidekick-hosted-pilot.md).
+Keep dependency, workflow, schema, migration, and secret paths protected. Pair this guide with [Hosted Automation Policy](hosted-policy.md) for ready-to-paste policy variants, [Web/App Verification Profile](web-app-profile.md) for browser screenshots and preview URLs, and [Hosted Lifecycle Events](hosted-events.md) for feedback and QA handoff payloads.
 
 ## First Run Workflow
 
