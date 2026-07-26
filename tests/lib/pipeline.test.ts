@@ -220,6 +220,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipInstall: false,
     skipPreflight: false,
     skipVerify: true,  // Skip verify by default in tests
+    skipQa: false,
     skipLearn: false,
     skipE2e: false,
     autoMerge: false,
@@ -644,6 +645,7 @@ describe('processIssue', () => {
 
     const result = await processIssue(42, 'Marketing page update', 'Issue body', makeConfig({
       skipVerify: false,
+      skipQa: false,
       webApp: {
         setupCommand: '',
         buildCommand: 'pnpm build',

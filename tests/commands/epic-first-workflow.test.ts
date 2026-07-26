@@ -41,6 +41,7 @@ jest.mock('../../src/lib/config', () => ({
     skipInstall: false,
     skipPreflight: true,
     skipVerify: false,
+    skipQa: false,
     skipLearn: true,
     skipE2e: false,
     autoMerge: false,

@@ -29,6 +29,7 @@ const makeConfig = (overrides?: Partial<Config>): Config => ({
   skipTests: false,
   skipReview: false,
   skipVerify: true,
+  skipQa: false,
   evalDir: '.alpha-loop/evals',
   evalModel: '',
   skipEval: false,

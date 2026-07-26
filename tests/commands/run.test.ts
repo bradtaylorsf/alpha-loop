@@ -168,6 +168,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     skipInstall: false,
     skipPreflight: false,
     skipVerify: false,
+    skipQa: false,
     skipLearn: false,
     skipE2e: false,
     autoMerge: false,

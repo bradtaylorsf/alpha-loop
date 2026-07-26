@@ -36,6 +36,7 @@ const makeConfig = (): Config => ({
   skipInstall: false,
   skipPreflight: false,
   skipVerify: false,
+  skipQa: false,
   skipLearn: false,
   skipE2e: false,
   maxIssues: 0,

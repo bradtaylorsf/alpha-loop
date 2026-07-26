@@ -51,6 +51,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipInstall: false,
     skipPreflight: false,
     skipVerify: false,
+    skipQa: false,
     skipLearn: false,
     skipE2e: false,
     autoMerge: false,
