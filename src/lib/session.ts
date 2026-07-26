@@ -1314,11 +1314,17 @@ export async function finalizeSession(
     log.warn('Could not checkout session branch for finalization');
     return null;
   }
-  // Pull remote changes (auto-merged batch PRs) into local branch
-  const pull = exec(`git pull origin "${session.branch}" --no-edit`, { cwd: projectDir });
+  // Pull remote changes (auto-merged batch PRs) into local branch.
+  // --autostash keeps uncommitted trace/artifact files from blocking a
+  // fast-forward; without it a dirty working tree forces the rebase fallback,
+  // which leaves the local branch missing the auto-merged child PRs and risks
+  // clobbering them on the finalize push.
+  const pull = exec(`git pull origin "${session.branch}" --no-edit --autostash`, {
+    cwd: projectDir,
+  });
   if (pull.exitCode !== 0) {
     log.warn(`Could not pull remote session branch — trying rebase`);
-    exec(`git rebase "origin/${session.branch}"`, { cwd: projectDir });
+    exec(`git rebase "origin/${session.branch}" --autostash`, { cwd: projectDir });
   }
 
   // Save session manifest to learnings directory (tracked in git, shared with team)

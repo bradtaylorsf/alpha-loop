@@ -240,7 +240,10 @@ export function labelIssue(repo: string, issueNum: number, addLabel: string, rem
  */
 export function commentIssue(repo: string, issueNum: number, body: string): boolean {
   const bodyFile = join(tmpdir(), `alpha-loop-comment-${Date.now()}`);
-  writeFileSync(bodyFile, body, 'utf-8');
+  // GitHub rejects comments over 65536 chars. Agent outputs (e.g. assumptions
+  // notes) can balloon when they capture CLI banners/echoed prompts, so cap the
+  // body rather than let the whole comment fail.
+  writeFileSync(bodyFile, truncateBody(body), 'utf-8');
   try {
     const result = ghExec(
       `gh issue comment ${issueNum} --repo "${repo}" --body-file "${bodyFile}"`,
@@ -289,9 +292,13 @@ export function createPR(options: CreatePROptions): string {
   const quotedHead = shellQuote(head);
   const pushResult = exec(`git push -u origin ${quotedHead}`, { cwd });
   if (pushResult.exitCode !== 0) {
-    // Try force push if branch exists from previous attempt
-    log.warn('Push failed, trying force push...');
-    const forceResult = exec(`git push -u origin ${quotedHead} --force`, { cwd });
+    // Try force push if branch exists from previous attempt.
+    // Use --force-with-lease so a stale local branch can never silently clobber
+    // remote commits (e.g. child PRs auto-merged into a session branch). If the
+    // remote has advanced beyond what we fetched, this fails loudly instead of
+    // destroying merged work.
+    log.warn('Push failed, trying force push (with lease)...');
+    const forceResult = exec(`git push -u origin ${quotedHead} --force-with-lease`, { cwd });
     if (forceResult.exitCode !== 0) {
       throw new Error(`Failed to push branch ${head}: ${forceResult.stderr}`);
     }

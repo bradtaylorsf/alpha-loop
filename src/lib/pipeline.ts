@@ -2564,7 +2564,7 @@ export async function processIssue(
     log.dry('Would update issue status to in-review');
   }
 
-  const shouldRequestQa = plan.qa?.needed || Boolean(webAppProfile);
+  const shouldRequestQa = !config.skipQa && (plan.qa?.needed || Boolean(webAppProfile));
   if (shouldRequestQa) {
     const qaChecklist = webAppProfile ? webAppQaChecklist : (plan.qa?.checklist ?? []);
     const qaPreviewUrl = webAppPrContext?.previewUrl ?? plan.qa?.previewUrl;

@@ -196,6 +196,16 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
     } else {
       log.info(`Created worktree from origin/${fromBranch}`);
     }
+
+    // Defensive: a fresh worktree branched from the base/session branch must not
+    // carry a pause-request artifact. If one was accidentally committed to the
+    // branch, it would falsely pause every subsequent issue with a stale reason.
+    // (Resumed worktrees are intentionally left untouched above.)
+    const stalePauseRequest = join(worktreePath, 'alpha-loop-pause-request.json');
+    if (existsSync(stalePauseRequest)) {
+      log.warn('Removing committed alpha-loop-pause-request.json from fresh worktree (should be gitignored)');
+      unlinkSync(stalePauseRequest);
+    }
   }
 
   // --- Post-creation setup (runs for both fresh and resumed worktrees) ---

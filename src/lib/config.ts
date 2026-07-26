@@ -395,6 +395,7 @@ export type Config = {
   skipInstall: boolean;
   skipPreflight: boolean;
   skipVerify: boolean;
+  skipQa: boolean;
   skipLearn: boolean;
   skipE2e: boolean;
   maxIssues: number;
@@ -472,6 +473,7 @@ const DEFAULTS: Config = {
   skipInstall: false,
   skipPreflight: false,
   skipVerify: false,
+  skipQa: false,
   skipLearn: false,
   skipE2e: false,
   maxIssues: 0,
@@ -540,6 +542,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   skip_install: 'skipInstall',
   skip_preflight: 'skipPreflight',
   skip_verify: 'skipVerify',
+  skip_qa: 'skipQa',
   skip_learn: 'skipLearn',
   skip_e2e: 'skipE2e',
   max_issues: 'maxIssues',
@@ -586,6 +589,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   SKIP_INSTALL: 'skipInstall',
   SKIP_PREFLIGHT: 'skipPreflight',
   SKIP_VERIFY: 'skipVerify',
+  SKIP_QA: 'skipQa',
   SKIP_LEARN: 'skipLearn',
   SKIP_E2E: 'skipE2e',
   MAX_ISSUES: 'maxIssues',
