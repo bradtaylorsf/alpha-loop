@@ -35,6 +35,12 @@ import {
   type SessionStatus,
 } from '../lib/session.js';
 import {
+  acquireSessionLock,
+  releaseSessionLock,
+  SessionLockError,
+  type SessionLockHandle,
+} from '../lib/session-lock.js';
+import {
   labelIssue,
   commentIssue,
   createPR,
@@ -986,6 +992,21 @@ export async function resumePausedIssueFromManifest(
     return true;
   }
 
+  // Hold the session lock while resuming so a concurrent `alpha-loop run` of
+  // the same session fails fast instead of sharing state — and skip resuming
+  // when a live run already owns the session.
+  let sessionLock: SessionLockHandle;
+  try {
+    sessionLock = acquireSessionLock(ref.sessionDir, ref.manifest.name);
+  } catch (err) {
+    releaseResumeLock(lockPath);
+    if (err instanceof SessionLockError) {
+      log.warn(`Session ${ref.manifest.name} is locked by an active run; resume of issue #${issueNum} skipped. ${err.message}`);
+      return true;
+    }
+    throw err;
+  }
+
   try {
     const issue = getIssueWithComments(config.repo, issueNum) ?? fallbackIssueFromManifest(issueNum, ref.manifest);
     const context = buildResumeFeedbackContext(ref, issue);
@@ -1120,6 +1141,7 @@ export async function resumePausedIssueFromManifest(
     });
     throw err;
   } finally {
+    releaseSessionLock(sessionLock);
     releaseResumeLock(lockPath);
   }
 }

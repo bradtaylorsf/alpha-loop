@@ -54,6 +54,11 @@ jest.mock('../../src/lib/session', () => ({
   updateSessionManifest: jest.fn(),
 }));
 
+jest.mock('../../src/lib/session-lock', () => ({
+  ...jest.requireActual('../../src/lib/session-lock'),
+  releaseSessionLock: jest.fn(),
+}));
+
 jest.mock('../../src/lib/verify-epic', () => ({
   verifyEpic: jest.fn().mockResolvedValue({
     verdict: 'pass',
@@ -114,6 +119,7 @@ import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
 import { processIssue, processBatch } from '../../src/lib/pipeline';
 import { createSession, finalizeSession, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
+import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
 import { generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
 import { syncAgentAssets } from '../../src/commands/sync';
@@ -133,6 +139,7 @@ const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue
 const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue>;
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
+const mockReleaseSessionLock = releaseSessionLock as jest.MockedFunction<typeof releaseSessionLock>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
 const mockTransitionSessionStatus = transitionSessionStatus as jest.MockedFunction<typeof transitionSessionStatus>;
 const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
@@ -308,6 +315,69 @@ describe('runCommand', () => {
       }),
     }));
     expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('runSingleEpicExecution fails fast when another live run holds the session lock', async () => {
+    const config = makeConfig() as any;
+    mockGetIssueWithComments.mockReturnValue({
+      number: 195, title: 'Parent Epic', body: '- [ ] #201 Build child', labels: ['epic'],
+    });
+    mockCreateSession.mockImplementation(() => {
+      throw new SessionLockError(
+        '/tmp/sessions/session/epic-195/session.lock',
+        'Another alpha-loop run (pid 4242 on host, started 2026-08-07T03:12:11.000Z) is already processing session session/epic-195.',
+      );
+    });
+
+    await expect(runSingleEpicExecution({ config, epicNumber: 195 })).rejects.toMatchObject({
+      code: 'session-locked',
+      exitCode: 1,
+      message: expect.stringContaining('already processing session session/epic-195'),
+    });
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockReleaseSessionLock).not.toHaveBeenCalled();
+  });
+
+  test('runSingleEpicExecution releases the session lock after the run finishes', async () => {
+    const config = makeConfig({
+      autoMerge: true,
+      skipPostSessionReview: true,
+    }) as any;
+    const lockHandle = { path: '/tmp/sessions/session.lock', token: 'lock-token', payload: {} as any };
+    mockCreateSession.mockReturnValue({
+      name: 'session/epic-195',
+      branch: 'session/epic-195',
+      resultsDir: '/tmp/sessions',
+      logsDir: '/tmp/sessions/logs',
+      results: [],
+      lock: lockHandle,
+    } as any);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) {
+        return { number: 195, title: 'Parent Epic', body: '- [ ] #201 Build child', labels: ['epic'] };
+      }
+      if (issueNum === 201) {
+        return { number: 201, title: 'Build child', body: 'Child body', labels: ['ready'] };
+      }
+      return null;
+    });
+    mockGetEpicSubIssues.mockReturnValue([{ number: 201, checked: true, lineIndex: 0 }]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 201,
+      title: 'Build child',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+    mockFinalizeSession.mockResolvedValue('https://github.com/owner/repo/pull/500');
+
+    const result = await runSingleEpicExecution({ config, epicNumber: 195 });
+
+    expect(result.status).toBe('success');
+    expect(mockReleaseSessionLock).toHaveBeenCalledWith(lockHandle);
   });
 
   test('runSingleEpicExecution returns invalid epic number failure without exiting', async () => {
