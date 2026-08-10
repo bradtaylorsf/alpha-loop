@@ -252,6 +252,20 @@ describe('daemon locking', () => {
     expect(JSON.parse(readFileSync(lockPath, 'utf-8')).token).toBe(lock.token);
   });
 
+  it('throws DaemonLockError when a stale lock cannot be reclaimed', () => {
+    const daemon = makeDaemon({ lock: { ...DEFAULT_DAEMON_CONFIG.lock, path: join(tempDir, '.alpha-loop', 'daemon.lock') } });
+    const lockPath = daemonLockPath(daemon);
+    // A directory at the lock path defeats both the unlink and the wx
+    // re-create, simulating losing the reclaim race to another daemon —
+    // acquire must still fail with DaemonLockError, not a raw fs error.
+    mkdirSync(lockPath, { recursive: true });
+
+    expect(() => acquireDaemonLock(makeConfig({ daemon }), daemon, {
+      now: new Date('2026-05-30T12:00:00.000Z'),
+      isPidAlive: () => false,
+    })).toThrow(/Could not reclaim the stale daemon lock/);
+  });
+
   it('refreshes held repo locks so active daemons are not treated as stale', () => {
     const daemon = makeDaemon({ lock: { ...DEFAULT_DAEMON_CONFIG.lock, path: join(tempDir, '.alpha-loop', 'daemon.lock') } });
     const config = makeConfig({ daemon });
