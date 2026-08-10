@@ -422,6 +422,8 @@ describe('resumeCommand', () => {
       'resuming',
       'completed',
     ]);
+    // The session lock taken for the resume is released when it finishes.
+    expect(existsSync(join(sessionDir, 'session.lock'))).toBe(false);
   });
 
   test('resumes QA change requests at implementation stage and keeps the existing PR URL', async () => {
@@ -512,6 +514,37 @@ describe('resumeCommand', () => {
     expect(mockProcessIssue).not.toHaveBeenCalled();
     expect(mockGetIssueWithComments).not.toHaveBeenCalled();
     expect(mockCreatePR).not.toHaveBeenCalled();
+  });
+
+  test('skips resume when a live run holds the session lock', async () => {
+    tempDir = mkdtempSync(join(tmpdir(), 'alpha-loop-resume-locked-'));
+    process.chdir(tempDir);
+
+    const sessionDir = join(tempDir, '.alpha-loop', 'sessions', 'session', '20260530-120000');
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(join(sessionDir, 'session.json'), JSON.stringify(makeManifest(), null, 2));
+    // A concurrent `alpha-loop run` holds the session lock (this test process
+    // stands in for it, so the recorded pid is alive).
+    writeFileSync(join(sessionDir, 'session.lock'), JSON.stringify({
+      version: 1,
+      sessionName: 'session/20260530-120000',
+      pid: process.pid,
+      hostname: 'active-host',
+      cwd: tempDir,
+      startedAt: '2026-05-30T12:10:00.000Z',
+      token: 'active-run-token',
+    }, null, 2) + '\n');
+
+    mockLoadConfig.mockReturnValue(baseConfig());
+
+    await resumeCommand({ issue: '286' });
+
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockGetIssueWithComments).not.toHaveBeenCalled();
+    // The active run's lock is untouched and the transient resume lock was released.
+    const lock = JSON.parse(readFileSync(join(sessionDir, 'session.lock'), 'utf-8'));
+    expect(lock.token).toBe('active-run-token');
+    expect(existsSync(join(sessionDir, 'resume.lock'))).toBe(false);
   });
 
   test('prefers crash markers over branch walking and clears marker after saving recovered result', async () => {

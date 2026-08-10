@@ -28,6 +28,7 @@ import {
   type SessionStage,
   type SessionStatus,
 } from '../lib/session.js';
+import { releaseSessionLock, SessionLockError } from '../lib/session-lock.js';
 import { cleanupWorktree } from '../lib/worktree.js';
 import {
   generateSessionSummary,
@@ -185,7 +186,8 @@ type CommandExitErrorCode =
   | 'invalid-queue-branch-mode'
   | 'epic-queue-validation-failed'
   | 'epic-queue-stopped'
-  | 'session-interrupt-cleanup-failed';
+  | 'session-interrupt-cleanup-failed'
+  | 'session-locked';
 
 class CommandExitError extends Error {
   readonly code: CommandExitErrorCode | EpicExecutionFailureCode;
@@ -841,8 +843,6 @@ async function runIssueSession(
       : undefined;
   const queueContext = target.type === 'epic' ? target.queue : undefined;
   const activeMilestone = target.type === 'flat' ? target.activeMilestone : '';
-  const failures: EpicExecutionFailure[] = [];
-  let verificationClosedEpic = false;
 
   if (target.type === 'issue') {
     log.info(`Processing targeted issue #${target.issue.number}: ${target.issue.title}`);
@@ -855,17 +855,59 @@ async function runIssueSession(
     log.info(`Filtering issues by milestone: ${activeMilestone}`);
   }
 
-  // Create session (named after epic or milestone if selected)
-  const session = createSession(config, {
-    milestone: activeMilestone || undefined,
-    issueNum: target.type === 'issue' ? target.issue.number : undefined,
-    issueTitle: target.type === 'issue' ? target.issue.title : undefined,
-    parentEpicNum: target.type === 'issue' ? target.parentEpic?.number : undefined,
-    parentEpicTitle: target.type === 'issue' ? target.parentEpic?.title : undefined,
-    epicNum: activeEpic,
-    epicTitle: activeEpicTitle,
-    queue: queueContext,
-  });
+  // Create session (named after epic or milestone if selected). Session names
+  // are deterministic per epic/milestone, so createSession locks the session
+  // directory — a concurrently started run of the same target fails fast here
+  // instead of silently sharing the manifest, logs, and session branch.
+  let session: SessionContext;
+  try {
+    session = createSession(config, {
+      milestone: activeMilestone || undefined,
+      issueNum: target.type === 'issue' ? target.issue.number : undefined,
+      issueTitle: target.type === 'issue' ? target.issue.title : undefined,
+      parentEpicNum: target.type === 'issue' ? target.parentEpic?.number : undefined,
+      parentEpicTitle: target.type === 'issue' ? target.parentEpic?.title : undefined,
+      epicNum: activeEpic,
+      epicTitle: activeEpicTitle,
+      queue: queueContext,
+    });
+  } catch (err) {
+    if (err instanceof SessionLockError) {
+      throw new CommandExitError({
+        code: 'session-locked',
+        message: err.message,
+        exitCode: 1,
+        cause: err,
+      });
+    }
+    throw err;
+  }
+
+  try {
+    return await executeSessionRun(config, options, target, session, {
+      activeEpic,
+      activeEpicIssue,
+      activeMilestone,
+    });
+  } finally {
+    releaseSessionLock(session.lock);
+  }
+}
+
+async function executeSessionRun(
+  config: Config,
+  options: RunOptions,
+  target: SessionExecutionTarget,
+  session: SessionContext,
+  context: {
+    activeEpic: number | undefined;
+    activeEpicIssue: Issue | undefined;
+    activeMilestone: string;
+  },
+): Promise<SessionExecutionResult> {
+  const { activeEpic, activeEpicIssue, activeMilestone } = context;
+  const failures: EpicExecutionFailure[] = [];
+  let verificationClosedEpic = false;
 
   // Print startup banner
   printBanner(config, session);

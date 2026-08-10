@@ -18,6 +18,7 @@ import {
   type HumanFeedbackStateBlock,
   type HumanFeedbackTransitionInput,
 } from './session-state.js';
+import { acquireSessionLock, type SessionLockHandle } from './session-lock.js';
 import type { Config } from './config.js';
 import type { PipelineResult, GateResult } from './pipeline.js';
 import type { QueueEpicLink, QueueSessionContext } from './epic-queue.js';
@@ -43,6 +44,8 @@ export type SessionContext = {
   epic?: number;
   /** Queue metadata for multi-epic queue sessions. */
   queue?: QueueSessionContext;
+  /** Lock on the session directory, held while this run owns the session. */
+  lock?: SessionLockHandle;
 };
 
 export type SessionStatus =
@@ -1021,6 +1024,7 @@ function buildDraftSessionPrBody(args: {
 /**
  * Create a new session context with timestamp-based name.
  * Optionally creates a session branch when autoMerge is enabled.
+ * Throws SessionLockError when a live process already owns the session dir.
  */
 export function createSession(config: Config, options?: CreateSessionOptions): SessionContext {
   const now = new Date();
@@ -1051,9 +1055,15 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
   let sessionPrUrl: string | undefined;
   const branchSource = queue?.branchedFromBranch ?? config.baseBranch;
 
+  // Session names are deterministic per epic/milestone, so a concurrently
+  // started run of the same target would share this directory, manifest, and
+  // session branch. Take the lock before any git or manifest side effects so
+  // the second run fails fast (SessionLockError) instead of clobbering state.
+  let lock: SessionLockHandle | undefined;
   if (!config.dryRun) {
     mkdirSync(resultsDir, { recursive: true });
     mkdirSync(logsDir, { recursive: true });
+    lock = acquireSessionLock(resultsDir, name);
   }
 
   // Create session branch and draft PR if auto-merge is enabled
@@ -1170,6 +1180,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
     parentEpicNum: options?.parentEpicNum,
     epic: epicNum,
     queue,
+    lock,
   };
 
   if (!config.dryRun) {
