@@ -297,14 +297,17 @@ describe('createPR', () => {
     expect(createCall?.[0]).toContain("--title 'feat: Add $(touch /tmp/pwned) '\\''quoted'\\'''");
   });
 
-  test('tries force push on initial push failure', () => {
-    let pushAttempt = 0;
+  test('skips push when the remote branch already contains local commits', () => {
     mockExec.mockImplementation((cmd: string) => {
-      if (cmd.includes('git push') && !cmd.includes('--force')) {
-        return { stdout: '', stderr: 'rejected', exitCode: 1 };
+      if (cmd.startsWith('git push')) {
+        return { stdout: '', stderr: 'rejected (fetch first)', exitCode: 1 };
       }
-      if (cmd.includes('git push') && cmd.includes('--force')) {
+      // local is an ancestor of origin/<head> — remote is ahead (e.g. auto-merged PRs)
+      if (cmd.startsWith("git merge-base --is-ancestor 'agent/")) {
         return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith("git merge-base --is-ancestor 'origin/")) {
+        return { stdout: '', stderr: '', exitCode: 1 };
       }
       if (cmd.includes('gh pr list')) {
         return { stdout: '[]', stderr: '', exitCode: 0 };
@@ -318,11 +321,209 @@ describe('createPR', () => {
     const url = createPR(baseOptions);
     expect(url).toBe('https://github.com/owner/repo/pull/1');
 
-    // Should have tried force push
+    // Exactly one (failed) push attempt — no retry, no force push
+    const pushCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].startsWith('git push'),
+    );
+    expect(pushCalls).toHaveLength(1);
+  });
+
+  test('retries a plain push after fetch when local fast-forwards the remote', () => {
+    let pushAttempts = 0;
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('--force-with-lease')) {
+        return { stdout: '', stderr: 'should not force push', exitCode: 1 };
+      }
+      if (cmd.startsWith('git push')) {
+        pushAttempts += 1;
+        return pushAttempts === 1
+          ? { stdout: '', stderr: 'rejected (stale packed-refs)', exitCode: 1 }
+          : { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith("git merge-base --is-ancestor 'agent/")) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      // origin/<head> is an ancestor of local — push fast-forwards
+      if (cmd.startsWith("git merge-base --is-ancestor 'origin/")) {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr list')) {
+        return { stdout: '[]', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr create')) {
+        return { stdout: 'https://github.com/owner/repo/pull/1', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const url = createPR(baseOptions);
+    expect(url).toBe('https://github.com/owner/repo/pull/1');
+    expect(pushAttempts).toBe(2);
+
     const forcePushCalls = mockExec.mock.calls.filter(
       (call) => typeof call[0] === 'string' && call[0].includes('--force'),
     );
-    expect(forcePushCalls.length).toBeGreaterThan(0);
+    expect(forcePushCalls).toHaveLength(0);
+  });
+
+  test('force pushes with lease only when diverged trees are identical', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('--force-with-lease')) {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith('git push')) {
+        return { stdout: '', stderr: 'rejected', exitCode: 1 };
+      }
+      if (cmd.startsWith('git merge-base')) {
+        return { stdout: '', stderr: '', exitCode: 1 }; // diverged both ways
+      }
+      if (cmd.startsWith('git diff --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 0 }; // identical trees
+      }
+      if (cmd.includes('gh pr list')) {
+        return { stdout: '[]', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr create')) {
+        return { stdout: 'https://github.com/owner/repo/pull/1', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const url = createPR(baseOptions);
+    expect(url).toBe('https://github.com/owner/repo/pull/1');
+
+    const forcePushCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('--force-with-lease'),
+    );
+    expect(forcePushCalls).toHaveLength(1);
+    const mergeCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].startsWith("git merge 'origin/"),
+    );
+    expect(mergeCalls).toHaveLength(0);
+  });
+
+  test('merges remote commits instead of force-pushing when content diverged', () => {
+    let pushAttempts = 0;
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('--force-with-lease')) {
+        return { stdout: '', stderr: 'should not force push', exitCode: 1 };
+      }
+      if (cmd.startsWith('git push')) {
+        pushAttempts += 1;
+        return pushAttempts === 1
+          ? { stdout: '', stderr: 'rejected', exitCode: 1 }
+          : { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith('git merge-base')) {
+        return { stdout: '', stderr: '', exitCode: 1 }; // diverged both ways
+      }
+      if (cmd.startsWith('git diff --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 }; // different content
+      }
+      if (cmd === 'git rev-parse --abbrev-ref HEAD') {
+        return { stdout: 'agent/issue-42', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith("git merge 'origin/")) {
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr list')) {
+        return { stdout: '[]', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr create')) {
+        return { stdout: 'https://github.com/owner/repo/pull/1', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const url = createPR(baseOptions);
+    expect(url).toBe('https://github.com/owner/repo/pull/1');
+    expect(pushAttempts).toBe(2);
+
+    const mergeCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].startsWith("git merge 'origin/agent/issue-42'"),
+    );
+    expect(mergeCalls).toHaveLength(1);
+    const forcePushCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('--force'),
+    );
+    expect(forcePushCalls).toHaveLength(0);
+  });
+
+  test('aborts the merge and throws instead of force-pushing when divergent content conflicts', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('git push')) {
+        return { stdout: '', stderr: 'rejected', exitCode: 1 };
+      }
+      if (cmd.startsWith('git merge-base')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      if (cmd.startsWith('git diff --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      if (cmd === 'git rev-parse --abbrev-ref HEAD') {
+        return { stdout: 'agent/issue-42', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith("git merge 'origin/")) {
+        return { stdout: '', stderr: 'CONFLICT (content)', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    expect(() => createPR(baseOptions)).toThrow(/refusing to force-push/);
+
+    const abortCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0] === 'git merge --abort',
+    );
+    expect(abortCalls).toHaveLength(1);
+    const forcePushCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].includes('--force'),
+    );
+    expect(forcePushCalls).toHaveLength(0);
+  });
+
+  test('refuses to merge when the diverged branch is not checked out', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('git push')) {
+        return { stdout: '', stderr: 'rejected', exitCode: 1 };
+      }
+      if (cmd.startsWith('git merge-base')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      if (cmd.startsWith('git diff --quiet')) {
+        return { stdout: '', stderr: '', exitCode: 1 };
+      }
+      if (cmd === 'git rev-parse --abbrev-ref HEAD') {
+        return { stdout: 'some-other-branch', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    expect(() => createPR(baseOptions)).toThrow(/not checked out/);
+
+    const mergeCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].startsWith("git merge 'origin/"),
+    );
+    expect(mergeCalls).toHaveLength(0);
+  });
+
+  test('skipPush creates the PR without any git push', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: '[]', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr create')) {
+        return { stdout: 'https://github.com/owner/repo/pull/1', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const url = createPR({ ...baseOptions, skipPush: true });
+    expect(url).toBe('https://github.com/owner/repo/pull/1');
+
+    const pushCalls = mockExec.mock.calls.filter(
+      (call) => typeof call[0] === 'string' && call[0].startsWith('git push'),
+    );
+    expect(pushCalls).toHaveLength(0);
   });
 
   test('throws when push fails completely', () => {

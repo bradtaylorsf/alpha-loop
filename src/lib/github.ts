@@ -279,28 +279,111 @@ export type CreatePROptions = {
   title: string;
   body: string;
   cwd?: string;
+  /**
+   * Skip pushing the head branch — the remote branch already holds the
+   * content the PR should describe and local has diverged from it.
+   */
+  skipPush?: boolean;
 };
+
+/**
+ * Recover from a rejected push without destroying remote commits.
+ *
+ * The remote branch may hold commits the local branch does not — e.g. child
+ * PRs auto-merged into a session branch by GitHub. A force push here would
+ * destroy them, and --force-with-lease does not protect against that when the
+ * remote-tracking ref was just fetched. So instead: skip the push when the
+ * remote already contains local, retry when it fast-forwards, force-push
+ * (with lease) only when the trees are identical, and otherwise merge the
+ * remote commits into local before a plain push. Throws when the branches
+ * diverge with conflicting content — never force-pushes over it.
+ */
+function reconcilePushDivergence(head: string, cwd?: string): void {
+  const quotedHead = shellQuote(head);
+  const quotedRemoteRef = shellQuote(`origin/${head}`);
+  exec(`git fetch origin ${quotedHead}`, { cwd });
+
+  const remoteExists = exec(`git rev-parse --verify --quiet ${quotedRemoteRef}`, { cwd });
+  if (remoteExists.exitCode !== 0) {
+    // No remote branch — the push failure was not a divergence (auth, network,
+    // ...). Retry once, then surface the error.
+    const retry = exec(`git push -u origin ${quotedHead}`, { cwd });
+    if (retry.exitCode !== 0) {
+      throw new Error(`Failed to push branch ${head}: ${retry.stderr}`);
+    }
+    return;
+  }
+
+  const remoteContainsLocal = exec(
+    `git merge-base --is-ancestor ${quotedHead} ${quotedRemoteRef}`, { cwd },
+  );
+  if (remoteContainsLocal.exitCode === 0) {
+    log.info(`Remote branch ${head} already contains local commits — skipping push`);
+    return;
+  }
+
+  const localContainsRemote = exec(
+    `git merge-base --is-ancestor ${quotedRemoteRef} ${quotedHead}`, { cwd },
+  );
+  if (localContainsRemote.exitCode === 0) {
+    const retry = exec(`git push -u origin ${quotedHead}`, { cwd });
+    if (retry.exitCode !== 0) {
+      throw new Error(`Failed to push branch ${head}: ${retry.stderr}`);
+    }
+    return;
+  }
+
+  // Histories diverged. Identical trees mean a pure history rewrite (e.g. a
+  // rebase) — force-with-lease loses no content there.
+  const sameTree = exec(`git diff --quiet ${quotedRemoteRef} ${quotedHead}`, { cwd });
+  if (sameTree.exitCode === 0) {
+    log.warn(`Branch ${head} diverged from remote with identical content — force pushing (with lease)`);
+    const force = exec(`git push -u origin ${quotedHead} --force-with-lease`, { cwd });
+    if (force.exitCode !== 0) {
+      throw new Error(`Failed to push branch ${head}: ${force.stderr}`);
+    }
+    return;
+  }
+
+  // Content differs both ways — merge the remote commits into local and push
+  // the union. git merge targets the current branch, so bail out rather than
+  // merge into the wrong branch if the checkout is elsewhere.
+  const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd }).stdout.trim();
+  if (currentBranch !== head) {
+    throw new Error(
+      `Branch ${head} diverged from origin/${head} and is not checked out — ` +
+      'refusing to force-push over remote commits. Reconcile manually.',
+    );
+  }
+  log.warn(`Branch ${head} diverged from remote — merging remote commits before push`);
+  const merge = exec(`git merge ${quotedRemoteRef} --no-edit`, { cwd });
+  if (merge.exitCode !== 0) {
+    exec('git merge --abort', { cwd });
+    throw new Error(
+      `Branch ${head} diverged from origin/${head} with conflicting content — ` +
+      'refusing to force-push over remote commits. Reconcile manually.',
+    );
+  }
+  const push = exec(`git push -u origin ${quotedHead}`, { cwd });
+  if (push.exitCode !== 0) {
+    throw new Error(`Failed to push branch ${head}: ${push.stderr}`);
+  }
+}
 
 /**
  * Create a PR, or update an existing one if a PR already exists for the branch.
  * Returns the PR URL.
  */
 export function createPR(options: CreatePROptions): string {
-  const { repo, base, head, title, body, cwd } = options;
+  const { repo, base, head, title, body, cwd, skipPush } = options;
 
   // Push the branch first
   const quotedHead = shellQuote(head);
-  const pushResult = exec(`git push -u origin ${quotedHead}`, { cwd });
-  if (pushResult.exitCode !== 0) {
-    // Try force push if branch exists from previous attempt.
-    // Use --force-with-lease so a stale local branch can never silently clobber
-    // remote commits (e.g. child PRs auto-merged into a session branch). If the
-    // remote has advanced beyond what we fetched, this fails loudly instead of
-    // destroying merged work.
-    log.warn('Push failed, trying force push (with lease)...');
-    const forceResult = exec(`git push -u origin ${quotedHead} --force-with-lease`, { cwd });
-    if (forceResult.exitCode !== 0) {
-      throw new Error(`Failed to push branch ${head}: ${forceResult.stderr}`);
+  if (!skipPush) {
+    const pushResult = exec(`git push -u origin ${quotedHead}`, { cwd });
+    if (pushResult.exitCode !== 0) {
+      log.warn('Push failed — reconciling with remote branch...');
+      reconcilePushDivergence(head, cwd);
     }
   }
 
