@@ -568,6 +568,7 @@ Run with persistent mounts for `.alpha-loop/sessions`, `.alpha-loop/feedback`, `
 Primary places to inspect:
 
 - `.alpha-loop/sessions/<session>/session.json` - durable session manifest with issue, branch, worktree, PR, stage, status, prompts, transcripts, and logs.
+- `.alpha-loop/sessions/<session>/session.lock` - held by the live run or resume that owns the session; stale locks from dead processes are reclaimed automatically.
 - `.alpha-loop/sessions/<session>/logs/events.jsonl` - lifecycle event delivery attempts.
 - `.alpha-loop/sessions/<session>/screenshots/` - browser screenshots.
 - `.alpha-loop/sessions/<session>/web-app-verification/` - browser verification JSON.
@@ -645,6 +646,7 @@ Keep paused/waiting/QA worktrees until the issue is resolved, intentionally aban
 | Chat feedback creates duplicates | Ensure adapter payloads include a stable `externalEventId`; inspect `.alpha-loop/feedback/ingested-events/`. |
 | `resume --issue` cannot find work | Inspect `alpha-loop history`, branch names, `.alpha-loop/sessions/<session>/session.json`, and whether paused worktrees were cleaned. |
 | Daemon says another instance is running | Check `.alpha-loop/daemon.lock`, the recorded PID, and `daemon.lock.stale_after`. Do not run two full daemons against one checkout. |
+| Run says the session is locked | Another run or resume owns `.alpha-loop/sessions/<session>/session.lock`. Wait for it to finish; locks from dead processes are reclaimed automatically, so delete the file only if the recorded PID is gone. |
 | Costs are too high | Lower `max_session_cost_usd` and `max_issue_cost_usd`, narrow `ready` usage, shorten session limits, and consider routing cheaper models for non-critical stages. |
 
 ## Setup Checklist

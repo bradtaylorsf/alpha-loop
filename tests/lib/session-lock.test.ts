@@ -165,6 +165,22 @@ describe('session lock', () => {
     expect(() => acquireSessionLock(sessionDir, 'session/epic-591-support')).not.toThrow();
   });
 
+  test('a stale lock that cannot be reclaimed still fails with SessionLockError', () => {
+    // A directory at the lock path defeats both unlink and the wx re-create,
+    // simulating losing the reclaim race — the error contract must hold.
+    mkdirSync(sessionLockPath(sessionDir), { recursive: true });
+
+    let thrown: unknown;
+    try {
+      acquireSessionLock(sessionDir, 'session/epic-591-support', { isPidAlive: () => false });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(SessionLockError);
+    expect((thrown as SessionLockError).message).toContain('Could not reclaim');
+  });
+
   test('release refuses when the lock was taken over by another run', () => {
     const lock = acquireSessionLock(sessionDir, 'session/epic-591-support');
     const takenOver = acquireSessionLock(sessionDir, 'session/epic-591-support', {

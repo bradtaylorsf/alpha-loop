@@ -108,8 +108,18 @@ export function acquireSessionLock(
 
     if (!existing || !isPidAlive(existing.pid)) {
       try { unlinkSync(lockPath); } catch { /* best effort */ }
-      writeFileSync(lockPath, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
-      return { path: lockPath, token: payload.token, payload };
+      try {
+        writeFileSync(lockPath, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
+        return { path: lockPath, token: payload.token, payload };
+      } catch {
+        // Lost the reclaim race to another process, or the stale lock cannot
+        // be replaced — keep the "handle or SessionLockError" contract.
+        throw new SessionLockError(
+          lockPath,
+          `Could not reclaim the stale lock for session ${sessionName} — another alpha-loop run `
+          + `may have just acquired it. Retry, or inspect the lock file: ${lockPath}`,
+        );
+      }
     }
 
     throw new SessionLockError(
