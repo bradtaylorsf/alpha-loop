@@ -746,4 +746,145 @@ describe('finalizeSession', () => {
     expect(body).toContain('Closes #1');
     expect(body).not.toContain('Closes #2');
   });
+
+  describe('diverged session branch reconciliation', () => {
+    function makeFinalizableSession(config: Config) {
+      const session = createSession(config);
+      session.results.push({
+        issueNum: 1,
+        title: 'First issue',
+        status: 'success',
+        prUrl: 'https://github.com/owner/repo/pull/1',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        duration: 60,
+        filesChanged: 3,
+      });
+      // Only inspect exec calls made by finalizeSession itself
+      mockExec.mockClear();
+      return session;
+    }
+
+    /**
+     * Simulate a session branch that diverged from origin: the pull conflicts,
+     * and (unless rebaseSucceeds) the rebase conflicts too, stranding the
+     * checkout on a detached HEAD until the finalizer aborts it.
+     */
+    function mockDivergedRemote(opts: { rebaseSucceeds?: boolean; detachedAfterAbort?: boolean } = {}) {
+      mockExec.mockImplementation((cmd: string) => {
+        if (cmd.startsWith('git pull origin')) {
+          return { stdout: '', stderr: 'CONFLICT (content): e2e/request-stage-board.spec.ts', exitCode: 1 };
+        }
+        if (cmd.startsWith('git rebase "origin/')) {
+          return opts.rebaseSucceeds
+            ? { stdout: '', stderr: '', exitCode: 0 }
+            : { stdout: '', stderr: 'CONFLICT (content): e2e/request-stage-board.spec.ts', exitCode: 1 };
+        }
+        if (cmd.startsWith('git symbolic-ref')) {
+          // Detached HEAD after the aborted rebase unless told otherwise
+          return opts.detachedAfterAbort === false
+            ? { stdout: 'refs/heads/session/20260101-000000', stderr: '', exitCode: 0 }
+            : { stdout: '', stderr: '', exitCode: 1 };
+        }
+        if (cmd.includes('diff --cached --quiet')) {
+          return { stdout: '', stderr: '', exitCode: 1 }; // learnings staged
+        }
+        return { stdout: '', stderr: '', exitCode: 0 };
+      });
+    }
+
+    test('aborts a conflicted rebase and restores the session branch checkout', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+      const config = makeConfig({ autoMerge: true });
+      const session = makeFinalizableSession(config);
+      mockDivergedRemote();
+
+      await finalizeSession(session, config);
+
+      const calls = mockExec.mock.calls.map((call) => String(call[0]));
+      const mergeAbortIdx = calls.indexOf('git merge --abort');
+      const rebaseIdx = calls.findIndex((cmd) => cmd.startsWith('git rebase "origin/'));
+      const rebaseAbortIdx = calls.indexOf('git rebase --abort');
+
+      // Conflicted pull's merge is aborted before the rebase attempt
+      expect(mergeAbortIdx).toBeGreaterThan(-1);
+      expect(mergeAbortIdx).toBeLessThan(rebaseIdx);
+      // Conflicted rebase is always aborted — never left in progress
+      expect(rebaseAbortIdx).toBeGreaterThan(rebaseIdx);
+      // Detached HEAD is restored to the session branch (initial checkout + restore)
+      const checkoutCalls = calls.filter((cmd) => cmd === `git checkout "${session.branch}"`);
+      expect(checkoutCalls).toHaveLength(2);
+      expect(calls.lastIndexOf(`git checkout "${session.branch}"`)).toBeGreaterThan(rebaseAbortIdx);
+    });
+
+    test('leaves the checkout alone when the rebase abort reattaches HEAD', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+      const config = makeConfig({ autoMerge: true });
+      const session = makeFinalizableSession(config);
+      mockDivergedRemote({ detachedAfterAbort: false });
+
+      await finalizeSession(session, config);
+
+      const calls = mockExec.mock.calls.map((call) => String(call[0]));
+      const checkoutCalls = calls.filter((cmd) => cmd === `git checkout "${session.branch}"`);
+      expect(checkoutCalls).toHaveLength(1); // only the initial checkout
+    });
+
+    test('commits learnings locally but never pushes when the branch stays diverged', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+      const config = makeConfig({ autoMerge: true });
+      const session = makeFinalizableSession(config);
+      mockDivergedRemote();
+
+      const result = await finalizeSession(session, config);
+
+      expect(result).toBe('https://github.com/owner/repo/pull/99');
+      const calls = mockExec.mock.calls.map((call) => String(call[0]));
+      expect(calls.some((cmd) => cmd.startsWith('git commit'))).toBe(true);
+      expect(calls.some((cmd) => cmd.startsWith('git push'))).toBe(false);
+      expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({ skipPush: true }));
+    });
+
+    test('pushes learnings when the pull fails but the rebase reconciles', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+      const config = makeConfig({ autoMerge: true });
+      const session = makeFinalizableSession(config);
+      mockDivergedRemote({ rebaseSucceeds: true });
+
+      await finalizeSession(session, config);
+
+      const calls = mockExec.mock.calls.map((call) => String(call[0]));
+      expect(calls).not.toContain('git rebase --abort');
+      expect(calls).toContain(`git push origin "${session.branch}"`);
+      expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({ skipPush: false }));
+    });
+
+    test('skips pull entirely when no remote session branch exists', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
+      const config = makeConfig({ autoMerge: true });
+      const session = makeFinalizableSession(config);
+      mockExec.mockImplementation((cmd: string) => {
+        if (cmd.startsWith('git rev-parse --verify --quiet "origin/')) {
+          return { stdout: '', stderr: '', exitCode: 1 }; // remote branch missing
+        }
+        if (cmd.includes('diff --cached --quiet')) {
+          return { stdout: '', stderr: '', exitCode: 1 };
+        }
+        return { stdout: '', stderr: '', exitCode: 0 };
+      });
+
+      await finalizeSession(session, config);
+
+      const calls = mockExec.mock.calls.map((call) => String(call[0]));
+      expect(calls.some((cmd) => cmd.startsWith('git pull'))).toBe(false);
+      expect(calls).toContain(`git push origin "${session.branch}"`);
+      expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({ skipPush: false }));
+    });
+  });
 });

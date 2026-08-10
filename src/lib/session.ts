@@ -1296,6 +1296,47 @@ Build on what was already done. Avoid duplicating work.`;
 }
 
 /**
+ * Bring the local session branch up to date with its remote counterpart.
+ * Auto-merged child PRs land on the remote session branch, so finalization
+ * must fold those commits in before pushing anything.
+ *
+ * Guarantees on return, success or failure: no merge or rebase is left in
+ * progress and the checkout is on the session branch (never a detached HEAD).
+ * Returns false when local and remote remain diverged — the caller must not
+ * push (and especially not force-push) over the remote branch.
+ */
+function reconcileSessionBranchWithRemote(branch: string, projectDir: string): boolean {
+  const remoteRef = exec(`git rev-parse --verify --quiet "origin/${branch}"`, { cwd: projectDir });
+  if (remoteRef.exitCode !== 0) return true; // no remote branch — nothing to reconcile
+
+  // Pull remote changes (auto-merged batch PRs) into local branch.
+  // --autostash keeps uncommitted trace/artifact files from blocking a
+  // fast-forward; without it a dirty working tree forces the rebase fallback,
+  // which leaves the local branch missing the auto-merged child PRs and risks
+  // clobbering them on the finalize push.
+  const pull = exec(`git pull origin "${branch}" --no-edit --autostash`, { cwd: projectDir });
+  if (pull.exitCode === 0) return true;
+
+  // A conflicted pull leaves a merge in progress; abort it before trying rebase.
+  log.warn(`Could not pull remote session branch — trying rebase`);
+  exec('git merge --abort', { cwd: projectDir });
+
+  const rebase = exec(`git rebase "origin/${branch}" --autostash`, { cwd: projectDir });
+  if (rebase.exitCode === 0) return true;
+
+  // A conflicted rebase stops on a detached HEAD with .git/rebase-merge present
+  // and the autostash pending. Abort restores the branch and the stash — never
+  // exit with the user's checkout stuck mid-rebase.
+  log.warn('Rebase onto remote session branch failed — aborting rebase');
+  exec('git rebase --abort', { cwd: projectDir });
+  const head = exec('git symbolic-ref -q HEAD', { cwd: projectDir });
+  if (head.exitCode !== 0) {
+    exec(`git checkout "${branch}"`, { cwd: projectDir });
+  }
+  return false;
+}
+
+/**
  * Finalize session: commit learnings to session branch, create session PR.
  * Only runs when autoMerge is enabled and issues were processed.
  */
@@ -1325,17 +1366,13 @@ export async function finalizeSession(
     log.warn('Could not checkout session branch for finalization');
     return null;
   }
-  // Pull remote changes (auto-merged batch PRs) into local branch.
-  // --autostash keeps uncommitted trace/artifact files from blocking a
-  // fast-forward; without it a dirty working tree forces the rebase fallback,
-  // which leaves the local branch missing the auto-merged child PRs and risks
-  // clobbering them on the finalize push.
-  const pull = exec(`git pull origin "${session.branch}" --no-edit --autostash`, {
-    cwd: projectDir,
-  });
-  if (pull.exitCode !== 0) {
-    log.warn(`Could not pull remote session branch — trying rebase`);
-    exec(`git rebase "origin/${session.branch}" --autostash`, { cwd: projectDir });
+  const reconciled = reconcileSessionBranchWithRemote(session.branch, projectDir);
+  if (!reconciled) {
+    log.warn(
+      `Session branch ${session.branch} diverged from origin and could not be reconciled — ` +
+      'the remote branch (with any auto-merged child PRs) is kept as-is. Learnings will be ' +
+      'committed locally but not pushed; reconcile and push manually to update the session PR.',
+    );
   }
 
   // Save session manifest to learnings directory (tracked in git, shared with team)
@@ -1407,7 +1444,11 @@ export async function finalizeSession(
       `git commit -m "chore: learnings from ${session.name}\n\nProcessed ${commitIssueCount} issue(s) in this session."`,
       { cwd: projectDir },
     );
-    exec(`git push origin "${session.branch}"`, { cwd: projectDir });
+    if (reconciled) {
+      exec(`git push origin "${session.branch}"`, { cwd: projectDir });
+    } else {
+      log.warn('Skipping learnings push — session branch diverged from origin');
+    }
   }
 
   // Create or update session PR
@@ -1553,6 +1594,10 @@ export async function finalizeSession(
       title: prTitle,
       body: prBody,
       cwd: projectDir,
+      // When local and remote diverged irreconcilably, create/update the PR
+      // from the remote branch as-is rather than pushing (or force-pushing)
+      // the diverged local branch over the auto-merged child PRs.
+      skipPush: !reconciled,
     });
     session.sessionPrUrl = prUrl;
     updateSessionManifest(session, {
