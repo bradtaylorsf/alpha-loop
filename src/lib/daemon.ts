@@ -257,8 +257,18 @@ export function acquireDaemonLock(
 
     if (lockIsStale(existing, daemon, now, isPidAlive)) {
       try { unlinkSync(lockPath); } catch { /* best effort */ }
-      writeFileSync(lockPath, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
-      return { path: lockPath, token: payload.token, payload };
+      try {
+        writeFileSync(lockPath, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
+        return { path: lockPath, token: payload.token, payload };
+      } catch {
+        // Lost the reclaim race to another daemon, or the stale lock cannot
+        // be replaced — keep the "handle or DaemonLockError" contract.
+        throw new DaemonLockError(
+          lockPath,
+          `Could not reclaim the stale daemon lock for ${config.repo} — another alpha-loop daemon `
+          + `may have just acquired it. Retry, or inspect the lock file: ${lockPath}`,
+        );
+      }
     }
 
     throw new DaemonLockError(
