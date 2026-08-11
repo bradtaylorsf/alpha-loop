@@ -272,6 +272,32 @@ batch: true
 batch_size: 5
 ```
 
+### Quick Mode
+
+Quick mode is the middle ground between sequential and batch mode — built for epics where you want speed without losing per-issue context isolation:
+
+```bash
+# Run an epic in quick mode
+alpha-loop run --epic 42 --quick
+```
+
+**How it works:** One shared worktree is created for the whole run (one branch, one dependency install). Then each issue gets its own fresh agent sessions for plan + implement + commit — so the loop runs *plan, build, plan, build, plan, build* — and everything else is deferred to a single finalize pass at the end:
+
+1. **Per issue** — Plan agent, implement agent, commit (fresh agent context per issue, no context bleed between issues)
+2. **Finalize: test** — Runs the test suite once with the usual agent fix loop
+3. **Finalize: PR** — Creates one PR for all issues and auto-merges it into the session branch
+4. **Epic verification** — The epic verification pass runs as usual when the checklist completes
+5. **Post-session review** — The existing holistic session review (with fix loop) covers the whole diff
+6. **Epic-level learnings** — One learning artifact is extracted for the whole run (fed by the review findings and verification outcome) and committed into the session PR
+
+Compared to sequential mode, this drops per-issue tests, review, verify, learnings, PR, and merge round-trips. Compared to batch mode, each issue still gets a dedicated agent session, so quality holds up on larger epics. If the deferred test pass fails after the fix attempts, the PR is left open and unmerged, the shared worktree is preserved for recovery, and epic verification is skipped.
+
+Or set it permanently in `.alpha-loop.yaml`:
+
+```yaml
+quick: true
+```
+
 ### Crash Recovery (`alpha-loop resume`)
 
 If the loop hangs or crashes mid-session, work can be stranded on local branches with no PR. Run `alpha-loop resume` to recover:
@@ -359,7 +385,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop evolve` | Meta-Harness-style automated optimization loop |
 | `alpha-loop evolve routing` | Propose routing promotions/demotions as draft PRs based on eval metrics |
 | `alpha-loop evolve routing --demote <stage>` | Manually demote a stage to routing.fallback.escalate_to |
-| `alpha-loop plan` | Generate a full project scope (milestones + issues) from seed inputs using AI |
+| `alpha-loop plan` | Generate a full project scope (milestones + issues) from seed inputs using AI. Issues are sliced vertically and carry `## Touches` file-scope and `Depends on #N` dependency metadata so the runner can order (and eventually parallelize) work |
 | `alpha-loop plan --seed <file>` | Read seed description from a file instead of prompting |
 | `alpha-loop plan --dry-run` | Display the plan and save `.alpha-loop/plan.json` without creating GitHub resources |
 | `alpha-loop plan --resume` | Create GitHub resources from the saved `.alpha-loop/plan.json` draft |
@@ -390,6 +416,7 @@ Options:
   --merge-to <branch> Use an existing branch instead of creating a new session branch
   --batch             Batch mode: process multiple issues per agent call (faster, fewer tokens)
   --batch-size <n>    Issues per batch (default: 5)
+  --quick             Quick mode: plan+build+commit per issue in a fresh agent session, one test/review/PR pass at the end
   --issue <n>         Process exactly one issue by issue number (skips the picker)
   --epic <n>          Process a specific epic by issue number (skips the picker)
   --epics <ids>       Process multiple epics in order (comma-separated)
@@ -547,6 +574,7 @@ eval_dir: .alpha-loop/evals
 | `auto_capture` | `true` | Auto-capture failures as eval cases at end of session |
 | `batch` | `false` | Enable batch mode — process multiple issues per agent call |
 | `batch_size` | `5` | Number of issues per batch when batch mode is enabled |
+| `quick` | `false` | Quick mode — plan+build+commit per issue on one shared worktree, single test/review/PR pass at the end |
 | `smoke_test` | (none) | Shell command to run as a final smoke test after session review |
 | `web_app.setup_command` | top-level `setup_command` | Optional setup command for website/app repos |
 | `web_app.build_command` | package `build` script | Build command captured as part of web/app verification |
@@ -648,6 +676,7 @@ All config options can be set via environment variables (uppercase, same names):
 | `AUTO_CAPTURE` | `auto_capture` |
 | `BATCH` | `batch` |
 | `BATCH_SIZE` | `batch_size` |
+| `QUICK` | `quick` |
 | `SKIP_POST_SESSION_REVIEW` | `post_session.review` (inverted) |
 | `SKIP_POST_SESSION_SECURITY` | `post_session.security_scan` (inverted) |
 
