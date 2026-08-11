@@ -1,0 +1,157 @@
+{
+  "name": "session/epic-374-epic-parallel-execution-concurrent-sessions-tiered-tests-non-blocking-agents",
+  "branch": "session/epic-374-epic-parallel-execution-concurrent-sessions-tiered-tests-non-blocking-agents",
+  "completed": "2026-08-11T02:13:50.994Z",
+  "results": [
+    {
+      "issueNum": 370,
+      "title": "Add tiered testing: scoped per-issue test runs, full suite once per session",
+      "status": "waiting",
+      "testsPassing": false,
+      "verifyPassing": false,
+      "duration": 974,
+      "filesChanged": 0
+    },
+    {
+      "issueNum": 371,
+      "title": "Make all git mutations worktree-only to unblock concurrent sessions",
+      "status": "waiting",
+      "testsPassing": false,
+      "verifyPassing": false,
+      "duration": 1085,
+      "filesChanged": 0
+    },
+    {
+      "issueNum": 372,
+      "title": "Run independent epics in parallel via --parallel on the epic queue",
+      "status": "waiting",
+      "testsPassing": false,
+      "verifyPassing": false,
+      "duration": 1101,
+      "filesChanged": 0
+    },
+    {
+      "issueNum": 373,
+      "title": "Run learnings and assumptions agents as non-blocking background tasks",
+      "status": "waiting",
+      "testsPassing": false,
+      "verifyPassing": false,
+      "duration": 1027,
+      "filesChanged": 0
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 113478,
+      "tokens_out": 87291,
+      "cost_usd": 0,
+      "wall_time_s": 203.056,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-11T01:03:48.507Z",
+      "issue_num": 370
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 866320,
+      "tokens_out": 666400,
+      "cost_usd": 0,
+      "wall_time_s": 763.458,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-11T01:07:12.003Z",
+      "issue_num": 370
+    },
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 145217,
+      "tokens_out": 111705,
+      "cost_usd": 0,
+      "wall_time_s": 159.126,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-11T01:20:08.142Z",
+      "issue_num": 371
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 1341044,
+      "tokens_out": 1031572,
+      "cost_usd": 0,
+      "wall_time_s": 918.216,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-11T01:22:47.748Z",
+      "issue_num": 371
+    },
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 72514,
+      "tokens_out": 55780,
+      "cost_usd": 0,
+      "wall_time_s": 215.092,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-11T01:38:23.935Z",
+      "issue_num": 372
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 973803,
+      "tokens_out": 749079,
+      "cost_usd": 0,
+      "wall_time_s": 872.906,
+      "tool_calls": 0,
+      "tool_errors": 1,
+      "stage_success": true,
+      "started_at": "2026-08-11T01:41:59.490Z",
+      "issue_num": 372
+    },
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 69187,
+      "tokens_out": 53221,
+      "cost_usd": 0,
+      "wall_time_s": 250.439,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-11T01:56:45.077Z",
+      "issue_num": 373
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 386051,
+      "tokens_out": 296962,
+      "cost_usd": 0,
+      "wall_time_s": 768.336,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-11T02:00:56.038Z",
+      "issue_num": 373
+    }
+  ]
+}
