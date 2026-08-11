@@ -422,6 +422,12 @@ export type Config = {
   batch: boolean;
   /** Number of issues per batch when batch mode is enabled (default: 5). */
   batchSize: number;
+  /**
+   * Quick mode — each issue runs plan + implement + commit in a fresh agent
+   * session on one shared worktree; tests, review, and the PR are deferred to
+   * a single end-of-run pass (default: false).
+   */
+  quick: boolean;
   /** Shell command to run as a final smoke test after session review (default: ''). */
   smokeTest: string;
   /** Agent timeout in seconds. Defaults to 1800 (30 minutes). */
@@ -495,6 +501,7 @@ const DEFAULTS: Config = {
   skipPostSessionSecurity: false,
   batch: false,
   batchSize: 5,
+  quick: false,
   smokeTest: '',
   agentTimeout: 1800,
   pricing: {
@@ -561,6 +568,7 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   auto_capture: 'autoCapture',
   batch: 'batch',
   batch_size: 'batchSize',
+  quick: 'quick',
   smoke_test: 'smokeTest',
   agent_timeout: 'agentTimeout',
   pipeline: 'pipeline',
@@ -610,6 +618,7 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   SKIP_POST_SESSION_SECURITY: 'skipPostSessionSecurity',
   BATCH: 'batch',
   BATCH_SIZE: 'batchSize',
+  QUICK: 'quick',
   SMOKE_TEST: 'smokeTest',
   AGENT_TIMEOUT: 'agentTimeout',
   PREFER_EPICS: 'preferEpics',

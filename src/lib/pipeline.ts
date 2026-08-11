@@ -480,6 +480,15 @@ export type PipelineOptions = {
     path?: string | null;
     branch?: string | null;
   };
+  /**
+   * Quick mode: run only plan + implement + commit in the given shared
+   * worktree. Tests, review, verify, learnings, PR, and merge are deferred
+   * to a single end-of-run pass (finalizeQuickRun).
+   */
+  quickWorktree?: {
+    path: string;
+    branch: string;
+  };
 };
 
 const PAUSE_REQUEST_FILE = 'alpha-loop-pause-request.json';
@@ -1264,6 +1273,7 @@ export async function processIssue(
     statePath: defaultEscalationStatePath(projectDir),
   });
   const epicOption = epicPromptOption(pipelineOptions);
+  const quickWorktree = pipelineOptions.quickWorktree;
   const resumeStage = pipelineOptions.resumeStage;
   const resumeContext = pipelineOptions.resumeContext?.trim();
   const resumeVerificationOnly = resumeStage === 'verification';
@@ -1321,7 +1331,7 @@ export async function processIssue(
   let worktreeResumed = false;
 
   const configuredSetupCommand = config.webApp?.setupCommand || config.setupCommand;
-  const setupCommands = [
+  const setupCommands = quickWorktree ? [] : [
     ...(!config.skipInstall ? ['pnpm install --frozen-lockfile', 'pnpm install'] : []),
     ...(configuredSetupCommand ? [configuredSetupCommand] : []),
     ...(config.webApp?.buildCommand ? [config.webApp.buildCommand] : []),
@@ -1346,21 +1356,29 @@ export async function processIssue(
   }
 
   try {
-    const wt = await setupWorktree({
-      issueNum,
-      projectDir,
-      baseBranch: config.baseBranch,
-      sessionBranch: session.branch,
-      autoMerge: config.autoMerge,
-      skipInstall: config.skipInstall,
-      setupCommand: configuredSetupCommand,
-      savedBranch: pipelineOptions.savedWorktree?.branch,
-      savedPath: pipelineOptions.savedWorktree?.path,
-      dryRun: config.dryRun,
-    });
-    worktreePath = wt.path;
-    worktreeBranch = wt.branch;
-    worktreeResumed = wt.resumed;
+    if (quickWorktree) {
+      // Quick mode: all issues share one pre-created worktree — no per-issue
+      // branch, install, or setup command.
+      worktreePath = quickWorktree.path;
+      worktreeBranch = quickWorktree.branch;
+      log.info(`Quick mode: reusing shared worktree at ${worktreePath} (branch: ${worktreeBranch})`);
+    } else {
+      const wt = await setupWorktree({
+        issueNum,
+        projectDir,
+        baseBranch: config.baseBranch,
+        sessionBranch: session.branch,
+        autoMerge: config.autoMerge,
+        skipInstall: config.skipInstall,
+        setupCommand: configuredSetupCommand,
+        savedBranch: pipelineOptions.savedWorktree?.branch,
+        savedPath: pipelineOptions.savedWorktree?.path,
+        dryRun: config.dryRun,
+      });
+      worktreePath = wt.path;
+      worktreeBranch = wt.branch;
+      worktreeResumed = wt.resumed;
+    }
     recordSessionWorktree(session, {
       issueNum,
       title,
@@ -1520,13 +1538,15 @@ export async function processIssue(
       if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
         log.warn(`Agent hit a transient error during planning for #${issueNum} — re-queuing`);
         requeueIssue(config, issueNum);
-        const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, worktreePath });
-        recordSessionCleanup(session, {
-          status: cleanup.status,
-          worktreePath: cleanup.path,
-          reason: cleanup.reason,
-          at: new Date().toISOString(),
-        });
+        if (!quickWorktree) {
+          const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, worktreePath });
+          recordSessionCleanup(session, {
+            status: cleanup.status,
+            worktreePath: cleanup.path,
+            reason: cleanup.reason,
+            at: new Date().toISOString(),
+          });
+        }
         recordSessionIssue(session, issueNum, { status: 'failure', stage: 'plan', failureReason: 'transient' });
         return failureResult(issueNum, title, startTime, 'transient');
       }
@@ -1647,13 +1667,15 @@ export async function processIssue(
       if (isTransientError(implResult.output)) {
         log.warn(`Agent hit a transient error during implementation for #${issueNum} — re-queuing`);
         requeueIssue(config, issueNum);
-        const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true, worktreePath });
-        recordSessionCleanup(session, {
-          status: cleanup.status,
-          worktreePath: cleanup.path,
-          reason: cleanup.reason,
-          at: new Date().toISOString(),
-        });
+        if (!quickWorktree) {
+          const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true, worktreePath });
+          recordSessionCleanup(session, {
+            status: cleanup.status,
+            worktreePath: cleanup.path,
+            reason: cleanup.reason,
+            at: new Date().toISOString(),
+          });
+        }
         recordSessionIssue(session, issueNum, { status: 'failure', stage: 'implement', failureReason: 'transient' });
         return failureResult(issueNum, title, startTime, 'transient');
       }
@@ -1661,13 +1683,15 @@ export async function processIssue(
       labelIssue(config.repo, issueNum, 'failed', 'in-progress');
       commentIssue(config.repo, issueNum, 'Agent loop failed during implementation. See logs for details.');
       writeRecoverableCrashMarker(new Error('Implementation failed after writing commits'), 'implement');
-      const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true, worktreePath });
-      recordSessionCleanup(session, {
-        status: cleanup.status,
-        worktreePath: cleanup.path,
-        reason: cleanup.reason,
-        at: new Date().toISOString(),
-      });
+      if (!quickWorktree) {
+        const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true, worktreePath });
+        recordSessionCleanup(session, {
+          status: cleanup.status,
+          worktreePath: cleanup.path,
+          reason: cleanup.reason,
+          at: new Date().toISOString(),
+        });
+      }
       recordSessionIssue(session, issueNum, { status: 'failure', stage: 'implement', failureReason: 'permanent' });
       return failureResult(issueNum, title, startTime, 'permanent');
     }
@@ -1723,7 +1747,11 @@ export async function processIssue(
     ? { ...config, testCommand: webAppProfile.testCommand }
     : config;
 
-  if (!plan.testing.needed) {
+  if (quickWorktree) {
+    log.info('Quick mode: tests deferred to end-of-run pass');
+    testsPassing = true;
+    testOutput = 'Quick mode: tests deferred to end-of-run pass';
+  } else if (!plan.testing.needed) {
     log.info(`Tests skipped by plan: ${plan.testing.reason}`);
     testsPassing = true;
     testOutput = `Tests skipped by plan: ${plan.testing.reason}`;
@@ -1841,7 +1869,7 @@ export async function processIssue(
     }
   }
 
-  if (testsPassing && webAppProfile?.buildCommand && !config.dryRun) {
+  if (testsPassing && webAppProfile?.buildCommand && !config.dryRun && !quickWorktree) {
     log.step('Step 5b: Running web/app build');
     const commandDecision = evaluateCommandPolicy(config, webAppProfile.buildCommand, { issueNum, title, stage: 'command' });
     if (!decisionAllowed(commandDecision)) {
@@ -1880,7 +1908,9 @@ export async function processIssue(
   let reviewOutput = '';
   let reviewGate: GateResult = DEFAULT_GATE;
 
-  if (config.skipReview) {
+  if (quickWorktree) {
+    log.info('Quick mode: code review deferred to end-of-run session review');
+  } else if (config.skipReview) {
     log.info('Code review skipped');
   } else if (config.dryRun) {
     log.dry('Would run code review');
@@ -2024,7 +2054,12 @@ export async function processIssue(
   let verifyPassing = false;
   let verifySkipped = false;
 
-  if (!plan.verification.needed) {
+  if (quickWorktree) {
+    log.info('Quick mode: verification deferred to end-of-run pass');
+    verifyPassing = true;
+    verifySkipped = true;
+    verifyOutput = 'Quick mode: verification deferred to end-of-run pass';
+  } else if (!plan.verification.needed) {
     log.info(`Verification skipped by plan: ${plan.verification.reason}`);
     verifyPassing = true;
     verifySkipped = true;
@@ -2205,7 +2240,7 @@ export async function processIssue(
 
   // --- Step 7b: Smoke test (if configured) ---
   const smokeCommand = webAppProfile?.smokeTest || config.smokeTest;
-  if (smokeCommand && !config.dryRun) {
+  if (smokeCommand && !config.dryRun && !quickWorktree) {
     currentStep = 'smoke';
     recordSessionStage(session, 'smoke');
     log.step('Step 7b: Running smoke test');
@@ -2344,7 +2379,7 @@ export async function processIssue(
   currentStep = 'learn';
   recordSessionStage(session, 'learn');
   log.step('Step 8: Extracting learnings');
-  const learningFile = await extractLearnings({
+  const learningFile = quickWorktree ? null : await extractLearnings({
     issueNum,
     title,
     status: testsPassing ? 'success' : 'failure',
@@ -2363,14 +2398,18 @@ export async function processIssue(
     ...epicOption,
   });
 
-  if (!config.dryRun) {
-    commitLearningFiles(
-      worktreePath,
-      [learningFile],
-      `chore: add learning artifact for issue #${issueNum}`,
-    );
+  if (quickWorktree) {
+    log.info('Quick mode: learning extraction deferred to the end-of-run epic-level pass');
+  } else {
+    if (!config.dryRun) {
+      commitLearningFiles(
+        worktreePath,
+        [learningFile],
+        `chore: add learning artifact for issue #${issueNum}`,
+      );
+    }
+    stepsCompleted.push('learn');
   }
-  stepsCompleted.push('learn');
 
   const webAppPrContext: WebAppPRContext | undefined = webAppProfile
     ? {
@@ -2417,7 +2456,9 @@ export async function processIssue(
   log.step('Step 9: Creating PR');
   let prUrl: string | undefined = pipelineOptions.existingPrUrl ?? undefined;
 
-  if (!config.dryRun) {
+  if (quickWorktree) {
+    log.info('Quick mode: PR deferred to end-of-run pass');
+  } else if (!config.dryRun) {
     const prBase = config.autoMerge ? session.branch : config.baseBranch;
     const prBody = buildPRBody(issueNum, title, reviewGate, testOutput, testsPassing, verifyPassing, verifySkipped, body, session.epic, webAppPrContext);
 
@@ -2564,7 +2605,7 @@ export async function processIssue(
     log.dry('Would update issue status to in-review');
   }
 
-  const shouldRequestQa = !config.skipQa && (plan.qa?.needed || Boolean(webAppProfile));
+  const shouldRequestQa = !quickWorktree && !config.skipQa && (plan.qa?.needed || Boolean(webAppProfile));
   if (shouldRequestQa) {
     const qaChecklist = webAppProfile ? webAppQaChecklist : (plan.qa?.checklist ?? []);
     const qaPreviewUrl = webAppPrContext?.previewUrl ?? plan.qa?.previewUrl;
@@ -2628,7 +2669,9 @@ export async function processIssue(
   currentStep = 'cleanup';
   recordSessionStage(session, 'cleanup');
   log.step('Step 12: Cleanup');
-  if (!mergeSucceeded && config.autoMerge && prUrl) {
+  if (quickWorktree) {
+    log.info('Quick mode: shared worktree kept for remaining issues and the end-of-run pass');
+  } else if (!mergeSucceeded && config.autoMerge && prUrl) {
     // Merge was expected but didn't happen (tests failing or merge failed) — preserve worktree for recovery
     const cleanup = await cleanupWorktree({
       issueNum,
@@ -3569,6 +3612,176 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   if (prUrl) log.info(`PR: ${prUrl}`);
 
   return results;
+}
+
+export type QuickFinalizeOptions = {
+  /** Issues that were implemented on the shared worktree, in processing order. */
+  issues: Array<{ number: number; title: string }>;
+  config: Config;
+  session: SessionContext;
+  worktreePath: string;
+  worktreeBranch: string;
+  /** Parent epic number, used for PR title/body when present. */
+  epicNum?: number;
+};
+
+export type QuickFinalizeResult = {
+  testsPassing: boolean;
+  testOutput: string;
+  prUrl?: string;
+  merged: boolean;
+};
+
+function buildQuickPRBody(
+  issues: Array<{ number: number; title: string }>,
+  testsPassing: boolean,
+  epicNum?: number,
+): string {
+  const lines: string[] = [
+    '## Quick Session Summary',
+    '',
+    'Issues implemented in quick mode (plan + build per issue, deferred verification):',
+    '',
+    ...issues.map((issue) => `- #${issue.number}: ${issue.title} (closes #${issue.number})`),
+    '',
+    `**Tests**: ${testsPassing ? 'PASSING' : 'FAILING'} (single end-of-run pass)`,
+    '**Review**: deferred to post-session holistic review',
+  ];
+  if (epicNum !== undefined) {
+    lines.push('', `Part of epic #${epicNum}.`);
+  }
+  lines.push('', '---', '*Generated by alpha-loop quick mode*');
+  return lines.join('\n');
+}
+
+/**
+ * End-of-run pass for quick mode: run the test suite once (with the usual
+ * agent fix loop), then create a single PR from the shared worktree branch
+ * and auto-merge it into the session branch.
+ *
+ * Per-issue quick runs skip tests/review/verify/PR entirely; this is where
+ * that deferred work happens, before the post-session holistic review and
+ * epic verification.
+ */
+export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<QuickFinalizeResult> {
+  const { issues, config, session, worktreePath, worktreeBranch, epicNum } = options;
+  const projectDir = process.cwd();
+  const logFile = join(session.logsDir, 'quick-finalize.log');
+
+  if (config.dryRun) {
+    log.dry('Would run quick-mode finalize pass (tests + single PR)');
+    return { testsPassing: true, testOutput: '', merged: false };
+  }
+
+  log.step('Quick finalize: running deferred test pass');
+  recordSessionStage(session, 'test');
+
+  // Safety net: commit anything an implement agent left uncommitted.
+  autoCommitDirtyWorktree(worktreePath, 'chore: commit remaining quick-mode changes');
+
+  let testsPassing = false;
+  let testOutput = '';
+  for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+    log.info(`Quick test attempt ${attempt} of ${config.maxTestRetries}`);
+    const testResult = runTests(worktreePath, config, logFile);
+    testOutput = testResult.output;
+
+    if (testResult.passed) {
+      testsPassing = true;
+      log.success(`All tests passed on attempt ${attempt}`);
+      break;
+    }
+
+    if (attempt < config.maxTestRetries) {
+      log.warn(`Tests failed on attempt ${attempt}, invoking agent to fix...`);
+      const issueList = issues.map((issue) => `#${issue.number} (${issue.title})`).join(', ');
+      const fixPrompt = `Tests are failing after implementing these issues in quick mode: ${issueList} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix ONLY code related to the issues listed above — do NOT modify test infrastructure, build scripts, or unrelated files\n3. Run the tests again to verify\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed`;
+
+      writeTraceToSubdir(session.name, 'prompts', `quick-fix-${attempt}.md`, fixPrompt);
+      try {
+        const fixResult = await spawnAgent({
+          ...agentForStep(config, 'test_fix'),
+          prompt: fixPrompt,
+          cwd: worktreePath,
+          logFile: join(session.logsDir, `quick-fix-${attempt}.log`),
+          verbose: config.verbose,
+          timeout: config.agentTimeout * 1000,
+        });
+        writeTraceToSubdir(session.name, 'outputs', `quick-fix-${attempt}.log`, fixResult.output);
+      } catch (err) {
+        log.warn(`Quick fix agent failed: ${err instanceof Error ? err.message : err}`);
+      }
+      autoCommitDirtyWorktree(worktreePath, `fix: resolve quick-mode test failures (attempt ${attempt})`);
+    } else {
+      log.warn(`Tests still failing after ${config.maxTestRetries} attempts`);
+      testOutput = `TESTS FAILED after ${config.maxTestRetries} fix attempts. Latest output:\n${testOutput}`;
+    }
+  }
+
+  // Single PR for all quick-mode issues, targeting the session branch when
+  // auto-merge is on (the session PR to base stays the reviewable artifact).
+  log.step('Quick finalize: creating single PR');
+  recordSessionStage(session, 'pr');
+  const prBase = config.autoMerge ? session.branch : config.baseBranch;
+  const issueNums = issues.map((issue) => `#${issue.number}`).join(', ');
+  const prTitle = epicNum !== undefined
+    ? `feat: quick session for epic #${epicNum} (${issueNums})`
+    : `feat: quick session (${issueNums})`;
+
+  let prUrl: string | undefined;
+  try {
+    prUrl = createPR({
+      repo: config.repo,
+      base: prBase,
+      head: worktreeBranch,
+      title: prTitle,
+      body: buildQuickPRBody(issues, testsPassing, epicNum),
+      cwd: worktreePath,
+    });
+    log.success(`Quick PR created: ${prUrl}`);
+    updateSessionManifestForPr(session, prUrl);
+  } catch (err) {
+    log.error(`Failed to create quick-mode PR: ${err instanceof Error ? err.message : err}`);
+    log.warn(`Worktree preserved at ${worktreePath} — branch ${worktreeBranch} holds all quick-mode commits`);
+    return { testsPassing, testOutput, merged: false };
+  }
+
+  let merged = false;
+  if (!testsPassing) {
+    log.warn('Skipping quick PR merge: tests are not passing — PR left open for manual review');
+  } else if (config.autoMerge) {
+    try {
+      mergePR(config.repo, worktreeBranch);
+      merged = true;
+      // Update local session branch to include the merged quick work.
+      exec('git fetch origin', { cwd: projectDir });
+      const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
+      if (currentBranch !== session.branch) {
+        exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+      }
+      exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+    } catch (err) {
+      log.warn(`Quick PR auto-merge failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // The orchestrator owns the shared worktree; clean it up now that the
+  // deferred pass is complete. Preserve it when the work didn't merge.
+  const cleanup = await cleanupWorktree({
+    issueNum: issues[0]?.number ?? 0,
+    projectDir,
+    autoCleanup: config.autoCleanup,
+    preserveIfCommits: !merged,
+    worktreePath,
+  });
+  recordSessionCleanup(session, {
+    status: cleanup.status,
+    worktreePath: cleanup.path,
+    reason: cleanup.reason,
+    at: new Date().toISOString(),
+  });
+
+  return { testsPassing, testOutput, prUrl, merged };
 }
 
 function failureResult(issueNum: number, title: string, startTime: number, reason?: 'transient' | 'permanent'): PipelineResult {

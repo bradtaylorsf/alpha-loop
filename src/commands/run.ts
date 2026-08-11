@@ -13,7 +13,7 @@ import {
 } from '../lib/github.js';
 import { buildEpicSummary, parseSubIssues } from '../lib/epics.js';
 import { verifyEpic } from '../lib/verify-epic.js';
-import { processIssue, processBatch } from '../lib/pipeline.js';
+import { processIssue, processBatch, finalizeQuickRun } from '../lib/pipeline.js';
 import {
   createSession,
   finalizeSession,
@@ -29,8 +29,9 @@ import {
   type SessionStatus,
 } from '../lib/session.js';
 import { releaseSessionLock, SessionLockError } from '../lib/session-lock.js';
-import { cleanupWorktree } from '../lib/worktree.js';
+import { cleanupWorktree, setupWorktree } from '../lib/worktree.js';
 import {
+  extractLearnings,
   generateSessionSummary,
   repairSessionLearningArtifacts,
   repairSessionSummaryArtifact,
@@ -86,6 +87,7 @@ export type RunOptions = {
   mergeTo?: string;
   batch?: boolean;
   batchSize?: number;
+  quick?: boolean;
   verbose?: boolean;
   validate?: boolean;
   fix?: boolean;
@@ -124,7 +126,8 @@ export type EpicExecutionFailureCode =
   | 'transient-stop'
   | 'epic-verification-failed'
   | 'epic-incomplete'
-  | 'epic-run-error';
+  | 'epic-run-error'
+  | 'quick-finalize-failed';
 
 export type EpicExecutionFailure = {
   code: EpicExecutionFailureCode;
@@ -1214,6 +1217,9 @@ async function executeSessionRun(
 
   // When set mid-loop, skip post-loop epic verification (e.g. checklist body inconsistency).
   let epicAbort = false;
+  // Quick mode: outputs from the deferred passes, fed into the epic-level learning extraction.
+  let quickFinalizeTestOutput: string | null = null;
+  let epicVerificationSummary: string | null = null;
 
   if (issues.length === 0) {
     log.info('No issues found. Nothing to do.');
@@ -1315,7 +1321,10 @@ async function executeSessionRun(
 
     const sessionStartTime = Date.now();
 
-    if (config.batch) {
+    if (config.batch && config.quick) {
+      log.warn('Both batch and quick mode are enabled — quick mode takes precedence');
+    }
+    if (config.batch && !config.quick) {
       // --- Batch mode: chunk issues and process each chunk as one agent session ---
       const batchSize = config.batchSize;
       const totalBatches = Math.ceil(issuesToProcess.length / batchSize);
@@ -1400,6 +1409,33 @@ async function executeSessionRun(
       }
     } else {
       // --- Sequential mode (original behavior) ---
+      // Quick mode: one shared worktree for the whole run — each issue runs
+      // plan + implement + commit in a fresh agent session on it, and tests,
+      // review, and the single PR happen in one finalize pass after the loop.
+      let quickWorktree: { path: string; branch: string } | null = null;
+      if (config.quick && issuesToProcess.length > 0) {
+        log.step(`Quick mode: setting up shared worktree for ${issuesToProcess.length} issue(s)`);
+        try {
+          const wt = await setupWorktree({
+            issueNum: issuesToProcess[0].number,
+            projectDir: process.cwd(),
+            baseBranch: config.baseBranch,
+            sessionBranch: session.branch,
+            autoMerge: config.autoMerge,
+            skipInstall: config.skipInstall,
+            setupCommand: config.webApp?.setupCommand || config.setupCommand,
+            dryRun: config.dryRun,
+          });
+          quickWorktree = { path: wt.path, branch: wt.branch };
+        } catch (err) {
+          const message = `Quick mode: failed to set up shared worktree: ${err instanceof Error ? err.message : err}`;
+          log.error(message);
+          failures.push({ code: 'quick-finalize-failed', message });
+          issuesToProcess = [];
+        }
+      }
+      const quickProcessed: Array<{ number: number; title: string }> = [];
+
       for (const issue of issuesToProcess) {
         // Check duration limit before each issue
         const runtimeDecision = evaluateRuntimePolicy(config, Date.now() - sessionStartTime);
@@ -1423,23 +1459,21 @@ async function executeSessionRun(
         activeIssueNum = issue.number;
 
         try {
-          const result = epicPromptContext
-            ? await processIssue(
-                issue.number,
-                issue.title,
-                issue.body,
-                config,
-                session,
-                { epicContext: epicPromptContext },
-              )
-            : await processIssue(
-                issue.number,
-                issue.title,
-                issue.body,
-                config,
-                session,
-              );
+          const result = await processIssue(
+            issue.number,
+            issue.title,
+            issue.body,
+            config,
+            session,
+            {
+              ...(epicPromptContext ? { epicContext: epicPromptContext } : {}),
+              ...(quickWorktree ? { quickWorktree } : {}),
+            },
+          );
           session.results.push(result);
+          if (quickWorktree && result.status === 'success' && !isRecoveredRunResult(result)) {
+            quickProcessed.push({ number: issue.number, title: issue.title });
+          }
 
           // Flip the epic checklist box when this sub-issue succeeded.
           // Skipped in dry-run: `processIssue` stubs tests in dry-run and returns success,
@@ -1474,6 +1508,60 @@ async function executeSessionRun(
 
         activeIssueNum = null;
       }
+
+      // --- Quick mode finalize: deferred tests + single PR for all issues ---
+      if (quickWorktree && quickProcessed.length > 0) {
+        try {
+          const quickResult = await finalizeQuickRun({
+            issues: quickProcessed,
+            config,
+            session,
+            worktreePath: quickWorktree.path,
+            worktreeBranch: quickWorktree.branch,
+            epicNum: activeEpic,
+          });
+          quickFinalizeTestOutput = quickResult.testOutput;
+          // Attach the shared PR to each quick result so summaries and the
+          // session PR body reference it.
+          if (quickResult.prUrl) {
+            for (const result of session.results) {
+              if (!result.prUrl && quickProcessed.some((q) => q.number === result.issueNum)) {
+                result.prUrl = quickResult.prUrl;
+              }
+            }
+          }
+          if (!quickResult.testsPassing) {
+            const message = `Quick mode: deferred test pass failed after ${config.maxTestRetries} attempts — PR ${quickResult.prUrl ?? '(not created)'} left unmerged`;
+            failures.push({ code: 'quick-finalize-failed', message });
+            epicAbort = true; // skip epic verification on a known-broken state
+          } else if (config.autoMerge && !quickResult.merged) {
+            const message = `Quick mode: PR ${quickResult.prUrl ?? '(not created)'} could not be merged into ${session.branch}`;
+            failures.push({ code: 'quick-finalize-failed', message });
+            epicAbort = true;
+          }
+        } catch (err) {
+          const message = `Quick mode finalize failed: ${err instanceof Error ? err.message : err}`;
+          log.error(message);
+          failures.push({ code: 'quick-finalize-failed', message });
+          epicAbort = true;
+        }
+      } else if (quickWorktree && quickProcessed.length === 0 && !config.dryRun) {
+        // Nothing succeeded — release the shared worktree (preserved if it
+        // holds commits, so partial work stays recoverable).
+        const cleanup = await cleanupWorktree({
+          issueNum: issuesToProcess[0]?.number ?? 0,
+          projectDir: process.cwd(),
+          autoCleanup: config.autoCleanup,
+          preserveIfCommits: true,
+          worktreePath: quickWorktree.path,
+        });
+        recordSessionCleanup(session, {
+          status: cleanup.status,
+          worktreePath: cleanup.path,
+          reason: cleanup.reason,
+          at: new Date().toISOString(),
+        });
+      }
     }
   }
 
@@ -1485,6 +1573,7 @@ async function executeSessionRun(
         log.step(`All sub-issues of epic #${activeEpic} are complete — running verification pass`);
         const verification = await runEpicVerificationFlow(activeEpic, config, session);
         verificationClosedEpic = verification.closedEpic;
+        epicVerificationSummary = `Epic #${activeEpic} verification: status=${verification.status}, verdict=${verification.verdict ?? 'unknown'}${verification.closedEpic ? ' (epic closed)' : ''}`;
         if (verification.failure) {
           failures.push(verification.failure);
         } else if (verification.status === 'needs-human-input') {
@@ -1700,6 +1789,48 @@ async function executeSessionRun(
     }
   } else if (config.skipPostSessionReview) {
     log.info('Post-session review skipped');
+  }
+
+  // Quick mode: one epic-level learning extraction (per-issue learnings were
+  // deferred). Runs after the post-session review so the learn prompt sees the
+  // holistic review findings and the epic verification outcome. The artifact is
+  // written to .alpha-loop/learnings/ on the session branch, which
+  // finalizeSession commits and pushes into the session PR.
+  if (config.quick && session.results.length > 0 && !config.dryRun && !config.skipLearn) {
+    log.step('Quick mode: extracting epic-level learnings');
+    try {
+      const projectDir = process.cwd();
+      exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+      const quickDiff = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: projectDir }).stdout.slice(0, 10_000);
+      if (quickDiff.trim()) {
+        const reviewGate = session.sessionReviewFindings;
+        const reviewOutput = reviewGate
+          ? (reviewGate.findings.length > 0
+              ? `Review: ${reviewGate.summary}\n${reviewGate.findings.map((f) => `- [${f.severity}] ${f.description} (${f.fixed ? 'fixed' : 'unfixed'})`).join('\n')}`
+              : `Review: ${reviewGate.summary || 'passed'}`)
+          : 'Review: post-session review not run';
+        await extractLearnings({
+          issueNum: activeEpic ?? session.results[0].issueNum,
+          title: activeEpicIssue?.title ?? `Quick session ${session.name}`,
+          status: session.results.every((r) => r.status === 'success') ? 'success' : 'failure',
+          retries: 0,
+          duration: session.results.reduce((sum, r) => sum + r.duration, 0),
+          diff: quickDiff,
+          testOutput: quickFinalizeTestOutput ?? '',
+          reviewOutput,
+          verifyOutput: epicVerificationSummary ?? '',
+          body: activeEpicIssue?.body ?? '',
+          config,
+          sessionLogsDir: session.logsDir,
+          sessionName: session.name,
+          ...(epicPromptContext ? { epicContext: epicPromptContext } : {}),
+        });
+      } else {
+        log.info('Quick mode: no session diff — skipping epic-level learnings');
+      }
+    } catch (err) {
+      log.warn(`Quick mode: epic-level learning extraction failed: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   // Finalize session
@@ -1986,6 +2117,7 @@ function buildConfigOverrides(options: RunOptions): Partial<Config> {
   if (options.mergeTo) overrides.mergeTo = options.mergeTo;
   if (options.batch) overrides.batch = true;
   if (options.batchSize) overrides.batchSize = options.batchSize;
+  if (options.quick) overrides.quick = true;
   if (options.verbose) overrides.verbose = true;
   return overrides;
 }
