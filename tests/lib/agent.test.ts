@@ -2,12 +2,19 @@ import {
   buildAgentArgs,
   buildEndpointEnv,
   buildOneShotCommand,
+  codexSandboxArgs,
   spawnAgent,
   DEFAULT_LMSTUDIO_BASE_URL,
   DEFAULT_OLLAMA_BASE_URL,
   type AgentOptions,
 } from '../../src/lib/agent';
 import type { RoutingEndpoint } from '../../src/lib/config';
+
+jest.mock('../../src/lib/shell', () => ({
+  exec: jest.fn(() => ({ stdout: '', stderr: '', exitCode: 128 })),
+}));
+import { exec } from '../../src/lib/shell';
+const mockShellExec = exec as jest.MockedFunction<typeof exec>;
 
 // Mock child_process.spawn
 const mockStdin = { write: jest.fn(), end: jest.fn() };
@@ -676,5 +683,52 @@ describe('spawnAgent default local env injection', () => {
     });
     const spawnOpts = (spawn as jest.Mock).mock.calls.at(-1)?.[2];
     expect(spawnOpts.env.ANTHROPIC_BASE_URL).toBe('http://localhost:9999');
+  });
+});
+
+describe('codexSandboxArgs', () => {
+  test('grants the parent .git dir as a writable root in linked worktrees', () => {
+    mockShellExec.mockReturnValue({
+      stdout: '/repo/.git\n',
+      stderr: '',
+      exitCode: 0,
+    });
+
+    expect(codexSandboxArgs('/repo/.worktrees/issue-1')).toEqual([
+      '-c',
+      'sandbox_workspace_write.writable_roots=["/repo/.git"]',
+    ]);
+    expect(mockShellExec).toHaveBeenCalledWith('git rev-parse --git-common-dir', { cwd: '/repo/.worktrees/issue-1' });
+  });
+
+  test('returns no args for the primary checkout (.git already inside cwd)', () => {
+    mockShellExec.mockReturnValue({ stdout: '.git\n', stderr: '', exitCode: 0 });
+
+    expect(codexSandboxArgs('/repo')).toEqual([]);
+  });
+
+  test('returns no args outside a git repo', () => {
+    mockShellExec.mockReturnValue({ stdout: '', stderr: 'fatal: not a git repository', exitCode: 128 });
+
+    expect(codexSandboxArgs('/tmp/elsewhere')).toEqual([]);
+  });
+
+  test('codex agent args include the writable-roots grant when in a linked worktree', () => {
+    mockShellExec.mockReturnValue({ stdout: '/repo/.git\n', stderr: '', exitCode: 0 });
+
+    const result = buildAgentArgs({
+      agent: 'codex',
+      model: 'gpt-5.4',
+      prompt: 'test',
+      cwd: '/repo/.worktrees/issue-9',
+    });
+
+    expect(result.command).toBe('codex');
+    expect(result.args).toEqual([
+      'exec',
+      '--model', 'gpt-5.4',
+      '--full-auto',
+      '-c', 'sandbox_workspace_write.writable_roots=["/repo/.git"]',
+    ]);
   });
 });

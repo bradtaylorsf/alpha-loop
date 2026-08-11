@@ -3,7 +3,9 @@
  */
 import { spawn } from 'node:child_process';
 import { createWriteStream, type WriteStream } from 'node:fs';
+import { resolve, relative, isAbsolute } from 'node:path';
 import { log } from './logger.js';
+import { exec } from './shell.js';
 import { classifyToolErrors } from './escalation.js';
 import type { RoutingEndpoint } from './config.js';
 
@@ -126,6 +128,31 @@ export type AgentOptions = {
 };
 
 /**
+ * Extra sandbox config the codex CLI needs when running inside a linked git
+ * worktree: the worktree's index and metadata live in the PARENT repo's .git
+ * directory, outside codex's workspace-write sandbox (which only covers the
+ * cwd). Without this grant, `git add`/`git commit` inside the worktree fail on
+ * index.lock and the agent cannot commit its own work.
+ *
+ * Returns `-c sandbox_workspace_write.writable_roots=[...]` args pointing at
+ * the git common dir, or [] when cwd is the primary checkout (common dir is
+ * already inside the sandbox) or not a git repo at all.
+ */
+export function codexSandboxArgs(cwd: string): string[] {
+  try {
+    const result = exec('git rev-parse --git-common-dir', { cwd });
+    if (result.exitCode !== 0 || !result.stdout.trim()) return [];
+    const commonDir = resolve(cwd, result.stdout.trim());
+    const rel = relative(cwd, commonDir);
+    const insideCwd = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    if (insideCwd) return [];
+    return ['-c', `sandbox_workspace_write.writable_roots=[${JSON.stringify(commonDir)}]`];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Build CLI command and args for a given agent type.
  *
  * `lmstudio` delegates to the claude CLI shape (Anthropic-compatible); `ollama`
@@ -160,6 +187,7 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
       }
       if (options.model) args.push('--model', options.model);
       args.push('--full-auto');
+      args.push(...codexSandboxArgs(options.cwd));
       return { command: 'codex', args };
     }
     case 'opencode': {

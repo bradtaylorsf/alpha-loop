@@ -1012,11 +1012,14 @@ function parseGitStatusPaths(stdout: string): string[] {
 
 function autoCommitDirtyWorktree(worktreePath: string, commitMessage: string): string[] {
   const statusResult = exec('git status --porcelain', { cwd: worktreePath });
-  const paths = parseGitStatusPaths(statusResult.stdout);
+  // The pause-request artifact is control-plane data, never work product — it
+  // must not land in the branch or it would falsely pause later issues.
+  const paths = parseGitStatusPaths(statusResult.stdout)
+    .filter((path) => path !== PAUSE_REQUEST_FILE);
   if (paths.length === 0) return [];
 
   log.warn(`Agent did not commit; auto-committing ${paths.length} files: ${paths.join(', ')}`);
-  const addResult = exec('git add -A', { cwd: worktreePath });
+  const addResult = exec(`git add -A -- ${shellQuote(`:(exclude)${PAUSE_REQUEST_FILE}`)} .`, { cwd: worktreePath });
   if (addResult.exitCode !== 0) {
     log.warn(`Could not stage fallback auto-commit paths: ${addResult.stderr || addResult.stdout}`);
     return [];
@@ -1720,17 +1723,27 @@ export async function processIssue(
     stepCosts.push(buildStepCost('implement', issueNum, implResult, config));
     recordStageTelemetry(session, issueNum, 'implement', implResult, config, implCtx);
 
+    // Commit any work the agent left uncommitted BEFORE honoring pause
+    // requests or failure handling. A sandboxed agent that cannot write the
+    // parent repo's git metadata (linked worktrees keep their index under the
+    // main .git dir) finishes its work, fails to commit, and pauses — the
+    // pipeline owns the fallback commit so completed work is never stranded.
+    if (implResult.exitCode === 0) {
+      autoCommittedPaths = autoCommitDirtyWorktree(
+        worktreePath,
+        `feat: implement issue #${issueNum} - ${title}`,
+      );
+    } else {
+      autoCommitDirtyWorktree(
+        worktreePath,
+        `wip: partial implementation of #${issueNum} (agent timed out or failed)`,
+      );
+    }
+
     const pauseResult = await pauseIfRequested('implement');
     if (pauseResult) return pauseResult;
 
     if (implResult.exitCode !== 0) {
-      // Auto-commit any uncommitted work before deciding on cleanup
-      const dirtyCheck = exec('git status --porcelain', { cwd: worktreePath });
-      if (dirtyCheck.stdout.trim()) {
-        exec('git add -A', { cwd: worktreePath });
-        exec(`git commit -m "wip: partial implementation of #${issueNum} (agent timed out or failed)"`, { cwd: worktreePath });
-      }
-
       if (isTransientError(implResult.output)) {
         log.warn(`Agent hit a transient error during implementation for #${issueNum} — re-queuing`);
         requeueIssue(config, issueNum);
@@ -1762,12 +1775,6 @@ export async function processIssue(
       recordSessionIssue(session, issueNum, { status: 'failure', stage: 'implement', failureReason: 'permanent' });
       return failureResult(issueNum, title, startTime, 'permanent');
     }
-
-    // Auto-commit if agent didn't
-    autoCommittedPaths = autoCommitDirtyWorktree(
-      worktreePath,
-      `feat: implement issue #${issueNum} - ${title}`,
-    );
 
     stepsCompleted.push('implement');
 
@@ -1888,19 +1895,16 @@ export async function processIssue(
         recordStageTelemetry(session, issueNum, 'test_fix', fixResult, config, fixCtx);
         stepsCompleted.push(`fix-${attempt}`);
 
+        // Auto-commit fixes before the pause check so sandboxed agents that
+        // cannot commit never strand fix work uncommitted.
+        autoCommitDirtyWorktree(worktreePath, `fix(#${issueNum}): resolve test failures (attempt ${attempt})`);
+
         const pauseResult = await pauseIfRequested(`test-fix-${attempt}`, {
           testsPassing: false,
           verifyPassing: false,
           verifySkipped: true,
         });
         if (pauseResult) return pauseResult;
-
-        // Auto-commit fixes
-        const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
-        if (fixStatus.stdout.trim()) {
-          exec('git add -A', { cwd: worktreePath });
-          exec(`git commit -m "fix(#${issueNum}): resolve test failures (attempt ${attempt})"`, { cwd: worktreePath });
-        }
 
         // Capture fix diff
         try {
@@ -2070,19 +2074,16 @@ export async function processIssue(
         stepCosts.push(buildStepCost('review', issueNum, reviewFixResult, config));
         recordStageTelemetry(session, issueNum, 'review_fix', reviewFixResult, config, reviewFixCtx);
 
+        // Auto-commit before the pause check so sandboxed agents that cannot
+        // commit never strand review fixes uncommitted.
+        autoCommitDirtyWorktree(worktreePath, `fix(#${issueNum}): address review findings (attempt ${attempt})`);
+
         const pauseResult = await pauseIfRequested(`review-fix-${attempt}`, {
           testsPassing,
           verifyPassing: false,
           verifySkipped: true,
         });
         if (pauseResult) return pauseResult;
-
-        // Auto-commit if agent didn't
-        const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
-        if (fixStatus.stdout.trim()) {
-          exec('git add -A', { cwd: worktreePath });
-          exec(`git commit -m "fix(#${issueNum}): address review findings (attempt ${attempt})"`, { cwd: worktreePath });
-        }
 
         // Re-run tests before next review attempt
         const testInvocation = resolvePipelineTestInvocation(worktreePath, issueBaseCommit, testConfig);
@@ -2258,19 +2259,16 @@ export async function processIssue(
           stepCosts.push(buildStepCost('verify', issueNum, verifyFixResult, config));
           recordStageTelemetry(session, issueNum, 'verify_fix', verifyFixResult, config, verifyFixCtx);
 
+          // Auto-commit before the pause check so sandboxed agents that
+          // cannot commit never strand verification fixes uncommitted.
+          autoCommitDirtyWorktree(worktreePath, `fix(#${issueNum}): address verification findings (attempt ${attempt})`);
+
           const pauseResult = await pauseIfRequested(`verify-fix-${attempt}`, {
             testsPassing,
             verifyPassing: false,
             verifySkipped: false,
           });
           if (pauseResult) return pauseResult;
-
-          // Auto-commit if agent didn't
-          const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
-          if (fixStatus.stdout.trim()) {
-            exec('git add -A', { cwd: worktreePath });
-            exec(`git commit -m "fix(#${issueNum}): address verification findings (attempt ${attempt})"`, { cwd: worktreePath });
-          }
 
           // Re-run tests before next verify attempt
           const testInvocation = resolvePipelineTestInvocation(worktreePath, issueBaseCommit, testConfig);

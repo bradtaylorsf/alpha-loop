@@ -392,7 +392,7 @@ describe('processIssue', () => {
     expect(mockLog.warn).toHaveBeenCalledWith(
       'Agent did not commit; auto-committing 2 files: src/lib/pipeline.ts, tests/lib/pipeline.test.ts',
     );
-    expect(mockExec).toHaveBeenCalledWith('git add -A', { cwd: '/tmp/worktree' });
+    expect(mockExec).toHaveBeenCalledWith("git add -A -- ':(exclude)alpha-loop-pause-request.json' .", { cwd: '/tmp/worktree' });
     expect(mockExec).toHaveBeenCalledWith(
       "git commit -m 'feat: implement issue #42 - Test issue'",
       { cwd: '/tmp/worktree' },
@@ -1199,6 +1199,60 @@ describe('processIssue', () => {
     expect(mockCreatePR.mock.invocationCallOrder[0]).toBeGreaterThan(
       (mockSpawnAgent as jest.Mock).mock.invocationCallOrder[verifyFixCallIndex],
     );
+  });
+
+  test('records a QA pause instead of failing when the session is already paused for human input (verify exhausted, PR exists)', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+
+    mockExistsSync.mockImplementation((path: any) => String(path).includes('plan-issue-42.json'));
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).includes('plan-issue-42.json')) {
+        return JSON.stringify({
+          summary: 'Plan with live verification and human QA',
+          files: ['src/index.ts'],
+          implementation: 'Implement it',
+          testing: { needed: false, reason: 'Verified live' },
+          verification: { needed: true, method: 'playwright', instructions: 'Open app', reason: 'Runtime behavior' },
+          qa: { needed: true, checklist: ['Open the preview and confirm the flow'], reason: 'Subjective UI check' },
+        });
+      }
+      return '';
+    });
+
+    // Every live-verification attempt fails, so the pipeline exhausts maxTestRetries
+    // and proceeds to PR creation + the QA pause with verifyPassing=false.
+    mockRunVerify.mockResolvedValue({ passed: false, skipped: false, output: 'Verification failed' });
+
+    // Run the REAL session-level state machine behind the mocked session module:
+    // an earlier sub-issue of the same epic session already paused it for human input.
+    const { applyHumanFeedbackTransition } = jest.requireActual('../../src/lib/session-state');
+    let manifest: any = applyHumanFeedbackTransition(
+      { status: 'running', stage: 'implement' },
+      { to: 'human_input_requested', reason: 'Sub-issue #606 needs a product decision', issueNum: 606 },
+    );
+    mockTransitionHumanFeedbackSessionStatus.mockImplementation((_session: any, input: any) => {
+      manifest = applyHumanFeedbackTransition(manifest, input);
+      return manifest;
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({ skipVerify: false }), makeSession());
+
+    expect(mockRunVerify).toHaveBeenCalledTimes(3);
+    expect(mockCreatePR).toHaveBeenCalled();
+
+    // The issue must surface as paused-for-QA with its PR, not as failed.
+    expect(result.status).toBe('waiting');
+    expect(result.waitingStatus).toBe('qa_requested');
+    expect(result.prUrl).toBe('https://github.com/owner/repo/pull/1');
+    expect(manifest.feedback.currentStatus).toBe('qa_requested');
+    expect(mockRecordSessionIssue).toHaveBeenCalledWith(expect.anything(), 42, expect.objectContaining({
+      status: 'qa_requested',
+      prUrl: 'https://github.com/owner/repo/pull/1',
+    }));
+    expect(mockWriteCrashMarker).not.toHaveBeenCalled();
+    expect(labelIssue).not.toHaveBeenCalledWith('owner/repo', 42, 'failed', expect.anything());
   });
 
   test('returns failure and labels failed when implementation fails', async () => {
@@ -2055,5 +2109,64 @@ describe('runFullSuiteGate', () => {
     }
     expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
     expect(mockSpawnAgent.mock.calls[0][0].prompt).toContain('full suite failed');
+  });
+});
+
+describe('auto-commit before pause (sandboxed agents that cannot commit)', () => {
+  test('commits implementation work before honoring a pause request', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    // The pause-request file appears only after the implement agent has run
+    // (plan is spawnAgent call #1, implement is call #2).
+    (existsSync as jest.Mock).mockImplementation((p: unknown) =>
+      String(p).endsWith('alpha-loop-pause-request.json') && mockSpawnAgent.mock.calls.length >= 2);
+    (readFileSync as jest.Mock).mockImplementation((p: unknown) => {
+      if (String(p).endsWith('alpha-loop-pause-request.json')) {
+        return JSON.stringify({
+          type: 'human_input',
+          reason: 'sandbox cannot write the worktree git index',
+          question: 'Please create the commit for me.',
+          qaChecklist: [],
+        });
+      }
+      return '';
+    });
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: ' M src/lib/thing.ts\n?? alpha-loop-pause-request.json\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    // The issue pauses, but the completed work is committed first — and the
+    // pause-request artifact itself is excluded from the commit.
+    expect(result.status).toBe('waiting');
+    expect(mockExec).toHaveBeenCalledWith(
+      "git add -A -- ':(exclude)alpha-loop-pause-request.json' .",
+      { cwd: '/tmp/worktree' },
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      "git commit -m 'feat: implement issue #42 - Test issue'",
+      { cwd: '/tmp/worktree' },
+    );
+  });
+
+  test('never lists the pause-request file among auto-committed paths', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: '?? alpha-loop-pause-request.json\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    // Only the control-plane file was dirty — nothing to commit.
+    expect(result.autoCommittedByPipeline).toBeUndefined();
+    expect(mockExec).not.toHaveBeenCalledWith(
+      expect.stringContaining('git commit -m \'feat: implement issue #42'),
+      expect.anything(),
+    );
   });
 });
