@@ -1,4 +1,4 @@
-import { processIssue, processBatch, finalizeQuickRun, buildPRBody } from '../../src/lib/pipeline';
+import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, buildPRBody } from '../../src/lib/pipeline';
 import type { SessionContext } from '../../src/lib/session';
 
 // Mock all dependencies
@@ -42,6 +42,7 @@ jest.mock('../../src/lib/github', () => ({
 }));
 
 jest.mock('../../src/lib/testing', () => ({
+  ...jest.requireActual('../../src/lib/testing'),
   runTests: jest.fn(),
 }));
 
@@ -214,6 +215,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     labelReady: 'ready',
     maxTestRetries: 3,
     testCommand: 'pnpm test',
+    testScope: 'full',
+    changedTestCommand: '',
     devCommand: 'pnpm dev',
     skipTests: false,
     skipReview: false,
@@ -314,6 +317,40 @@ describe('processIssue', () => {
     expect(mockExtractLearnings).toHaveBeenCalled();
     expect(mockSaveResult).toHaveBeenCalled();
     expect(mockCleanupWorktree).toHaveBeenCalled();
+  });
+
+  test('refreshes issue-scoped changed files for test retries', async () => {
+    let changedDiffCalls = 0;
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('git merge-base HEAD')) {
+        return { stdout: 'issue-base-sha', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes("git diff --name-only 'issue-base-sha'...HEAD")) {
+        changedDiffCalls++;
+        return {
+          stdout: changedDiffCalls === 1 ? 'src/first.ts' : 'src/first.ts\ntests/first.test.ts',
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockRunTests
+      .mockReturnValueOnce({ passed: false, output: 'failed' })
+      .mockReturnValueOnce({ passed: true, output: 'passed' });
+
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig({
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+      skipReview: true,
+    }), makeSession());
+
+    expect(mockRunTests).toHaveBeenNthCalledWith(1, '/tmp/worktree', expect.any(Object), expect.any(String), {
+      changedFiles: ['src/first.ts'],
+    });
+    expect(mockRunTests).toHaveBeenNthCalledWith(2, '/tmp/worktree', expect.any(Object), expect.any(String), {
+      changedFiles: ['src/first.ts', 'tests/first.test.ts'],
+    });
   });
 
   test('sets auto-commit metadata when the agent leaves uncommitted work', async () => {
@@ -1744,6 +1781,12 @@ describe('finalizeQuickRun', () => {
     expect(result.prUrl).toBe('https://github.com/owner/repo/pull/1');
 
     expect(mockRunTests).toHaveBeenCalledTimes(1);
+    expect(mockRunTests).toHaveBeenCalledWith(
+      '/tmp/quick-worktree',
+      expect.any(Object),
+      expect.any(String),
+      { forceFull: true },
+    );
     expect(mockSpawnAgent).not.toHaveBeenCalled();
     expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
       base: 'session/20260330-143000',
@@ -1833,5 +1876,33 @@ describe('finalizeQuickRun', () => {
     expect(result.testsPassing).toBe(true);
     expect(mockRunTests).not.toHaveBeenCalled();
     expect(mockCreatePR).not.toHaveBeenCalled();
+  });
+});
+
+describe('runFullSuiteGate', () => {
+  const issues = [{ number: 42, title: 'First issue' }];
+
+  test('forces the full suite and reuses the fix loop', async () => {
+    mockRunTests
+      .mockReturnValueOnce({ passed: false, output: 'full suite failed' })
+      .mockReturnValueOnce({ passed: true, output: 'full suite passed' });
+
+    const result = await runFullSuiteGate({
+      issues,
+      config: makeConfig({
+        testScope: 'changed',
+        changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+      }),
+      session: makeSession(),
+      worktreePath: '/tmp/session-worktree',
+    });
+
+    expect(result.testsPassing).toBe(true);
+    expect(mockRunTests).toHaveBeenCalledTimes(2);
+    for (const call of mockRunTests.mock.calls) {
+      expect(call[3]).toEqual({ forceFull: true });
+    }
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+    expect(mockSpawnAgent.mock.calls[0][0].prompt).toContain('full suite failed');
   });
 });

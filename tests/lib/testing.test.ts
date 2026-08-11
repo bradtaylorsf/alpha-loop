@@ -2,6 +2,7 @@ import { runTests } from '../../src/lib/testing';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
+  shellQuote: (value: string) => `'${String(value).replace(/'/g, `'\\''`)}'`,
 }));
 
 jest.mock('../../src/lib/logger', () => ({
@@ -22,6 +23,7 @@ jest.mock('node:fs', () => ({
 }));
 
 import { exec } from '../../src/lib/shell';
+import { log } from '../../src/lib/logger';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
@@ -41,6 +43,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     labelReady: 'ready',
     maxTestRetries: 3,
     testCommand: 'pnpm test',
+    testScope: 'full',
+    changedTestCommand: '',
     devCommand: 'pnpm dev',
     skipTests: false,
     skipReview: false,
@@ -105,6 +109,73 @@ describe('runTests', () => {
 
     expect(result.passed).toBe(true);
     expect(mockExec).toHaveBeenCalledWith('npm test', expect.objectContaining({ cwd: '/work' }));
+  });
+
+  test('uses a safely quoted changed-file template in changed scope', () => {
+    mockExec.mockReturnValue({ stdout: 'Related tests passed', stderr: '', exitCode: 0 });
+
+    runTests('/work', makeConfig({
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+    }), '/log', {
+      changedFiles: ['src/one.ts', "src/it's complicated.ts"],
+    });
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "pnpm jest --findRelatedTests 'src/one.ts' 'src/it'\\''s complicated.ts'",
+      expect.objectContaining({ cwd: '/work' }),
+    );
+  });
+
+  test('preserves the full command in full scope even when changed files are provided', () => {
+    mockExec.mockReturnValue({ stdout: 'All tests passed', stderr: '', exitCode: 0 });
+
+    runTests('/work', makeConfig(), '/log', { changedFiles: ['src/one.ts'] });
+
+    expect(mockExec).toHaveBeenCalledWith('pnpm test', expect.objectContaining({ cwd: '/work' }));
+  });
+
+  test('treats an omitted test scope as full for backwards compatibility', () => {
+    mockExec.mockReturnValue({ stdout: 'All tests passed', stderr: '', exitCode: 0 });
+
+    runTests('/work', makeConfig({ testScope: undefined }), '/log');
+
+    expect(mockExec).toHaveBeenCalledWith('pnpm test', expect.objectContaining({ cwd: '/work' }));
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  test('forces the full command for the session gate', () => {
+    mockExec.mockReturnValue({ stdout: 'All tests passed', stderr: '', exitCode: 0 });
+
+    runTests('/work', makeConfig({
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+    }), '/log', { changedFiles: ['src/one.ts'], forceFull: true });
+
+    expect(mockExec).toHaveBeenCalledWith('pnpm test', expect.objectContaining({ cwd: '/work' }));
+  });
+
+  test('warns and falls back to the full command when changed_test_command is unset', () => {
+    mockExec.mockReturnValue({ stdout: 'All tests passed', stderr: '', exitCode: 0 });
+
+    runTests('/work', makeConfig({ testScope: 'changed' }), '/log', {
+      changedFiles: ['src/one.ts'],
+    });
+
+    expect(mockExec).toHaveBeenCalledWith('pnpm test', expect.objectContaining({ cwd: '/work' }));
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('changed_test_command is not configured'));
+  });
+
+  test('warns and falls back when the changed command has no files placeholder', () => {
+    mockExec.mockReturnValue({ stdout: 'All tests passed', stderr: '', exitCode: 0 });
+
+    runTests('/work', makeConfig({
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests',
+    }), '/log', { changedFiles: ['src/one.ts'] });
+
+    expect(mockExec).toHaveBeenCalledWith('pnpm test', expect.objectContaining({ cwd: '/work' }));
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('{files}'));
   });
 
   test('returns passed=false when test command exits non-zero', () => {

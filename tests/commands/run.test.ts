@@ -2,6 +2,7 @@ import { formatEpicPickerMeta, formatMilestonePickerMeta, runCommand, runSingleE
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
+  shellQuote: (value: string) => `'${String(value).replace(/'/g, `'\\''`)}'`,
 }));
 
 jest.mock('../../src/lib/logger', () => ({
@@ -39,6 +40,7 @@ jest.mock('../../src/lib/pipeline', () => ({
   processIssue: jest.fn(),
   processBatch: jest.fn(),
   finalizeQuickRun: jest.fn(),
+  runFullSuiteGate: jest.fn(),
   readGateResult: jest.fn(() => ({ passed: true, summary: '', findings: [] })),
   formatGateFindings: jest.fn(() => ''),
 }));
@@ -120,7 +122,7 @@ import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
-import { processIssue, processBatch, finalizeQuickRun } from '../../src/lib/pipeline';
+import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate } from '../../src/lib/pipeline';
 import { setupWorktree } from '../../src/lib/worktree';
 import { createSession, finalizeSession, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
@@ -143,6 +145,7 @@ const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue
 const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue>;
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockFinalizeQuickRun = finalizeQuickRun as jest.MockedFunction<typeof finalizeQuickRun>;
+const mockRunFullSuiteGate = runFullSuiteGate as jest.MockedFunction<typeof runFullSuiteGate>;
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
 const mockReleaseSessionLock = releaseSessionLock as jest.MockedFunction<typeof releaseSessionLock>;
@@ -176,6 +179,8 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     labelReady: 'ready',
     maxTestRetries: 3,
     testCommand: 'pnpm test',
+    testScope: 'full',
+    changedTestCommand: '',
     devCommand: 'pnpm dev',
     skipTests: false,
     skipReview: false,
@@ -238,6 +243,7 @@ beforeEach(() => {
   mockGetEpicSubIssues.mockReturnValue([]);
   mockGetIssueWithComments.mockReturnValue(null);
   mockProcessBatch.mockResolvedValue([]);
+  mockRunFullSuiteGate.mockResolvedValue({ testsPassing: true, testOutput: 'All tests passed' });
   mockContextNeedsRefresh.mockReturnValue(false);
   mockSyncAgentAssets.mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] });
 });
@@ -1276,6 +1282,95 @@ Coordinate hosted work.
     expect(mockRepairSessionSummaryArtifact).not.toHaveBeenCalled();
     expect(mockLog.info).toHaveBeenCalledWith('Skipping parent learning artifact repair; issue learnings are committed in child PRs');
     expect(mockFinalizeSession).toHaveBeenCalled();
+  });
+
+  test('runs one full-suite session gate for effective changed scope', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Test issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({});
+
+    expect(mockRunFullSuiteGate).toHaveBeenCalledTimes(1);
+    expect(mockRunFullSuiteGate).toHaveBeenCalledWith(expect.objectContaining({
+      issues: [{ number: 42, title: 'Test issue' }],
+      worktreePath: process.cwd(),
+    }));
+    expect(mockRunFullSuiteGate.mock.invocationCallOrder[0]).toBeLessThan(
+      mockFinalizeSession.mock.invocationCallOrder[0],
+    );
+  });
+
+  test('does not add a session gate when changed scope falls back to full runs', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      testScope: 'changed',
+      changedTestCommand: '',
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Test issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({});
+
+    expect(mockRunFullSuiteGate).not.toHaveBeenCalled();
+  });
+
+  test('marks the session failed when the end-of-session full suite cannot be fixed', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Test issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+    mockRunFullSuiteGate.mockResolvedValue({ testsPassing: false, testOutput: 'still failing' });
+
+    await runCommand({});
+
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(
+      expect.any(Object),
+      'failed',
+      'failed',
+      expect.any(Object),
+    );
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('full test suite failed'));
   });
 
   test('quick mode shares one worktree across issues and runs the finalize pass', async () => {
