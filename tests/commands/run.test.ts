@@ -54,6 +54,7 @@ jest.mock('../../src/lib/session', () => ({
   createSession: jest.fn(),
   ensureSessionWorktree: jest.fn(),
   finalizeSession: jest.fn(),
+  recordSessionBackgroundTaskError: jest.fn(),
   recordSessionIssue: jest.fn(),
   recordSessionPolicyDecision: jest.fn(),
   saveResult: jest.fn(),
@@ -136,7 +137,7 @@ import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
 import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, type PipelineResult } from '../../src/lib/pipeline';
 import { cleanupWorktree, setupWorktree } from '../../src/lib/worktree';
-import { createSession, ensureSessionWorktree, finalizeSession, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
+import { createSession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
 import { extractLearnings, generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
@@ -166,6 +167,7 @@ const mockCreateSession = createSession as jest.MockedFunction<typeof createSess
 const mockEnsureSessionWorktree = ensureSessionWorktree as jest.MockedFunction<typeof ensureSessionWorktree>;
 const mockReleaseSessionLock = releaseSessionLock as jest.MockedFunction<typeof releaseSessionLock>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
+const mockRecordSessionBackgroundTaskError = recordSessionBackgroundTaskError as jest.MockedFunction<typeof recordSessionBackgroundTaskError>;
 const mockTransitionSessionStatus = transitionSessionStatus as jest.MockedFunction<typeof transitionSessionStatus>;
 const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
 const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
@@ -254,6 +256,7 @@ beforeEach(() => {
     resultsDir: '/tmp/sessions',
     logsDir: '/tmp/sessions/logs',
     results: [],
+    pendingBackgroundTasks: [],
   });
   mockFinalizeSession.mockResolvedValue(null);
   mockEnsureSessionWorktree.mockImplementation(async (session) => {
@@ -1864,6 +1867,106 @@ Coordinate hosted work.
       sessionName: 'session/20260330-143000',
     }));
     expect(mockFinalizeSession).toHaveBeenCalled();
+  });
+
+  test('starts the next sequential issue while background work is pending and drains before summary and finalization', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) =>
+      makeConfig({ ...overrides, autoMerge: true, skipPostSessionReview: true }) as any,
+    );
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'First issue', body: 'Body', labels: ['ready'] },
+      { number: 43, title: 'Second issue', body: 'Body', labels: ['ready'] },
+    ]);
+
+    let resolveBackground!: () => void;
+    const backgroundGate = new Promise<void>((resolve) => { resolveBackground = resolve; });
+    let signalSecondIssueStarted!: () => void;
+    const secondIssueStarted = new Promise<void>((resolve) => { signalSecondIssueStarted = resolve; });
+    let artifactReady = false;
+    let summarySawArtifact = false;
+    let finalizeSawArtifact = false;
+
+    mockProcessIssue.mockImplementation(async (issueNum: number, title: string, _body, _config, session) => {
+      if (issueNum === 42) {
+        const promise = backgroundGate.then(() => { artifactReady = true; });
+        void promise.catch(() => undefined);
+        (session.pendingBackgroundTasks ??= []).push({ issueNum, stage: 'learn', promise });
+      } else {
+        signalSecondIssueStarted();
+      }
+      return {
+        issueNum,
+        title,
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        duration: 60,
+        filesChanged: 5,
+      };
+    });
+    mockGenerateSessionSummary.mockImplementation(async () => {
+      summarySawArtifact = artifactReady;
+      return null;
+    });
+    mockFinalizeSession.mockImplementation(async () => {
+      finalizeSawArtifact = artifactReady;
+      return null;
+    });
+
+    const runPromise = runCommand({});
+    await secondIssueStarted;
+
+    expect(artifactReady).toBe(false);
+    expect(mockGenerateSessionSummary).not.toHaveBeenCalled();
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+
+    resolveBackground();
+    await runPromise;
+
+    expect(summarySawArtifact).toBe(true);
+    expect(finalizeSawArtifact).toBe(true);
+    expect(mockProcessIssue.mock.calls.map((call) => call[0])).toEqual([42, 43]);
+  });
+
+  test('records rejected background tasks without changing successful issue results', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) =>
+      makeConfig({ ...overrides, autoMerge: true, skipPostSessionReview: true }) as any,
+    );
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Successful issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockImplementation(async (issueNum: number, title: string, _body, _config, session) => {
+      const promise = Promise.reject(new Error('learning agent failed'));
+      void promise.catch(() => undefined);
+      (session.pendingBackgroundTasks ??= []).push({ issueNum, stage: 'learn', promise });
+      return {
+        issueNum,
+        title,
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        duration: 60,
+        filesChanged: 5,
+      };
+    });
+
+    await runCommand({});
+
+    expect(mockRecordSessionBackgroundTaskError).toHaveBeenCalledWith(expect.any(Object), {
+      issueNum: 42,
+      stage: 'learn',
+      message: 'learning agent failed',
+    });
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        results: [expect.objectContaining({ issueNum: 42, status: 'success' })],
+      }),
+      'completed',
+      'completed',
+      expect.any(Object),
+    );
   });
 
   test('processes a single epic scheduled in the requested milestone', async () => {

@@ -20,6 +20,7 @@ import {
   createSession,
   ensureSessionWorktree,
   finalizeSession,
+  recordSessionBackgroundTaskError,
   recordSessionIssue,
   recordSessionPolicyDecision,
   saveResult,
@@ -268,6 +269,42 @@ function sessionStatusFromResults(session: SessionContext, failures: EpicExecuti
 
 function hasWaitingResults(session: SessionContext): boolean {
   return session.results.some((result) => result.status === 'waiting' && !isRecoveredRunResult(result));
+}
+
+function backgroundErrorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
+export async function drainSessionBackgroundTasks(session: SessionContext): Promise<void> {
+  const pending = session.pendingBackgroundTasks ?? [];
+  const snapshot = [...pending];
+  if (snapshot.length === 0) return;
+
+  log.step(`Waiting for ${snapshot.length} background task(s) to finish`);
+  const settled = await Promise.allSettled(snapshot.map((task) => task.promise));
+
+  settled.forEach((result, index) => {
+    if (result.status !== 'rejected') return;
+    const task = snapshot[index];
+    const message = backgroundErrorMessage(result.reason);
+    log.warn(`Background ${task.stage} task failed for issue #${task.issueNum}: ${message}`);
+    try {
+      recordSessionBackgroundTaskError(session, {
+        issueNum: task.issueNum,
+        stage: task.stage,
+        message,
+      });
+    } catch (err) {
+      log.warn(
+        `Could not record background ${task.stage} failure for issue #${task.issueNum}: ` +
+        backgroundErrorMessage(err),
+      );
+    }
+  });
+
+  const completed = new Set(snapshot);
+  session.pendingBackgroundTasks = (session.pendingBackgroundTasks ?? [])
+    .filter((task) => !completed.has(task));
 }
 
 async function pauseIssueForAutomationPolicy(args: {
@@ -1101,6 +1138,7 @@ async function executeSessionRun(
     // Finalize session
     let finalizationError: unknown;
     try {
+      await drainSessionBackgroundTasks(session);
       await finalizeSession(session, config);
     } catch (err) {
       finalizationError = err;
@@ -1735,6 +1773,10 @@ async function executeSessionRun(
     }
   }
 
+  // Deferred learnings must exist before repair/summary aggregation, and all
+  // other background side effects must settle before session finalization.
+  await drainSessionBackgroundTasks(session);
+
   // Generate session summary (aggregates learnings across all issues)
   if (session.results.length > 0) {
     const learningsRoot = session.worktreePath ?? process.cwd();
@@ -1936,6 +1978,7 @@ async function executeSessionRun(
   }
 
   // Finalize session
+  await drainSessionBackgroundTasks(session);
   const finalizedPrUrl = await finalizeSession(session, config);
   const sessionPrUrl = finalizedPrUrl ?? session.sessionPrUrl ?? null;
   const finalStatus = sessionStatusFromResults(session, failures);
