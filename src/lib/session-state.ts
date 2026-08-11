@@ -164,8 +164,11 @@ const STATUS_ALIASES: Record<string, HumanFeedbackSessionStatus> = {
 
 const TRANSITIONS: Record<HumanFeedbackSessionStatus, HumanFeedbackSessionStatus[]> = {
   running: ['human_input_requested', 'qa_requested', 'completed', 'failed'],
-  human_input_requested: ['feedback_received', 'resume_requested', 'failed'],
-  qa_requested: ['feedback_received', 'completed', 'failed'],
+  // The two human-gate states may flow into each other: an epic session shares one
+  // state machine across all sub-issues, so a later sub-issue can request QA (or
+  // human input) while the session is already paused for a different sub-issue.
+  human_input_requested: ['qa_requested', 'feedback_received', 'resume_requested', 'failed'],
+  qa_requested: ['human_input_requested', 'feedback_received', 'completed', 'failed'],
   feedback_received: ['human_input_requested', 'qa_requested', 'resume_requested', 'completed', 'failed'],
   resume_requested: ['resuming', 'failed'],
   resuming: ['running', 'human_input_requested', 'qa_requested', 'completed', 'failed'],

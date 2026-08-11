@@ -1026,6 +1026,60 @@ describe('processIssue', () => {
     );
   });
 
+  test('records a QA pause instead of failing when the session is already paused for human input (verify exhausted, PR exists)', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
+    const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
+
+    mockExistsSync.mockImplementation((path: any) => String(path).includes('plan-issue-42.json'));
+    mockReadFileSync.mockImplementation((path: any) => {
+      if (String(path).includes('plan-issue-42.json')) {
+        return JSON.stringify({
+          summary: 'Plan with live verification and human QA',
+          files: ['src/index.ts'],
+          implementation: 'Implement it',
+          testing: { needed: false, reason: 'Verified live' },
+          verification: { needed: true, method: 'playwright', instructions: 'Open app', reason: 'Runtime behavior' },
+          qa: { needed: true, checklist: ['Open the preview and confirm the flow'], reason: 'Subjective UI check' },
+        });
+      }
+      return '';
+    });
+
+    // Every live-verification attempt fails, so the pipeline exhausts maxTestRetries
+    // and proceeds to PR creation + the QA pause with verifyPassing=false.
+    mockRunVerify.mockResolvedValue({ passed: false, skipped: false, output: 'Verification failed' });
+
+    // Run the REAL session-level state machine behind the mocked session module:
+    // an earlier sub-issue of the same epic session already paused it for human input.
+    const { applyHumanFeedbackTransition } = jest.requireActual('../../src/lib/session-state');
+    let manifest: any = applyHumanFeedbackTransition(
+      { status: 'running', stage: 'implement' },
+      { to: 'human_input_requested', reason: 'Sub-issue #606 needs a product decision', issueNum: 606 },
+    );
+    mockTransitionHumanFeedbackSessionStatus.mockImplementation((_session: any, input: any) => {
+      manifest = applyHumanFeedbackTransition(manifest, input);
+      return manifest;
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({ skipVerify: false }), makeSession());
+
+    expect(mockRunVerify).toHaveBeenCalledTimes(3);
+    expect(mockCreatePR).toHaveBeenCalled();
+
+    // The issue must surface as paused-for-QA with its PR, not as failed.
+    expect(result.status).toBe('waiting');
+    expect(result.waitingStatus).toBe('qa_requested');
+    expect(result.prUrl).toBe('https://github.com/owner/repo/pull/1');
+    expect(manifest.feedback.currentStatus).toBe('qa_requested');
+    expect(mockRecordSessionIssue).toHaveBeenCalledWith(expect.anything(), 42, expect.objectContaining({
+      status: 'qa_requested',
+      prUrl: 'https://github.com/owner/repo/pull/1',
+    }));
+    expect(mockWriteCrashMarker).not.toHaveBeenCalled();
+    expect(labelIssue).not.toHaveBeenCalledWith('owner/repo', 42, 'failed', expect.anything());
+  });
+
   test('returns failure and labels failed when implementation fails', async () => {
     mockSpawnAgent.mockImplementation(async (options) => {
       // Plan succeeds, implement fails

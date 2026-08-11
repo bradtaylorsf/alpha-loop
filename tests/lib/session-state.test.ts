@@ -57,6 +57,40 @@ describe('human feedback session state machine', () => {
     )).toThrow(InvalidSessionTransitionError);
   });
 
+  it('allows moving between the two human-gate states for multi-issue epic sessions', () => {
+    const paused = applyHumanFeedbackTransition(
+      { status: 'running', stage: 'implement' },
+      {
+        to: 'human_input_requested',
+        reason: 'Sub-issue #606 needs a product decision',
+        issueNum: 606,
+        at: '2026-08-10T23:24:59.000Z',
+      },
+    );
+
+    const qa = applyHumanFeedbackTransition(paused, {
+      to: 'qa_requested',
+      reason: 'Sub-issue #608 opened a PR that needs human QA',
+      issueNum: 608,
+      at: '2026-08-11T00:30:00.000Z',
+    });
+    expect(qa.status).toBe('qa_requested');
+    expect(qa.feedback.currentStatus).toBe('qa_requested');
+
+    const backToInput = applyHumanFeedbackTransition(qa, {
+      to: 'human_input_requested',
+      reason: 'Sub-issue #607 hit an automation policy pause',
+      issueNum: 607,
+      at: '2026-08-11T01:00:00.000Z',
+    });
+    expect(backToInput.feedback.currentStatus).toBe('human_input_requested');
+    expect(backToInput.feedback.transitionHistory.map((entry) => entry.to)).toEqual([
+      'human_input_requested',
+      'qa_requested',
+      'human_input_requested',
+    ]);
+  });
+
   it('uses manifest status when legacy feedback status is still running', () => {
     const next = applyHumanFeedbackTransition({
       status: 'human_input_requested',
