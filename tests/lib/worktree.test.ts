@@ -66,6 +66,44 @@ describe('setupWorktree', () => {
     );
   });
 
+  test('creates an explicitly named session worktree without deleting its remote branch', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes("rev-parse --verify 'session/epic-371'")) {
+        return { stdout: '', stderr: 'missing', exitCode: 1 };
+      }
+      if (cmd.includes("rev-parse --verify 'origin/session/epic-371'")) {
+        return { stdout: '', stderr: 'missing', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await setupWorktree({
+      ...baseOptions,
+      branch: 'session/epic-371',
+      worktreePath: '/home/user/project/.worktrees/session-epic-371',
+      skipInstall: true,
+    });
+
+    expect(result).toEqual({
+      path: '/home/user/project/.worktrees/session-epic-371',
+      branch: 'session/epic-371',
+      resumed: false,
+    });
+    expect(mockExec).toHaveBeenCalledWith(
+      "git worktree add '/home/user/project/.worktrees/session-epic-371' -b 'session/epic-371' 'origin/master'",
+      { cwd: '/home/user/project' },
+    );
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('git push origin --delete'))).toBe(false);
+  });
+
+  test('rejects explicit worktree paths outside the repo worktrees directory', async () => {
+    await expect(setupWorktree({
+      ...baseOptions,
+      branch: 'session/epic-371',
+      worktreePath: '/tmp/session-epic-371',
+    })).rejects.toThrow(/unsafe worktree path/);
+  });
+
   test('branches from base branch when autoMerge is false', async () => {
     // No existing branch → fresh creation
     mockExec.mockImplementation((cmd: string) => {

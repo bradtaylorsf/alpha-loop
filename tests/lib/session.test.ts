@@ -1,10 +1,15 @@
-import { createSession, saveResult, getPreviousResult, finalizeSession, writeCrashMarker, loadCrashMarkers, clearCrashMarker } from '../../src/lib/session';
+import { createSession, ensureSessionWorktree, saveResult, getPreviousResult, finalizeSession, writeCrashMarker, loadCrashMarkers, clearCrashMarker } from '../../src/lib/session';
 import type { PipelineResult } from '../../src/lib/pipeline';
 import type { BranchAncestryMode, QueueSessionContext } from '../../src/lib/epic-queue';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
   formatTimestamp: jest.fn().mockReturnValue('20260101-000000'),
+  shellQuote: (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`,
+}));
+
+jest.mock('../../src/lib/worktree', () => ({
+  setupWorktree: jest.fn(),
 }));
 
 jest.mock('../../src/lib/logger', () => ({
@@ -40,12 +45,14 @@ jest.mock('node:fs', () => ({
 }));
 
 import { exec } from '../../src/lib/shell';
+import { setupWorktree } from '../../src/lib/worktree';
 import { createPR } from '../../src/lib/github';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync, renameSync } from 'node:fs';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
+const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>;
 const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
@@ -150,6 +157,11 @@ beforeEach(() => {
   mockExistsSync.mockReturnValue(false);
   mockReaddirSync.mockReturnValue([]);
   mockReadFileSync.mockReturnValue('');
+  mockSetupWorktree.mockImplementation(async (options) => ({
+    path: options.worktreePath ?? '/project/.worktrees/session-test',
+    branch: options.branch ?? `agent/issue-${options.issueNum}`,
+    resumed: false,
+  }));
 });
 
 describe('createSession', () => {
@@ -216,16 +228,22 @@ describe('createSession', () => {
     expect(session.branch).toBe('my-branch');
   });
 
-  test('creates session branch when autoMerge is enabled', () => {
-    mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 1 }); // branch doesn't exist
+  test('creates session branch in a dedicated worktree when autoMerge is enabled', async () => {
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config);
 
-    createSession(makeConfig({ autoMerge: true }));
+    await ensureSessionWorktree(session, config);
 
-    // Should attempt to create branch
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      branch: session.branch,
+      worktreePath: expect.stringContaining('.worktrees/session-20260101-000000'),
+      skipInstall: true,
+    }));
     expect(mockExec).toHaveBeenCalledWith(
-      expect.stringContaining('git checkout -b'),
-      expect.any(Object),
+      expect.stringContaining('git commit --allow-empty'),
+      { cwd: expect.stringContaining('.worktrees/session-20260101-000000') },
     );
+    expect(mockExec.mock.calls.some(([cmd, options]) => String(cmd).includes('git checkout') && options?.cwd === process.cwd())).toBe(false);
   });
 
   test('does not create session branch in dryRun mode', () => {
@@ -261,7 +279,7 @@ describe('createSession', () => {
     expect(session.name).toBe('session/epic-7-multi-word-title-with-spaces');
   });
 
-  test('draft PR title uses Epic #<N>: <title> format when autoMerge is enabled', () => {
+  test('draft PR title uses Epic #<N>: <title> format when autoMerge is enabled', async () => {
     // autoMerge triggers draft PR creation
     mockExec.mockImplementation((cmd: string) => {
       // branch doesn't exist so it gets created
@@ -270,7 +288,9 @@ describe('createSession', () => {
     });
     mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/99');
 
-    createSession(makeConfig({ autoMerge: true }), { epicNum: 165, epicTitle: 'Hybrid Routing' });
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config, { epicNum: 165, epicTitle: 'Hybrid Routing' });
+    await ensureSessionWorktree(session, config);
 
     expect(mockCreatePR).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -279,23 +299,26 @@ describe('createSession', () => {
     );
   });
 
-  test('creates stacked queue session branch from the previous session branch and annotates draft PR body', () => {
+  test('creates stacked queue session worktree from the previous session branch and annotates draft PR body', async () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('rev-parse --verify')) return { stdout: '', stderr: '', exitCode: 1 };
       return { stdout: '', stderr: '', exitCode: 0 };
     });
     mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/166');
 
-    createSession(makeConfig({ autoMerge: true }), {
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config, {
       epicNum: 166,
       epicTitle: 'Second Epic',
       queue: makeQueueContext(),
     });
+    await ensureSessionWorktree(session, config);
 
-    expect(mockExec).toHaveBeenCalledWith(
-      'git checkout -b "session/epic-166-second-epic" "origin/session/epic-205-first"',
-      expect.any(Object),
-    );
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      baseBranch: 'session/epic-205-first',
+      branch: 'session/epic-166-second-epic',
+      worktreePath: expect.stringContaining('.worktrees/session-epic-166-second-epic'),
+    }));
     const body = mockCreatePR.mock.calls[0][0].body;
     expect(body).toContain('## Execution Queue');
     expect(body).toContain('**Position:** 2 of 3');
@@ -303,14 +326,15 @@ describe('createSession', () => {
     expect(body).toContain('Merge [the previous session PR](https://github.com/owner/repo/pull/205) first; after it lands on master, rebase `session/epic-166-second-epic` onto `master` before final review/merge.');
   });
 
-  test('creates independent queue session branch from base branch and explains no ancestry dependency in draft PR body', () => {
+  test('creates independent queue session worktree from base branch and explains no ancestry dependency in draft PR body', async () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('rev-parse --verify')) return { stdout: '', stderr: '', exitCode: 1 };
       return { stdout: '', stderr: '', exitCode: 0 };
     });
     mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/166');
 
-    createSession(makeConfig({ autoMerge: true }), {
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config, {
       epicNum: 166,
       epicTitle: 'Second Epic',
       queue: makeQueueContext({
@@ -321,15 +345,48 @@ describe('createSession', () => {
         rebaseOntoBranch: null,
       }),
     });
+    await ensureSessionWorktree(session, config);
 
-    expect(mockExec).toHaveBeenCalledWith(
-      'git checkout -b "session/epic-166-second-epic" "origin/master"',
-      expect.any(Object),
-    );
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      baseBranch: 'master',
+      branch: 'session/epic-166-second-epic',
+      worktreePath: expect.stringContaining('.worktrees/session-epic-166-second-epic'),
+    }));
     const body = mockCreatePR.mock.calls[0][0].body;
     expect(body).toContain('**Branch ancestry:** independent');
     expect(body).toContain('**Depends on:** None - no branch ancestry dependency was created.');
     expect(body).toContain('No branch ancestry dependency was created; this branch starts from `master`.');
+  });
+
+  test('keeps two interleaved epic sessions isolated without changing the main checkout HEAD', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('git ls-remote --heads')) return { stdout: '', stderr: '', exitCode: 0 };
+      if (cmd === 'git diff --cached --quiet') return { stdout: '', stderr: '', exitCode: 1 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/371');
+    const config = makeConfig({ autoMerge: true });
+    const first = createSession(config, { epicNum: 371, epicTitle: 'Worktree Only' });
+    const second = createSession(config, { epicNum: 372, epicTitle: 'Parallel Epics' });
+
+    await Promise.all([
+      ensureSessionWorktree(first, config),
+      ensureSessionWorktree(second, config),
+    ]);
+
+    expect(first.worktreePath).toContain('.worktrees/session-epic-371-worktree-only');
+    expect(second.worktreePath).toContain('.worktrees/session-epic-372-parallel-epics');
+    expect(first.worktreePath).not.toBe(second.worktreePath);
+
+    first.results.push({ issueNum: 471, title: 'First child', status: 'success', testsPassing: true, verifyPassing: true, verifySkipped: false, duration: 10, filesChanged: 1 });
+    second.results.push({ issueNum: 472, title: 'Second child', status: 'success', testsPassing: true, verifyPassing: true, verifySkipped: false, duration: 10, filesChanged: 1 });
+    await Promise.all([finalizeSession(first, config), finalizeSession(second, config)]);
+
+    const sessionPaths = new Set([first.worktreePath, second.worktreePath]);
+    const headMutations = mockExec.mock.calls.filter(([cmd]) => /git (checkout|commit|pull|rebase|reset)/.test(String(cmd)));
+    expect(headMutations.length).toBeGreaterThan(0);
+    expect(headMutations.every(([, options]) => sessionPaths.has(options?.cwd))).toBe(true);
+    expect(headMutations.some(([, options]) => options?.cwd === process.cwd())).toBe(false);
   });
 });
 
@@ -751,6 +808,7 @@ describe('finalizeSession', () => {
   describe('diverged session branch reconciliation', () => {
     function makeFinalizableSession(config: Config) {
       const session = createSession(config);
+      session.worktreePath = '/project/.worktrees/session-20260101-000000';
       session.results.push({
         issueNum: 1,
         title: 'First issue',
@@ -814,9 +872,9 @@ describe('finalizeSession', () => {
       expect(mergeAbortIdx).toBeLessThan(rebaseIdx);
       // Conflicted rebase is always aborted — never left in progress
       expect(rebaseAbortIdx).toBeGreaterThan(rebaseIdx);
-      // Detached HEAD is restored to the session branch (initial checkout + restore)
+      // Detached HEAD is restored inside the session worktree.
       const checkoutCalls = calls.filter((cmd) => cmd === `git checkout "${session.branch}"`);
-      expect(checkoutCalls).toHaveLength(2);
+      expect(checkoutCalls).toHaveLength(1);
       expect(calls.lastIndexOf(`git checkout "${session.branch}"`)).toBeGreaterThan(rebaseAbortIdx);
     });
 
@@ -831,7 +889,7 @@ describe('finalizeSession', () => {
 
       const calls = mockExec.mock.calls.map((call) => String(call[0]));
       const checkoutCalls = calls.filter((cmd) => cmd === `git checkout "${session.branch}"`);
-      expect(checkoutCalls).toHaveLength(1); // only the initial checkout
+      expect(checkoutCalls).toHaveLength(0);
     });
 
     test('commits learnings locally but never pushes when the branch stays diverged', async () => {

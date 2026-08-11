@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync, renameSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { log } from './logger.js';
-import { exec, formatTimestamp } from './shell.js';
+import { exec, formatTimestamp, shellQuote } from './shell.js';
 import { ghExec } from './rate-limit.js';
 import { createPR, updateProjectStatus } from './github.js';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from './learning.js';
@@ -19,6 +19,7 @@ import {
   type HumanFeedbackTransitionInput,
 } from './session-state.js';
 import { acquireSessionLock, type SessionLockHandle } from './session-lock.js';
+import { setupWorktree } from './worktree.js';
 import type { Config } from './config.js';
 import type { PipelineResult, GateResult } from './pipeline.js';
 import type { QueueEpicLink, QueueSessionContext } from './epic-queue.js';
@@ -36,6 +37,12 @@ export type SessionContext = {
   results: PipelineResult[];
   sessionReviewFindings?: GateResult;
   sessionPrUrl?: string;
+  /** Dedicated checkout for every session-branch mutation. */
+  worktreePath?: string;
+  /** Metadata retained for lazy session branch/PR initialization. */
+  milestone?: string;
+  epicTitle?: string;
+  branchSource?: string;
   /** Issue currently being processed, when known. */
   currentIssueNum?: number;
   /** Parent epic for targeted child-issue sessions, when known. */
@@ -1052,7 +1059,6 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
   const logsDir = join(resultsDir, 'logs');
   const manifestPath = sessionManifestPath(resultsDir);
   const id = sessionIdFromName(name);
-  let sessionPrUrl: string | undefined;
   const branchSource = queue?.branchedFromBranch ?? config.baseBranch;
 
   // Session names are deterministic per epic/milestone, so a concurrently
@@ -1066,106 +1072,6 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
     lock = acquireSessionLock(resultsDir, name);
   }
 
-  // Create session branch and draft PR if auto-merge is enabled
-  if (config.autoMerge && !config.dryRun) {
-    // Fetch latest to ensure we have remote refs
-    exec('git fetch origin', { cwd: projectDir });
-
-    const branchExists = exec(`git rev-parse --verify "${branch}"`, { cwd: projectDir });
-    if (branchExists.exitCode !== 0) {
-      // Create from the queue ancestry branch (or base branch) first, fall back to local.
-      const fromRemote = exec(
-        `git checkout -b "${branch}" "origin/${branchSource}"`,
-        { cwd: projectDir },
-      );
-      if (fromRemote.exitCode !== 0) {
-        exec(`git checkout -b "${branch}" "${branchSource}"`, { cwd: projectDir });
-      }
-      // Create an initial commit so the branch has a diff from base (required for PR creation)
-      exec(`git commit --allow-empty -m "chore: start session ${name}"`, { cwd: projectDir });
-      // Push session branch to remote so PRs can target it
-      exec(`git push origin "${branch}"`, { cwd: projectDir });
-      // Switch back to the original branch
-      exec(`git checkout -`, { cwd: projectDir });
-      log.info(`Created session branch: ${branch}`);
-
-      // Create a draft PR immediately so the session is visible in GitHub
-      try {
-        const draftPR = createPR({
-          repo: config.repo,
-          base: config.baseBranch,
-          head: branch,
-          title: draftSessionPrTitle(name, milestone, epicNum, epicTitle),
-          body: buildDraftSessionPrBody({
-            branch,
-            startedAt: new Date().toISOString(),
-            milestone,
-            epicNum,
-            epicTitle,
-            queue,
-            baseBranch: config.baseBranch,
-          }),
-          cwd: projectDir,
-        });
-        sessionPrUrl = draftPR;
-        log.success(`Session PR (draft): ${draftPR}`);
-      } catch {
-        // Non-fatal — PR can be created later during finalization
-        log.warn('Could not create draft session PR — will create during finalization');
-      }
-    } else {
-      // Ensure session branch exists on remote (may have been deleted after a previous merge)
-      const remoteCheck = exec(`git ls-remote --heads origin "${branch}"`, { cwd: projectDir });
-      if (!remoteCheck.stdout.trim()) {
-        log.warn(`Session branch "${branch}" exists locally but not on remote — recreating from ${branchSource}`);
-        // Ensure we're not on the branch we're about to delete
-        exec(`git checkout "${branchSource}"`, { cwd: projectDir });
-        // Delete stale local branch and recreate from current base (the old one is behind after merge)
-        exec(`git branch -D "${branch}"`, { cwd: projectDir });
-        const fromRemote = exec(
-          `git checkout -b "${branch}" "origin/${branchSource}"`,
-          { cwd: projectDir },
-        );
-        if (fromRemote.exitCode !== 0) {
-          exec(`git checkout -b "${branch}" "${branchSource}"`, { cwd: projectDir });
-        }
-        exec(`git commit --allow-empty -m "chore: start session ${name}"`, { cwd: projectDir });
-        const pushResult = exec(`git push origin "${branch}"`, { cwd: projectDir });
-        if (pushResult.exitCode !== 0) {
-          log.error(`Failed to push recreated session branch: ${pushResult.stderr}`);
-        }
-        exec(`git checkout -`, { cwd: projectDir });
-        log.info(`Recreated session branch: ${branch}`);
-
-        // Recreate draft PR for the session
-        try {
-          const draftPR = createPR({
-            repo: config.repo,
-            base: config.baseBranch,
-            head: branch,
-            title: draftSessionPrTitle(name, milestone, epicNum, epicTitle),
-            body: buildDraftSessionPrBody({
-              branch,
-              startedAt: new Date().toISOString(),
-              milestone,
-              epicNum,
-              epicTitle,
-              queue,
-              baseBranch: config.baseBranch,
-            }),
-            cwd: projectDir,
-          });
-          sessionPrUrl = draftPR;
-          log.success(`Session PR (draft): ${draftPR}`);
-        } catch {
-          log.warn('Could not create draft session PR — will create during finalization');
-        }
-      } else {
-        log.info(`Session branch already exists: ${branch}`);
-      }
-    }
-  }
-
   const session: SessionContext = {
     id,
     name,
@@ -1175,7 +1081,9 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
     logsDir,
     manifestPath,
     results: [],
-    sessionPrUrl,
+    milestone,
+    epicTitle,
+    branchSource,
     currentIssueNum: options?.issueNum,
     parentEpicNum: options?.parentEpicNum,
     epic: epicNum,
@@ -1207,8 +1115,8 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
       parentEpicTitle: options?.parentEpicTitle ?? epicTitle ?? null,
       branch,
       baseBranch: config.baseBranch,
-      prUrl: sessionPrUrl ?? null,
-      sessionPrUrl: sessionPrUrl ?? null,
+      prUrl: null,
+      sessionPrUrl: null,
       status: 'running',
       stage: 'created',
       labels: [],
@@ -1260,6 +1168,84 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
 }
 
 /**
+ * Lazily create or reuse the checkout that owns the session branch. Session
+ * setup, review, reconciliation, learning commits, and finalization all share
+ * this path so a run never changes the main checkout's HEAD.
+ */
+export async function ensureSessionWorktree(
+  session: SessionContext,
+  config: Config,
+  options: { createDraftPr?: boolean } = {},
+): Promise<string | null> {
+  if (config.dryRun || session.branch === config.baseBranch) return null;
+  if (session.worktreePath) return session.worktreePath;
+
+  const projectDir = process.cwd();
+  const slug = session.name.replace(/^session\//, '');
+  const worktreePath = join(projectDir, '.worktrees', `session-${slug}`);
+  const branchSource = session.branchSource ?? session.queue?.branchedFromBranch ?? config.baseBranch;
+
+  exec('git fetch origin', { cwd: projectDir });
+  const remoteCheck = exec(`git ls-remote --heads origin ${shellQuote(session.branch)}`, { cwd: projectDir });
+  const remoteExists = Boolean(remoteCheck.stdout.trim());
+
+  const worktree = await setupWorktree({
+    issueNum: session.currentIssueNum ?? session.epic ?? 0,
+    projectDir,
+    baseBranch: branchSource,
+    branch: session.branch,
+    worktreePath,
+    skipInstall: true,
+  });
+  session.worktreePath = worktree.path;
+
+  if (config.autoMerge && !remoteExists) {
+    if (worktree.resumed) {
+      const reset = exec(`git reset --hard ${shellQuote(`origin/${branchSource}`)}`, { cwd: worktree.path });
+      if (reset.exitCode !== 0) {
+        throw new Error(`Failed to reset stale session branch ${session.branch}: ${reset.stderr}`);
+      }
+    }
+    exec(`git commit --allow-empty -m ${shellQuote(`chore: start session ${session.name}`)}`, { cwd: worktree.path });
+    const pushResult = exec(`git push origin ${shellQuote(session.branch)}`, { cwd: worktree.path });
+    if (pushResult.exitCode !== 0) {
+      throw new Error(`Failed to push session branch ${session.branch}: ${pushResult.stderr}`);
+    }
+    log.info(`${worktree.resumed ? 'Recreated' : 'Created'} session branch: ${session.branch}`);
+
+    if (options.createDraftPr !== false) {
+      try {
+        const draftPR = createPR({
+          repo: config.repo,
+          base: config.baseBranch,
+          head: session.branch,
+          title: draftSessionPrTitle(session.name, session.milestone, session.epic, session.epicTitle),
+          body: buildDraftSessionPrBody({
+            branch: session.branch,
+            startedAt: new Date().toISOString(),
+            milestone: session.milestone,
+            epicNum: session.epic,
+            epicTitle: session.epicTitle,
+            queue: session.queue,
+            baseBranch: config.baseBranch,
+          }),
+          cwd: worktree.path,
+        });
+        session.sessionPrUrl = draftPR;
+        updateSessionManifest(session, { prUrl: draftPR, sessionPrUrl: draftPR });
+        log.success(`Session PR (draft): ${draftPR}`);
+      } catch {
+        log.warn('Could not create draft session PR — will create during finalization');
+      }
+    }
+  } else if (config.autoMerge) {
+    log.info(`Session branch already exists: ${session.branch}`);
+  }
+
+  return worktree.path;
+}
+
+/**
  * Save a pipeline result to the session directory as JSON.
  */
 export function saveResult(session: SessionContext, result: PipelineResult): void {
@@ -1305,8 +1291,8 @@ Build on what was already done. Avoid duplicating work.`;
  * Returns false when local and remote remain diverged — the caller must not
  * push (and especially not force-push) over the remote branch.
  */
-function reconcileSessionBranchWithRemote(branch: string, projectDir: string): boolean {
-  const remoteRef = exec(`git rev-parse --verify --quiet "origin/${branch}"`, { cwd: projectDir });
+export function reconcileSessionBranchWithRemote(branch: string, sessionWorktreePath: string): boolean {
+  const remoteRef = exec(`git rev-parse --verify --quiet "origin/${branch}"`, { cwd: sessionWorktreePath });
   if (remoteRef.exitCode !== 0) return true; // no remote branch — nothing to reconcile
 
   // Pull remote changes (auto-merged batch PRs) into local branch.
@@ -1314,24 +1300,24 @@ function reconcileSessionBranchWithRemote(branch: string, projectDir: string): b
   // fast-forward; without it a dirty working tree forces the rebase fallback,
   // which leaves the local branch missing the auto-merged child PRs and risks
   // clobbering them on the finalize push.
-  const pull = exec(`git pull origin "${branch}" --no-edit --autostash`, { cwd: projectDir });
+  const pull = exec(`git pull origin "${branch}" --no-edit --autostash`, { cwd: sessionWorktreePath });
   if (pull.exitCode === 0) return true;
 
   // A conflicted pull leaves a merge in progress; abort it before trying rebase.
   log.warn(`Could not pull remote session branch — trying rebase`);
-  exec('git merge --abort', { cwd: projectDir });
+  exec('git merge --abort', { cwd: sessionWorktreePath });
 
-  const rebase = exec(`git rebase "origin/${branch}" --autostash`, { cwd: projectDir });
+  const rebase = exec(`git rebase "origin/${branch}" --autostash`, { cwd: sessionWorktreePath });
   if (rebase.exitCode === 0) return true;
 
   // A conflicted rebase stops on a detached HEAD with .git/rebase-merge present
   // and the autostash pending. Abort restores the branch and the stash — never
   // exit with the user's checkout stuck mid-rebase.
   log.warn('Rebase onto remote session branch failed — aborting rebase');
-  exec('git rebase --abort', { cwd: projectDir });
-  const head = exec('git symbolic-ref -q HEAD', { cwd: projectDir });
+  exec('git rebase --abort', { cwd: sessionWorktreePath });
+  const head = exec('git symbolic-ref -q HEAD', { cwd: sessionWorktreePath });
   if (head.exitCode !== 0) {
-    exec(`git checkout "${branch}"`, { cwd: projectDir });
+    exec(`git checkout "${branch}"`, { cwd: sessionWorktreePath });
   }
   return false;
 }
@@ -1357,16 +1343,16 @@ export async function finalizeSession(
   recordSessionStage(session, 'finalize');
 
   const projectDir = process.cwd();
-
-  // Ensure we're on the session branch and up to date with remote
-  // (batch PRs may have been auto-merged into the remote session branch)
-  exec('git fetch origin', { cwd: projectDir });
-  const checkout = exec(`git checkout "${session.branch}"`, { cwd: projectDir });
-  if (checkout.exitCode !== 0) {
-    log.warn('Could not checkout session branch for finalization');
+  const sessionWorktreePath = await ensureSessionWorktree(session, config, { createDraftPr: false });
+  if (!sessionWorktreePath) {
+    log.warn('Could not create session worktree for finalization');
     return null;
   }
-  const reconciled = reconcileSessionBranchWithRemote(session.branch, projectDir);
+
+  // Fetch in the repository, then reconcile only inside the session worktree.
+  // Batch PRs may have been auto-merged into the remote session branch.
+  exec('git fetch origin', { cwd: projectDir });
+  const reconciled = reconcileSessionBranchWithRemote(session.branch, sessionWorktreePath);
   if (!reconciled) {
     log.warn(
       `Session branch ${session.branch} diverged from origin and could not be reconciled — ` +
@@ -1376,7 +1362,7 @@ export async function finalizeSession(
   }
 
   // Save session manifest to learnings directory (tracked in git, shared with team)
-  const learningsDir = join(projectDir, '.alpha-loop', 'learnings');
+  const learningsDir = join(sessionWorktreePath, '.alpha-loop', 'learnings');
   mkdirSync(learningsDir, { recursive: true });
   repairSessionLearningArtifacts({
     sessionName: session.name,
@@ -1434,18 +1420,18 @@ export async function finalizeSession(
   log.info(`Session manifest saved: ${manifestName}`);
 
   // Stage learnings (including session manifest)
-  exec('git add .alpha-loop/learnings/', { cwd: projectDir });
+  exec('git add .alpha-loop/learnings/', { cwd: sessionWorktreePath });
 
   // Commit if there are staged changes
-  const diffResult = exec('git diff --cached --quiet', { cwd: projectDir });
+  const diffResult = exec('git diff --cached --quiet', { cwd: sessionWorktreePath });
   if (diffResult.exitCode !== 0) {
     const commitIssueCount = session.results.length;
     exec(
       `git commit -m "chore: learnings from ${session.name}\n\nProcessed ${commitIssueCount} issue(s) in this session."`,
-      { cwd: projectDir },
+      { cwd: sessionWorktreePath },
     );
     if (reconciled) {
-      exec(`git push origin "${session.branch}"`, { cwd: projectDir });
+      exec(`git push origin "${session.branch}"`, { cwd: sessionWorktreePath });
     } else {
       log.warn('Skipping learnings push — session branch diverged from origin');
     }
@@ -1593,7 +1579,7 @@ export async function finalizeSession(
       head: session.branch,
       title: prTitle,
       body: prBody,
-      cwd: projectDir,
+      cwd: sessionWorktreePath,
       // When local and remote diverged irreconcilably, create/update the PR
       // from the remote branch as-is rather than pushing (or force-pushing)
       // the diverged local branch over the auto-merged child PRs.
@@ -1624,7 +1610,7 @@ export async function finalizeSession(
     try {
       const fallback = ghExec(
         `gh pr create --repo "${config.repo}" --base "${config.baseBranch}" --head "${session.branch}" --title "${prTitle}" --body "Session finalization — see branch for details"`,
-        { cwd: projectDir }, true,
+        { cwd: sessionWorktreePath }, true,
       );
       if (fallback.exitCode === 0 && fallback.stdout.trim()) {
         const fallbackPrUrl = fallback.stdout.trim();
