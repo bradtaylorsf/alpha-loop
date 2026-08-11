@@ -3060,6 +3060,10 @@ export async function runCommand(options: RunOptions): Promise<void> {
       }
       if (options.queueContext && options.queueResult) {
         const queue = readQueueWorkerContext(options.queueContext);
+        // Queue workers must always own distinct session branches. A repository-level
+        // merge_to setting is valid for standalone runs, but inheriting it here would
+        // send every parallel worker to the same branch.
+        const workerConfig: Config = { ...config, autoMerge: true, mergeTo: '' };
         let result: EpicExecutionResult;
         if (queue.currentEpic.number !== options.epic) {
           result = buildEpicFailureResult(options.epic, {
@@ -3071,7 +3075,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
         } else {
           try {
             result = await runSingleEpicExecution({
-              config,
+              config: workerConfig,
               epicNumber: options.epic,
               options: { ...options, stopOnPartialEpic: true },
               queue,

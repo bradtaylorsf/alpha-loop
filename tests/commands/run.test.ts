@@ -667,6 +667,7 @@ describe('runCommand', () => {
   test('internal queue workers leave shared project preparation to the coordinator', async () => {
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
       ...overrides,
+      mergeTo: 'shared-integration-branch',
       skipPreflight: true,
       skipVerify: true,
       skipPostSessionReview: true,
@@ -717,6 +718,10 @@ describe('runCommand', () => {
 
     expect(mockSyncAgentAssets).not.toHaveBeenCalled();
     expect(mockContextNeedsRefresh).not.toHaveBeenCalled();
+    expect(mockCreateSession).toHaveBeenCalledWith(
+      expect.objectContaining({ autoMerge: true, mergeTo: '' }),
+      expect.objectContaining({ epicNum: 77 }),
+    );
   });
 
   test('dry-run session preview does not sync assets or refresh generated context', async () => {

@@ -272,9 +272,11 @@ export function validateEpicQueue(
 
   const queuedEpicNumbers = new Set(entries.map((entry) => entry.epicNumber));
   for (const entry of entries) {
-    entry.dependencyIds = parseDependencies(entry.issue.body).filter((dependencyId) => (
-      queuedEpicNumbers.has(dependencyId)
-    ));
+    entry.dependencyIds = entry.status === 'already-complete'
+      ? []
+      : parseDependencies(entry.issue.body).filter((dependencyId) => (
+          queuedEpicNumbers.has(dependencyId)
+        ));
   }
 
   if (errors.length === 0) {

@@ -96,6 +96,26 @@ describe('epic queue helpers', () => {
     ]);
   });
 
+  test('completed epics do not keep otherwise satisfied dependency cycles active', () => {
+    const issues = new Map<number, Issue>([
+      [10, issue({ number: 10, body: 'Depends on #20.' })],
+      [20, issue({
+        number: 20,
+        body: 'Blocked by #10.',
+        state: 'CLOSED',
+        stateReason: 'COMPLETED',
+      })],
+    ]);
+
+    const result = validateEpicQueue('owner/repo', [10, 20], (_repo, issueNum) => issues.get(issueNum) ?? null);
+
+    expect(result.errors).toEqual([]);
+    expect(result.entries.map((entry) => [entry.epicNumber, entry.status, entry.dependencyIds])).toEqual([
+      [10, 'pending', [20]],
+      [20, 'already-complete', []],
+    ]);
+  });
+
   test('validateEpicQueue rejects duplicates, missing issues, non-epics, and closed incomplete epics', () => {
     const issues = new Map<number, Issue>([
       [166, issue({ number: 166, labels: ['ready'] })],
