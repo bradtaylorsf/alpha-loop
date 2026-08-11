@@ -61,6 +61,8 @@ jest.mock('../../src/lib/session', () => ({
   getPreviousResult: jest.fn(),
   loadSessionManifest: jest.fn(),
   writeCrashMarker: jest.fn(),
+  enqueueSessionBackgroundTask: jest.fn(),
+  recordSessionBackgroundTaskError: jest.fn(),
   recordSessionCleanup: jest.fn(),
   recordSessionError: jest.fn(),
   recordSessionIssue: jest.fn(),
@@ -143,6 +145,8 @@ import {
   getPreviousResult,
   loadSessionManifest,
   writeCrashMarker,
+  enqueueSessionBackgroundTask,
+  recordSessionBackgroundTaskError,
   recordSessionCleanup,
   recordSessionIssue,
   recordSessionPolicyDecision,
@@ -153,7 +157,8 @@ import {
   transitionHumanFeedbackSessionStatus,
 } from '../../src/lib/session';
 import { buildIssuePlanPrompt, buildImplementPrompt, buildReviewPrompt, buildBatchPlanPrompt, buildBatchImplementPrompt, buildBatchReviewPrompt } from '../../src/lib/prompts';
-import { writeTraceToSubdir } from '../../src/lib/traces';
+import { computeCosts, writeCosts, writeTraceToSubdir } from '../../src/lib/traces';
+import { buildStageTelemetry, writeStageTelemetry } from '../../src/lib/telemetry';
 import { emitLifecycleEvent } from '../../src/lib/events';
 import type { Config } from '../../src/lib/config';
 
@@ -174,6 +179,8 @@ const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGetPreviousResult = getPreviousResult as jest.MockedFunction<typeof getPreviousResult>;
 const mockLoadSessionManifest = loadSessionManifest as jest.MockedFunction<typeof loadSessionManifest>;
 const mockWriteCrashMarker = writeCrashMarker as jest.MockedFunction<typeof writeCrashMarker>;
+const mockEnqueueSessionBackgroundTask = enqueueSessionBackgroundTask as jest.MockedFunction<typeof enqueueSessionBackgroundTask>;
+const mockRecordSessionBackgroundTaskError = recordSessionBackgroundTaskError as jest.MockedFunction<typeof recordSessionBackgroundTaskError>;
 const mockRecordSessionCleanup = recordSessionCleanup as jest.MockedFunction<typeof recordSessionCleanup>;
 const mockRecordSessionIssue = recordSessionIssue as jest.MockedFunction<typeof recordSessionIssue>;
 const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
@@ -189,6 +196,10 @@ const mockBuildBatchPlanPrompt = buildBatchPlanPrompt as jest.MockedFunction<typ
 const mockBuildBatchImplementPrompt = buildBatchImplementPrompt as jest.MockedFunction<typeof buildBatchImplementPrompt>;
 const mockBuildBatchReviewPrompt = buildBatchReviewPrompt as jest.MockedFunction<typeof buildBatchReviewPrompt>;
 const mockWriteTraceToSubdir = writeTraceToSubdir as jest.MockedFunction<typeof writeTraceToSubdir>;
+const mockComputeCosts = computeCosts as jest.MockedFunction<typeof computeCosts>;
+const mockWriteCosts = writeCosts as jest.MockedFunction<typeof writeCosts>;
+const mockBuildStageTelemetry = buildStageTelemetry as jest.MockedFunction<typeof buildStageTelemetry>;
+const mockWriteStageTelemetry = writeStageTelemetry as jest.MockedFunction<typeof writeStageTelemetry>;
 const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 
 const epicContext = {
@@ -271,6 +282,7 @@ function makeSession(): SessionContext {
     logsDir: '/tmp/sessions/session/20260330-143000/logs',
     worktreePath: '/tmp/session-worktree',
     results: [],
+    pendingBackgroundTasks: [],
   };
 }
 
@@ -296,6 +308,15 @@ beforeEach(() => {
   mockGetLearningContext.mockReturnValue('');
   mockGetPreviousResult.mockReturnValue(null);
   mockLoadSessionManifest.mockReturnValue(null);
+  mockEnqueueSessionBackgroundTask.mockImplementation((session, task) => {
+    const promise = Promise.resolve().then(task.run);
+    void promise.catch(() => undefined);
+    (session.pendingBackgroundTasks ??= []).push({
+      issueNum: task.issueNum,
+      stage: task.stage,
+      promise,
+    });
+  });
 });
 
 describe('processIssue', () => {
@@ -792,39 +813,136 @@ describe('processIssue', () => {
     );
   });
 
-  test('extracts and commits the learning artifact in the worktree before creating the PR', async () => {
-    const learningPath = '/tmp/worktree/.alpha-loop/learnings/issue-42-20260101-000000.md';
-    mockExtractLearnings.mockResolvedValueOnce(learningPath);
+  test('defers learning and assumptions work after PR creation and preserves settlement side effects', async () => {
+    let resolveLearning!: (value: string | null) => void;
+    const learningPending = new Promise<string | null>((resolve) => { resolveLearning = resolve; });
+    let resolveAssumptions!: (value: { exitCode: number; output: string; duration: number }) => void;
+    const assumptionsPending = new Promise<{ exitCode: number; output: string; duration: number }>((resolve) => {
+      resolveAssumptions = resolve;
+    });
+    const session = makeSession();
+    const sessionWorktreePath = '/tmp/session-worktree';
+
+    mockExtractLearnings.mockReturnValueOnce(learningPending);
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'assumptions prompt') return assumptionsPending;
+      return { exitCode: 0, output: 'Agent output', duration: 5000 };
+    });
     mockExec.mockImplementation((cmd: string) => {
       if (cmd === 'git diff "origin/master...HEAD"') {
         return { stdout: 'diff --git a/src/foo.ts b/src/foo.ts', stderr: '', exitCode: 0 };
       }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({ autoMerge: true }), session);
+
+    expect(result.status).toBe('success');
+    expect(session.pendingBackgroundTasks).toHaveLength(2);
+    expect(session.pendingBackgroundTasks?.map((task) => task.stage)).toEqual(['learn', 'assumptions']);
+    expect(mockCreatePR).toHaveBeenCalled();
+
+    expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({
+      outputRoot: sessionWorktreePath,
+      agentCwd: sessionWorktreePath,
+      sessionLogsDir: '/tmp/sessions/session/20260330-143000/logs',
+      sessionName: 'session/20260330-143000',
+    }));
+    expect(mockCreatePR.mock.invocationCallOrder[0]).toBeLessThan(
+      mockExtractLearnings.mock.invocationCallOrder[0],
+    );
+    expect(mockExec).not.toHaveBeenCalledWith(
+      expect.stringContaining('chore: add learning artifact for issue #42'),
+      expect.anything(),
+    );
+    expect(commentIssue).not.toHaveBeenCalledWith(
+      'owner/repo',
+      42,
+      expect.stringContaining('## AI Implementation Notes'),
+    );
+
+    resolveLearning(`${sessionWorktreePath}/.alpha-loop/learnings/issue-42-20260101-000000.md`);
+    resolveAssumptions({
+      exitCode: 0,
+      output: 'Assumed the existing API contract remains stable.',
+      duration: 750,
+    });
+    await Promise.allSettled(session.pendingBackgroundTasks?.map((task) => task.promise) ?? []);
+
+    expect(mockSpawnAgent).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: 'assumptions prompt',
+      cwd: sessionWorktreePath,
+    }));
+    expect(commentIssue).toHaveBeenCalledWith(
+      'owner/repo',
+      42,
+      expect.stringContaining('Assumed the existing API contract remains stable.'),
+    );
+    expect(mockComputeCosts).toHaveBeenLastCalledWith(expect.arrayContaining([
+      expect.objectContaining({ step: 'assumptions', issueNum: 42 }),
+    ]));
+    expect(mockWriteCosts).toHaveBeenLastCalledWith('session/20260330-143000', {});
+    expect(mockBuildStageTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({ output: 'Assumed the existing API contract remains stable.' }),
+      'assumptions',
+      expect.any(Object),
+      expect.objectContaining({ issueNum: 42 }),
+    );
+    expect(mockWriteStageTelemetry).toHaveBeenCalled();
+    expect(mockRecordSessionBackgroundTaskError).not.toHaveBeenCalled();
+  });
+
+  test('keeps background failures non-fatal and available for session-end recording', async () => {
+    const session = makeSession();
+    mockExtractLearnings.mockRejectedValueOnce(new Error('learning agent failed'));
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'assumptions prompt') throw new Error('assumptions agent failed');
+      return { exitCode: 0, output: 'Agent output', duration: 5000 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({ autoMerge: true }), session);
+    const settled = await Promise.allSettled(session.pendingBackgroundTasks?.map((task) => task.promise) ?? []);
+
+    expect(result.status).toBe('success');
+    expect(settled.map((entry) => entry.status)).toEqual(['rejected', 'rejected']);
+    expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      status: 'success',
+    }));
+  });
+
+  test.each([
+    { scenario: 'auto-merge is disabled', autoMerge: false, sessionWorktreeAvailable: true },
+    { scenario: 'the session checkout is unavailable', autoMerge: true, sessionWorktreeAvailable: false },
+  ])('keeps synchronous issue-PR learning commits when $scenario', async ({ autoMerge, sessionWorktreeAvailable }) => {
+    const learningPath = '/tmp/worktree/.alpha-loop/learnings/issue-42-20260101-000000.md';
+    mockExtractLearnings.mockResolvedValueOnce(learningPath);
+    mockExec.mockImplementation((cmd: string) => {
       if (cmd.startsWith('git diff --cached --name-only --')) {
         return { stdout: '.alpha-loop/learnings/issue-42-20260101-000000.md', stderr: '', exitCode: 0 };
       }
       return { stdout: '', stderr: '', exitCode: 0 };
     });
 
-    await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+    const session = makeSession();
+    if (!sessionWorktreeAvailable) delete session.worktreePath;
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig({ autoMerge }), session);
 
     expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({
       outputRoot: '/tmp/worktree',
       agentCwd: '/tmp/worktree',
-      sessionLogsDir: '/tmp/sessions/session/20260330-143000/logs',
-      sessionName: 'session/20260330-143000',
     }));
-
-    const commitCallIndex = mockExec.mock.calls.findIndex(([cmd]) =>
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining("git commit -m 'chore: add learning artifact for issue #42'"),
+      { cwd: '/tmp/worktree' },
+    );
+    const learningCommitOrder = mockExec.mock.calls.findIndex(([cmd]) =>
       String(cmd).startsWith("git commit -m 'chore: add learning artifact for issue #42'"),
     );
-    expect(commitCallIndex).toBeGreaterThanOrEqual(0);
-    expect(mockExec.mock.calls[commitCallIndex][0]).toContain('.alpha-loop/learnings/issue-42-20260101-000000.md');
-    expect(mockExtractLearnings.mock.invocationCallOrder[0]).toBeLessThan(
-      mockExec.mock.invocationCallOrder[commitCallIndex],
-    );
-    expect(mockExec.mock.invocationCallOrder[commitCallIndex]).toBeLessThan(
+    expect(learningCommitOrder).toBeGreaterThanOrEqual(0);
+    expect(mockExec.mock.invocationCallOrder[learningCommitOrder]).toBeLessThan(
       mockCreatePR.mock.invocationCallOrder[0],
     );
+    expect(session.pendingBackgroundTasks?.map((task) => task.stage)).toEqual(['assumptions']);
   });
 
   test('uses per-step pipeline agents for plan, implementation, and review', async () => {

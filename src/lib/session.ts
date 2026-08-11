@@ -25,6 +25,20 @@ import type { PipelineResult, GateResult } from './pipeline.js';
 import type { QueueEpicLink, QueueSessionContext } from './epic-queue.js';
 import type { AutomationPolicyDecision } from './automation-policy.js';
 
+export type SessionBackgroundTaskStage = 'learn' | 'assumptions';
+
+export type PendingSessionBackgroundTask = {
+  issueNum: number;
+  stage: SessionBackgroundTaskStage;
+  promise: Promise<void>;
+};
+
+export type EnqueueSessionBackgroundTaskInput = {
+  issueNum: number;
+  stage: SessionBackgroundTaskStage;
+  run: () => Promise<void>;
+};
+
 export type SessionContext = {
   /** Stable id used in durable manifests and trace joins. */
   id?: string;
@@ -35,6 +49,8 @@ export type SessionContext = {
   logsDir: string;
   manifestPath?: string;
   results: PipelineResult[];
+  /** Non-blocking per-issue work that must settle before session finalization. */
+  pendingBackgroundTasks?: PendingSessionBackgroundTask[];
   sessionReviewFindings?: GateResult;
   sessionPrUrl?: string;
   /** Dedicated checkout for every session-branch mutation. */
@@ -475,6 +491,45 @@ export function recordSessionError(
   }));
 }
 
+/**
+ * Record a deferred task failure without changing the durable session or issue status.
+ */
+export function recordSessionBackgroundTaskError(
+  session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
+  args: { issueNum: number; stage: SessionBackgroundTaskStage; message: string },
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, (manifest) => ({
+    ...manifest,
+    errors: [
+      ...manifest.errors,
+      {
+        issueNum: args.issueNum,
+        stage: args.stage,
+        message: args.message,
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  }));
+}
+
+/**
+ * Start deferred work immediately and retain its promise for session-end draining.
+ * A rejection observer is attached up front so a fast failure cannot become an
+ * unhandled rejection before the runner reaches the drain point.
+ */
+export function enqueueSessionBackgroundTask(
+  session: SessionContext,
+  task: EnqueueSessionBackgroundTaskInput,
+): void {
+  const promise = Promise.resolve().then(task.run);
+  void promise.catch(() => undefined);
+  (session.pendingBackgroundTasks ??= []).push({
+    issueNum: task.issueNum,
+    stage: task.stage,
+    promise,
+  });
+}
+
 export function recordSessionWorktree(
   session: Pick<SessionContext, 'manifestPath' | 'resultsDir'>,
   args: { issueNum: number; title?: string; path: string; branch: string; resumed: boolean },
@@ -755,6 +810,7 @@ export function rehydrateSessionContextFromManifest(ref: ResumableSessionRef): S
     logsDir: join(sessionDir, 'logs'),
     manifestPath,
     results: readSessionResults(sessionDir),
+    pendingBackgroundTasks: [],
     sessionPrUrl: manifest.sessionPrUrl ?? manifest.prUrl ?? undefined,
     currentIssueNum: manifest.currentIssue?.issueNum ?? manifest.issueNumber ?? undefined,
     parentEpicNum: manifest.parentEpicNumber ?? undefined,
@@ -1081,6 +1137,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
     logsDir,
     manifestPath,
     results: [],
+    pendingBackgroundTasks: [],
     milestone,
     epicTitle,
     branchSource,

@@ -44,6 +44,7 @@ import type { TestRunOptions } from './testing.js';
 import { runVerify } from './verify.js';
 import { extractLearnings, getLearningContext } from './learning.js';
 import {
+  enqueueSessionBackgroundTask,
   saveResult,
   getPreviousResult,
   loadSessionManifest,
@@ -2444,11 +2445,7 @@ export async function processIssue(
     ? `Review: ${reviewGate.summary}\n${reviewGate.findings.map((f) => `- [${f.severity}] ${f.description} (${f.fixed ? 'fixed' : 'unfixed'})`).join('\n')}`
     : `Review: ${reviewGate.summary || 'passed'}`;
 
-  // --- Step 8: Extract learnings ---
-  currentStep = 'learn';
-  recordSessionStage(session, 'learn');
-  log.step('Step 8: Extracting learnings');
-  const learningFile = quickWorktree ? null : await extractLearnings({
+  const learningOptions = {
     issueNum,
     title,
     status: testsPassing ? 'success' : 'failure',
@@ -2460,16 +2457,32 @@ export async function processIssue(
     verifyOutput,
     body,
     config,
-    outputRoot: worktreePath,
-    agentCwd: worktreePath,
     sessionLogsDir: session.logsDir,
     sessionName: session.name,
     ...epicOption,
-  });
+  };
+  const backgroundWorktreePath = session.worktreePath;
+  const deferLearning = !quickWorktree
+    && config.autoMerge
+    && !config.dryRun
+    && !config.skipLearn
+    && backgroundWorktreePath !== undefined;
 
   if (quickWorktree) {
     log.info('Quick mode: learning extraction deferred to the end-of-run epic-level pass');
-  } else {
+  } else if (config.skipLearn) {
+    log.info('Skipping learning extraction (skipLearn=true)');
+  } else if (!deferLearning) {
+    // Without a session branch, the artifact must still be created and committed
+    // before the issue PR so it cannot be orphaned in the parent checkout.
+    currentStep = 'learn';
+    recordSessionStage(session, 'learn');
+    log.step('Step 8: Extracting learnings');
+    const learningFile = await extractLearnings({
+      ...learningOptions,
+      outputRoot: worktreePath,
+      agentCwd: worktreePath,
+    });
     if (!config.dryRun) {
       commitLearningFiles(
         worktreePath,
@@ -2561,46 +2574,75 @@ export async function processIssue(
     log.dry('Would create PR');
   }
 
+  // --- Step 8 (deferred): Extract learnings on the session checkout ---
+  if (deferLearning && prUrl && backgroundWorktreePath) {
+    currentStep = 'learn';
+    recordSessionStage(session, 'learn');
+    log.step('Step 8: Extracting learnings in the background');
+    enqueueSessionBackgroundTask(session, {
+      issueNum,
+      stage: 'learn',
+      run: async () => {
+        const learningFile = await extractLearnings({
+          ...learningOptions,
+          outputRoot: backgroundWorktreePath,
+          agentCwd: backgroundWorktreePath,
+        });
+        if (!learningFile) {
+          throw new Error(`Learning extraction produced no artifact for issue #${issueNum}`);
+        }
+      },
+    });
+    stepsCompleted.push('learn');
+  }
+
   // --- Step 9b: Post assumptions/decisions comment ---
   if (!config.dryRun && prUrl) {
     currentStep = 'assumptions';
     recordSessionStage(session, 'assumptions');
-    try {
-      const reviewSummary = reviewGate.summary || 'No review findings';
-      const assumptionsPrompt = buildAssumptionsPrompt({
-        issueNum,
-        title,
-        body,
-        diff: runDiff,
-        reviewSummary,
-      });
+    const reviewSummary = reviewGate.summary || 'No review findings';
+    const assumptionsPrompt = buildAssumptionsPrompt({
+      issueNum,
+      title,
+      body,
+      diff: runDiff,
+      reviewSummary,
+    });
 
-      tracePrompt(session, issueNum, 'assumptions', assumptionsPrompt);
+    tracePrompt(session, issueNum, 'assumptions', assumptionsPrompt);
+    enqueueSessionBackgroundTask(session, {
+      issueNum,
+      stage: 'assumptions',
+      run: async () => {
+        const assumptionsResult = await spawnAgent({
+          ...agentForStep(config, 'learn'),
+          prompt: assumptionsPrompt,
+          cwd: backgroundWorktreePath ?? projectDir,
+          logFile: join(session.logsDir, `issue-${issueNum}-assumptions.log`),
+          verbose: config.verbose,
+          timeout: config.agentTimeout * 1000,
+        });
 
-      const assumptionsResult = await spawnAgent({
-        ...agentForStep(config, 'learn'),
-        prompt: assumptionsPrompt,
-        cwd: worktreePath,
-        logFile: join(session.logsDir, `issue-${issueNum}-assumptions.log`),
-        verbose: config.verbose,
-        timeout: config.agentTimeout * 1000,
-      });
+        traceOutput(session, issueNum, 'assumptions', assumptionsResult.output);
+        stepCosts.push(buildStepCost('assumptions', issueNum, assumptionsResult, config));
+        writeCosts(session.name, computeCosts(stepCosts));
+        recordStageTelemetry(session, issueNum, 'assumptions', assumptionsResult, config, {
+          profile: selectRoutingProfile(config, issueNum),
+        });
 
-      traceOutput(session, issueNum, 'assumptions', assumptionsResult.output);
-      stepCosts.push(buildStepCost('assumptions', issueNum, assumptionsResult, config));
-      recordStageTelemetry(session, issueNum, 'assumptions', assumptionsResult, config, {
-        profile: selectRoutingProfile(config, issueNum),
-      });
+        if (assumptionsResult.exitCode !== 0 || !assumptionsResult.output.trim()) {
+          throw new Error(
+            `Assumptions agent failed for issue #${issueNum} ` +
+            `(exit ${assumptionsResult.exitCode}, output ${assumptionsResult.output.length} chars)`,
+          );
+        }
 
-      if (assumptionsResult.exitCode === 0 && assumptionsResult.output.trim()) {
         commentIssue(config.repo, issueNum,
           `## AI Implementation Notes\n\n${assumptionsResult.output.trim()}\n\n---\n_Posted by alpha-loop for user validation._`,
         );
         log.success('Posted assumptions/decisions comment');
-      }
-    } catch (err) {
-      log.warn(`Failed to post assumptions comment: ${err}`);
-    }
+      },
+    });
   }
 
   // --- Step 9c: Write full traces (Meta-Harness style) ---
