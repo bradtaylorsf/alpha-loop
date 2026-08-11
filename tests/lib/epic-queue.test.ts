@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  buildEpicQueueWaves,
   createEpicQueueManifest,
   createEpicQueueValidationFailureManifest,
   findDuplicateEpicIds,
@@ -54,6 +55,45 @@ describe('epic queue helpers', () => {
       [166, 'already-complete'],
       [214, 'pending'],
     ]);
+    expect(result.entries.map((entry) => entry.dependencyIds)).toEqual([[], [], []]);
+  });
+
+  test('buildEpicQueueWaves creates deterministic dependency waves in requested order', () => {
+    const issues = new Map<number, Issue>([
+      [30, issue({ number: 30, title: 'Third', body: 'Depends on #10 and depends on #20.' })],
+      [10, issue({ number: 10, title: 'First', body: 'No dependencies.' })],
+      [20, issue({ number: 20, title: 'Second', body: 'No dependencies.' })],
+      [40, issue({ number: 40, title: 'Fourth', body: 'Requires #30.' })],
+    ]);
+    const result = validateEpicQueue('owner/repo', [30, 10, 20, 40], (_repo, issueNum) => issues.get(issueNum) ?? null);
+
+    expect(result.errors).toEqual([]);
+    expect(result.entries.map((entry) => [entry.epicNumber, entry.dependencyIds])).toEqual([
+      [30, [10, 20]],
+      [10, []],
+      [20, []],
+      [40, [30]],
+    ]);
+    expect(buildEpicQueueWaves(result.entries).map((wave) => wave.map((entry) => entry.epicNumber))).toEqual([
+      [10, 20],
+      [30],
+      [40],
+    ]);
+  });
+
+  test('validateEpicQueue rejects dependency cycles among queued epics', () => {
+    const issues = new Map<number, Issue>([
+      [10, issue({ number: 10, body: 'Depends on #20.' })],
+      [20, issue({ number: 20, body: 'Blocked by #10.' })],
+      [30, issue({ number: 30, body: 'Depends on #10.' })],
+    ]);
+
+    const result = validateEpicQueue('owner/repo', [10, 20, 30], (_repo, issueNum) => issues.get(issueNum) ?? null);
+
+    expect(result.errors).toEqual([
+      expect.objectContaining({ code: 'dependency-cycle', epicNumber: 10 }),
+      expect.objectContaining({ code: 'dependency-cycle', epicNumber: 20 }),
+    ]);
   });
 
   test('validateEpicQueue rejects duplicates, missing issues, non-epics, and closed incomplete epics', () => {
@@ -104,6 +144,7 @@ describe('epic queue helpers', () => {
           title: 'First',
           issue: issue({ number: 205, title: 'First' }),
           status: 'pending',
+          dependencyIds: [],
         },
       ], new Date('2026-05-21T10:11:12.000Z'));
 
@@ -111,6 +152,16 @@ describe('epic queue helpers', () => {
 
       expect(manifestPath).toBe(join(projectDir, '.alpha-loop', 'sessions', 'queue-20260521T101112Z', 'queue.json'));
       expect(JSON.parse(readFileSync(manifestPath, 'utf-8'))).toEqual(manifest);
+      expect(manifest.parallelLimit).toBe(1);
+      expect(manifest.waves).toEqual([
+        expect.objectContaining({ waveNumber: 1, epicIds: [205], status: 'pending' }),
+      ]);
+      expect(manifest.epics[0]).toEqual(expect.objectContaining({
+        dependencyIds: [],
+        waveNumber: 1,
+        waveIndex: 1,
+        logPath: null,
+      }));
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
     }

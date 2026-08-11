@@ -347,6 +347,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run --epic <N>` | Process an epic — its sub-issues in checklist order, auto-verify on completion (see [docs/epics.md](docs/epics.md)) |
 | `alpha-loop run --epics <ids>` | Process an ordered comma-separated queue of epics, one session branch and PR per epic |
 | `alpha-loop run --epics <ids> --queue-branch-mode independent` | Run queued epics without stacking later session branches on earlier ones |
+| `alpha-loop run --epics <ids> --queue-branch-mode independent --parallel <n>` | Run up to `n` dependency-ready epics concurrently in topological waves |
 | `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
 | `alpha-loop daemon` | Run hosted daemon mode continuously for repo stewardship |
 | `alpha-loop daemon --mode feedback-only` | Poll feedback and resume eligible sessions without triage or new work selection |
@@ -421,6 +422,7 @@ Options:
   --epic <n>          Process a specific epic by issue number (skips the picker)
   --epics <ids>       Process multiple epics in order (comma-separated)
   --queue-branch-mode <mode>  Branch mode for --epics: stacked or independent
+  --parallel <n>      Run up to n dependency-ready epics concurrently (independent queues only)
   --skip-epic         Skip epic discovery, use flat/milestone flow
   --verify-only <n>   Run only the verification pass on an existing epic
 ```
@@ -861,7 +863,9 @@ To run several epics unattended while keeping review scope separate, pass an exp
 alpha-loop run --epics 205,166,214
 ```
 
-The queue is validated before any work starts. Each listed issue must exist, be labeled `epic`, not be duplicated, and be open unless it is already closed as completed. Alpha Loop processes the epics in the given order, creates/finalizes one session branch and PR per epic, and stops on the first epic failure, verification gap, checklist consistency error, or transient agent/rate-limit stop. By default, queue sessions use `stacked` ancestry: later epic session branches start from the previous successful session branch while their PRs still target the configured base branch. Use `--queue-branch-mode independent` for unrelated epics that should all branch from the base branch. Non-dry-run queue attempts write `.alpha-loop/sessions/queue-<timestamp>/queue.json`; `alpha-loop history` lists those manifests and `alpha-loop history queue-<timestamp>` prints stopped/pending epics, session PRs, and rebase notes. `--dry-run` prints the validated queue without mutating GitHub or git state.
+The queue is validated before any work starts. Each listed issue must exist, be labeled `epic`, not be duplicated, and be open unless it is already closed as completed. Alpha Loop processes sequential queues in the given order, creates/finalizes one session branch and PR per epic, and stops on the first failure. By default, queues use `stacked` ancestry. For independent work, add `--queue-branch-mode independent --parallel 2`: Alpha Loop derives topological waves from queued `Depends on #N` references, runs up to two ready epics as child processes, and waits for each wave before starting dependents. A failed epic does not cancel siblings already running; unrelated later epics continue, failed dependents are recorded as skipped, and the queue exits nonzero.
+
+Parallel worker output is stored in `.alpha-loop/sessions/queue-<timestamp>/epic-<N>.log`. The atomic `queue.json` manifest records the concurrency limit, waves, dependencies, per-epic status and log path, and dependency-failure skips. Use `alpha-loop history queue-<timestamp>` to inspect progress. `--parallel` requires independent mode; stacked branches are inherently sequential. `--dry-run` prints the validated wave schedule without mutating GitHub or git state.
 
 Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
 
@@ -918,7 +922,7 @@ What needs to be done.
 | `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
 | `.alpha-loop/sessions/<session>/session.json` | No (gitignored) | Durable resumable session state with issue, branch, worktree, PR, stage, status, prompts, transcripts, and logs |
 | `.alpha-loop/sessions/<session>/session.lock` | No (gitignored) | Held by the live run or resume that owns the session; a second run of the same epic/milestone fails fast, and locks from dead processes are reclaimed automatically |
-| `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, session PRs, merge order, and stop reason |
+| `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, dependency waves, concurrency, session PRs, logs, and failures |
 | `.alpha-loop/feedback/` | No (gitignored) | Local idempotency records for external feedback adapter events |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |
