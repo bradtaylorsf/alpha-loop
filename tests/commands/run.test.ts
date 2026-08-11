@@ -1287,6 +1287,7 @@ Coordinate hosted work.
   test('runs one full-suite session gate for effective changed scope', async () => {
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
       ...overrides,
+      autoMerge: true,
       testScope: 'changed',
       changedTestCommand: 'pnpm jest --findRelatedTests {files}',
     }) as any);
@@ -1319,8 +1320,35 @@ Coordinate hosted work.
   test('does not add a session gate when changed scope falls back to full runs', async () => {
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
       ...overrides,
+      autoMerge: true,
       testScope: 'changed',
       changedTestCommand: '',
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Test issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({});
+
+    expect(mockRunFullSuiteGate).not.toHaveBeenCalled();
+  });
+
+  test('does not add a session gate when auto-merge is disabled', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: false,
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
     }) as any);
     mockPollIssues.mockReturnValue([
       { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
@@ -1344,6 +1372,7 @@ Coordinate hosted work.
   test('marks the session failed when the end-of-session full suite cannot be fixed', async () => {
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
       ...overrides,
+      autoMerge: true,
       testScope: 'changed',
       changedTestCommand: 'pnpm jest --findRelatedTests {files}',
     }) as any);

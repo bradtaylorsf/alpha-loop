@@ -340,6 +340,7 @@ describe('processIssue', () => {
       .mockReturnValueOnce({ passed: true, output: 'passed' });
 
     await processIssue(42, 'Test issue', 'Issue body', makeConfig({
+      autoMerge: true,
       testScope: 'changed',
       changedTestCommand: 'pnpm jest --findRelatedTests {files}',
       skipReview: true,

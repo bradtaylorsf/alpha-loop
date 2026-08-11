@@ -258,7 +258,7 @@ describe('init command', () => {
     // No package.json in tempDir, so package manager is 'unknown' -> 'npm run test'
     expect(content).toMatch(/^test_command: npm run test$/m);
     expect(content).toContain('# test_scope: full');
-    expect(content).toContain('# changed_test_command: pnpm jest --findRelatedTests {files}');
+    expect(content).toContain('# changed_test_command: pnpm jest --findRelatedTests --passWithNoTests {files}');
     expect(content).toContain('harnesses:');
   });
 

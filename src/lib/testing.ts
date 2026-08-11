@@ -30,6 +30,7 @@ export type ResolvedTestCommand = {
 /** True when changed scope has a usable file-list template. */
 export function isChangedTestScopeEnabled(config: Config): boolean {
   return config.testScope === 'changed'
+    && config.autoMerge
     && (config.changedTestCommand?.trim().length ?? 0) > 0
     && Boolean(config.changedTestCommand?.includes('{files}'));
 }
@@ -41,6 +42,14 @@ export function resolveTestCommand(
 ): ResolvedTestCommand {
   if (options.forceFull || config.testScope !== 'changed') {
     return { command: config.testCommand, scope: 'full' };
+  }
+
+  if (!config.autoMerge) {
+    return {
+      command: config.testCommand,
+      scope: 'full',
+      fallbackReason: 'test_scope is changed but auto_merge is disabled, so no aggregate session branch is available; falling back to the full test_command',
+    };
   }
 
   const template = config.changedTestCommand?.trim() ?? '';

@@ -115,6 +115,7 @@ describe('runTests', () => {
     mockExec.mockReturnValue({ stdout: 'Related tests passed', stderr: '', exitCode: 0 });
 
     runTests('/work', makeConfig({
+      autoMerge: true,
       testScope: 'changed',
       changedTestCommand: 'pnpm jest --findRelatedTests {files}',
     }), '/log', {
@@ -158,7 +159,7 @@ describe('runTests', () => {
   test('warns and falls back to the full command when changed_test_command is unset', () => {
     mockExec.mockReturnValue({ stdout: 'All tests passed', stderr: '', exitCode: 0 });
 
-    runTests('/work', makeConfig({ testScope: 'changed' }), '/log', {
+    runTests('/work', makeConfig({ autoMerge: true, testScope: 'changed' }), '/log', {
       changedFiles: ['src/one.ts'],
     });
 
@@ -166,10 +167,24 @@ describe('runTests', () => {
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('changed_test_command is not configured'));
   });
 
+  test('warns and falls back to the full command when auto-merge is disabled', () => {
+    mockExec.mockReturnValue({ stdout: 'All tests passed', stderr: '', exitCode: 0 });
+
+    runTests('/work', makeConfig({
+      autoMerge: false,
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+    }), '/log', { changedFiles: ['src/one.ts'] });
+
+    expect(mockExec).toHaveBeenCalledWith('pnpm test', expect.objectContaining({ cwd: '/work' }));
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('auto_merge'));
+  });
+
   test('warns and falls back when the changed command has no files placeholder', () => {
     mockExec.mockReturnValue({ stdout: 'All tests passed', stderr: '', exitCode: 0 });
 
     runTests('/work', makeConfig({
+      autoMerge: true,
       testScope: 'changed',
       changedTestCommand: 'pnpm jest --findRelatedTests',
     }), '/log', { changedFiles: ['src/one.ts'] });
