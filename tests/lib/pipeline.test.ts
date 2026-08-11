@@ -1,4 +1,4 @@
-import { processIssue, processBatch, buildPRBody } from '../../src/lib/pipeline';
+import { processIssue, processBatch, finalizeQuickRun, buildPRBody } from '../../src/lib/pipeline';
 import type { SessionContext } from '../../src/lib/session';
 
 // Mock all dependencies
@@ -246,6 +246,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipPostSessionSecurity: false,
     batch: false,
     batchSize: 5,
+    quick: false,
     smokeTest: '',
     agentTimeout: 1800,
     pricing: {
@@ -1668,5 +1669,169 @@ describe('buildPRBody', () => {
     expect(body).toContain('Browser results');
     expect(body).toContain('## Human QA Checklist');
     expect(body).toContain('- [ ] Open preview and check the hero.');
+  });
+});
+
+describe('processIssue quick mode', () => {
+  const quickWorktree = { path: '/tmp/quick-worktree', branch: 'agent/issue-100' };
+
+  test('runs only plan + implement on the shared worktree and defers everything else', async () => {
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession(), {
+      quickWorktree,
+    });
+
+    expect(result.status).toBe('success');
+    expect(result.testsPassing).toBe(true);
+    expect(result.verifySkipped).toBe(true);
+    expect(result.prUrl).toBeUndefined();
+
+    // Shared worktree is used as-is — never created or removed per issue
+    expect(mockSetupWorktree).not.toHaveBeenCalled();
+    expect(mockCleanupWorktree).not.toHaveBeenCalled();
+    expect(mockRecordSessionWorktree).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      path: '/tmp/quick-worktree',
+      branch: 'agent/issue-100',
+    }));
+
+    // Tests, review, verify, learnings, and PR are all deferred
+    expect(mockRunTests).not.toHaveBeenCalled();
+    expect(mockCreatePR).not.toHaveBeenCalled();
+    expect(mockMergePR).not.toHaveBeenCalled();
+    expect(mockExtractLearnings).not.toHaveBeenCalled();
+
+    // Exactly two agent sessions: plan + implement
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
+    const prompts = mockSpawnAgent.mock.calls.map(([opts]) => opts.prompt);
+    expect(prompts).toEqual(['structured implementation plan prompt', 'implement prompt']);
+    // Both run in the shared worktree
+    for (const [opts] of mockSpawnAgent.mock.calls) {
+      expect(opts.cwd).toBe('/tmp/quick-worktree');
+    }
+  });
+
+  test('preserves the shared worktree when implementation fails', async () => {
+    mockSpawnAgent
+      .mockResolvedValueOnce({ exitCode: 0, output: 'plan ok', duration: 1000 })
+      .mockResolvedValueOnce({ exitCode: 1, output: 'implementation exploded', duration: 1000 });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession(), {
+      quickWorktree,
+    });
+
+    expect(result.status).toBe('failure');
+    expect(mockCleanupWorktree).not.toHaveBeenCalled();
+  });
+});
+
+describe('finalizeQuickRun', () => {
+  const issues = [
+    { number: 42, title: 'First issue' },
+    { number: 43, title: 'Second issue' },
+  ];
+
+  test('runs deferred tests once, creates a single PR, and merges it', async () => {
+    const result = await finalizeQuickRun({
+      issues,
+      config: makeConfig({ autoMerge: true }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+      epicNum: 100,
+    });
+
+    expect(result.testsPassing).toBe(true);
+    expect(result.merged).toBe(true);
+    expect(result.prUrl).toBe('https://github.com/owner/repo/pull/1');
+
+    expect(mockRunTests).toHaveBeenCalledTimes(1);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+    expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
+      base: 'session/20260330-143000',
+      head: 'agent/issue-42',
+      title: 'feat: quick session for epic #100 (#42, #43)',
+    }));
+    const prBody = mockCreatePR.mock.calls[0][0].body;
+    expect(prBody).toContain('- #42: First issue (closes #42)');
+    expect(prBody).toContain('- #43: Second issue (closes #43)');
+    expect(prBody).toContain('Part of epic #100');
+    expect(mockMergePR).toHaveBeenCalledWith('owner/repo', 'agent/issue-42');
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      worktreePath: '/tmp/quick-worktree',
+      preserveIfCommits: false,
+    }));
+  });
+
+  test('targets the base branch when auto-merge is off and does not merge', async () => {
+    const result = await finalizeQuickRun({
+      issues,
+      config: makeConfig({ autoMerge: false }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+    });
+
+    expect(result.merged).toBe(false);
+    expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
+      base: 'master',
+      title: 'feat: quick session (#42, #43)',
+    }));
+    expect(mockMergePR).not.toHaveBeenCalled();
+  });
+
+  test('invokes the fix agent when tests fail, then retries', async () => {
+    mockRunTests
+      .mockReturnValueOnce({ passed: false, output: '1 test failed' })
+      .mockReturnValueOnce({ passed: true, output: 'All tests passed' });
+
+    const result = await finalizeQuickRun({
+      issues,
+      config: makeConfig({ autoMerge: true }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+    });
+
+    expect(result.testsPassing).toBe(true);
+    expect(mockRunTests).toHaveBeenCalledTimes(2);
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+    const fixPrompt = mockSpawnAgent.mock.calls[0][0].prompt;
+    expect(fixPrompt).toContain('#42 (First issue)');
+    expect(fixPrompt).toContain('1 test failed');
+    expect(result.merged).toBe(true);
+  });
+
+  test('leaves the PR unmerged and preserves the worktree when tests keep failing', async () => {
+    mockRunTests.mockReturnValue({ passed: false, output: 'still failing' });
+
+    const result = await finalizeQuickRun({
+      issues,
+      config: makeConfig({ autoMerge: true }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+    });
+
+    expect(result.testsPassing).toBe(false);
+    expect(result.merged).toBe(false);
+    expect(mockRunTests).toHaveBeenCalledTimes(3); // maxTestRetries
+    expect(mockCreatePR).toHaveBeenCalled();
+    expect(mockMergePR).not.toHaveBeenCalled();
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      preserveIfCommits: true,
+    }));
+  });
+
+  test('dry run skips everything', async () => {
+    const result = await finalizeQuickRun({
+      issues,
+      config: makeConfig({ dryRun: true }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+    });
+
+    expect(result.testsPassing).toBe(true);
+    expect(mockRunTests).not.toHaveBeenCalled();
+    expect(mockCreatePR).not.toHaveBeenCalled();
   });
 });

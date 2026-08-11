@@ -85,6 +85,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipPostSessionSecurity: false,
     batch: false,
     batchSize: 5,
+    quick: false,
     smokeTest: '',
     agentTimeout: 1800,
     pricing: {},

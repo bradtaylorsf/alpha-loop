@@ -414,6 +414,12 @@ harnesses:
 # batch: false
 # batch_size: 5
 
+# === Quick mode (advanced) ==================================================
+# Plan + build + commit per issue in a fresh agent session on one shared
+# worktree; tests, review, and the PR happen once at the end of the run.
+# Faster than sequential mode while keeping per-issue agent context isolation.
+# quick: false
+
 # === Evaluation =============================================================
 # Settings for the eval harness used by \`alpha-loop review\` and CI eval runs.
 # eval_dir: .alpha-loop/evals

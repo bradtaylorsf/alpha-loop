@@ -38,6 +38,7 @@ jest.mock('../../src/lib/github', () => ({
 jest.mock('../../src/lib/pipeline', () => ({
   processIssue: jest.fn(),
   processBatch: jest.fn(),
+  finalizeQuickRun: jest.fn(),
   readGateResult: jest.fn(() => ({ passed: true, summary: '', findings: [] })),
   formatGateFindings: jest.fn(() => ''),
 }));
@@ -69,9 +70,11 @@ jest.mock('../../src/lib/verify-epic', () => ({
 
 jest.mock('../../src/lib/worktree', () => ({
   cleanupWorktree: jest.fn(),
+  setupWorktree: jest.fn(),
 }));
 
 jest.mock('../../src/lib/learning', () => ({
+  extractLearnings: jest.fn().mockResolvedValue(null),
   generateSessionSummary: jest.fn().mockResolvedValue(null),
   repairSessionLearningArtifacts: jest.fn(),
   repairSessionSummaryArtifact: jest.fn(),
@@ -117,10 +120,11 @@ import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
-import { processIssue, processBatch } from '../../src/lib/pipeline';
+import { processIssue, processBatch, finalizeQuickRun } from '../../src/lib/pipeline';
+import { setupWorktree } from '../../src/lib/worktree';
 import { createSession, finalizeSession, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
-import { generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
+import { extractLearnings, generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
 import { syncAgentAssets } from '../../src/commands/sync';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -138,6 +142,8 @@ const mockLabelIssue = labelIssue as jest.MockedFunction<typeof labelIssue>;
 const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue>;
 const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue>;
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
+const mockFinalizeQuickRun = finalizeQuickRun as jest.MockedFunction<typeof finalizeQuickRun>;
+const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
 const mockReleaseSessionLock = releaseSessionLock as jest.MockedFunction<typeof releaseSessionLock>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
@@ -145,6 +151,7 @@ const mockTransitionSessionStatus = transitionSessionStatus as jest.MockedFuncti
 const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
 const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGenerateSessionSummary = generateSessionSummary as jest.MockedFunction<typeof generateSessionSummary>;
+const mockExtractLearnings = extractLearnings as jest.MockedFunction<typeof extractLearnings>;
 const mockRepairSessionLearningArtifacts = repairSessionLearningArtifacts as jest.MockedFunction<typeof repairSessionLearningArtifacts>;
 const mockRepairSessionSummaryArtifact = repairSessionSummaryArtifact as jest.MockedFunction<typeof repairSessionSummaryArtifact>;
 const mockContextNeedsRefresh = contextNeedsRefresh as jest.MockedFunction<typeof contextNeedsRefresh>;
@@ -197,6 +204,7 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     skipPostSessionSecurity: false,
     batch: false,
     batchSize: 5,
+    quick: false,
     smokeTest: '',
     agentTimeout: 1800,
     pricing: {},
@@ -530,6 +538,7 @@ describe('runCommand', () => {
       42,
       'Runnable issue',
       'Body',
+      expect.any(Object),
       expect.any(Object),
       expect.any(Object),
     );
@@ -1035,6 +1044,7 @@ describe('runCommand', () => {
       'Target body',
       expect.objectContaining({ dryRun: true }),
       expect.any(Object),
+      expect.any(Object),
     );
     expect(mockCreateSession).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       epicNum: undefined,
@@ -1260,11 +1270,101 @@ Coordinate hosted work.
       42, 'Test issue', 'Body',
       expect.any(Object),
       expect.any(Object),
+      expect.any(Object),
     );
     expect(mockRepairSessionLearningArtifacts).not.toHaveBeenCalled();
     expect(mockRepairSessionSummaryArtifact).not.toHaveBeenCalled();
     expect(mockLog.info).toHaveBeenCalledWith('Skipping parent learning artifact repair; issue learnings are committed in child PRs');
     expect(mockFinalizeSession).toHaveBeenCalled();
+  });
+
+  test('quick mode shares one worktree across issues and runs the finalize pass', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'First issue', body: 'Body A', labels: ['ready'] },
+      { number: 43, title: 'Second issue', body: 'Body B', labels: ['ready'] },
+    ]);
+    mockSetupWorktree.mockResolvedValue({ path: '/tmp/quick-shared', branch: 'agent/issue-42', resumed: false });
+    mockProcessIssue.mockImplementation(async (issueNum: number, title: string) => ({
+      issueNum,
+      title,
+      status: 'success' as const,
+      testsPassing: true,
+      verifyPassing: false,
+      verifySkipped: true,
+      duration: 30,
+      filesChanged: 2,
+    }));
+    mockFinalizeQuickRun.mockResolvedValue({
+      testsPassing: true,
+      testOutput: 'All tests passed',
+      prUrl: 'https://github.com/owner/repo/pull/9',
+      merged: true,
+    });
+
+    await runCommand({});
+
+    // One shared worktree, created once
+    expect(mockSetupWorktree).toHaveBeenCalledTimes(1);
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 42 }));
+
+    // Both issues processed with the shared quick worktree
+    expect(mockProcessIssue).toHaveBeenCalledTimes(2);
+    for (const call of mockProcessIssue.mock.calls) {
+      expect(call[5]).toEqual(expect.objectContaining({
+        quickWorktree: { path: '/tmp/quick-shared', branch: 'agent/issue-42' },
+      }));
+    }
+
+    // Deferred test + PR pass runs once with both issues
+    expect(mockFinalizeQuickRun).toHaveBeenCalledTimes(1);
+    expect(mockFinalizeQuickRun).toHaveBeenCalledWith(expect.objectContaining({
+      issues: [
+        { number: 42, title: 'First issue' },
+        { number: 43, title: 'Second issue' },
+      ],
+      worktreePath: '/tmp/quick-shared',
+      worktreeBranch: 'agent/issue-42',
+    }));
+
+    // One learning extraction for the whole run, not one per issue
+    expect(mockExtractLearnings).toHaveBeenCalledTimes(1);
+    expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({
+      issueNum: 42,
+      status: 'success',
+      testOutput: 'All tests passed',
+    }));
+    expect(mockFinalizeSession).toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  test('quick mode records a failure and keeps the session failed when the finalize pass fails tests', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'First issue', body: 'Body A', labels: ['ready'] },
+    ]);
+    mockSetupWorktree.mockResolvedValue({ path: '/tmp/quick-shared', branch: 'agent/issue-42', resumed: false });
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'First issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: false,
+      verifySkipped: true,
+      duration: 30,
+      filesChanged: 2,
+    });
+    mockFinalizeQuickRun.mockResolvedValue({
+      testsPassing: false,
+      testOutput: 'TESTS FAILED',
+      prUrl: 'https://github.com/owner/repo/pull/9',
+      merged: false,
+    });
+
+    await runCommand({});
+
+    expect(mockFinalizeQuickRun).toHaveBeenCalledTimes(1);
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(expect.any(Object), 'failed', 'failed', expect.any(Object));
   });
 
   test('continues other eligible work when one issue is waiting for human feedback', async () => {
@@ -1422,6 +1522,7 @@ Coordinate hosted work.
       42,
       'Flat issue',
       'Body',
+      expect.any(Object),
       expect.any(Object),
       expect.any(Object),
     );
@@ -1675,6 +1776,7 @@ Coordinate batch children.
 
     await runCommand({});
 
-    expect(mockProcessIssue.mock.calls[0]).toHaveLength(5);
+    const flatOptions = mockProcessIssue.mock.calls[0][5] as Record<string, unknown> | undefined;
+    expect(flatOptions?.epicContext).toBeUndefined();
   });
 });
