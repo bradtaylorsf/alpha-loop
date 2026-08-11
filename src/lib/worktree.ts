@@ -55,7 +55,7 @@ const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.l
 
 function isInsidePath(parent: string, child: string): boolean {
   const rel = relative(parent, child);
-  return rel === '' || (rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel));
+  return rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
 function resolveWorktreeLocation(

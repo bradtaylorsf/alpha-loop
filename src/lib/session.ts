@@ -1195,7 +1195,8 @@ export async function ensureSessionWorktree(
     baseBranch: branchSource,
     branch: session.branch,
     worktreePath,
-    skipInstall: true,
+    skipInstall: config.skipInstall,
+    setupCommand: config.webApp?.setupCommand || config.setupCommand,
   });
   session.worktreePath = worktree.path;
 

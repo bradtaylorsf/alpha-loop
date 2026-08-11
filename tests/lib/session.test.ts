@@ -229,7 +229,10 @@ describe('createSession', () => {
   });
 
   test('creates session branch in a dedicated worktree when autoMerge is enabled', async () => {
-    const config = makeConfig({ autoMerge: true });
+    const config = makeConfig({
+      autoMerge: true,
+      setupCommand: 'python -m venv .venv',
+    });
     const session = createSession(config);
 
     await ensureSessionWorktree(session, config);
@@ -237,7 +240,8 @@ describe('createSession', () => {
     expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({
       branch: session.branch,
       worktreePath: expect.stringContaining('.worktrees/session-20260101-000000'),
-      skipInstall: true,
+      skipInstall: false,
+      setupCommand: 'python -m venv .venv',
     }));
     expect(mockExec).toHaveBeenCalledWith(
       expect.stringContaining('git commit --allow-empty'),

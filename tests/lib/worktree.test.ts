@@ -104,6 +104,14 @@ describe('setupWorktree', () => {
     })).rejects.toThrow(/unsafe worktree path/);
   });
 
+  test('rejects the worktrees container itself as an explicit worktree path', async () => {
+    await expect(setupWorktree({
+      ...baseOptions,
+      branch: 'session/epic-371',
+      worktreePath: '/home/user/project/.worktrees',
+    })).rejects.toThrow(/unsafe worktree path/);
+  });
+
   test('branches from base branch when autoMerge is false', async () => {
     // No existing branch → fresh creation
     mockExec.mockImplementation((cmd: string) => {
@@ -506,5 +514,21 @@ describe('cleanupWorktree', () => {
       expect.stringContaining('rm -rf'),
       expect.anything(),
     );
+  });
+
+  test('skips cleanup when the target is the worktrees container itself', async () => {
+    mockExists.mockReturnValue(true);
+
+    const result = await cleanupWorktree({
+      ...baseOptions,
+      worktreePath: '/home/user/project/.worktrees',
+    });
+
+    expect(result).toEqual({
+      status: 'skipped',
+      path: '/home/user/project/.worktrees',
+      reason: 'unsafe-worktree-path',
+    });
+    expect(mockExec).not.toHaveBeenCalled();
   });
 });
