@@ -331,7 +331,7 @@ describe('processIssue', () => {
     expect(mockLog.warn).toHaveBeenCalledWith(
       'Agent did not commit; auto-committing 2 files: src/lib/pipeline.ts, tests/lib/pipeline.test.ts',
     );
-    expect(mockExec).toHaveBeenCalledWith('git add -A', { cwd: '/tmp/worktree' });
+    expect(mockExec).toHaveBeenCalledWith("git add -A -- ':(exclude)alpha-loop-pause-request.json' .", { cwd: '/tmp/worktree' });
     expect(mockExec).toHaveBeenCalledWith(
       "git commit -m 'feat: implement issue #42 - Test issue'",
       { cwd: '/tmp/worktree' },
@@ -1887,5 +1887,64 @@ describe('finalizeQuickRun', () => {
     expect(result.testsPassing).toBe(true);
     expect(mockRunTests).not.toHaveBeenCalled();
     expect(mockCreatePR).not.toHaveBeenCalled();
+  });
+});
+
+describe('auto-commit before pause (sandboxed agents that cannot commit)', () => {
+  test('commits implementation work before honoring a pause request', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    // The pause-request file appears only after the implement agent has run
+    // (plan is spawnAgent call #1, implement is call #2).
+    (existsSync as jest.Mock).mockImplementation((p: unknown) =>
+      String(p).endsWith('alpha-loop-pause-request.json') && mockSpawnAgent.mock.calls.length >= 2);
+    (readFileSync as jest.Mock).mockImplementation((p: unknown) => {
+      if (String(p).endsWith('alpha-loop-pause-request.json')) {
+        return JSON.stringify({
+          type: 'human_input',
+          reason: 'sandbox cannot write the worktree git index',
+          question: 'Please create the commit for me.',
+          qaChecklist: [],
+        });
+      }
+      return '';
+    });
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: ' M src/lib/thing.ts\n?? alpha-loop-pause-request.json\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    // The issue pauses, but the completed work is committed first — and the
+    // pause-request artifact itself is excluded from the commit.
+    expect(result.status).toBe('waiting');
+    expect(mockExec).toHaveBeenCalledWith(
+      "git add -A -- ':(exclude)alpha-loop-pause-request.json' .",
+      { cwd: '/tmp/worktree' },
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      "git commit -m 'feat: implement issue #42 - Test issue'",
+      { cwd: '/tmp/worktree' },
+    );
+  });
+
+  test('never lists the pause-request file among auto-committed paths', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: '?? alpha-loop-pause-request.json\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    // Only the control-plane file was dirty — nothing to commit.
+    expect(result.autoCommittedByPipeline).toBeUndefined();
+    expect(mockExec).not.toHaveBeenCalledWith(
+      expect.stringContaining('git commit -m \'feat: implement issue #42'),
+      expect.anything(),
+    );
   });
 });
