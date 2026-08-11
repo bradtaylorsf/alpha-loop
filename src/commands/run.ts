@@ -17,6 +17,7 @@ import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate } from '
 import { isChangedTestScopeEnabled } from '../lib/testing.js';
 import {
   createSession,
+  ensureSessionWorktree,
   finalizeSession,
   recordSessionIssue,
   recordSessionPolicyDecision,
@@ -888,15 +889,47 @@ async function runIssueSession(
     throw err;
   }
 
+  let completed = false;
   try {
-    return await executeSessionRun(config, options, target, session, {
+    if (config.autoMerge) {
+      await ensureSessionWorktree(session, config);
+    }
+    const result = await executeSessionRun(config, options, target, session, {
       activeEpic,
       activeEpicIssue,
       activeMilestone,
     });
+    completed = true;
+    return result;
   } finally {
+    try {
+      await cleanupSessionWorktree(session, config, !completed);
+    } catch (err) {
+      log.warn(`Session worktree cleanup failed: ${err instanceof Error ? err.message : err}`);
+    }
     releaseSessionLock(session.lock);
   }
+}
+
+async function cleanupSessionWorktree(
+  session: SessionContext,
+  config: Config,
+  preserveIfCommits: boolean,
+): Promise<void> {
+  if (!session.worktreePath) return;
+  const cleanupResult = await cleanupWorktree({
+    issueNum: session.currentIssueNum ?? session.epic ?? 0,
+    projectDir: process.cwd(),
+    autoCleanup: config.autoCleanup,
+    preserveIfCommits,
+    worktreePath: session.worktreePath,
+  });
+  recordSessionCleanup(session, {
+    status: cleanupResult.status,
+    worktreePath: cleanupResult.path,
+    reason: cleanupResult.reason,
+    at: new Date().toISOString(),
+  });
 }
 
 async function executeSessionRun(
@@ -1013,6 +1046,12 @@ async function executeSessionRun(
     } catch (err) {
       finalizationError = err;
       log.error(`Session finalization failed: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      await cleanupSessionWorktree(session, config, Boolean(finalizationError));
+    } catch (err) {
+      finalizationError ??= err;
+      log.error(`Session worktree cleanup failed: ${err instanceof Error ? err.message : err}`);
     }
 
     const issueCount = session.results.length;
@@ -1575,14 +1614,15 @@ async function executeSessionRun(
     .map((result) => ({ number: result.issueNum, title: result.title }));
   if (!config.quick && isChangedTestScopeEnabled(config) && fullGateIssues.length > 0 && !config.dryRun) {
     try {
-      if (config.autoMerge) {
-        exec(`git checkout ${shellQuote(session.branch)}`, { cwd: process.cwd() });
+      const sessionWorktreePath = await ensureSessionWorktree(session, config);
+      if (!sessionWorktreePath) {
+        throw new Error('session worktree is unavailable');
       }
       const fullGate = await runFullSuiteGate({
         issues: fullGateIssues,
         config,
         session,
-        worktreePath: process.cwd(),
+        worktreePath: sessionWorktreePath,
       });
       if (!fullGate.testsPassing) {
         const message = `End-of-session full test suite failed after ${config.maxTestRetries} attempts`;
@@ -1672,7 +1712,8 @@ async function executeSessionRun(
 
   // Generate session summary (aggregates learnings across all issues)
   if (session.results.length > 0) {
-    const learningsDir = join(process.cwd(), '.alpha-loop', 'learnings');
+    const learningsRoot = session.worktreePath ?? process.cwd();
+    const learningsDir = join(learningsRoot, '.alpha-loop', 'learnings');
     if (config.autoMerge) {
       repairSessionLearningArtifacts({
         sessionName: session.name,
@@ -1704,16 +1745,16 @@ async function executeSessionRun(
   if (session.results.length > 0 && !config.skipPostSessionReview && !config.dryRun) {
     log.step('Running post-session code review...');
 
-    const projectDir = process.cwd();
+    const projectDir = session.worktreePath;
+    if (!projectDir) {
+      log.warn('Session worktree is unavailable — skipping post-session review');
+    } else {
 
-    // Ensure we're on the session branch
-    exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+      // Get full session diff
+      const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: projectDir });
+      const sessionDiff = diffResult.stdout;
 
-    // Get full session diff
-    const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: projectDir });
-    const sessionDiff = diffResult.stdout;
-
-    if (sessionDiff.trim()) {
+      if (sessionDiff.trim()) {
       // Load vision context if available
       const visionPath = join(projectDir, '.alpha-loop', 'vision.md');
       const visionContext = existsSync(visionPath) ? readFileSync(visionPath, 'utf-8') : undefined;
@@ -1817,8 +1858,9 @@ async function executeSessionRun(
       if (existsSync(reviewFile)) {
         try { unlinkSync(reviewFile); } catch { /* ignore */ }
       }
-    } else {
-      log.info('No changes in session diff, skipping session review');
+      } else {
+        log.info('No changes in session diff, skipping session review');
+      }
     }
   } else if (config.skipPostSessionReview) {
     log.info('Post-session review skipped');
@@ -1832,8 +1874,8 @@ async function executeSessionRun(
   if (config.quick && session.results.length > 0 && !config.dryRun && !config.skipLearn) {
     log.step('Quick mode: extracting epic-level learnings');
     try {
-      const projectDir = process.cwd();
-      exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+      const projectDir = session.worktreePath;
+      if (!projectDir) throw new Error('session worktree is unavailable');
       const quickDiff = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: projectDir }).stdout.slice(0, 10_000);
       if (quickDiff.trim()) {
         const reviewGate = session.sessionReviewFindings;
@@ -1856,6 +1898,8 @@ async function executeSessionRun(
           config,
           sessionLogsDir: session.logsDir,
           sessionName: session.name,
+          outputRoot: projectDir,
+          agentCwd: projectDir,
           ...(epicPromptContext ? { epicContext: epicPromptContext } : {}),
         });
       } else {

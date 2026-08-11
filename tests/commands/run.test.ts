@@ -45,8 +45,13 @@ jest.mock('../../src/lib/pipeline', () => ({
   formatGateFindings: jest.fn(() => ''),
 }));
 
+jest.mock('../../src/lib/agent', () => ({
+  spawnAgent: jest.fn(),
+}));
+
 jest.mock('../../src/lib/session', () => ({
   createSession: jest.fn(),
+  ensureSessionWorktree: jest.fn(),
   finalizeSession: jest.fn(),
   recordSessionIssue: jest.fn(),
   recordSessionPolicyDecision: jest.fn(),
@@ -122,15 +127,16 @@ import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
-import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate } from '../../src/lib/pipeline';
-import { setupWorktree } from '../../src/lib/worktree';
-import { createSession, finalizeSession, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
+import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, type PipelineResult } from '../../src/lib/pipeline';
+import { cleanupWorktree, setupWorktree } from '../../src/lib/worktree';
+import { createSession, ensureSessionWorktree, finalizeSession, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
 import { extractLearnings, generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
 import { syncAgentAssets } from '../../src/commands/sync';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { emitLifecycleEvent } from '../../src/lib/events';
+import { spawnAgent } from '../../src/lib/agent';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
@@ -147,7 +153,9 @@ const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch
 const mockFinalizeQuickRun = finalizeQuickRun as jest.MockedFunction<typeof finalizeQuickRun>;
 const mockRunFullSuiteGate = runFullSuiteGate as jest.MockedFunction<typeof runFullSuiteGate>;
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
+const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
+const mockEnsureSessionWorktree = ensureSessionWorktree as jest.MockedFunction<typeof ensureSessionWorktree>;
 const mockReleaseSessionLock = releaseSessionLock as jest.MockedFunction<typeof releaseSessionLock>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
 const mockTransitionSessionStatus = transitionSessionStatus as jest.MockedFunction<typeof transitionSessionStatus>;
@@ -163,6 +171,7 @@ const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileS
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
+const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -238,6 +247,12 @@ beforeEach(() => {
     results: [],
   });
   mockFinalizeSession.mockResolvedValue(null);
+  mockEnsureSessionWorktree.mockImplementation(async (session) => {
+    session.worktreePath = `/tmp/${String(session.name).replace(/\//g, '-')}`;
+    return session.worktreePath;
+  });
+  mockCleanupWorktree.mockResolvedValue({ status: 'removed', path: '/tmp/session-worktree' });
+  mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: 'Review passed', duration: 1 });
   mockPollIssues.mockReturnValue([]);
   mockListEpics.mockReturnValue([]);
   mockGetEpicSubIssues.mockReturnValue([]);
@@ -1310,8 +1325,11 @@ Coordinate hosted work.
     expect(mockRunFullSuiteGate).toHaveBeenCalledTimes(1);
     expect(mockRunFullSuiteGate).toHaveBeenCalledWith(expect.objectContaining({
       issues: [{ number: 42, title: 'Test issue' }],
-      worktreePath: process.cwd(),
+      worktreePath: '/tmp/session-20260330-143000',
     }));
+    expect(mockExec.mock.calls.some(([cmd, options]) => (
+      String(cmd).startsWith('git checkout') && options?.cwd === process.cwd()
+    ))).toBe(false);
     expect(mockRunFullSuiteGate.mock.invocationCallOrder[0]).toBeLessThan(
       mockFinalizeSession.mock.invocationCallOrder[0],
     );
@@ -1402,8 +1420,85 @@ Coordinate hosted work.
     expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('full test suite failed'));
   });
 
+  test('signal cleanup also releases the dedicated session worktree', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: true,
+      skipPostSessionReview: true,
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Interrupted issue', body: 'Body', labels: ['ready'] },
+    ]);
+
+    let resolveIssue!: (result: PipelineResult) => void;
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    mockProcessIssue.mockImplementation(() => {
+      notifyStarted();
+      return new Promise((resolve) => { resolveIssue = resolve; });
+    });
+
+    let notifySessionCleanup!: () => void;
+    const sessionCleanup = new Promise<void>((resolve) => { notifySessionCleanup = resolve; });
+    mockCleanupWorktree.mockImplementation(async (options) => {
+      if (options.worktreePath?.includes('session-20260330-143000')) notifySessionCleanup();
+      return { status: 'removed', path: options.worktreePath ?? '/tmp/issue-worktree' };
+    });
+
+    const run = runCommand({});
+    await started;
+    process.emit('SIGINT');
+    await sessionCleanup;
+
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      worktreePath: '/tmp/session-20260330-143000',
+    }));
+
+    resolveIssue({
+      issueNum: 42,
+      title: 'Interrupted issue',
+      status: 'failure',
+      testsPassing: false,
+      verifyPassing: false,
+      verifySkipped: true,
+      duration: 1,
+      filesChanged: 0,
+    });
+    await run;
+  });
+
+  test('runs post-session review inside the dedicated session worktree', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: true,
+      skipPostSessionReview: false,
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Review issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Review issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 1,
+      filesChanged: 1,
+    });
+
+    await runCommand({});
+
+    expect(mockSpawnAgent).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: '/tmp/session-20260330-143000',
+    }));
+    expect(mockExec.mock.calls.some(([cmd, options]) => (
+      String(cmd).startsWith('git checkout') && options?.cwd === process.cwd()
+    ))).toBe(false);
+  });
+
   test('quick mode shares one worktree across issues and runs the finalize pass', async () => {
-    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true }) as any);
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true, autoMerge: true }) as any);
     mockPollIssues.mockReturnValue([
       { number: 42, title: 'First issue', body: 'Body A', labels: ['ready'] },
       { number: 43, title: 'Second issue', body: 'Body B', labels: ['ready'] },

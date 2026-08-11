@@ -60,6 +60,7 @@ import {
   recordSessionWorktree,
   transitionHumanFeedbackSessionStatus,
   updateSessionManifest,
+  ensureSessionWorktree,
 } from './session.js';
 import {
   classifyFeedback,
@@ -111,6 +112,17 @@ import {
   type WebAppPreviewResolution,
   type WebAppVerificationSummary,
 } from './web-app-profile.js';
+
+async function refreshSessionWorktree(
+  session: SessionContext,
+  config: Config,
+  projectDir: string,
+): Promise<void> {
+  const sessionWorktreePath = await ensureSessionWorktree(session, config);
+  if (!sessionWorktreePath) return;
+  exec('git fetch origin', { cwd: projectDir });
+  exec(`git pull origin ${shellQuote(session.branch)} --no-edit --autostash`, { cwd: sessionWorktreePath });
+}
 
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
@@ -2707,13 +2719,7 @@ export async function processIssue(
         mergePR(config.repo, worktreeBranch);
         mergeSucceeded = true;
 
-        // Update local repo to include merged changes
-        exec('git fetch origin', { cwd: projectDir });
-        const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
-        if (currentBranch !== session.branch) {
-          exec(`git checkout "${session.branch}"`, { cwd: projectDir });
-        }
-        exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+        await refreshSessionWorktree(session, config, projectDir);
       } catch (err) {
         log.warn(`Auto-merge failed: ${err}`);
       }
@@ -3628,12 +3634,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       try {
         mergePR(config.repo, worktreeBranch);
         mergeSucceeded = true;
-        exec('git fetch origin', { cwd: projectDir });
-        const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
-        if (currentBranch !== session.branch) {
-          exec(`git checkout "${session.branch}"`, { cwd: projectDir });
-        }
-        exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+        await refreshSessionWorktree(session, config, projectDir);
       } catch (err) {
         log.warn(`Auto-merge failed: ${err}`);
       }
@@ -3868,13 +3869,7 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
     try {
       mergePR(config.repo, worktreeBranch);
       merged = true;
-      // Update local session branch to include the merged quick work.
-      exec('git fetch origin', { cwd: projectDir });
-      const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
-      if (currentBranch !== session.branch) {
-        exec(`git checkout "${session.branch}"`, { cwd: projectDir });
-      }
-      exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+      await refreshSessionWorktree(session, config, projectDir);
     } catch (err) {
       log.warn(`Quick PR auto-merge failed: ${err instanceof Error ? err.message : err}`);
     }

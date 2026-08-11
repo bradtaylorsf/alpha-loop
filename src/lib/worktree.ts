@@ -19,6 +19,10 @@ export type SetupWorktreeOptions = {
   issueNum: number;
   projectDir: string;
   baseBranch: string;
+  /** Explicit branch name. Defaults to agent/issue-<N>. */
+  branch?: string;
+  /** Explicit path under <projectDir>/.worktrees. Defaults to issue-<N>. */
+  worktreePath?: string;
   sessionBranch?: string;
   autoMerge?: boolean;
   skipInstall?: boolean;
@@ -51,17 +55,17 @@ const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.l
 
 function isInsidePath(parent: string, child: string): boolean {
   const rel = relative(parent, child);
-  return rel === '' || (rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel));
+  return rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
 function resolveWorktreeLocation(
   projectDir: string,
   issueNum: number,
-  savedPath?: string | null,
+  requestedPath?: string | null,
 ): { worktreesDir: string; worktreePath: string; safe: boolean } {
   const worktreesDir = resolve(projectDir, '.worktrees');
-  const worktreePath = savedPath?.trim()
-    ? resolve(projectDir, savedPath)
+  const worktreePath = requestedPath?.trim()
+    ? resolve(projectDir, requestedPath)
     : resolve(worktreesDir, `issue-${issueNum}`);
   return {
     worktreesDir,
@@ -83,9 +87,12 @@ function resolveWorktreeLocation(
 export async function setupWorktree(options: SetupWorktreeOptions): Promise<WorktreeResult> {
   const { issueNum, projectDir, baseBranch, sessionBranch, autoMerge, skipInstall, setupCommand, savedBranch, savedPath, dryRun } = options;
   const defaultBranch = `agent/issue-${issueNum}`;
-  const branch = savedBranch?.trim() || defaultBranch;
-  const { worktreesDir, worktreePath, safe } = resolveWorktreeLocation(projectDir, issueNum, savedPath);
+  const explicitBranch = options.branch?.trim();
+  const branch = savedBranch?.trim() || explicitBranch || defaultBranch;
+  const requestedPath = savedPath?.trim() || options.worktreePath?.trim();
+  const { worktreesDir, worktreePath, safe } = resolveWorktreeLocation(projectDir, issueNum, requestedPath);
   const requiresSavedBranch = Boolean(savedBranch?.trim());
+  const preservesNamedBranch = requiresSavedBranch || Boolean(explicitBranch);
 
   if (!safe) {
     throw new Error(`Refusing unsafe worktree path outside ${worktreesDir}: ${worktreePath}`);
@@ -132,14 +139,14 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
         resumed = true;
       } else {
         log.warn(`Could not reuse branch ${branch}: ${reuseResult.stderr}`);
-        if (requiresSavedBranch) {
-          throw new Error(`Failed to recreate saved worktree from ${branch}: ${reuseResult.stderr}`);
+        if (preservesNamedBranch) {
+          throw new Error(`Failed to recreate worktree from ${branch}: ${reuseResult.stderr}`);
         }
         // Can't reuse a disposable issue branch — force-delete and fall through to fresh creation.
         exec(`git branch -D ${shellQuote(branch)}`, { cwd: projectDir });
         exec('git worktree prune', { cwd: projectDir });
       }
-    } else if (requiresSavedBranch) {
+    } else if (preservesNamedBranch) {
       exec('git fetch origin', { cwd: projectDir });
       const remoteBranchCheck = exec(`git rev-parse --verify ${shellQuote(`origin/${branch}`)}`, { cwd: projectDir });
       if (remoteBranchCheck.exitCode === 0) {
@@ -150,7 +157,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
           log.info(`Resumed worktree with ${commitCount} commit(s)`);
           resumed = true;
         } else {
-          throw new Error(`Failed to recreate saved worktree from origin/${branch}: ${remoteReuseResult.stderr}`);
+          throw new Error(`Failed to recreate worktree from origin/${branch}: ${remoteReuseResult.stderr}`);
         }
       }
     }
@@ -162,8 +169,11 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
       throw new Error(`Saved resume branch ${branch} was not found; cannot recreate paused worktree without losing context`);
     }
 
-    // Delete remote branch from previous failed runs
-    exec(`git push origin --delete ${shellQuote(branch)}`, { cwd: projectDir });
+    // Issue branches are disposable between fresh runs. Explicitly named
+    // branches (notably session branches) must never delete their remote.
+    if (!explicitBranch) {
+      exec(`git push origin --delete ${shellQuote(branch)}`, { cwd: projectDir });
+    }
 
     // Determine source branch: use session branch when auto-merging and it exists
     let fromBranch = baseBranch;

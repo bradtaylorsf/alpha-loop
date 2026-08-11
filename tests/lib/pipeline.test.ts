@@ -56,6 +56,7 @@ jest.mock('../../src/lib/learning', () => ({
 }));
 
 jest.mock('../../src/lib/session', () => ({
+  ensureSessionWorktree: jest.fn((session: { worktreePath?: string }) => Promise.resolve(session.worktreePath ?? null)),
   saveResult: jest.fn(),
   getPreviousResult: jest.fn(),
   loadSessionManifest: jest.fn(),
@@ -268,6 +269,7 @@ function makeSession(): SessionContext {
     branch: 'session/20260330-143000',
     resultsDir: '/tmp/sessions/session/20260330-143000',
     logsDir: '/tmp/sessions/session/20260330-143000/logs',
+    worktreePath: '/tmp/session-worktree',
     results: [],
   };
 }
@@ -1295,7 +1297,6 @@ describe('processIssue', () => {
     mockRunTests.mockReturnValue({ passed: false, output: 'Tests failed' });
 
     await processIssue(42, 'Test issue', 'Body', makeConfig({ autoMerge: true }), makeSession());
-
     // PR should still be created
     expect(mockCreatePR).toHaveBeenCalled();
     // But mergePR should NOT be called
@@ -1311,6 +1312,20 @@ describe('processIssue', () => {
     expect(mockCleanupWorktree).toHaveBeenCalledWith(
       expect.objectContaining({ preserveIfCommits: true }),
     );
+  });
+
+  test('refreshes the session branch only inside its worktree after auto-merge', async () => {
+    await processIssue(42, 'Test issue', 'Body', makeConfig({ autoMerge: true, skipQa: true }), makeSession());
+
+    expect(mockMergePR).toHaveBeenCalled();
+    expect(mockExec).toHaveBeenCalledWith('git fetch origin', { cwd: process.cwd() });
+    expect(mockExec).toHaveBeenCalledWith(
+      "git pull origin 'session/20260330-143000' --no-edit --autostash",
+      { cwd: '/tmp/session-worktree' },
+    );
+    expect(mockExec.mock.calls.some(([cmd, options]) => (
+      String(cmd).startsWith('git checkout') && options?.cwd === process.cwd()
+    ))).toBe(false);
   });
 
   test('preserves worktree when tests fail and auto-merge is enabled', async () => {
