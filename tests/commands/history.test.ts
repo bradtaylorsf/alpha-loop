@@ -539,6 +539,47 @@ describe('history', () => {
       expect(output).toContain('pending');
     });
 
+    it('shows parallel wave progress, dependencies, logs, and dependency skips', () => {
+      const sessionsDir = path.join(tmpDir, '.alpha-loop', 'sessions');
+      createQueueManifest(sessionsDir);
+      const manifestPath = path.join(sessionsDir, 'queue-20260521T101112Z', 'queue.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      manifest.branchAncestryMode = 'independent';
+      manifest.parallelLimit = 2;
+      manifest.waves = [
+        { waveNumber: 1, epicIds: [205, 166], status: 'failure', startedAt: manifest.startedAt, endedAt: manifest.endedAt },
+        { waveNumber: 2, epicIds: [214], status: 'skipped', startedAt: manifest.endedAt, endedAt: manifest.endedAt },
+      ];
+      manifest.epics[0] = { ...manifest.epics[0], dependencyIds: [], waveNumber: 1, waveIndex: 1, logPath: '.alpha-loop/sessions/queue-20260521T101112Z/epic-205.log' };
+      manifest.epics[1] = { ...manifest.epics[1], dependencyIds: [], waveNumber: 1, waveIndex: 2, logPath: '.alpha-loop/sessions/queue-20260521T101112Z/epic-166.log' };
+      manifest.epics[2] = {
+        ...manifest.epics[2],
+        status: 'skipped',
+        dependencyIds: [166],
+        waveNumber: 2,
+        waveIndex: 1,
+        skipReason: 'Epic #214 skipped because queued dependencies failed: #166',
+        dependencyFailure: {
+          failedEpicIds: [166],
+          message: 'Epic #214 skipped because queued dependencies failed: #166',
+        },
+      };
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+      historyDetail(sessionsDir, 'queue-20260521T101112Z', tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Branch mode: independent');
+      expect(output).toContain('Concurrency: 2');
+      expect(output).toContain('Waves:');
+      expect(output).toContain('1/2 failure - #205, #166');
+      expect(output).toContain('#205 First Epic - success (wave 1.1)');
+      expect(output).toContain('Log:      .alpha-loop/sessions/queue-20260521T101112Z/epic-205.log');
+      expect(output).toContain('#214 Third Epic - skipped (wave 2.1)');
+      expect(output).toContain('Requires: #166');
+      expect(output).toContain('Dependency skip: Epic #214 skipped because queued dependencies failed: #166');
+    });
+
     it('shows queue metadata from checked-in session manifests', () => {
       const sessionsDir = path.join(tmpDir, '.alpha-loop', 'sessions');
       const learningsDir = path.join(tmpDir, '.alpha-loop', 'learnings');

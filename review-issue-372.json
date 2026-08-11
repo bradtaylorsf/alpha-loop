@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "summary": "Parallel epic queues meet the acceptance criteria after fixing worker branch isolation and completed-dependency scheduling.",
+  "findings": [
+    {
+      "severity": "critical",
+      "description": "Parallel queue workers inherited the repository merge_to setting, which could route every worker to the same branch instead of isolated per-epic session branches.",
+      "fixed": true,
+      "file": "src/commands/run.ts"
+    },
+    {
+      "severity": "warning",
+      "description": "Already-completed epics retained outgoing dependency edges, so stale issue bodies could create a false dependency cycle and reject an otherwise runnable queue.",
+      "fixed": true,
+      "file": "src/lib/epic-queue.ts"
+    }
+  ]
+}

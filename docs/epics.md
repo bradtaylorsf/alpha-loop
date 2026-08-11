@@ -156,7 +156,15 @@ You can also provide the queue explicitly:
 alpha-loop run --epics 205,166,214
 ```
 
-Explicit queues are processed exactly in the order provided. Before any session starts, Alpha Loop validates that each issue exists, is labeled `epic`, is not duplicated, and is open unless already closed as completed. `--dry-run` performs the same validation and prints the queue without creating branches, PRs, GitHub comments, or queue manifests.
+Sequential queues are processed exactly in the order provided. Before any session starts, Alpha Loop validates that each issue exists, is labeled `epic`, is not duplicated, has no dependency cycle with another queued epic, and is open unless already closed as completed. `--dry-run` performs the same validation and prints the queue without creating branches, PRs, GitHub comments, or queue manifests.
+
+Independent queues can run concurrently:
+
+```bash
+alpha-loop run --epics 205,166,214 --queue-branch-mode independent --parallel 2
+```
+
+`--parallel` must be a positive integer, requires `--epics`, and is rejected for stacked branch mode.
 
 ### Execution Model
 
@@ -166,9 +174,13 @@ For a non-dry-run queue, Alpha Loop writes:
 .alpha-loop/sessions/queue-<timestamp>/queue.json
 ```
 
-The manifest records queue status, epic order, branch ancestry mode, per-epic session branch/PR URLs, dependency and overlap notes, failures, and the stop reason if the queue halts. `alpha-loop history` lists queue manifests alongside sessions, and `alpha-loop history queue-<timestamp>` prints the manifest details. If a queue stops, inspect that detail view to find the failed epic and the still-pending epics.
+The manifest records queue status, epic order, branch ancestry mode, concurrency limit, wave ordering/progress, per-epic dependencies, session branch/PR URLs, worker log paths, dependency and overlap notes, failures, and the stop reason if the queue halts. It is replaced atomically after launches and completions. `alpha-loop history` lists queue manifests alongside sessions, and `alpha-loop history queue-<timestamp>` prints the manifest details.
 
 Queue execution is fail-stop by default. Alpha Loop stops at the first epic that fails, remains incomplete after eligible children run, hits an epic checklist consistency error, fails verification, or encounters a transient agent/rate-limit stop. Earlier successful epic PRs stay available for review. Pending epics remain `pending` in `queue.json`; rerun them with a new explicit queue once the failure is resolved.
+
+With `--parallel`, Alpha Loop parses queued `Depends on #N`, `after #N`, `requires #N`, and `blocked by #N` references into deterministic topological waves while preserving requested order within each wave. It starts at most `n` child `alpha-loop run --epic <N>` workers at once and waits for all started siblings before advancing. If one worker fails, its running siblings finish; epics that do not depend on the failure still run in later waves, while direct and transitive dependents are skipped with failure details. Any worker failure or dependency skip makes the final queue exit nonzero.
+
+Before workers start, the coordinator syncs generated agent assets and refreshes project context once in the shared checkout. Each child then performs git mutations only in its session worktree and streams combined stdout/stderr to `.alpha-loop/sessions/queue-<timestamp>/epic-<N>.log`; queue context and structured result artifacts live beside the log. The existing per-epic session lock remains the last-resort guard against two workers targeting the same epic.
 
 If the process crashes inside a child issue before its branch has a PR, run `alpha-loop resume` to recover stranded `agent/issue-*` branches as WIP PRs. Recovered PRs are not marked complete; run the project tests and final verification before merging, then inspect the queue manifest and continue with the remaining epic IDs.
 

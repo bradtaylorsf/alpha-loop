@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { formatEpicPickerMeta, formatMilestonePickerMeta, runCommand, runSingleEpicExecution } from '../../src/commands/run';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -119,8 +120,14 @@ jest.mock('node:fs', () => ({
   readFileSync: jest.fn(),
   writeFileSync: jest.fn(),
   mkdirSync: jest.fn(),
+  openSync: jest.fn().mockReturnValue(99),
+  closeSync: jest.fn(),
   renameSync: jest.fn(),
   unlinkSync: jest.fn(),
+}));
+
+jest.mock('node:child_process', () => ({
+  spawn: jest.fn(),
 }));
 
 import { exec } from '../../src/lib/shell';
@@ -135,6 +142,7 @@ import { extractLearnings, generateSessionSummary, repairSessionLearningArtifact
 import { contextNeedsRefresh } from '../../src/lib/context';
 import { syncAgentAssets } from '../../src/commands/sync';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { emitLifecycleEvent } from '../../src/lib/events';
 import { spawnAgent } from '../../src/lib/agent';
 
@@ -172,6 +180,7 @@ const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
+const mockSpawn = spawn as jest.MockedFunction<typeof spawn>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -510,6 +519,209 @@ describe('runCommand', () => {
     expect(mockFinalizeSession).not.toHaveBeenCalled();
     expect(mockWriteFileSync).not.toHaveBeenCalled();
     expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('--parallel requires an epic queue in independent branch mode and a positive limit', async () => {
+    await runCommand({ parallel: 2 });
+    expect(mockLog.error).toHaveBeenCalledWith('--parallel can only be used with --epics');
+    expect(process.exitCode).toBe(1);
+
+    process.exitCode = undefined;
+    await runCommand({ epics: '205,166', parallel: 2, queueBranchMode: 'stacked', dryRun: true });
+    expect(mockLog.error).toHaveBeenCalledWith('--parallel requires --queue-branch-mode independent; stacked queues are inherently sequential');
+    expect(process.exitCode).toBe(1);
+
+    process.exitCode = undefined;
+    await runCommand({ epics: '205,166', parallel: 0, queueBranchMode: 'independent', dryRun: true });
+    expect(mockLog.error).toHaveBeenCalledWith('--parallel requires a positive integer');
+    expect(process.exitCode).toBe(1);
+    expect(mockGetIssueWithComments).not.toHaveBeenCalled();
+  });
+
+  test('--parallel dry-run prints dependency waves without spawning children', async () => {
+    const issues = new Map([
+      [30, { number: 30, title: 'Dependent', body: 'Depends on #10.', labels: ['epic'], state: 'OPEN' }],
+      [10, { number: 10, title: 'Independent A', body: '', labels: ['epic'], state: 'OPEN' }],
+      [20, { number: 20, title: 'Independent B', body: '', labels: ['epic'], state: 'OPEN' }],
+    ]);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (issues.get(issueNum) as any) ?? null);
+
+    await runCommand({ epics: '30,10,20', parallel: 2, queueBranchMode: 'independent', dryRun: true });
+
+    expect(mockLog.dry).toHaveBeenCalledWith('Parallel schedule (limit 2):');
+    expect(mockLog.dry).toHaveBeenCalledWith('  Wave 1: #10, #20');
+    expect(mockLog.dry).toHaveBeenCalledWith('  Wave 2: #30 (depends on #10)');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  test('--parallel runs bounded dependency waves and skips only failed dependents', async () => {
+    const issues = new Map([
+      [10, { number: 10, title: 'Fails', body: '', labels: ['epic'], state: 'OPEN' }],
+      [20, { number: 20, title: 'Succeeds', body: '', labels: ['epic'], state: 'OPEN' }],
+      [30, { number: 30, title: 'Blocked by failure', body: 'Depends on #10.', labels: ['epic'], state: 'OPEN' }],
+      [40, { number: 40, title: 'Still runnable', body: 'Depends on #20.', labels: ['epic'], state: 'OPEN' }],
+      [50, { number: 50, title: 'Transitively blocked', body: 'Depends on #30.', labels: ['epic'], state: 'OPEN' }],
+    ]);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (issues.get(issueNum) as any) ?? null);
+
+    const childResults = new Map<string, string>();
+    const launched: number[] = [];
+    let active = 0;
+    let maxActive = 0;
+    mockExistsSync.mockImplementation((filePath: any) => childResults.has(String(filePath)));
+    mockReadFileSync.mockImplementation((filePath: any) => childResults.get(String(filePath)) ?? '');
+    mockSpawn.mockImplementation(((_command: string, args: readonly string[]) => {
+      const child = new EventEmitter();
+      const epicArg = args.indexOf('--epic');
+      const resultArg = args.indexOf('--queue-result');
+      const epicNumber = Number(args[epicArg + 1]);
+      const resultPath = args[resultArg + 1];
+      launched.push(epicNumber);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      queueMicrotask(() => {
+        const failed = epicNumber === 10;
+        childResults.set(resultPath, JSON.stringify({
+          epicNumber,
+          sessionName: `session/epic-${epicNumber}`,
+          sessionBranch: `session/epic-${epicNumber}`,
+          sessionPrUrl: failed ? null : `https://github.com/owner/repo/pull/${epicNumber}`,
+          status: failed ? 'failure' : 'success',
+          failures: failed ? [{ code: 'pipeline-failure', message: 'worker failed', issueNum: epicNumber }] : [],
+          verificationClosedEpic: !failed,
+        }));
+        active -= 1;
+        child.emit('close', failed ? 1 : 0);
+      });
+      return child as any;
+    }) as any);
+
+    await runCommand({ epics: '10,20,30,40,50', parallel: 2, queueBranchMode: 'independent' });
+
+    expect(maxActive).toBe(2);
+    expect(launched).toEqual([10, 20, 40]);
+    expect(process.exitCode).toBe(1);
+    const manifest = JSON.parse(String(mockWriteFileSync.mock.calls.at(-1)?.[1]));
+    expect(manifest.parallelLimit).toBe(2);
+    expect(manifest.waves.map((wave: any) => [wave.epicIds, wave.status])).toEqual([
+      [[10, 20], 'failure'],
+      [[30, 40], 'failure'],
+      [[50], 'skipped'],
+    ]);
+    expect(manifest.epics.map((entry: any) => [entry.epicNumber, entry.status])).toEqual([
+      [10, 'failure'],
+      [20, 'success'],
+      [30, 'skipped'],
+      [40, 'success'],
+      [50, 'skipped'],
+    ]);
+    expect(manifest.epics[2].dependencyFailure.failedEpicIds).toEqual([10]);
+    expect(manifest.epics[4].dependencyFailure.failedEpicIds).toEqual([10, 30]);
+    expect(manifest.epics[1].logPath).toContain('epic-20.log');
+    expect(mockSyncAgentAssets).toHaveBeenCalledTimes(1);
+    expect(mockContextNeedsRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  test('internal queue workers persist a structured result artifact before exiting', async () => {
+    mockReadFileSync.mockImplementation((filePath: any) => {
+      if (String(filePath) === '/tmp/queue-context.json') {
+        return JSON.stringify({
+          queueId: 'queue-test',
+          queueIndex: 1,
+          queueTotal: 1,
+          currentEpic: { number: 77, title: 'Missing epic' },
+          previousEpic: null,
+          nextEpic: null,
+          previousSessionBranch: null,
+          previousSessionPrUrl: null,
+          branchAncestryMode: 'independent',
+          branchedFromBranch: 'master',
+          dependsOnSessionBranch: null,
+          dependsOnSessionPrUrl: null,
+          rebaseOntoBranch: null,
+          dependencyWarnings: [],
+          overlapWarnings: [],
+        });
+      }
+      return '';
+    });
+
+    await runCommand({
+      epic: 77,
+      queueContext: '/tmp/queue-context.json',
+      queueResult: '/tmp/queue-result.json',
+      queueBranchMode: 'independent',
+      autoMerge: true,
+    });
+
+    const resultWrite = mockWriteFileSync.mock.calls.find(([filePath]) => String(filePath).startsWith('/tmp/queue-result.json.tmp-'));
+    expect(resultWrite).toBeDefined();
+    expect(JSON.parse(String(resultWrite?.[1]))).toEqual(expect.objectContaining({
+      epicNumber: 77,
+      status: 'failure',
+      failures: [expect.objectContaining({ code: 'epic-not-found' })],
+    }));
+    expect(process.exitCode).toBe(1);
+  });
+
+  test('internal queue workers leave shared project preparation to the coordinator', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      mergeTo: 'shared-integration-branch',
+      skipPreflight: true,
+      skipVerify: true,
+      skipPostSessionReview: true,
+      autoCapture: false,
+    }) as any);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 77) {
+        return { number: 77, title: 'Worker epic', body: '- [ ] #78', labels: ['epic'], state: 'OPEN' } as any;
+      }
+      if (issueNum === 78) {
+        return { number: 78, title: 'Not ready', body: '', labels: [], state: 'OPEN' } as any;
+      }
+      return null;
+    });
+    mockReadFileSync.mockImplementation((filePath: any) => {
+      if (String(filePath) === '/tmp/queue-context.json') {
+        return JSON.stringify({
+          queueId: 'queue-test',
+          queueIndex: 1,
+          queueTotal: 1,
+          currentEpic: { number: 77, title: 'Worker epic' },
+          previousEpic: null,
+          nextEpic: null,
+          previousSessionBranch: null,
+          previousSessionPrUrl: null,
+          branchAncestryMode: 'independent',
+          branchedFromBranch: 'master',
+          dependsOnSessionBranch: null,
+          dependsOnSessionPrUrl: null,
+          rebaseOntoBranch: null,
+          dependencyWarnings: [],
+          overlapWarnings: [],
+        });
+      }
+      return '';
+    });
+
+    await runCommand({
+      epic: 77,
+      queueContext: '/tmp/queue-context.json',
+      queueResult: '/tmp/queue-result.json',
+      queueBranchMode: 'independent',
+      autoMerge: true,
+      skipTests: true,
+      skipReview: true,
+      skipLearn: true,
+    });
+
+    expect(mockSyncAgentAssets).not.toHaveBeenCalled();
+    expect(mockContextNeedsRefresh).not.toHaveBeenCalled();
+    expect(mockCreateSession).toHaveBeenCalledWith(
+      expect.objectContaining({ autoMerge: true, mergeTo: '' }),
+      expect.objectContaining({ epicNum: 77 }),
+    );
   });
 
   test('dry-run session preview does not sync assets or refresh generated context', async () => {

@@ -286,14 +286,17 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
       const epicCount = manifest.epics.length;
       const successCount = manifest.epics.filter((entry) => entry.status === 'success').length;
       const failedCount = manifest.epics.filter((entry) => entry.status === 'failure').length;
+      const skippedCount = manifest.epics.filter((entry) => entry.status === 'skipped').length;
       const pendingCount = manifest.epics.filter((entry) => entry.status === 'pending' || entry.status === 'running').length;
       const startedAt = manifest.startedAt ?? '';
       const date = startedAt.length >= 10 ? startedAt.slice(0, 10) : queue.timestamp;
       const epicWord = epicCount === 1 ? 'epic' : 'epics';
       const status = `${manifest.status}${manifest.stopReason ? `: ${manifest.stopReason}` : ''}`;
+      const concurrency = (manifest.parallelLimit ?? 1) > 1 ? `, ${manifest.parallelLimit} parallel` : '';
+      const skipped = skippedCount > 0 ? `, ${skippedCount} skipped` : '';
 
       console.log(
-        `  ${queue.name.padEnd(30)} ${date}  ${String(epicCount).padStart(2)} ${epicWord.padEnd(6)} ${successCount} ok, ${failedCount} failed, ${pendingCount} pending  ${status}`,
+        `  ${queue.name.padEnd(30)} ${date}  ${String(epicCount).padStart(2)} ${epicWord.padEnd(6)} ${successCount} ok, ${failedCount} failed, ${pendingCount} pending${skipped}${concurrency}  ${status}`,
       );
     }
   }
@@ -315,15 +318,27 @@ function printQueueManifestDetail(queue: QueueManifestRef, projectDir?: string):
   console.log(`Queue:       ${manifest.queueId}`);
   console.log(`Status:      ${manifest.status}`);
   console.log(`Branch mode: ${manifest.branchAncestryMode}`);
+  console.log(`Concurrency: ${manifest.parallelLimit ?? 1}`);
   console.log(`Started:     ${manifest.startedAt}`);
   if (manifest.endedAt) console.log(`Ended:       ${manifest.endedAt}`);
   if (manifest.stopReason) console.log(`Stop reason: ${manifest.stopReason}`);
   console.log(`Manifest:    ${manifestPath}`);
   console.log('');
 
+  if (manifest.waves?.length > 0) {
+    console.log('Waves:');
+    for (const wave of manifest.waves) {
+      console.log(`  ${wave.waveNumber}/${manifest.waves.length} ${wave.status} - ${wave.epicIds.map((epicNumber) => `#${epicNumber}`).join(', ')}`);
+    }
+    console.log('');
+  }
+
   console.log('Epics:');
   for (const entry of manifest.epics) {
-    console.log(`  ${entry.queueIndex}/${entry.queueTotal} #${entry.epicNumber} ${entry.title} - ${formatQueueEpicStatus(entry.status)}`);
+    const wave = entry.waveNumber ? ` (wave ${entry.waveNumber}.${entry.waveIndex ?? 1})` : '';
+    console.log(`  ${entry.queueIndex}/${entry.queueTotal} #${entry.epicNumber} ${entry.title} - ${formatQueueEpicStatus(entry.status)}${wave}`);
+    if (entry.dependencyIds?.length > 0) console.log(`           Requires: ${entry.dependencyIds.map((epicNumber) => `#${epicNumber}`).join(', ')}`);
+    if (entry.logPath) console.log(`           Log:      ${entry.logPath}`);
     if (entry.sessionName) console.log(`           Session: ${entry.sessionName}`);
     if (entry.sessionBranch) console.log(`           Branch:  ${entry.sessionBranch}`);
     if (entry.sessionPrUrl) console.log(`           PR:      ${entry.sessionPrUrl}`);
@@ -337,6 +352,7 @@ function printQueueManifestDetail(queue: QueueManifestRef, projectDir?: string):
     }
     for (const warning of entry.dependencyWarnings ?? []) console.log(`           Dependency: ${warning}`);
     for (const warning of entry.overlapWarnings ?? []) console.log(`           File overlap: ${warning}`);
+    if (entry.dependencyFailure) console.log(`           Dependency skip: ${entry.dependencyFailure.message}`);
     for (const failure of entry.failures ?? []) console.log(`           Failure: ${failure.code} - ${failure.message}`);
   }
 }

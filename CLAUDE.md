@@ -25,6 +25,7 @@ alpha-loop run --dry-run # Dry run (preview, no changes)
 alpha-loop run --issue <N>       # Process exactly one ready issue
 alpha-loop run --epic <N>        # Process an epic (sub-issues in checklist order, auto-verify on completion)
 alpha-loop run --epics <ids>     # Process multiple epics in order, one session PR per epic
+alpha-loop run --epics <ids> --queue-branch-mode independent --parallel <n> # Run dependency-ready epics concurrently
 alpha-loop run --verify-only <N> # Run just the epic verification pass
 alpha-loop daemon        # Run hosted daemon mode continuously
 alpha-loop daemon --mode feedback-only # Poll feedback and resume without selecting new work
