@@ -27,6 +27,7 @@ import {
 import {
   createMilestone,
   createIssue,
+  updateIssue,
   addIssueToProject,
   listOpenIssues,
   listMilestones,
@@ -423,6 +424,7 @@ export async function planCommand(options: PlanOptions): Promise<void> {
 
   // Create issues
   const createdIssues: Array<{ num: number; title: string }> = [];
+  const localIdToIssueNum = new Map<number, number>();
   for (let i = 0; i < selectedIssues.length; i++) {
     const issue = selectedIssues[i];
     try {
@@ -440,6 +442,7 @@ export async function planCommand(options: PlanOptions): Promise<void> {
       );
       if (issueNum > 0) {
         createdIssues.push({ num: issueNum, title: issue.title });
+        localIdToIssueNum.set(issue.id, issueNum);
         const rateSt = getRateLimitStatus();
         log.success(`Created issue ${i + 1}/${selectedIssues.length} #${issueNum}: ${issue.title} [rate: ${rateSt.remaining}/${rateSt.limit}]`);
 
@@ -456,6 +459,30 @@ export async function planCommand(options: PlanOptions): Promise<void> {
       }
     } catch (err) {
       failures.push(`Issue "${issue.title}": ${(err as Error).message}`);
+    }
+  }
+
+  // ── Dependency backfill ────────────────────────────────────────────────────
+  // The plan's `dependsOn` uses temporary local ids; now that real issue
+  // numbers exist, write "Depends on #N" lines into each dependent issue body
+  // so the runner (parseDependencies) can order and parallelize work.
+  for (const issue of selectedIssues) {
+    const realNum = localIdToIssueNum.get(issue.id);
+    if (!realNum || issue.dependsOn.length === 0) continue;
+    const depNums = issue.dependsOn
+      .map((localId) => localIdToIssueNum.get(localId))
+      .filter((num): num is number => typeof num === 'number');
+    if (depNums.length === 0) continue;
+    const depLines = depNums.map((num) => `- Depends on #${num}`).join('\n');
+    const newBody = `${issue.body.trimEnd()}\n\n## Dependencies\n${depLines}\n`;
+    try {
+      if (updateIssue(config.repo, realNum, { body: newBody })) {
+        log.info(`Linked dependencies for #${realNum}: ${depNums.map((num) => `#${num}`).join(', ')}`);
+      } else {
+        failures.push(`Dependency backfill for #${realNum}: update returned false`);
+      }
+    } catch (err) {
+      failures.push(`Dependency backfill for #${realNum}: ${(err as Error).message}`);
     }
   }
 

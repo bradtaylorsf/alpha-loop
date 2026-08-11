@@ -70,6 +70,7 @@ jest.mock('../../src/lib/planning', () => ({
 jest.mock('../../src/lib/github', () => ({
   createMilestone: jest.fn(() => 1),
   createIssue: jest.fn(() => 42),
+  updateIssue: jest.fn(() => true),
   addIssueToProject: jest.fn(),
   listOpenIssues: jest.fn(() => []),
   listMilestones: jest.fn(() => []),
@@ -81,7 +82,7 @@ import { input, checkbox, confirm } from '@inquirer/prompts';
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { extractJsonFromResponse, savePlanDraft, loadPlanDraft } from '../../src/lib/planning';
-import { createMilestone, createIssue, addIssueToProject, listMilestones, listLabels, createLabel } from '../../src/lib/github';
+import { createMilestone, createIssue, updateIssue, addIssueToProject, listMilestones, listLabels, createLabel } from '../../src/lib/github';
 import { loadConfig } from '../../src/lib/config';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -94,6 +95,7 @@ const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockExtractJson = extractJsonFromResponse as jest.MockedFunction<typeof extractJsonFromResponse>;
 const mockCreateMilestone = createMilestone as jest.MockedFunction<typeof createMilestone>;
 const mockCreateIssue = createIssue as jest.MockedFunction<typeof createIssue>;
+const mockUpdateIssue = updateIssue as jest.MockedFunction<typeof updateIssue>;
 const mockAddIssueToProject = addIssueToProject as jest.MockedFunction<typeof addIssueToProject>;
 const mockSavePlanDraft = savePlanDraft as jest.MockedFunction<typeof savePlanDraft>;
 const mockLoadPlanDraft = loadPlanDraft as jest.MockedFunction<typeof loadPlanDraft>;
@@ -472,6 +474,35 @@ describe('plan command', () => {
     expect(log.success).toHaveBeenCalledWith(
       expect.stringContaining('Resumed plan'),
     );
+  });
+
+  it('backfills dependency metadata with real issue numbers after creation', async () => {
+    mockLoadPlanDraft.mockReturnValue(VALID_PLAN_DRAFT);
+    mockListMilestones.mockReturnValue([
+      {
+        number: 1,
+        title: '001 - MVP',
+        description: 'Core features',
+        openIssues: 0,
+        closedIssues: 0,
+        dueOn: '2026-06-01',
+        state: 'open',
+      },
+    ]);
+    mockCreateIssue.mockReturnValueOnce(42).mockReturnValueOnce(43);
+    mockUpdateIssue.mockReturnValue(true);
+
+    await planCommand({ resume: true, yes: true });
+
+    // Issue 2 (dashboard, #43) depends on local id 1 (login, #42) — its body
+    // gets a "Depends on #42" line the runner can parse for ordering.
+    expect(mockUpdateIssue).toHaveBeenCalledTimes(1);
+    expect(mockUpdateIssue).toHaveBeenCalledWith('owner/repo', 43, {
+      body: expect.stringContaining('- Depends on #42'),
+    });
+    const updatedBody = mockUpdateIssue.mock.calls[0][2].body as string;
+    expect(updatedBody).toContain('## Dependencies');
+    expect(updatedBody).toContain('## Acceptance Criteria');
   });
 
   it('errors when --resume has no saved draft', async () => {
