@@ -36,7 +36,8 @@ beforeEach(() => {
   for (const key of [
     'REPO', 'MODEL', 'PROJECT', 'AGENT', 'DRY_RUN',
     'REVIEW_MODEL', 'POLL_INTERVAL', 'BASE_BRANCH', 'LOG_DIR',
-    'LABEL_READY', 'MAX_TEST_RETRIES', 'TEST_COMMAND', 'DEV_COMMAND',
+    'LABEL_READY', 'MAX_TEST_RETRIES', 'TEST_COMMAND', 'TEST_SCOPE',
+    'CHANGED_TEST_COMMAND', 'DEV_COMMAND',
     'SKIP_TESTS', 'SKIP_REVIEW', 'SKIP_INSTALL', 'SKIP_PREFLIGHT',
     'SKIP_VERIFY', 'SKIP_LEARN', 'SKIP_E2E', 'AUTO_MERGE', 'MERGE_TO',
     'AUTO_CLEANUP', 'RUN_FULL', 'SESSION_RETENTION_PAUSED_WORKTREE_DAYS',
@@ -90,6 +91,8 @@ review_model: haiku
 label: todo
 base_branch: main
 test_command: npm test
+test_scope: changed
+changed_test_command: pnpm jest --findRelatedTests {files}
 `,
     );
 
@@ -102,6 +105,8 @@ test_command: npm test
     expect(config.labelReady).toBe('todo');
     expect(config.baseBranch).toBe('main');
     expect(config.testCommand).toBe('npm test');
+    expect(config.testScope).toBe('changed');
+    expect(config.changedTestCommand).toBe('pnpm jest --findRelatedTests {files}');
   });
 
   it('applies env var overrides over config file', () => {
@@ -129,6 +134,8 @@ max_test_retries: 5
     expect(config.baseBranch).toBe('master');
     expect(config.labelReady).toBe('ready');
     expect(config.maxTestRetries).toBe(3);
+    expect(config.testScope).toBe('full');
+    expect(config.changedTestCommand).toBe('');
     expect(config.dryRun).toBe(false);
     expect(config.skipTests).toBe(false);
     expect(config.autoMerge).toBe(true);
@@ -137,6 +144,27 @@ max_test_retries: 5
       pausedWorktreeDays: 0,
       completedWorktreeDays: 30,
     });
+  });
+
+  it('applies tiered testing environment overrides', () => {
+    process.env.TEST_SCOPE = 'changed';
+    process.env.CHANGED_TEST_COMMAND = 'pnpm vitest related {files}';
+
+    const config = loadConfig();
+
+    expect(config.testScope).toBe('changed');
+    expect(config.changedTestCommand).toBe('pnpm vitest related {files}');
+  });
+
+  it('warns and normalizes an invalid test scope to full', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation();
+    writeFileSync(join(tempDir, '.alpha-loop.yaml'), 'test_scope: focused\n');
+
+    const config = loadConfig();
+
+    expect(config.testScope).toBe('full');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('test_scope'));
+    warn.mockRestore();
   });
 
   it('loads session retention settings from nested config', () => {

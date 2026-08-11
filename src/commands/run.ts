@@ -4,7 +4,7 @@
 import { join } from 'node:path';
 import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
-import { exec } from '../lib/shell.js';
+import { exec, shellQuote } from '../lib/shell.js';
 import { loadConfig, assertSafeShellArg, resolveStepConfig, type Config } from '../lib/config.js';
 import {
   pollIssues, listMilestones, listEpics, getEpicSubIssues, getIssueWithComments,
@@ -13,7 +13,8 @@ import {
 } from '../lib/github.js';
 import { buildEpicSummary, parseSubIssues } from '../lib/epics.js';
 import { verifyEpic } from '../lib/verify-epic.js';
-import { processIssue, processBatch, finalizeQuickRun } from '../lib/pipeline.js';
+import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate } from '../lib/pipeline.js';
+import { isChangedTestScopeEnabled } from '../lib/testing.js';
 import {
   createSession,
   finalizeSession,
@@ -127,6 +128,7 @@ export type EpicExecutionFailureCode =
   | 'epic-verification-failed'
   | 'epic-incomplete'
   | 'epic-run-error'
+  | 'session-test-failed'
   | 'quick-finalize-failed';
 
 export type EpicExecutionFailure = {
@@ -1562,6 +1564,37 @@ async function executeSessionRun(
           at: new Date().toISOString(),
         });
       }
+    }
+  }
+
+  // Changed scope keeps per-issue runs focused, so require one aggregate full
+  // suite pass before epic verification, post-session review, and finalization.
+  // Quick mode already runs this same gate inside finalizeQuickRun.
+  const fullGateIssues = session.results
+    .filter((result) => result.status === 'success' && !isRecoveredRunResult(result))
+    .map((result) => ({ number: result.issueNum, title: result.title }));
+  if (!config.quick && isChangedTestScopeEnabled(config) && fullGateIssues.length > 0 && !config.dryRun) {
+    try {
+      if (config.autoMerge) {
+        exec(`git checkout ${shellQuote(session.branch)}`, { cwd: process.cwd() });
+      }
+      const fullGate = await runFullSuiteGate({
+        issues: fullGateIssues,
+        config,
+        session,
+        worktreePath: process.cwd(),
+      });
+      if (!fullGate.testsPassing) {
+        const message = `End-of-session full test suite failed after ${config.maxTestRetries} attempts`;
+        log.error(message);
+        failures.push({ code: 'session-test-failed', message });
+        epicAbort = true;
+      }
+    } catch (err) {
+      const message = `End-of-session full test suite failed: ${err instanceof Error ? err.message : err}`;
+      log.error(message);
+      failures.push({ code: 'session-test-failed', message });
+      epicAbort = true;
     }
   }
 

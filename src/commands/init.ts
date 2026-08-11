@@ -250,6 +250,10 @@ auto_merge: ${answers.autoMerge}            # Auto-merge PRs to session branch w
 # === Testing ================================================================
 # Commands the loop runs to verify changes.
 test_command: ${answers.testCommand}
+# Per-issue test scope: full (default) or changed; changed requires auto_merge.
+# test_scope: full
+# For changed scope, {files} expands to the issue-relative changed paths.
+# changed_test_command: pnpm jest --findRelatedTests --passWithNoTests {files}
 dev_command: ${answers.devCommand}
 # setup_command: ""           # Run once before the session (e.g., "pnpm install")
 # smoke_test: ""              # Final smoke command after review (e.g., "curl localhost:3000/health")

@@ -458,6 +458,9 @@ agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
 label: ready
 base_branch: main
 test_command: pnpm test
+# Run related tests per issue, then test_command once at the end of the session:
+# test_scope: changed
+# changed_test_command: pnpm jest --findRelatedTests --passWithNoTests {files}
 dev_command: pnpm dev
 auto_merge: true
 
@@ -546,6 +549,8 @@ eval_dir: .alpha-loop/evals
 | `label` | `ready` | GitHub label that marks issues as ready for the loop |
 | `base_branch` | `master` | Branch to create PRs against |
 | `test_command` | `pnpm test` | Command to run tests |
+| `test_scope` | `full` | Per-issue test scope: `full` always runs `test_command`; with `auto_merge: true`, `changed` uses `changed_test_command` and adds one full-suite session gate |
+| `changed_test_command` | (none) | Changed-scope command template; `{files}` expands to shell-quoted, issue-relative changed paths |
 | `dev_command` | `pnpm dev` | Command to start the dev server for verification |
 | `max_turns` | (none) | Max conversation turns for the agent |
 | `poll_interval` | `60` | Seconds between issue polling |
@@ -654,6 +659,8 @@ All config options can be set via environment variables (uppercase, same names):
 | `MAX_SESSION_DURATION` | `max_session_duration` |
 | `BASE_BRANCH` | `base_branch` |
 | `TEST_COMMAND` | `test_command` |
+| `TEST_SCOPE` | `test_scope` |
+| `CHANGED_TEST_COMMAND` | `changed_test_command` |
 | `DEV_COMMAND` | `dev_command` |
 | `DRY_RUN` | `dry_run` |
 | `SKIP_TESTS` | `skip_tests` |
@@ -681,6 +688,14 @@ All config options can be set via environment variables (uppercase, same names):
 | `SKIP_POST_SESSION_SECURITY` | `post_session.security_scan` (inverted) |
 
 **Precedence:** CLI flags > environment variables > `.alpha-loop.yaml` > auto-detection > defaults
+
+### Tiered Testing
+
+`test_scope: full` is the default and preserves the existing behavior: every per-issue test and retest runs `test_command`. To reduce repeated full-suite work in multi-issue sessions, set `test_scope: changed`, keep `auto_merge: true`, and provide a `changed_test_command` containing `{files}`. Alpha Loop replaces `{files}` with the shell-quoted paths changed by that issue since its worktree branch forked, refreshing the list after test, review, and verification fixes.
+
+With effective changed scope, Alpha Loop runs `test_command` once on the aggregate session branch after issue processing and before epic verification, post-session review, and finalization. That full pass uses the existing agent fix-and-retry loop. Preflight continues to use the unmodified full `test_command`, so the pre-existing-failure baseline is unchanged.
+
+If `auto_merge` is disabled, `changed_test_command` is empty, the template lacks `{files}`, or no changed paths can be resolved for an invocation, Alpha Loop logs a warning and falls back to `test_command`. The aggregate full-suite gate requires the session branch created by auto-merge; configurations that cannot create that branch disable the extra gate because their per-issue runs are already full-suite runs.
 
 ### Switching Agents
 
