@@ -2459,6 +2459,13 @@ export async function processIssue(
     config,
     sessionLogsDir: session.logsDir,
     sessionName: session.name,
+    onAgentResult: (result: AgentResult): void => {
+      stepCosts.push(buildStepCost('learn', issueNum, result, config));
+      writeCosts(session.name, computeCosts(stepCosts));
+      recordStageTelemetry(session, issueNum, 'learn', result, config, {
+        profile: selectRoutingProfile(config, issueNum),
+      });
+    },
     ...epicOption,
   };
   const backgroundWorktreePath = session.worktreePath;

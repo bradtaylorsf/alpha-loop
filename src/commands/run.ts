@@ -1,7 +1,7 @@
 /**
  * Run Command — the main loop: poll issues, process them, finalize session.
  */
-import { join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
@@ -2356,6 +2356,51 @@ function writeJsonAtomic(filePath: string, value: unknown): void {
   renameSync(temporaryPath, filePath);
 }
 
+type QueueWorkerArtifactPaths = {
+  contextPath: string;
+  resultPath: string;
+  queueId: string;
+};
+
+function isInsideDirectory(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel);
+}
+
+function resolveQueueWorkerArtifactPaths(
+  contextPath: string,
+  resultPath: string,
+  epicNumber: number,
+): QueueWorkerArtifactPaths {
+  const sessionsDir = resolve(process.cwd(), '.alpha-loop', 'sessions');
+  const resolvedContextPath = resolve(process.cwd(), contextPath);
+  const resolvedResultPath = resolve(process.cwd(), resultPath);
+  const queueDir = dirname(resolvedContextPath);
+  const queueId = basename(queueDir);
+  const expectedContextName = `epic-${epicNumber}-context.json`;
+  const expectedResultName = `epic-${epicNumber}-result.json`;
+
+  const valid = isInsideDirectory(sessionsDir, resolvedContextPath)
+    && isInsideDirectory(sessionsDir, resolvedResultPath)
+    && dirname(resolvedResultPath) === queueDir
+    && queueId.startsWith('queue-')
+    && basename(resolvedContextPath) === expectedContextName
+    && basename(resolvedResultPath) === expectedResultName;
+  if (!valid) {
+    throw new CommandExitError({
+      code: 'invalid-queue-worker-context',
+      message: 'Internal queue worker artifact paths must be matching epic context/result files inside .alpha-loop/sessions/queue-*',
+      exitCode: 1,
+    });
+  }
+
+  return {
+    contextPath: resolvedContextPath,
+    resultPath: resolvedResultPath,
+    queueId,
+  };
+}
+
 function readQueueWorkerContext(filePath: string): QueueSessionContext {
   try {
     const value = JSON.parse(readFileSync(filePath, 'utf-8')) as QueueSessionContext;
@@ -3102,7 +3147,19 @@ export async function runCommand(options: RunOptions): Promise<void> {
         });
       }
       if (options.queueContext && options.queueResult) {
-        const queue = readQueueWorkerContext(options.queueContext);
+        const artifactPaths = resolveQueueWorkerArtifactPaths(
+          options.queueContext,
+          options.queueResult,
+          options.epic,
+        );
+        const queue = readQueueWorkerContext(artifactPaths.contextPath);
+        if (queue.queueId !== artifactPaths.queueId) {
+          throw new CommandExitError({
+            code: 'invalid-queue-worker-context',
+            message: `Queue worker context id ${queue.queueId} does not match artifact directory ${artifactPaths.queueId}`,
+            exitCode: 1,
+          });
+        }
         // Queue workers must always own distinct session branches. A repository-level
         // merge_to setting is valid for standalone runs, but inheriting it here would
         // send every parallel worker to the same branch.
@@ -3132,7 +3189,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
             });
           }
         }
-        writeJsonAtomic(options.queueResult, result);
+        writeJsonAtomic(artifactPaths.resultPath, result);
         if (result.status !== 'success') process.exitCode = 1;
         return;
       }

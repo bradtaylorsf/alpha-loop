@@ -823,7 +823,16 @@ describe('processIssue', () => {
     const session = makeSession();
     const sessionWorktreePath = '/tmp/session-worktree';
 
-    mockExtractLearnings.mockReturnValueOnce(learningPending);
+    const learningAgentResult = {
+      exitCode: 0,
+      output: 'Learning output',
+      duration: 625,
+    };
+    mockExtractLearnings.mockImplementationOnce(async (options) => {
+      const learningFile = await learningPending;
+      options.onAgentResult?.(learningAgentResult);
+      return learningFile;
+    });
     mockSpawnAgent.mockImplementation(async (options) => {
       if (options.prompt === 'assumptions prompt') return assumptionsPending;
       return { exitCode: 0, output: 'Agent output', duration: 5000 };
@@ -847,6 +856,7 @@ describe('processIssue', () => {
       agentCwd: sessionWorktreePath,
       sessionLogsDir: '/tmp/sessions/session/20260330-143000/logs',
       sessionName: 'session/20260330-143000',
+      onAgentResult: expect.any(Function),
     }));
     expect(mockCreatePR.mock.invocationCallOrder[0]).toBeLessThan(
       mockExtractLearnings.mock.invocationCallOrder[0],
@@ -879,9 +889,16 @@ describe('processIssue', () => {
       expect.stringContaining('Assumed the existing API contract remains stable.'),
     );
     expect(mockComputeCosts).toHaveBeenLastCalledWith(expect.arrayContaining([
+      expect.objectContaining({ step: 'learn', issueNum: 42 }),
       expect.objectContaining({ step: 'assumptions', issueNum: 42 }),
     ]));
     expect(mockWriteCosts).toHaveBeenLastCalledWith('session/20260330-143000', {});
+    expect(mockBuildStageTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({ output: 'Learning output' }),
+      'learn',
+      expect.any(Object),
+      expect.objectContaining({ issueNum: 42 }),
+    );
     expect(mockBuildStageTelemetry).toHaveBeenCalledWith(
       expect.objectContaining({ output: 'Assumed the existing API contract remains stable.' }),
       'assumptions',

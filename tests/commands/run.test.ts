@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { join } from 'node:path';
 import { formatEpicPickerMeta, formatMilestonePickerMeta, runCommand, runSingleEpicExecution } from '../../src/commands/run';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -626,8 +627,11 @@ describe('runCommand', () => {
   });
 
   test('internal queue workers persist a structured result artifact before exiting', async () => {
+    const queueDir = join(process.cwd(), '.alpha-loop', 'sessions', 'queue-test');
+    const contextPath = join(queueDir, 'epic-77-context.json');
+    const resultPath = join(queueDir, 'epic-77-result.json');
     mockReadFileSync.mockImplementation((filePath: any) => {
-      if (String(filePath) === '/tmp/queue-context.json') {
+      if (String(filePath) === contextPath) {
         return JSON.stringify({
           queueId: 'queue-test',
           queueIndex: 1,
@@ -651,13 +655,13 @@ describe('runCommand', () => {
 
     await runCommand({
       epic: 77,
-      queueContext: '/tmp/queue-context.json',
-      queueResult: '/tmp/queue-result.json',
+      queueContext: contextPath,
+      queueResult: resultPath,
       queueBranchMode: 'independent',
       autoMerge: true,
     });
 
-    const resultWrite = mockWriteFileSync.mock.calls.find(([filePath]) => String(filePath).startsWith('/tmp/queue-result.json.tmp-'));
+    const resultWrite = mockWriteFileSync.mock.calls.find(([filePath]) => String(filePath).startsWith(`${resultPath}.tmp-`));
     expect(resultWrite).toBeDefined();
     expect(JSON.parse(String(resultWrite?.[1]))).toEqual(expect.objectContaining({
       epicNumber: 77,
@@ -668,6 +672,9 @@ describe('runCommand', () => {
   });
 
   test('internal queue workers leave shared project preparation to the coordinator', async () => {
+    const queueDir = join(process.cwd(), '.alpha-loop', 'sessions', 'queue-test');
+    const contextPath = join(queueDir, 'epic-77-context.json');
+    const resultPath = join(queueDir, 'epic-77-result.json');
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
       ...overrides,
       mergeTo: 'shared-integration-branch',
@@ -686,7 +693,7 @@ describe('runCommand', () => {
       return null;
     });
     mockReadFileSync.mockImplementation((filePath: any) => {
-      if (String(filePath) === '/tmp/queue-context.json') {
+      if (String(filePath) === contextPath) {
         return JSON.stringify({
           queueId: 'queue-test',
           queueIndex: 1,
@@ -710,8 +717,8 @@ describe('runCommand', () => {
 
     await runCommand({
       epic: 77,
-      queueContext: '/tmp/queue-context.json',
-      queueResult: '/tmp/queue-result.json',
+      queueContext: contextPath,
+      queueResult: resultPath,
       queueBranchMode: 'independent',
       autoMerge: true,
       skipTests: true,
@@ -725,6 +732,21 @@ describe('runCommand', () => {
       expect.objectContaining({ autoMerge: true, mergeTo: '' }),
       expect.objectContaining({ epicNum: 77 }),
     );
+  });
+
+  test('internal queue workers reject artifact paths outside the queue sessions directory', async () => {
+    await runCommand({
+      epic: 77,
+      queueContext: '/tmp/queue-context.json',
+      queueResult: '/tmp/queue-result.json',
+      queueBranchMode: 'independent',
+      autoMerge: true,
+    });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('queue worker artifact paths'));
+    expect(mockReadFileSync).not.toHaveBeenCalled();
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
   });
 
   test('dry-run session preview does not sync assets or refresh generated context', async () => {

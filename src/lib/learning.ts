@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'node:path';
 import { log } from './logger.js';
 import { formatTimestamp } from './shell.js';
-import { spawnAgent } from './agent.js';
+import { spawnAgent, type AgentResult } from './agent.js';
 import { buildLearnPrompt, type EpicPromptContext } from './prompts.js';
 import { resolveStepConfig } from './config.js';
 import type { Config } from './config.js';
@@ -27,6 +27,8 @@ export type ExtractLearningsOptions = {
   sessionLogsDir?: string;
   sessionName?: string;
   epicContext?: EpicPromptContext;
+  /** Observe the learning agent result for caller-owned cost and telemetry recording. */
+  onAgentResult?: (result: AgentResult) => void;
 };
 
 export type SessionLearningRepairResult = {
@@ -525,6 +527,7 @@ export async function extractLearnings(options: ExtractLearningsOptions): Promis
     cwd: agentCwd,
     logFile: undefined,
   });
+  options.onAgentResult?.(result);
 
   if (result.exitCode !== 0 || !result.output.trim()) {
     log.warn(`Learning extraction failed (exit ${result.exitCode}, output ${result.output.length} chars), skipping`);
