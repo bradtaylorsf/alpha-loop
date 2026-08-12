@@ -81,6 +81,7 @@ import {
   writeRunManifest,
   writeConfigSnapshot,
   writeScores,
+  persistIssueScores,
   writeCosts,
   persistStepCosts,
   computeScores,
@@ -2711,7 +2712,7 @@ export async function processIssue(
         filesChanged,
         stepsCompleted,
       };
-      writeScores(session.name, computeScores([issueScoreResult]));
+      persistIssueScores(session.name, `issue-${issueNum}`, [issueScoreResult]);
       persistStepCosts(session.name, `issue-${issueNum}`, stepCosts);
     } catch (err) {
       log.warn(`Failed to write traces for #${issueNum}: ${err}`);
@@ -3674,7 +3675,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           filesChanged: r.filesChanged,
           stepsCompleted,
         }));
-      writeScores(session.name, computeScores(scoreResults));
+      persistIssueScores(session.name, `batch-${issueNums.join('-')}`, scoreResults);
       persistStepCosts(session.name, `batch-${issueNums.join('-')}`, stepCosts);
 
       // Config snapshot
@@ -3972,21 +3973,28 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
   const shipped = merged || (!config.autoMerge && testsPassing && prUrl !== undefined);
   updateIssueOutcomes(shipped);
 
-  // The orchestrator owns the shared worktree; clean it up now that the
-  // deferred pass is complete. Preserve it when the work didn't merge.
-  const cleanup = await cleanupWorktree({
-    issueNum: issues[0]?.number ?? 0,
-    projectDir,
-    autoCleanup: config.autoCleanup,
-    preserveIfCommits: !merged,
-    worktreePath,
-  });
-  recordSessionCleanup(session, {
-    status: cleanup.status,
-    worktreePath: cleanup.path,
-    reason: cleanup.reason,
-    at: new Date().toISOString(),
-  });
+  // Post-merge bookkeeping must never throw out of this function: the caller
+  // treats a throw as "nothing shipped" and demotes results — wrong once the
+  // merge has landed. Contain cleanup failures to a warning.
+  try {
+    // The orchestrator owns the shared worktree; clean it up now that the
+    // deferred pass is complete. Preserve it when the work didn't merge.
+    const cleanup = await cleanupWorktree({
+      issueNum: issues[0]?.number ?? 0,
+      projectDir,
+      autoCleanup: config.autoCleanup,
+      preserveIfCommits: !merged,
+      worktreePath,
+    });
+    recordSessionCleanup(session, {
+      status: cleanup.status,
+      worktreePath: cleanup.path,
+      reason: cleanup.reason,
+      at: new Date().toISOString(),
+    });
+  } catch (err) {
+    log.warn(`Quick finalize: post-merge cleanup failed (work is shipped and safe): ${err instanceof Error ? err.message : err}`);
+  }
 
   return { testsPassing, testOutput, prUrl, merged };
 }

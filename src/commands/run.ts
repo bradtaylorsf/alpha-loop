@@ -193,7 +193,6 @@ type SessionExecutionResult = {
 type CommandExitErrorCode =
   | 'missing-repository'
   | 'missing-prerequisite'
-  | 'quick-requires-auto-merge'
   | 'ambiguous-milestone-epics'
   | 'invalid-verify-only'
   | 'incompatible-issue-options'
@@ -1324,6 +1323,10 @@ async function executeSessionRun(
   let epicAbort = false;
   // Quick mode: outputs from the deferred passes, fed into the epic-level learning extraction.
   let quickFinalizeTestOutput: string | null = null;
+  // Issues demoted by a failed quick finalize — already covered by the
+  // quick-finalize-failed failure entry, so the per-result failure loop
+  // must not add a second entry for each of them.
+  const demotedQuickIssueNums = new Set<number>();
   let epicVerificationSummary: string | null = null;
 
   if (issues.length === 0) {
@@ -1628,6 +1631,7 @@ async function executeSessionRun(
             result.status = 'failure';
             result.testsPassing = false;
             result.failureReason = 'permanent';
+            demotedQuickIssueNums.add(result.issueNum);
             if (!config.dryRun) saveResult(session, result);
           }
           if (activeEpic !== undefined && !config.dryRun) {
@@ -1772,6 +1776,9 @@ async function executeSessionRun(
   }
 
   for (const result of session.results) {
+    // Quick-demoted results are already covered by the single
+    // quick-finalize-failed entry — a per-issue duplicate is manifest noise.
+    if (demotedQuickIssueNums.has(result.issueNum)) continue;
     if (result.status === 'failure' && !isRecoveredRunResult(result)) {
       const transient = result.failureReason === 'transient';
       failures.push({
@@ -3123,18 +3130,6 @@ export async function runCommand(options: RunOptions): Promise<void> {
       throw new CommandExitError({
         code: 'invalid-parallel',
         message: '--parallel can only be used with --epics',
-        exitCode: 1,
-      });
-    }
-
-    // Quick mode's deferred pass merges one PR into the session branch, and
-    // learnings ride the session worktree — both require auto-merge. Without
-    // it a quick run would complete with zero learning artifacts (extraction
-    // has no session worktree to land in) and no mergeable output.
-    if (config.quick && !config.autoMerge) {
-      throw new CommandExitError({
-        code: 'quick-requires-auto-merge',
-        message: 'quick mode requires auto_merge: true — the deferred test/PR pass ships through the session branch',
         exitCode: 1,
       });
     }

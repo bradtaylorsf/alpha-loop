@@ -86,6 +86,7 @@ jest.mock('../../src/lib/traces', () => ({
   writeScores: jest.fn(),
   writeCosts: jest.fn(),
   persistStepCosts: jest.fn(),
+  persistIssueScores: jest.fn(),
   computeScores: jest.fn().mockReturnValue({}),
   computeCosts: jest.fn().mockReturnValue({}),
   runDir: jest.fn().mockReturnValue('/tmp/traces/run'),

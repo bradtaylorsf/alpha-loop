@@ -37,6 +37,10 @@ Codex's workspace-write sandbox covers only the cwd; a linked worktree's git ind
 The post-session review loop committed the review agent's direct fixes only on the retry path; a first-attempt pass stranded them uncommitted (same family as the pause bug — separate fix in flight).
 **Rule:** after any agent that may write files, the pipeline commits dirty state before acting on the gate verdict, whatever the verdict is.
 
+### 9. Command-level guards don't cover shared execution paths (round-two MAJOR)
+The `quick requires auto_merge` guard was placed in `runCommand` — but `alpha-loop daemon` and queue workers reach the same session path without ever passing through it. Configuration invariants belong at config load (coercion with a warning, like `test_scope`), where every entry point inherits them.
+**Rule:** validate config combinations in `loadConfig`, not in individual command entry points. A guard that only some callers pass through is a guard with a hole. Corollary from the same round: a `catch` that assumes "nothing shipped" must be provably unreachable after the ship point — contain post-merge bookkeeping errors so they can't be misread as failure.
+
 ## Process learnings
 
 - **The loop's own gates share blind spots with the loop's author.** Per-issue review, epic verification, and the post-session holistic review all passed over the CRITICAL finding — they verify the *diff*, not the *bookkeeping claims* the pipeline makes about the diff. Independent QA prompted to challenge claims-vs-evidence with executable reproductions found in hours what the gates missed entirely.

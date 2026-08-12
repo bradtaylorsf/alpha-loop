@@ -1871,17 +1871,15 @@ Coordinate hosted work.
       ['owner/repo', 900, 901, true],
       ['owner/repo', 900, 901, false],
     ]);
+
+    // And the demotion itself — the mechanism that stops finalizeSession from
+    // emitting "Closes #901" — must hold independently of the checklist.
+    const finalizedSession = mockFinalizeSession.mock.calls[0][0] as any;
+    const demoted = finalizedSession.results.find((r: any) => r.issueNum === 901);
+    expect(demoted.status).toBe('failure');
+    expect(demoted.testsPassing).toBe(false);
   });
 
-  test('quick mode without auto_merge is rejected before any session is created', async () => {
-    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true, autoMerge: false }) as any);
-
-    await runCommand({});
-
-    expect(process.exitCode).toBe(1);
-    expect(mockCreateSession).not.toHaveBeenCalled();
-    expect(mockProcessIssue).not.toHaveBeenCalled();
-  });
 
   test('continues other eligible work when one issue is waiting for human feedback', async () => {
     mockPollIssues.mockReturnValue([

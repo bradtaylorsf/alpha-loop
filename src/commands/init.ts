@@ -660,6 +660,11 @@ const GITIGNORE_ENTRIES = [
   '.alpha-loop/templates/*.bak',
   '.worktrees/',
   'plugins/',
+  '# Alpha-loop pipeline control-plane artifacts (read by the loop, never work product)',
+  'alpha-loop-pause-request.json',
+  'review-issue-*.json',
+  'verify-issue-*.json',
+  'plan-issue-*.json',
 ];
 
 function ensureGitignore(): void {

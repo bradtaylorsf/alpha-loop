@@ -1449,6 +1449,14 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     console.warn(`[config] test_scope: invalid value "${String(merged.testScope)}" (expected full or changed); using full`);
     merged.testScope = 'full';
   }
+  // Quick mode ships through the session branch: the deferred pass merges one
+  // PR into it and learnings land in the session worktree — both need
+  // auto-merge. Coerce here (not in run) so every entry point is covered:
+  // `alpha-loop daemon` and queue workers never pass through runCommand.
+  if (merged.quick && !merged.autoMerge) {
+    console.warn('[config] quick: true requires auto_merge: true — disabling quick mode for this run');
+    merged.quick = false;
+  }
   if (typeof merged.changedTestCommand !== 'string') {
     console.warn(`[config] changed_test_command: expected a string (got ${String(merged.changedTestCommand)}); ignoring`);
     merged.changedTestCommand = '';

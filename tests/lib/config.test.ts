@@ -109,6 +109,38 @@ changed_test_command: pnpm jest --findRelatedTests {files}
     expect(config.changedTestCommand).toBe('pnpm jest --findRelatedTests {files}');
   });
 
+  it('disables quick mode when auto_merge is off, at every entry point', () => {
+    // The coercion lives in loadConfig (not runCommand) so daemon and queue
+    // workers are covered too — they never pass through runCommand.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+quick: true
+auto_merge: false
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.quick).toBe(false);
+    expect(config.autoMerge).toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('quick: true requires auto_merge: true'));
+    warnSpy.mockRestore();
+  });
+
+  it('keeps quick mode enabled when auto_merge is on', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+quick: true
+auto_merge: true
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.quick).toBe(true);
+  });
+
   it('applies env var overrides over config file', () => {
     writeFileSync(
       join(tempDir, '.alpha-loop.yaml'),
