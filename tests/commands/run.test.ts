@@ -117,6 +117,10 @@ jest.mock('../../src/commands/sync', () => ({
   resolveHarnesses: jest.fn((harnesses: string[], _agent: string) => harnesses),
 }));
 
+jest.mock('../../src/commands/scan', () => ({
+  scanCommand: jest.fn(),
+}));
+
 jest.mock('node:fs', () => ({
   existsSync: jest.fn().mockReturnValue(false),
   readFileSync: jest.fn(),
@@ -475,7 +479,8 @@ describe('runCommand', () => {
     expect(mockExit).not.toHaveBeenCalled();
   });
 
-  test('skips generated-file auto-commit when refreshed context fails validation', async () => {
+  test('stops without git mutation when refreshed context fails validation', async () => {
+    mockContextNeedsRefresh.mockReturnValue(true);
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
       skipPostSessionReview: true,
       ...overrides,
@@ -496,10 +501,54 @@ describe('runCommand', () => {
 
     await runCommand({});
 
-    expect(mockLog.warn).toHaveBeenCalledWith('Skipping generated context/instructions auto-commit because validation failed:');
+    expect(mockLog.warn).toHaveBeenCalledWith('Generated context/instructions failed validation:');
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('commit them through a pull request'));
+    expect(process.exitCode).toBe(1);
     expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git add '))).toBe(false);
     expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git commit '))).toBe(false);
     expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git push '))).toBe(false);
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+  });
+
+  test('stops valid context refresh without pushing the configured base branch', async () => {
+    const validContext = [
+      '## Architecture',
+      '- TypeScript CLI',
+      '## Conventions',
+      '- Jest tests',
+      '## Critical Rules',
+      '- PRs only',
+      '## Active State',
+      '- Context refreshed',
+    ].join('\n');
+    mockContextNeedsRefresh.mockReturnValue(true);
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      baseBranch: 'protected-main',
+      skipPostSessionReview: true,
+      ...overrides,
+    }) as any);
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain .alpha-loop/ AGENTS.md CLAUDE.md') {
+        return { stdout: ' M .alpha-loop/context.md\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: validContext, stderr: '', exitCode: 0 };
+    });
+    mockExistsSync.mockImplementation((filePath: any) => String(filePath).endsWith('.alpha-loop/context.md'));
+    mockReadFileSync.mockImplementation((filePath: any) => {
+      if (String(filePath).endsWith('.alpha-loop/context.md')) return validContext;
+      return '';
+    });
+
+    await runCommand({});
+
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining(
+      'Alpha Loop will not push directly to protected-main',
+    ));
+    expect(process.exitCode).toBe(1);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git add '))).toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git commit '))).toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git push '))).toBe(false);
+    expect(mockProcessIssue).not.toHaveBeenCalled();
   });
 
   test('--epics dry-run validates the full queue in order without creating sessions or manifests', async () => {
