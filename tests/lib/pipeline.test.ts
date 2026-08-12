@@ -1749,6 +1749,25 @@ describe('processBatch', () => {
     { number: 11, title: 'Issue 11', body: 'Body 11' },
   ];
 
+  test('propagates cancellation into the active agent and starts no later stage', async () => {
+    const controller = new AbortController();
+    mockSpawnAgent.mockImplementationOnce(async (options) => {
+      expect(options.signal).toBe(controller.signal);
+      controller.abort(new Error('cancel active batch'));
+      return { exitCode: 130, output: '[ABORTED]', duration: 1 };
+    });
+
+    await expect(processBatch(
+      batchIssues,
+      makeConfig({ batch: true }),
+      makeSession(),
+      { signal: controller.signal },
+    )).rejects.toThrow('cancel active batch');
+
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+    expect(mockBuildBatchImplementPrompt).not.toHaveBeenCalled();
+  });
+
   test('passes epic context into batch prompts, learnings, and PR body', async () => {
     await processBatch(batchIssues, makeConfig({ batch: true }), { ...makeSession(), epic: 195 }, { epicContext });
 

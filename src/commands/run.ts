@@ -1102,6 +1102,7 @@ async function executeSessionRun(
 
   // Track active worktree for cleanup on signal
   let activeIssueNum: number | null = null;
+  const runAbortController = new AbortController();
 
   // Handle Ctrl+C gracefully
   const cleanup = async () => {
@@ -1156,13 +1157,6 @@ async function executeSessionRun(
       finalizationError = err;
       log.error(`Session finalization failed: ${err instanceof Error ? err.message : err}`);
     }
-    try {
-      await cleanupSessionWorktree(session, config, Boolean(finalizationError));
-    } catch (err) {
-      finalizationError ??= err;
-      log.error(`Session worktree cleanup failed: ${err instanceof Error ? err.message : err}`);
-    }
-
     const issueCount = session.results.length;
     const successCount = session.results.filter((r) => r.status === 'success' && !isRecoveredRunResult(r)).length;
     log.info(`Session complete: ${successCount}/${issueCount} issues succeeded`);
@@ -1180,17 +1174,12 @@ async function executeSessionRun(
     process.exitCode = 0;
   };
 
-  const handleSignalCleanupError = (err: unknown): void => {
-    if (isCommandExitError(err)) {
-      process.exitCode = err.exitCode;
-      if (!err.logged) log.error(err.message);
-      return;
-    }
-    process.exitCode = 1;
-    log.error(`Session cleanup failed: ${err instanceof Error ? err.message : err}`);
+  const requestShutdown = (signal: 'SIGINT' | 'SIGTERM'): void => {
+    if (runAbortController.signal.aborted) return;
+    runAbortController.abort(new Error(`Received ${signal}`));
   };
-  const handleSigint = () => { void cleanup().catch(handleSignalCleanupError); };
-  const handleSigterm = () => { void cleanup().catch(handleSignalCleanupError); };
+  const handleSigint = () => { requestShutdown('SIGINT'); };
+  const handleSigterm = () => { requestShutdown('SIGTERM'); };
   process.on('SIGINT', handleSigint);
   process.on('SIGTERM', handleSigterm);
 
@@ -1478,9 +1467,11 @@ async function executeSessionRun(
         activeIssueNum = batchIssues[0].number;
 
         try {
-          const results = epicPromptContext
-            ? await processBatch(batchIssues, config, session, { epicContext: epicPromptContext })
-            : await processBatch(batchIssues, config, session);
+          const results = await processBatch(batchIssues, config, session, {
+            signal: runAbortController.signal,
+            ...(epicPromptContext ? { epicContext: epicPromptContext } : {}),
+          });
+          if (runAbortController.signal.aborted) break;
           session.results.push(...results);
 
           // Flip epic checklist for each successful sub-issue.
@@ -1521,11 +1512,13 @@ async function executeSessionRun(
             break;
           }
         } catch (err) {
+          if (runAbortController.signal.aborted) break;
           const message = `Failed to process batch ${batchIdx + 1}: ${err}`;
           log.error(message);
           failures.push({ code: 'batch-processing-error', message });
         }
 
+        if (runAbortController.signal.aborted) break;
         activeIssueNum = null;
       }
     } else {
@@ -1587,10 +1580,12 @@ async function executeSessionRun(
             config,
             session,
             {
+              signal: runAbortController.signal,
               ...(epicPromptContext ? { epicContext: epicPromptContext } : {}),
               ...(quickWorktree ? { quickWorktree } : {}),
             },
           );
+          if (runAbortController.signal.aborted) break;
           session.results.push(result);
           if (quickWorktree && result.status === 'success' && !isRecoveredRunResult(result)) {
             quickProcessed.push({ number: issue.number, title: issue.title });
@@ -1622,11 +1617,13 @@ async function executeSessionRun(
             break;
           }
         } catch (err) {
+          if (runAbortController.signal.aborted) break;
           const message = `Failed to process issue #${issue.number}: ${err}`;
           log.error(message);
           failures.push({ code: 'issue-processing-error', message, issueNum: issue.number });
         }
 
+        if (runAbortController.signal.aborted) break;
         activeIssueNum = null;
       }
 
@@ -1717,6 +1714,27 @@ async function executeSessionRun(
         });
       }
     }
+  }
+
+  if (runAbortController.signal.aborted) {
+    try {
+      await cleanup();
+    } catch (err) {
+      process.exitCode = isCommandExitError(err) ? err.exitCode : 1;
+      if (!isCommandExitError(err) || !err.logged) {
+        log.error(`Session cleanup failed: ${err instanceof Error ? err.message : err}`);
+      }
+    } finally {
+      process.off('SIGINT', handleSigint);
+      process.off('SIGTERM', handleSigterm);
+    }
+    return {
+      session,
+      sessionPrUrl: session.sessionPrUrl ?? null,
+      failures,
+      verificationClosedEpic,
+      waiting: true,
+    };
   }
 
   // Changed scope keeps per-issue runs focused, so require one aggregate full
