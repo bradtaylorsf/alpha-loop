@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { program } from 'commander';
+import { Option, program } from 'commander';
 import { historyCommand } from './commands/history.js';
 import { scanCommand } from './commands/scan.js';
 import { visionCommand } from './commands/vision.js';
@@ -44,6 +44,9 @@ program
   .option('--epic <n>', 'Process a specific epic by issue number (skips the picker)', parseInt)
   .option('--epics <ids>', 'Process multiple epics in order (comma-separated issue numbers)')
   .option('--queue-branch-mode <mode>', 'Branch mode for --epics: stacked or independent')
+  .option('--parallel <n>', 'Run up to n dependency-ready epics concurrently (independent queues only)', Number)
+  .addOption(new Option('--queue-context <path>').hideHelp())
+  .addOption(new Option('--queue-result <path>').hideHelp())
   .option('--skip-epic', 'Skip epic discovery, use flat/milestone flow')
   .option('--verify-only <n>', 'Run only the verification pass on an existing epic', parseInt)
   .action(async (options) => {

@@ -20,6 +20,9 @@ export type StepConfig = {
 /** Per-step pipeline configuration. */
 export type PipelineConfig = Partial<Record<PipelineStepName, StepConfig>>;
 
+/** Test command scope used during per-issue pipeline runs. */
+export type TestScope = 'full' | 'changed';
+
 /** The Loop stages that support per-stage routing (model + endpoint). */
 export type RoutingStageName = 'plan' | 'build' | 'test_write' | 'test_exec' | 'review' | 'summary';
 
@@ -389,6 +392,10 @@ export type Config = {
   labelReady: string;
   maxTestRetries: number;
   testCommand: string;
+  /** Per-issue test scope. Changed scope requires changedTestCommand. */
+  testScope?: TestScope;
+  /** Test command template for changed scope; {files} receives shell-quoted paths. */
+  changedTestCommand?: string;
   devCommand: string;
   skipTests: boolean;
   skipReview: boolean;
@@ -473,6 +480,8 @@ const DEFAULTS: Config = {
   labelReady: 'ready',
   maxTestRetries: 3,
   testCommand: 'pnpm test',
+  testScope: 'full',
+  changedTestCommand: '',
   devCommand: 'pnpm dev',
   skipTests: false,
   skipReview: false,
@@ -543,6 +552,8 @@ const YAML_KEY_MAP: Record<string, keyof Config> = {
   label: 'labelReady',
   max_test_retries: 'maxTestRetries',
   test_command: 'testCommand',
+  test_scope: 'testScope',
+  changed_test_command: 'changedTestCommand',
   dev_command: 'devCommand',
   skip_tests: 'skipTests',
   skip_review: 'skipReview',
@@ -591,6 +602,8 @@ const ENV_KEY_MAP: Record<string, keyof Config> = {
   LABEL_READY: 'labelReady',
   MAX_TEST_RETRIES: 'maxTestRetries',
   TEST_COMMAND: 'testCommand',
+  TEST_SCOPE: 'testScope',
+  CHANGED_TEST_COMMAND: 'changedTestCommand',
   DEV_COMMAND: 'devCommand',
   SKIP_TESTS: 'skipTests',
   SKIP_REVIEW: 'skipReview',
@@ -1431,6 +1444,25 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     automationPolicy,
     daemon,
   };
+
+  if (merged.testScope !== 'full' && merged.testScope !== 'changed') {
+    console.warn(`[config] test_scope: invalid value "${String(merged.testScope)}" (expected full or changed); using full`);
+    merged.testScope = 'full';
+  }
+  // Quick mode ships through the session branch: the deferred pass merges one
+  // PR into it and learnings land in the session worktree — both need
+  // auto-merge. Coerce here (not in run) so every entry point is covered:
+  // `alpha-loop daemon` and queue workers never pass through runCommand.
+  if (merged.quick && !merged.autoMerge) {
+    console.warn('[config] quick: true requires auto_merge: true — disabling quick mode for this run');
+    merged.quick = false;
+  }
+  if (typeof merged.changedTestCommand !== 'string') {
+    console.warn(`[config] changed_test_command: expected a string (got ${String(merged.changedTestCommand)}); ignoring`);
+    merged.changedTestCommand = '';
+  } else {
+    merged.changedTestCommand = merged.changedTestCommand.trim();
+  }
 
   // Validate agent is a known value
   const VALID_AGENTS = ['claude', 'codex', 'opencode', 'lmstudio', 'ollama'] as const;

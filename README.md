@@ -347,6 +347,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run --epic <N>` | Process an epic — its sub-issues in checklist order, auto-verify on completion (see [docs/epics.md](docs/epics.md)) |
 | `alpha-loop run --epics <ids>` | Process an ordered comma-separated queue of epics, one session branch and PR per epic |
 | `alpha-loop run --epics <ids> --queue-branch-mode independent` | Run queued epics without stacking later session branches on earlier ones |
+| `alpha-loop run --epics <ids> --queue-branch-mode independent --parallel <n>` | Run up to `n` dependency-ready epics concurrently in topological waves |
 | `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
 | `alpha-loop daemon` | Run hosted daemon mode continuously for repo stewardship |
 | `alpha-loop daemon --mode feedback-only` | Poll feedback and resume eligible sessions without triage or new work selection |
@@ -421,6 +422,7 @@ Options:
   --epic <n>          Process a specific epic by issue number (skips the picker)
   --epics <ids>       Process multiple epics in order (comma-separated)
   --queue-branch-mode <mode>  Branch mode for --epics: stacked or independent
+  --parallel <n>      Run up to n dependency-ready epics concurrently (independent queues only)
   --skip-epic         Skip epic discovery, use flat/milestone flow
   --verify-only <n>   Run only the verification pass on an existing epic
 ```
@@ -458,6 +460,9 @@ agent: claude  # AI agent CLI: claude, codex, opencode, lmstudio, ollama
 label: ready
 base_branch: main
 test_command: pnpm test
+# Run related tests per issue, then test_command once at the end of the session:
+# test_scope: changed
+# changed_test_command: pnpm jest --findRelatedTests --passWithNoTests {files}
 dev_command: pnpm dev
 auto_merge: true
 
@@ -546,6 +551,8 @@ eval_dir: .alpha-loop/evals
 | `label` | `ready` | GitHub label that marks issues as ready for the loop |
 | `base_branch` | `master` | Branch to create PRs against |
 | `test_command` | `pnpm test` | Command to run tests |
+| `test_scope` | `full` | Per-issue test scope: `full` always runs `test_command`; with `auto_merge: true`, `changed` uses `changed_test_command` and adds one full-suite session gate |
+| `changed_test_command` | (none) | Changed-scope command template; `{files}` expands to shell-quoted, issue-relative changed paths |
 | `dev_command` | `pnpm dev` | Command to start the dev server for verification |
 | `max_turns` | (none) | Max conversation turns for the agent |
 | `poll_interval` | `60` | Seconds between issue polling |
@@ -654,6 +661,8 @@ All config options can be set via environment variables (uppercase, same names):
 | `MAX_SESSION_DURATION` | `max_session_duration` |
 | `BASE_BRANCH` | `base_branch` |
 | `TEST_COMMAND` | `test_command` |
+| `TEST_SCOPE` | `test_scope` |
+| `CHANGED_TEST_COMMAND` | `changed_test_command` |
 | `DEV_COMMAND` | `dev_command` |
 | `DRY_RUN` | `dry_run` |
 | `SKIP_TESTS` | `skip_tests` |
@@ -681,6 +690,14 @@ All config options can be set via environment variables (uppercase, same names):
 | `SKIP_POST_SESSION_SECURITY` | `post_session.security_scan` (inverted) |
 
 **Precedence:** CLI flags > environment variables > `.alpha-loop.yaml` > auto-detection > defaults
+
+### Tiered Testing
+
+`test_scope: full` is the default and preserves the existing behavior: every per-issue test and retest runs `test_command`. To reduce repeated full-suite work in multi-issue sessions, set `test_scope: changed`, keep `auto_merge: true`, and provide a `changed_test_command` containing `{files}`. Alpha Loop replaces `{files}` with the shell-quoted paths changed by that issue since its worktree branch forked, refreshing the list after test, review, and verification fixes.
+
+With effective changed scope, Alpha Loop runs `test_command` once on the aggregate session branch after issue processing and before epic verification, post-session review, and finalization. That full pass uses the existing agent fix-and-retry loop. Preflight continues to use the unmodified full `test_command`, so the pre-existing-failure baseline is unchanged.
+
+If `auto_merge` is disabled, `changed_test_command` is empty, the template lacks `{files}`, or no changed paths can be resolved for an invocation, Alpha Loop logs a warning and falls back to `test_command`. The aggregate full-suite gate requires the session branch created by auto-merge; configurations that cannot create that branch disable the extra gate because their per-issue runs are already full-suite runs.
 
 ### Switching Agents
 
@@ -846,7 +863,9 @@ To run several epics unattended while keeping review scope separate, pass an exp
 alpha-loop run --epics 205,166,214
 ```
 
-The queue is validated before any work starts. Each listed issue must exist, be labeled `epic`, not be duplicated, and be open unless it is already closed as completed. Alpha Loop processes the epics in the given order, creates/finalizes one session branch and PR per epic, and stops on the first epic failure, verification gap, checklist consistency error, or transient agent/rate-limit stop. By default, queue sessions use `stacked` ancestry: later epic session branches start from the previous successful session branch while their PRs still target the configured base branch. Use `--queue-branch-mode independent` for unrelated epics that should all branch from the base branch. Non-dry-run queue attempts write `.alpha-loop/sessions/queue-<timestamp>/queue.json`; `alpha-loop history` lists those manifests and `alpha-loop history queue-<timestamp>` prints stopped/pending epics, session PRs, and rebase notes. `--dry-run` prints the validated queue without mutating GitHub or git state.
+The queue is validated before any work starts. Each listed issue must exist, be labeled `epic`, not be duplicated, and be open unless it is already closed as completed. Alpha Loop processes sequential queues in the given order, creates/finalizes one session branch and PR per epic, and stops on the first failure. By default, queues use `stacked` ancestry. For independent work, add `--queue-branch-mode independent --parallel 2`: Alpha Loop derives topological waves from queued `Depends on #N` references, runs up to two ready epics as child processes, and waits for each wave before starting dependents. A failed epic does not cancel siblings already running; unrelated later epics continue, failed dependents are recorded as skipped, and the queue exits nonzero.
+
+Parallel worker output is stored in `.alpha-loop/sessions/queue-<timestamp>/epic-<N>.log`. The atomic `queue.json` manifest records the concurrency limit, waves, dependencies, per-epic status and log path, and dependency-failure skips. Use `alpha-loop history queue-<timestamp>` to inspect progress. `--parallel` requires independent mode; stacked branches are inherently sequential. `--dry-run` prints the validated wave schedule without mutating GitHub or git state.
 
 Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
 
@@ -903,7 +922,7 @@ What needs to be done.
 | `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
 | `.alpha-loop/sessions/<session>/session.json` | No (gitignored) | Durable resumable session state with issue, branch, worktree, PR, stage, status, prompts, transcripts, and logs |
 | `.alpha-loop/sessions/<session>/session.lock` | No (gitignored) | Held by the live run or resume that owns the session; a second run of the same epic/milestone fails fast, and locks from dead processes are reclaimed automatically |
-| `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, session PRs, merge order, and stop reason |
+| `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, dependency waves, concurrency, session PRs, logs, and failures |
 | `.alpha-loop/feedback/` | No (gitignored) | Local idempotency records for external feedback adapter events |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |

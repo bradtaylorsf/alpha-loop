@@ -1,4 +1,4 @@
-import { processIssue, processBatch, finalizeQuickRun, buildPRBody } from '../../src/lib/pipeline';
+import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, buildPRBody } from '../../src/lib/pipeline';
 import type { SessionContext } from '../../src/lib/session';
 
 // Mock all dependencies
@@ -42,6 +42,7 @@ jest.mock('../../src/lib/github', () => ({
 }));
 
 jest.mock('../../src/lib/testing', () => ({
+  ...jest.requireActual('../../src/lib/testing'),
   runTests: jest.fn(),
 }));
 
@@ -55,10 +56,13 @@ jest.mock('../../src/lib/learning', () => ({
 }));
 
 jest.mock('../../src/lib/session', () => ({
+  ensureSessionWorktree: jest.fn((session: { worktreePath?: string }) => Promise.resolve(session.worktreePath ?? null)),
   saveResult: jest.fn(),
   getPreviousResult: jest.fn(),
   loadSessionManifest: jest.fn(),
   writeCrashMarker: jest.fn(),
+  enqueueSessionBackgroundTask: jest.fn(),
+  recordSessionBackgroundTaskError: jest.fn(),
   recordSessionCleanup: jest.fn(),
   recordSessionError: jest.fn(),
   recordSessionIssue: jest.fn(),
@@ -81,6 +85,8 @@ jest.mock('../../src/lib/traces', () => ({
   writeConfigSnapshot: jest.fn(),
   writeScores: jest.fn(),
   writeCosts: jest.fn(),
+  persistStepCosts: jest.fn(),
+  persistIssueScores: jest.fn(),
   computeScores: jest.fn().mockReturnValue({}),
   computeCosts: jest.fn().mockReturnValue({}),
   runDir: jest.fn().mockReturnValue('/tmp/traces/run'),
@@ -141,6 +147,8 @@ import {
   getPreviousResult,
   loadSessionManifest,
   writeCrashMarker,
+  enqueueSessionBackgroundTask,
+  recordSessionBackgroundTaskError,
   recordSessionCleanup,
   recordSessionIssue,
   recordSessionPolicyDecision,
@@ -151,7 +159,8 @@ import {
   transitionHumanFeedbackSessionStatus,
 } from '../../src/lib/session';
 import { buildIssuePlanPrompt, buildImplementPrompt, buildReviewPrompt, buildBatchPlanPrompt, buildBatchImplementPrompt, buildBatchReviewPrompt } from '../../src/lib/prompts';
-import { writeTraceToSubdir } from '../../src/lib/traces';
+import { computeCosts, persistStepCosts, writeCosts, writeTraceToSubdir } from '../../src/lib/traces';
+import { buildStageTelemetry, writeStageTelemetry } from '../../src/lib/telemetry';
 import { emitLifecycleEvent } from '../../src/lib/events';
 import type { Config } from '../../src/lib/config';
 
@@ -172,6 +181,8 @@ const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGetPreviousResult = getPreviousResult as jest.MockedFunction<typeof getPreviousResult>;
 const mockLoadSessionManifest = loadSessionManifest as jest.MockedFunction<typeof loadSessionManifest>;
 const mockWriteCrashMarker = writeCrashMarker as jest.MockedFunction<typeof writeCrashMarker>;
+const mockEnqueueSessionBackgroundTask = enqueueSessionBackgroundTask as jest.MockedFunction<typeof enqueueSessionBackgroundTask>;
+const mockRecordSessionBackgroundTaskError = recordSessionBackgroundTaskError as jest.MockedFunction<typeof recordSessionBackgroundTaskError>;
 const mockRecordSessionCleanup = recordSessionCleanup as jest.MockedFunction<typeof recordSessionCleanup>;
 const mockRecordSessionIssue = recordSessionIssue as jest.MockedFunction<typeof recordSessionIssue>;
 const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
@@ -187,6 +198,11 @@ const mockBuildBatchPlanPrompt = buildBatchPlanPrompt as jest.MockedFunction<typ
 const mockBuildBatchImplementPrompt = buildBatchImplementPrompt as jest.MockedFunction<typeof buildBatchImplementPrompt>;
 const mockBuildBatchReviewPrompt = buildBatchReviewPrompt as jest.MockedFunction<typeof buildBatchReviewPrompt>;
 const mockWriteTraceToSubdir = writeTraceToSubdir as jest.MockedFunction<typeof writeTraceToSubdir>;
+const mockComputeCosts = computeCosts as jest.MockedFunction<typeof computeCosts>;
+const mockWriteCosts = writeCosts as jest.MockedFunction<typeof writeCosts>;
+const mockPersistStepCosts = persistStepCosts as jest.MockedFunction<typeof persistStepCosts>;
+const mockBuildStageTelemetry = buildStageTelemetry as jest.MockedFunction<typeof buildStageTelemetry>;
+const mockWriteStageTelemetry = writeStageTelemetry as jest.MockedFunction<typeof writeStageTelemetry>;
 const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 
 const epicContext = {
@@ -214,6 +230,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     labelReady: 'ready',
     maxTestRetries: 3,
     testCommand: 'pnpm test',
+    testScope: 'full',
+    changedTestCommand: '',
     devCommand: 'pnpm dev',
     skipTests: false,
     skipReview: false,
@@ -265,7 +283,9 @@ function makeSession(): SessionContext {
     branch: 'session/20260330-143000',
     resultsDir: '/tmp/sessions/session/20260330-143000',
     logsDir: '/tmp/sessions/session/20260330-143000/logs',
+    worktreePath: '/tmp/session-worktree',
     results: [],
+    pendingBackgroundTasks: [],
   };
 }
 
@@ -291,6 +311,15 @@ beforeEach(() => {
   mockGetLearningContext.mockReturnValue('');
   mockGetPreviousResult.mockReturnValue(null);
   mockLoadSessionManifest.mockReturnValue(null);
+  mockEnqueueSessionBackgroundTask.mockImplementation((session, task) => {
+    const promise = Promise.resolve().then(task.run);
+    void promise.catch(() => undefined);
+    (session.pendingBackgroundTasks ??= []).push({
+      issueNum: task.issueNum,
+      stage: task.stage,
+      promise,
+    });
+  });
 });
 
 describe('processIssue', () => {
@@ -316,6 +345,41 @@ describe('processIssue', () => {
     expect(mockCleanupWorktree).toHaveBeenCalled();
   });
 
+  test('refreshes issue-scoped changed files for test retries', async () => {
+    let changedDiffCalls = 0;
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('git merge-base HEAD')) {
+        return { stdout: 'issue-base-sha', stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes("git diff --name-only 'issue-base-sha'...HEAD")) {
+        changedDiffCalls++;
+        return {
+          stdout: changedDiffCalls === 1 ? 'src/first.ts' : 'src/first.ts\ntests/first.test.ts',
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockRunTests
+      .mockReturnValueOnce({ passed: false, output: 'failed' })
+      .mockReturnValueOnce({ passed: true, output: 'passed' });
+
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig({
+      autoMerge: true,
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+      skipReview: true,
+    }), makeSession());
+
+    expect(mockRunTests).toHaveBeenNthCalledWith(1, '/tmp/worktree', expect.any(Object), expect.any(String), {
+      changedFiles: ['src/first.ts'],
+    });
+    expect(mockRunTests).toHaveBeenNthCalledWith(2, '/tmp/worktree', expect.any(Object), expect.any(String), {
+      changedFiles: ['src/first.ts', 'tests/first.test.ts'],
+    });
+  });
+
   test('sets auto-commit metadata when the agent leaves uncommitted work', async () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd === 'git status --porcelain') {
@@ -331,7 +395,7 @@ describe('processIssue', () => {
     expect(mockLog.warn).toHaveBeenCalledWith(
       'Agent did not commit; auto-committing 2 files: src/lib/pipeline.ts, tests/lib/pipeline.test.ts',
     );
-    expect(mockExec).toHaveBeenCalledWith("git add -A -- ':(exclude)alpha-loop-pause-request.json' .", { cwd: '/tmp/worktree' });
+    expect(mockExec).toHaveBeenCalledWith("git add -A -- ':(exclude)alpha-loop-pause-request.json' ':(exclude,glob)**/alpha-loop-pause-request.json' .", { cwd: '/tmp/worktree' });
     expect(mockExec).toHaveBeenCalledWith(
       "git commit -m 'feat: implement issue #42 - Test issue'",
       { cwd: '/tmp/worktree' },
@@ -752,39 +816,152 @@ describe('processIssue', () => {
     );
   });
 
-  test('extracts and commits the learning artifact in the worktree before creating the PR', async () => {
-    const learningPath = '/tmp/worktree/.alpha-loop/learnings/issue-42-20260101-000000.md';
-    mockExtractLearnings.mockResolvedValueOnce(learningPath);
+  test('defers learning and assumptions work after PR creation and preserves settlement side effects', async () => {
+    let resolveLearning!: (value: string | null) => void;
+    const learningPending = new Promise<string | null>((resolve) => { resolveLearning = resolve; });
+    let resolveAssumptions!: (value: { exitCode: number; output: string; duration: number }) => void;
+    const assumptionsPending = new Promise<{ exitCode: number; output: string; duration: number }>((resolve) => {
+      resolveAssumptions = resolve;
+    });
+    const session = makeSession();
+    const sessionWorktreePath = '/tmp/session-worktree';
+
+    const learningAgentResult = {
+      exitCode: 0,
+      output: 'Learning output',
+      duration: 625,
+    };
+    mockExtractLearnings.mockImplementationOnce(async (options) => {
+      const learningFile = await learningPending;
+      options.onAgentResult?.(learningAgentResult);
+      return learningFile;
+    });
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'assumptions prompt') return assumptionsPending;
+      return { exitCode: 0, output: 'Agent output', duration: 5000 };
+    });
     mockExec.mockImplementation((cmd: string) => {
       if (cmd === 'git diff "origin/master...HEAD"') {
         return { stdout: 'diff --git a/src/foo.ts b/src/foo.ts', stderr: '', exitCode: 0 };
       }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({ autoMerge: true }), session);
+
+    expect(result.status).toBe('success');
+    expect(session.pendingBackgroundTasks).toHaveLength(2);
+    expect(session.pendingBackgroundTasks?.map((task) => task.stage)).toEqual(['learn', 'assumptions']);
+    expect(mockCreatePR).toHaveBeenCalled();
+
+    expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({
+      outputRoot: sessionWorktreePath,
+      agentCwd: sessionWorktreePath,
+      sessionLogsDir: '/tmp/sessions/session/20260330-143000/logs',
+      sessionName: 'session/20260330-143000',
+      onAgentResult: expect.any(Function),
+    }));
+    expect(mockCreatePR.mock.invocationCallOrder[0]).toBeLessThan(
+      mockExtractLearnings.mock.invocationCallOrder[0],
+    );
+    expect(mockExec).not.toHaveBeenCalledWith(
+      expect.stringContaining('chore: add learning artifact for issue #42'),
+      expect.anything(),
+    );
+    expect(commentIssue).not.toHaveBeenCalledWith(
+      'owner/repo',
+      42,
+      expect.stringContaining('## AI Implementation Notes'),
+    );
+
+    resolveLearning(`${sessionWorktreePath}/.alpha-loop/learnings/issue-42-20260101-000000.md`);
+    resolveAssumptions({
+      exitCode: 0,
+      output: 'Assumed the existing API contract remains stable.',
+      duration: 750,
+    });
+    await Promise.allSettled(session.pendingBackgroundTasks?.map((task) => task.promise) ?? []);
+
+    expect(mockSpawnAgent).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: 'assumptions prompt',
+      cwd: sessionWorktreePath,
+    }));
+    expect(commentIssue).toHaveBeenCalledWith(
+      'owner/repo',
+      42,
+      expect.stringContaining('Assumed the existing API contract remains stable.'),
+    );
+    expect(mockPersistStepCosts).toHaveBeenLastCalledWith('session/20260330-143000', 'issue-42', expect.arrayContaining([
+      expect.objectContaining({ step: 'learn', issueNum: 42 }),
+      expect.objectContaining({ step: 'assumptions', issueNum: 42 }),
+    ]));
+    expect(mockBuildStageTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({ output: 'Learning output' }),
+      'learn',
+      expect.any(Object),
+      expect.objectContaining({ issueNum: 42 }),
+    );
+    expect(mockBuildStageTelemetry).toHaveBeenCalledWith(
+      expect.objectContaining({ output: 'Assumed the existing API contract remains stable.' }),
+      'assumptions',
+      expect.any(Object),
+      expect.objectContaining({ issueNum: 42 }),
+    );
+    expect(mockWriteStageTelemetry).toHaveBeenCalled();
+    expect(mockRecordSessionBackgroundTaskError).not.toHaveBeenCalled();
+  });
+
+  test('keeps background failures non-fatal and available for session-end recording', async () => {
+    const session = makeSession();
+    mockExtractLearnings.mockRejectedValueOnce(new Error('learning agent failed'));
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'assumptions prompt') throw new Error('assumptions agent failed');
+      return { exitCode: 0, output: 'Agent output', duration: 5000 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({ autoMerge: true }), session);
+    const settled = await Promise.allSettled(session.pendingBackgroundTasks?.map((task) => task.promise) ?? []);
+
+    expect(result.status).toBe('success');
+    expect(settled.map((entry) => entry.status)).toEqual(['rejected', 'rejected']);
+    expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      status: 'success',
+    }));
+  });
+
+  test.each([
+    { scenario: 'auto-merge is disabled', autoMerge: false, sessionWorktreeAvailable: true },
+    { scenario: 'the session checkout is unavailable', autoMerge: true, sessionWorktreeAvailable: false },
+  ])('keeps synchronous issue-PR learning commits when $scenario', async ({ autoMerge, sessionWorktreeAvailable }) => {
+    const learningPath = '/tmp/worktree/.alpha-loop/learnings/issue-42-20260101-000000.md';
+    mockExtractLearnings.mockResolvedValueOnce(learningPath);
+    mockExec.mockImplementation((cmd: string) => {
       if (cmd.startsWith('git diff --cached --name-only --')) {
         return { stdout: '.alpha-loop/learnings/issue-42-20260101-000000.md', stderr: '', exitCode: 0 };
       }
       return { stdout: '', stderr: '', exitCode: 0 };
     });
 
-    await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+    const session = makeSession();
+    if (!sessionWorktreeAvailable) delete session.worktreePath;
+    await processIssue(42, 'Test issue', 'Issue body', makeConfig({ autoMerge }), session);
 
     expect(mockExtractLearnings).toHaveBeenCalledWith(expect.objectContaining({
       outputRoot: '/tmp/worktree',
       agentCwd: '/tmp/worktree',
-      sessionLogsDir: '/tmp/sessions/session/20260330-143000/logs',
-      sessionName: 'session/20260330-143000',
     }));
-
-    const commitCallIndex = mockExec.mock.calls.findIndex(([cmd]) =>
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining("git commit -m 'chore: add learning artifact for issue #42'"),
+      { cwd: '/tmp/worktree' },
+    );
+    const learningCommitOrder = mockExec.mock.calls.findIndex(([cmd]) =>
       String(cmd).startsWith("git commit -m 'chore: add learning artifact for issue #42'"),
     );
-    expect(commitCallIndex).toBeGreaterThanOrEqual(0);
-    expect(mockExec.mock.calls[commitCallIndex][0]).toContain('.alpha-loop/learnings/issue-42-20260101-000000.md');
-    expect(mockExtractLearnings.mock.invocationCallOrder[0]).toBeLessThan(
-      mockExec.mock.invocationCallOrder[commitCallIndex],
-    );
-    expect(mockExec.mock.invocationCallOrder[commitCallIndex]).toBeLessThan(
+    expect(learningCommitOrder).toBeGreaterThanOrEqual(0);
+    expect(mockExec.mock.invocationCallOrder[learningCommitOrder]).toBeLessThan(
       mockCreatePR.mock.invocationCallOrder[0],
     );
+    expect(session.pendingBackgroundTasks?.map((task) => task.stage)).toEqual(['assumptions']);
   });
 
   test('uses per-step pipeline agents for plan, implementation, and review', async () => {
@@ -1311,7 +1488,6 @@ describe('processIssue', () => {
     mockRunTests.mockReturnValue({ passed: false, output: 'Tests failed' });
 
     await processIssue(42, 'Test issue', 'Body', makeConfig({ autoMerge: true }), makeSession());
-
     // PR should still be created
     expect(mockCreatePR).toHaveBeenCalled();
     // But mergePR should NOT be called
@@ -1327,6 +1503,20 @@ describe('processIssue', () => {
     expect(mockCleanupWorktree).toHaveBeenCalledWith(
       expect.objectContaining({ preserveIfCommits: true }),
     );
+  });
+
+  test('refreshes the session branch only inside its worktree after auto-merge', async () => {
+    await processIssue(42, 'Test issue', 'Body', makeConfig({ autoMerge: true, skipQa: true }), makeSession());
+
+    expect(mockMergePR).toHaveBeenCalled();
+    expect(mockExec).toHaveBeenCalledWith('git fetch origin', { cwd: process.cwd() });
+    expect(mockExec).toHaveBeenCalledWith(
+      "git pull origin 'session/20260330-143000' --no-edit --autostash",
+      { cwd: '/tmp/session-worktree' },
+    );
+    expect(mockExec.mock.calls.some(([cmd, options]) => (
+      String(cmd).startsWith('git checkout') && options?.cwd === process.cwd()
+    ))).toBe(false);
   });
 
   test('preserves worktree when tests fail and auto-merge is enabled', async () => {
@@ -1798,6 +1988,12 @@ describe('finalizeQuickRun', () => {
     expect(result.prUrl).toBe('https://github.com/owner/repo/pull/1');
 
     expect(mockRunTests).toHaveBeenCalledTimes(1);
+    expect(mockRunTests).toHaveBeenCalledWith(
+      '/tmp/quick-worktree',
+      expect.any(Object),
+      expect.any(String),
+      { forceFull: true },
+    );
     expect(mockSpawnAgent).not.toHaveBeenCalled();
     expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
       base: 'session/20260330-143000',
@@ -1890,6 +2086,34 @@ describe('finalizeQuickRun', () => {
   });
 });
 
+describe('runFullSuiteGate', () => {
+  const issues = [{ number: 42, title: 'First issue' }];
+
+  test('forces the full suite and reuses the fix loop', async () => {
+    mockRunTests
+      .mockReturnValueOnce({ passed: false, output: 'full suite failed' })
+      .mockReturnValueOnce({ passed: true, output: 'full suite passed' });
+
+    const result = await runFullSuiteGate({
+      issues,
+      config: makeConfig({
+        testScope: 'changed',
+        changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+      }),
+      session: makeSession(),
+      worktreePath: '/tmp/session-worktree',
+    });
+
+    expect(result.testsPassing).toBe(true);
+    expect(mockRunTests).toHaveBeenCalledTimes(2);
+    for (const call of mockRunTests.mock.calls) {
+      expect(call[3]).toEqual({ forceFull: true });
+    }
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+    expect(mockSpawnAgent.mock.calls[0][0].prompt).toContain('full suite failed');
+  });
+});
+
 describe('auto-commit before pause (sandboxed agents that cannot commit)', () => {
   test('commits implementation work before honoring a pause request', async () => {
     const { existsSync, readFileSync } = require('node:fs');
@@ -1921,7 +2145,7 @@ describe('auto-commit before pause (sandboxed agents that cannot commit)', () =>
     // pause-request artifact itself is excluded from the commit.
     expect(result.status).toBe('waiting');
     expect(mockExec).toHaveBeenCalledWith(
-      "git add -A -- ':(exclude)alpha-loop-pause-request.json' .",
+      "git add -A -- ':(exclude)alpha-loop-pause-request.json' ':(exclude,glob)**/alpha-loop-pause-request.json' .",
       { cwd: '/tmp/worktree' },
     );
     expect(mockExec).toHaveBeenCalledWith(
@@ -1945,6 +2169,115 @@ describe('auto-commit before pause (sandboxed agents that cannot commit)', () =>
     expect(mockExec).not.toHaveBeenCalledWith(
       expect.stringContaining('git commit -m \'feat: implement issue #42'),
       expect.anything(),
+    );
+  });
+});
+
+describe('quick mode GitHub side effects (deferred honestly)', () => {
+  const quickWorktree = { path: '/tmp/quick-worktree', branch: 'agent/issue-100' };
+
+  test('never claims tests passed or moves the issue to in-review before the finalize pass', async () => {
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession(), {
+      quickWorktree,
+    });
+
+    expect(result.status).toBe('success');
+    expect(mockRunTests).not.toHaveBeenCalled();
+
+    // Step 10 posts only the honest deferred note — no "Tests: PASSING",
+    // no in-review label, no In Review project status.
+    expect(commentIssue).toHaveBeenCalledWith(
+      'owner/repo', 42, expect.stringContaining('deferred to the end-of-run pass'),
+    );
+    expect(commentIssue).not.toHaveBeenCalledWith(
+      'owner/repo', 42, expect.stringContaining('**Tests**: PASSING'),
+    );
+    expect(labelIssue).not.toHaveBeenCalledWith('owner/repo', 42, 'in-review', expect.anything());
+    expect(updateProjectStatus).not.toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'In Review');
+  });
+
+  test('finalizeQuickRun moves issues to in-review only after a real merge', async () => {
+    const issues = [{ number: 42, title: 'First issue' }];
+    await finalizeQuickRun({
+      issues,
+      config: makeConfig({ autoMerge: true }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+    });
+
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'in-review', 'in-progress');
+    expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'In Review');
+    expect(commentIssue).toHaveBeenCalledWith(
+      'owner/repo', 42, expect.stringContaining('**Tests**: PASSING'),
+    );
+  });
+
+  test('finalizeQuickRun labels issues failed when the deferred tests never pass', async () => {
+    mockRunTests.mockReturnValue({ passed: false, output: 'still failing' });
+    const issues = [{ number: 42, title: 'First issue' }];
+    await finalizeQuickRun({
+      issues,
+      config: makeConfig({ autoMerge: true }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+    });
+
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'failed', 'in-progress');
+    expect(labelIssue).not.toHaveBeenCalledWith('owner/repo', 42, 'in-review', expect.anything());
+    expect(commentIssue).toHaveBeenCalledWith(
+      'owner/repo', 42, expect.stringContaining('did not ship this issue'),
+    );
+  });
+});
+
+describe('transient-failure worktree disposition', () => {
+  test('a rate-limited implement agent requeues without a wip commit so the worktree is discarded', async () => {
+    mockSpawnAgent
+      .mockResolvedValueOnce({ exitCode: 0, output: 'plan ok', duration: 100 })
+      .mockResolvedValueOnce({ exitCode: 1, output: 'You have hit your usage limit', duration: 100 });
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: ' M src/foo.ts\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('failure');
+    expect(result.failureReason).toBe('transient');
+    // No wip commit: the retry starts fresh, and preserveIfCommits must not
+    // pin the worktree (pre-#378 behavior, deliberately restored).
+    expect(mockExec).not.toHaveBeenCalledWith(
+      expect.stringContaining('wip: partial implementation'),
+      expect.anything(),
+    );
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      issueNum: 42,
+      preserveIfCommits: true,
+    }));
+  });
+
+  test('a permanently failed implement agent still gets a wip commit for recovery', async () => {
+    mockSpawnAgent
+      .mockResolvedValueOnce({ exitCode: 0, output: 'plan ok', duration: 100 })
+      .mockResolvedValueOnce({ exitCode: 1, output: 'segfault, no retry hints here', duration: 100 });
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: ' M src/foo.ts\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('failure');
+    expect(result.failureReason).toBe('permanent');
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('wip: partial implementation of #42'),
+      { cwd: '/tmp/worktree' },
     );
   });
 });

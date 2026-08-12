@@ -1,10 +1,11 @@
 /**
  * Run Command — the main loop: poll issues, process them, finalize session.
  */
-import { join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { spawn } from 'node:child_process';
 import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
-import { exec } from '../lib/shell.js';
+import { exec, shellQuote } from '../lib/shell.js';
 import { loadConfig, assertSafeShellArg, resolveStepConfig, type Config } from '../lib/config.js';
 import {
   pollIssues, listMilestones, listEpics, getEpicSubIssues, getIssueWithComments,
@@ -13,10 +14,13 @@ import {
 } from '../lib/github.js';
 import { buildEpicSummary, parseSubIssues } from '../lib/epics.js';
 import { verifyEpic } from '../lib/verify-epic.js';
-import { processIssue, processBatch, finalizeQuickRun } from '../lib/pipeline.js';
+import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate } from '../lib/pipeline.js';
+import { isChangedTestScopeEnabled } from '../lib/testing.js';
 import {
   createSession,
+  ensureSessionWorktree,
   finalizeSession,
+  recordSessionBackgroundTaskError,
   recordSessionIssue,
   recordSessionPolicyDecision,
   saveResult,
@@ -46,11 +50,12 @@ import { spawnAgent } from '../lib/agent.js';
 import { buildSessionReviewPrompt, type EpicPromptContext } from '../lib/prompts.js';
 import { writeTraceToSubdir } from '../lib/traces.js';
 import { validateGeneratedMarkdownForCommit } from '../lib/scan-validation.js';
-import { readFileSync, existsSync, renameSync, unlinkSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, existsSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, parseDependencies, type ValidationReport } from '../lib/validation.js';
 import { hasLabel } from '../lib/labels.js';
 import { emitLifecycleEvent } from '../lib/events.js';
 import {
+  buildEpicQueueWaves,
   createEpicQueueManifest,
   createEpicQueueValidationFailureManifest,
   parseEpicQueue,
@@ -99,6 +104,12 @@ export type RunOptions = {
   epics?: string;
   /** Branch ancestry mode for multi-epic queues. */
   queueBranchMode?: BranchAncestryMode;
+  /** Maximum concurrent workers for an independent epic queue. */
+  parallel?: number;
+  /** Internal: serialized queue context supplied by a queue coordinator. */
+  queueContext?: string;
+  /** Internal: child epic result artifact consumed by a queue coordinator. */
+  queueResult?: string;
   /** Skip the epic picker entirely, use flat/milestone flow. */
   skipEpic?: boolean;
   /** Run only the verification pass on an existing epic. */
@@ -127,6 +138,7 @@ export type EpicExecutionFailureCode =
   | 'epic-verification-failed'
   | 'epic-incomplete'
   | 'epic-run-error'
+  | 'session-test-failed'
   | 'quick-finalize-failed';
 
 export type EpicExecutionFailure = {
@@ -187,6 +199,8 @@ type CommandExitErrorCode =
   | 'incompatible-epic-queue-options'
   | 'invalid-epic-queue'
   | 'invalid-queue-branch-mode'
+  | 'invalid-parallel'
+  | 'invalid-queue-worker-context'
   | 'epic-queue-validation-failed'
   | 'epic-queue-stopped'
   | 'session-interrupt-cleanup-failed'
@@ -255,6 +269,42 @@ function sessionStatusFromResults(session: SessionContext, failures: EpicExecuti
 
 function hasWaitingResults(session: SessionContext): boolean {
   return session.results.some((result) => result.status === 'waiting' && !isRecoveredRunResult(result));
+}
+
+function backgroundErrorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
+export async function drainSessionBackgroundTasks(session: SessionContext): Promise<void> {
+  const pending = session.pendingBackgroundTasks ?? [];
+  const snapshot = [...pending];
+  if (snapshot.length === 0) return;
+
+  log.step(`Waiting for ${snapshot.length} background task(s) to finish`);
+  const settled = await Promise.allSettled(snapshot.map((task) => task.promise));
+
+  settled.forEach((result, index) => {
+    if (result.status !== 'rejected') return;
+    const task = snapshot[index];
+    const message = backgroundErrorMessage(result.reason);
+    log.warn(`Background ${task.stage} task failed for issue #${task.issueNum}: ${message}`);
+    try {
+      recordSessionBackgroundTaskError(session, {
+        issueNum: task.issueNum,
+        stage: task.stage,
+        message,
+      });
+    } catch (err) {
+      log.warn(
+        `Could not record background ${task.stage} failure for issue #${task.issueNum}: ` +
+        backgroundErrorMessage(err),
+      );
+    }
+  });
+
+  const completed = new Set(snapshot);
+  session.pendingBackgroundTasks = (session.pendingBackgroundTasks ?? [])
+    .filter((task) => !completed.has(task));
 }
 
 async function pauseIssueForAutomationPolicy(args: {
@@ -886,14 +936,95 @@ async function runIssueSession(
     throw err;
   }
 
+  let completed = false;
   try {
-    return await executeSessionRun(config, options, target, session, {
+    if (config.autoMerge) {
+      await ensureSessionWorktree(session, config);
+    }
+    const result = await executeSessionRun(config, options, target, session, {
       activeEpic,
       activeEpicIssue,
       activeMilestone,
     });
+    completed = true;
+    return result;
   } finally {
+    try {
+      await cleanupSessionWorktree(session, config, !completed);
+    } catch (err) {
+      log.warn(`Session worktree cleanup failed: ${err instanceof Error ? err.message : err}`);
+    }
     releaseSessionLock(session.lock);
+  }
+}
+
+async function cleanupSessionWorktree(
+  session: SessionContext,
+  config: Config,
+  preserveIfCommits: boolean,
+): Promise<void> {
+  if (!session.worktreePath) return;
+  const cleanupResult = await cleanupWorktree({
+    issueNum: session.currentIssueNum ?? session.epic ?? 0,
+    projectDir: process.cwd(),
+    autoCleanup: config.autoCleanup,
+    preserveIfCommits,
+    worktreePath: session.worktreePath,
+  });
+  recordSessionCleanup(session, {
+    status: cleanupResult.status,
+    worktreePath: cleanupResult.path,
+    reason: cleanupResult.reason,
+    at: new Date().toISOString(),
+  });
+}
+
+function syncProjectAgentAssets(config: Config): void {
+  if (config.dryRun) {
+    log.dry('Would sync agent assets before run');
+    return;
+  }
+
+  const syncResult = syncAgentAssets(resolveHarnesses(config.harnesses, config.agent));
+  if (syncResult.synced) {
+    log.success('Agent assets synced before run');
+  }
+}
+
+async function refreshProjectContextAndCommit(config: Config): Promise<void> {
+  if (contextNeedsRefresh()) {
+    if (config.dryRun) {
+      log.dry('Would refresh project context and instructions');
+    } else {
+      log.info('Project context is stale or missing. Generating...');
+      const { scanCommand } = await import('./scan.js');
+      scanCommand();
+    }
+  } else {
+    log.info('Project context is fresh');
+  }
+
+  if (config.dryRun) return;
+
+  const statusResult = exec('git status --porcelain .alpha-loop/ AGENTS.md CLAUDE.md');
+  if (!statusResult.stdout.trim()) return;
+
+  const validation = validateGeneratedMarkdownForCommit(process.cwd(), statusResult.stdout);
+  if (!validation.valid) {
+    log.warn('Skipping generated context/instructions auto-commit because validation failed:');
+    for (const error of validation.errors) {
+      log.warn(`  ${error}`);
+    }
+    return;
+  }
+
+  log.info('New files generated — committing so worktrees include them...');
+  exec('git add .alpha-loop/ AGENTS.md CLAUDE.md 2>/dev/null || true');
+  const diffCheck = exec('git diff --cached --quiet');
+  if (diffCheck.exitCode !== 0) {
+    exec('git commit -m "chore: add project vision and context for alpha-loop"');
+    exec(`git push origin "${config.baseBranch}"`);
+    log.success('Vision and context committed to ' + config.baseBranch);
   }
 }
 
@@ -1007,10 +1138,17 @@ async function executeSessionRun(
     // Finalize session
     let finalizationError: unknown;
     try {
+      await drainSessionBackgroundTasks(session);
       await finalizeSession(session, config);
     } catch (err) {
       finalizationError = err;
       log.error(`Session finalization failed: ${err instanceof Error ? err.message : err}`);
+    }
+    try {
+      await cleanupSessionWorktree(session, config, Boolean(finalizationError));
+    } catch (err) {
+      finalizationError ??= err;
+      log.error(`Session worktree cleanup failed: ${err instanceof Error ? err.message : err}`);
     }
 
     const issueCount = session.results.length;
@@ -1044,15 +1182,12 @@ async function executeSessionRun(
   process.on('SIGINT', handleSigint);
   process.on('SIGTERM', handleSigterm);
 
-  // Sync agent assets to all configured harnesses before starting the loop.
-  // Dry-run must remain read-only, so report what would happen instead.
-  if (config.dryRun) {
-    log.dry('Would sync agent assets before run');
-  } else {
-    const syncResult = syncAgentAssets(resolveHarnesses(config.harnesses, config.agent));
-    if (syncResult.synced) {
-      log.success('Agent assets synced before run');
-    }
+  // Parallel queue workers share a coordinator checkout. The coordinator performs
+  // generated-file preparation once before spawning them so workers only mutate
+  // their session worktrees.
+  const isParallelQueueWorker = options.queueContext !== undefined;
+  if (!isParallelQueueWorker) {
+    syncProjectAgentAssets(config);
   }
 
   // Pre-flight test validation
@@ -1124,40 +1259,9 @@ async function executeSessionRun(
     }
   }
 
-  // Generate or refresh project context if needed
-  if (contextNeedsRefresh()) {
-    if (config.dryRun) {
-      log.dry('Would refresh project context and instructions');
-    } else {
-      log.info('Project context is stale or missing. Generating...');
-      const { scanCommand } = await import('./scan.js');
-      scanCommand();
-    }
-  } else {
-    log.info('Project context is fresh');
-  }
-
-  // If vision or context were created/updated, commit them so worktrees get them
-  if (!config.dryRun) {
-    const statusResult = exec('git status --porcelain .alpha-loop/ AGENTS.md CLAUDE.md');
-    if (statusResult.stdout.trim()) {
-      const validation = validateGeneratedMarkdownForCommit(process.cwd(), statusResult.stdout);
-      if (!validation.valid) {
-        log.warn('Skipping generated context/instructions auto-commit because validation failed:');
-        for (const error of validation.errors) {
-          log.warn(`  ${error}`);
-        }
-      } else {
-        log.info('New files generated — committing so worktrees include them...');
-        exec('git add .alpha-loop/ AGENTS.md CLAUDE.md 2>/dev/null || true');
-        const diffCheck = exec('git diff --cached --quiet');
-        if (diffCheck.exitCode !== 0) {
-          exec('git commit -m "chore: add project vision and context for alpha-loop"');
-          exec(`git push origin "${config.baseBranch}"`);
-          log.success('Vision and context committed to ' + config.baseBranch);
-        }
-      }
-    }
+  // If vision or context were created/updated, commit them so worktrees get them.
+  if (!isParallelQueueWorker) {
+    await refreshProjectContextAndCommit(config);
   }
 
   // --- Fetch issue queue ---
@@ -1219,6 +1323,10 @@ async function executeSessionRun(
   let epicAbort = false;
   // Quick mode: outputs from the deferred passes, fed into the epic-level learning extraction.
   let quickFinalizeTestOutput: string | null = null;
+  // Issues demoted by a failed quick finalize — already covered by the
+  // quick-finalize-failed failure entry, so the per-result failure loop
+  // must not add a second entry for each of them.
+  const demotedQuickIssueNums = new Set<number>();
   let epicVerificationSummary: string | null = null;
 
   if (issues.length === 0) {
@@ -1511,6 +1619,32 @@ async function executeSessionRun(
 
       // --- Quick mode finalize: deferred tests + single PR for all issues ---
       if (quickWorktree && quickProcessed.length > 0) {
+        // Per-issue quick results report success on plan+build alone. If the
+        // deferred pass fails, those results and the epic checklist would
+        // claim shipped work whose code never reached the session branch —
+        // and the session PR would say "Closes #N" for unmerged issues.
+        // Demote everything this pass failed to ship.
+        const demoteQuickResults = (): void => {
+          for (const result of session.results) {
+            if (!quickProcessed.some((q) => q.number === result.issueNum)) continue;
+            if (result.status !== 'success' || isRecoveredRunResult(result)) continue;
+            result.status = 'failure';
+            result.testsPassing = false;
+            result.failureReason = 'permanent';
+            demotedQuickIssueNums.add(result.issueNum);
+            if (!config.dryRun) saveResult(session, result);
+          }
+          if (activeEpic !== undefined && !config.dryRun) {
+            for (const q of quickProcessed) {
+              try {
+                updateEpicChecklist(config.repo, activeEpic, q.number, false);
+                markEpicChecklistItem(epicChecklist, epicPromptContext, q.number, false);
+              } catch (err) {
+                log.warn(`Could not un-flip epic #${activeEpic} checklist for #${q.number}: ${err instanceof Error ? err.message : err}`);
+              }
+            }
+          }
+        };
         try {
           const quickResult = await finalizeQuickRun({
             issues: quickProcessed,
@@ -1533,26 +1667,33 @@ async function executeSessionRun(
           if (!quickResult.testsPassing) {
             const message = `Quick mode: deferred test pass failed after ${config.maxTestRetries} attempts — PR ${quickResult.prUrl ?? '(not created)'} left unmerged`;
             failures.push({ code: 'quick-finalize-failed', message });
+            demoteQuickResults();
             epicAbort = true; // skip epic verification on a known-broken state
           } else if (config.autoMerge && !quickResult.merged) {
             const message = `Quick mode: PR ${quickResult.prUrl ?? '(not created)'} could not be merged into ${session.branch}`;
             failures.push({ code: 'quick-finalize-failed', message });
+            demoteQuickResults();
             epicAbort = true;
           }
         } catch (err) {
           const message = `Quick mode finalize failed: ${err instanceof Error ? err.message : err}`;
           log.error(message);
           failures.push({ code: 'quick-finalize-failed', message });
+          demoteQuickResults();
           epicAbort = true;
         }
       } else if (quickWorktree && quickProcessed.length === 0 && !config.dryRun) {
         // Nothing succeeded — release the shared worktree (preserved if it
-        // holds commits, so partial work stays recoverable).
+        // holds commits, so partial work stays recoverable). A pause during
+        // plan leaves no commits, so also honor the session's waiting status
+        // — the pause path deliberately preserved this worktree.
+        const waitingResult = session.results.find((result) => result.status === 'waiting' && !isRecoveredRunResult(result));
         const cleanup = await cleanupWorktree({
           issueNum: issuesToProcess[0]?.number ?? 0,
           projectDir: process.cwd(),
           autoCleanup: config.autoCleanup,
           preserveIfCommits: true,
+          sessionStatus: waitingResult?.waitingStatus,
           worktreePath: quickWorktree.path,
         });
         recordSessionCleanup(session, {
@@ -1562,6 +1703,38 @@ async function executeSessionRun(
           at: new Date().toISOString(),
         });
       }
+    }
+  }
+
+  // Changed scope keeps per-issue runs focused, so require one aggregate full
+  // suite pass before epic verification, post-session review, and finalization.
+  // Quick mode already runs this same gate inside finalizeQuickRun.
+  const fullGateIssues = session.results
+    .filter((result) => result.status === 'success' && !isRecoveredRunResult(result))
+    .map((result) => ({ number: result.issueNum, title: result.title }));
+  if (!config.quick && isChangedTestScopeEnabled(config) && fullGateIssues.length > 0 && !config.dryRun) {
+    try {
+      const sessionWorktreePath = await ensureSessionWorktree(session, config);
+      if (!sessionWorktreePath) {
+        throw new Error('session worktree is unavailable');
+      }
+      const fullGate = await runFullSuiteGate({
+        issues: fullGateIssues,
+        config,
+        session,
+        worktreePath: sessionWorktreePath,
+      });
+      if (!fullGate.testsPassing) {
+        const message = `End-of-session full test suite failed after ${config.maxTestRetries} attempts`;
+        log.error(message);
+        failures.push({ code: 'session-test-failed', message });
+        epicAbort = true;
+      }
+    } catch (err) {
+      const message = `End-of-session full test suite failed: ${err instanceof Error ? err.message : err}`;
+      log.error(message);
+      failures.push({ code: 'session-test-failed', message });
+      epicAbort = true;
     }
   }
 
@@ -1603,6 +1776,9 @@ async function executeSessionRun(
   }
 
   for (const result of session.results) {
+    // Quick-demoted results are already covered by the single
+    // quick-finalize-failed entry — a per-issue duplicate is manifest noise.
+    if (demotedQuickIssueNums.has(result.issueNum)) continue;
     if (result.status === 'failure' && !isRecoveredRunResult(result)) {
       const transient = result.failureReason === 'transient';
       failures.push({
@@ -1637,9 +1813,14 @@ async function executeSessionRun(
     }
   }
 
+  // Deferred learnings must exist before repair/summary aggregation, and all
+  // other background side effects must settle before session finalization.
+  await drainSessionBackgroundTasks(session);
+
   // Generate session summary (aggregates learnings across all issues)
   if (session.results.length > 0) {
-    const learningsDir = join(process.cwd(), '.alpha-loop', 'learnings');
+    const learningsRoot = session.worktreePath ?? process.cwd();
+    const learningsDir = join(learningsRoot, '.alpha-loop', 'learnings');
     if (config.autoMerge) {
       repairSessionLearningArtifacts({
         sessionName: session.name,
@@ -1671,16 +1852,16 @@ async function executeSessionRun(
   if (session.results.length > 0 && !config.skipPostSessionReview && !config.dryRun) {
     log.step('Running post-session code review...');
 
-    const projectDir = process.cwd();
+    const projectDir = session.worktreePath;
+    if (!projectDir) {
+      log.warn('Session worktree is unavailable — skipping post-session review');
+    } else {
 
-    // Ensure we're on the session branch
-    exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+      // Get full session diff
+      const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: projectDir });
+      const sessionDiff = diffResult.stdout;
 
-    // Get full session diff
-    const diffResult = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: projectDir });
-    const sessionDiff = diffResult.stdout;
-
-    if (sessionDiff.trim()) {
+      if (sessionDiff.trim()) {
       // Load vision context if available
       const visionPath = join(projectDir, '.alpha-loop', 'vision.md');
       const visionContext = existsSync(visionPath) ? readFileSync(visionPath, 'utf-8') : undefined;
@@ -1784,8 +1965,9 @@ async function executeSessionRun(
       if (existsSync(reviewFile)) {
         try { unlinkSync(reviewFile); } catch { /* ignore */ }
       }
-    } else {
-      log.info('No changes in session diff, skipping session review');
+      } else {
+        log.info('No changes in session diff, skipping session review');
+      }
     }
   } else if (config.skipPostSessionReview) {
     log.info('Post-session review skipped');
@@ -1799,8 +1981,8 @@ async function executeSessionRun(
   if (config.quick && session.results.length > 0 && !config.dryRun && !config.skipLearn) {
     log.step('Quick mode: extracting epic-level learnings');
     try {
-      const projectDir = process.cwd();
-      exec(`git checkout "${session.branch}"`, { cwd: projectDir });
+      const projectDir = session.worktreePath;
+      if (!projectDir) throw new Error('session worktree is unavailable');
       const quickDiff = exec(`git diff "origin/${config.baseBranch}...HEAD"`, { cwd: projectDir }).stdout.slice(0, 10_000);
       if (quickDiff.trim()) {
         const reviewGate = session.sessionReviewFindings;
@@ -1823,6 +2005,8 @@ async function executeSessionRun(
           config,
           sessionLogsDir: session.logsDir,
           sessionName: session.name,
+          outputRoot: projectDir,
+          agentCwd: projectDir,
           ...(epicPromptContext ? { epicContext: epicPromptContext } : {}),
         });
       } else {
@@ -1834,6 +2018,7 @@ async function executeSessionRun(
   }
 
   // Finalize session
+  await drainSessionBackgroundTasks(session);
   const finalizedPrUrl = await finalizeSession(session, config);
   const sessionPrUrl = finalizedPrUrl ?? session.sessionPrUrl ?? null;
   const finalStatus = sessionStatusFromResults(session, failures);
@@ -2159,7 +2344,10 @@ function rejectIncompatibleEpicQueueOptions(options: RunOptions): void {
   });
 }
 
-function printDryRunEpicQueue(entries: ReturnType<typeof validateEpicQueue>['entries']): void {
+function printDryRunEpicQueue(
+  entries: ReturnType<typeof validateEpicQueue>['entries'],
+  parallelLimit?: number,
+): void {
   log.dry(`Validated epic queue (${entries.length} epic${entries.length === 1 ? '' : 's'}):`);
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
@@ -2170,12 +2358,229 @@ function printDryRunEpicQueue(entries: ReturnType<typeof validateEpicQueue>['ent
     const suffix = suffixes.length > 0 ? ` (${suffixes.join('; ')})` : '';
     log.dry(`  ${index + 1}. #${entry.epicNumber} ${entry.title}${suffix}`);
   }
+  if (parallelLimit !== undefined) {
+    const waves = buildEpicQueueWaves(entries);
+    log.dry(`Parallel schedule (limit ${parallelLimit}):`);
+    for (let index = 0; index < waves.length; index++) {
+      const epics = waves[index].map((entry) => {
+        const dependencies = entry.dependencyIds.length > 0
+          ? ` (depends on ${entry.dependencyIds.map((dependencyId) => `#${dependencyId}`).join(', ')})`
+          : '';
+        return `#${entry.epicNumber}${dependencies}`;
+      });
+      log.dry(`  Wave ${index + 1}: ${epics.join(', ')}`);
+    }
+  }
 }
 
 function normalizeQueueBranchMode(value: BranchAncestryMode | undefined): BranchAncestryMode {
   if (value === undefined) return 'stacked';
   if (value === 'stacked' || value === 'independent') return value;
   throw new Error(`Invalid queue branch mode: ${value}. Expected "stacked" or "independent".`);
+}
+
+function normalizeParallelLimit(value: number | undefined, branchAncestryMode: BranchAncestryMode): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('--parallel requires a positive integer');
+  }
+  if (branchAncestryMode !== 'independent') {
+    throw new Error('--parallel requires --queue-branch-mode independent; stacked queues are inherently sequential');
+  }
+  return value;
+}
+
+function writeJsonAtomic(filePath: string, value: unknown): void {
+  const temporaryPath = `${filePath}.tmp-${process.pid}`;
+  writeFileSync(temporaryPath, JSON.stringify(value, null, 2) + '\n', 'utf-8');
+  renameSync(temporaryPath, filePath);
+}
+
+type QueueWorkerArtifactPaths = {
+  contextPath: string;
+  resultPath: string;
+  queueId: string;
+};
+
+function isInsideDirectory(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel.length > 0 && !rel.startsWith('..') && !isAbsolute(rel);
+}
+
+function resolveQueueWorkerArtifactPaths(
+  contextPath: string,
+  resultPath: string,
+  epicNumber: number,
+): QueueWorkerArtifactPaths {
+  const sessionsDir = resolve(process.cwd(), '.alpha-loop', 'sessions');
+  const resolvedContextPath = resolve(process.cwd(), contextPath);
+  const resolvedResultPath = resolve(process.cwd(), resultPath);
+  const queueDir = dirname(resolvedContextPath);
+  const queueId = basename(queueDir);
+  const expectedContextName = `epic-${epicNumber}-context.json`;
+  const expectedResultName = `epic-${epicNumber}-result.json`;
+
+  const valid = isInsideDirectory(sessionsDir, resolvedContextPath)
+    && isInsideDirectory(sessionsDir, resolvedResultPath)
+    && dirname(resolvedResultPath) === queueDir
+    && queueId.startsWith('queue-')
+    && basename(resolvedContextPath) === expectedContextName
+    && basename(resolvedResultPath) === expectedResultName;
+  if (!valid) {
+    throw new CommandExitError({
+      code: 'invalid-queue-worker-context',
+      message: 'Internal queue worker artifact paths must be matching epic context/result files inside .alpha-loop/sessions/queue-*',
+      exitCode: 1,
+    });
+  }
+
+  return {
+    contextPath: resolvedContextPath,
+    resultPath: resolvedResultPath,
+    queueId,
+  };
+}
+
+function readQueueWorkerContext(filePath: string): QueueSessionContext {
+  try {
+    const value = JSON.parse(readFileSync(filePath, 'utf-8')) as QueueSessionContext;
+    if (!value.queueId || !value.currentEpic || value.branchAncestryMode !== 'independent') {
+      throw new Error('missing required independent queue fields');
+    }
+    return value;
+  } catch (err) {
+    throw new CommandExitError({
+      code: 'invalid-queue-worker-context',
+      message: `Could not read queue worker context ${filePath}: ${err instanceof Error ? err.message : err}`,
+      exitCode: 1,
+      cause: err,
+    });
+  }
+}
+
+function buildQueueChildArgs(args: {
+  epicNumber: number;
+  contextPath: string;
+  resultPath: string;
+  options: RunOptions;
+}): string[] {
+  const childArgs = [
+    ...process.execArgv,
+    process.argv[1],
+    'run',
+    '--epic', String(args.epicNumber),
+    '--queue-branch-mode', 'independent',
+    '--queue-context', args.contextPath,
+    '--queue-result', args.resultPath,
+    '--auto-merge',
+  ];
+  if (args.options.model) childArgs.push('--model', args.options.model);
+  if (args.options.skipTests) childArgs.push('--skip-tests');
+  if (args.options.skipReview) childArgs.push('--skip-review');
+  if (args.options.skipLearn) childArgs.push('--skip-learn');
+  if (args.options.batch) childArgs.push('--batch');
+  if (args.options.batchSize !== undefined) childArgs.push('--batch-size', String(args.options.batchSize));
+  if (args.options.quick) childArgs.push('--quick');
+  if (args.options.validate) childArgs.push('--validate');
+  if (args.options.fix) childArgs.push('--fix');
+  if (args.options.verbose) childArgs.push('--verbose');
+  return childArgs;
+}
+
+function readQueueChildResult(
+  epicNumber: number,
+  resultPath: string,
+  exitCode: number,
+  spawnError?: Error,
+): EpicExecutionResult {
+  if (spawnError) {
+    return buildEpicFailureResult(epicNumber, {
+      code: 'epic-run-error',
+      message: `Epic #${epicNumber} worker failed to start: ${spawnError.message}`,
+      issueNum: epicNumber,
+      exitCode: 1,
+    });
+  }
+  if (!existsSync(resultPath)) {
+    return buildEpicFailureResult(epicNumber, {
+      code: 'epic-run-error',
+      message: `Epic #${epicNumber} worker exited with code ${exitCode} without writing a result artifact`,
+      issueNum: epicNumber,
+      exitCode,
+    });
+  }
+  try {
+    const result = JSON.parse(readFileSync(resultPath, 'utf-8')) as EpicExecutionResult;
+    if (result.epicNumber !== epicNumber || !['success', 'failure', 'waiting'].includes(result.status)) {
+      throw new Error('result does not match the queued epic');
+    }
+    if (exitCode !== 0 && result.status === 'success') {
+      return buildEpicFailureResult(epicNumber, {
+        code: 'epic-run-error',
+        message: `Epic #${epicNumber} worker exited with code ${exitCode} after reporting success`,
+        issueNum: epicNumber,
+        exitCode,
+      });
+    }
+    return result;
+  } catch (err) {
+    return buildEpicFailureResult(epicNumber, {
+      code: 'epic-run-error',
+      message: `Epic #${epicNumber} wrote an invalid result artifact: ${err instanceof Error ? err.message : err}`,
+      issueNum: epicNumber,
+      exitCode: exitCode || 1,
+    });
+  }
+}
+
+async function spawnQueueChild(args: {
+  epicNumber: number;
+  contextPath: string;
+  resultPath: string;
+  logPath: string;
+  options: RunOptions;
+}): Promise<EpicExecutionResult> {
+  let logFd: number;
+  try {
+    logFd = openSync(args.logPath, 'a');
+  } catch (err) {
+    return buildEpicFailureResult(args.epicNumber, {
+      code: 'epic-run-error',
+      message: `Epic #${args.epicNumber} worker log could not be opened: ${err instanceof Error ? err.message : err}`,
+      issueNum: args.epicNumber,
+      exitCode: 1,
+    });
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (exitCode: number, spawnError?: Error): void => {
+      if (settled) return;
+      settled = true;
+      try { closeSync(logFd); } catch { /* child result is still authoritative */ }
+      resolve(readQueueChildResult(args.epicNumber, args.resultPath, exitCode, spawnError));
+    };
+    try {
+      const child = spawn(process.execPath, buildQueueChildArgs(args), {
+        cwd: process.cwd(),
+        stdio: ['ignore', logFd, logFd],
+      });
+      child.once('error', (err) => finish(1, err));
+      child.once('close', (code) => finish(code ?? 1));
+    } catch (err) {
+      finish(1, err instanceof Error ? err : new Error(String(err)));
+    }
+  });
+}
+
+async function runBounded<T>(items: T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex++];
+      await task(item);
+    }
+  });
+  await Promise.all(workers);
 }
 
 function toManifestFailures(failures: EpicExecutionFailure[]): EpicQueueManifestFailure[] {
@@ -2329,6 +2734,165 @@ function writeQueueManifestUpdate(manifest: EpicQueueManifest): void {
   log.info(`Queue manifest saved: ${manifestPath}`);
 }
 
+function applyQueueChildResult(entry: EpicQueueManifestEntry, result: EpicExecutionResult): void {
+  entry.sessionName = result.sessionName;
+  entry.sessionBranch = result.sessionBranch;
+  entry.sessionPrUrl = result.sessionPrUrl;
+  entry.failures = toManifestFailures(result.failures);
+  entry.endedAt = new Date().toISOString();
+  entry.status = result.status === 'success' ? 'success' : 'failure';
+}
+
+function failedDependenciesForEntry(
+  entry: EpicQueueManifestEntry,
+  entriesByEpic: Map<number, EpicQueueManifestEntry>,
+): number[] {
+  const failed = new Set<number>();
+  for (const dependencyId of entry.dependencyIds) {
+    const dependency = entriesByEpic.get(dependencyId);
+    if (!dependency) continue;
+    if (dependency.status === 'failure') failed.add(dependencyId);
+    if (dependency.dependencyFailure) {
+      failed.add(dependencyId);
+      for (const failedEpicId of dependency.dependencyFailure.failedEpicIds) failed.add(failedEpicId);
+    }
+  }
+  return Array.from(failed).sort((left, right) => (
+    (entriesByEpic.get(left)?.queueIndex ?? 0) - (entriesByEpic.get(right)?.queueIndex ?? 0)
+  ));
+}
+
+async function runParallelEpicQueue(args: {
+  config: Config;
+  options: RunOptions;
+  entries: ValidatedEpicQueueEntry[];
+  manifest: EpicQueueManifest;
+  risks: QueueRiskMap;
+  parallelLimit: number;
+}): Promise<void> {
+  const queueDir = join(process.cwd(), '.alpha-loop', 'sessions', args.manifest.queueId);
+  const entriesByEpic = new Map(args.manifest.epics.map((entry) => [entry.epicNumber, entry]));
+
+  for (const wave of args.manifest.waves) {
+    wave.status = 'running';
+    wave.startedAt = new Date().toISOString();
+    writeQueueManifestUpdate(args.manifest);
+    const runnable: Array<{ validated: ValidatedEpicQueueEntry; manifest: EpicQueueManifestEntry }> = [];
+
+    for (const epicNumber of wave.epicIds) {
+      const manifestEntry = entriesByEpic.get(epicNumber);
+      const validatedEntry = args.entries.find((entry) => entry.epicNumber === epicNumber);
+      if (!manifestEntry || !validatedEntry) continue;
+      if (manifestEntry.status === 'skipped' && !manifestEntry.dependencyFailure) {
+        log.info(`Skipping epic #${epicNumber}: ${manifestEntry.skipReason}`);
+        continue;
+      }
+
+      const failedDependencies = failedDependenciesForEntry(manifestEntry, entriesByEpic);
+      if (failedDependencies.length > 0) {
+        const message = `Epic #${epicNumber} skipped because queued dependencies failed: ${failedDependencies.map((id) => `#${id}`).join(', ')}`;
+        manifestEntry.status = 'skipped';
+        manifestEntry.endedAt = new Date().toISOString();
+        manifestEntry.skipReason = message;
+        manifestEntry.dependencyFailure = { failedEpicIds: failedDependencies, message };
+        manifestEntry.failures = [{ code: 'dependency-failed', message, issueNum: epicNumber }];
+        log.warn(message);
+        writeQueueManifestUpdate(args.manifest);
+        continue;
+      }
+      runnable.push({ validated: validatedEntry, manifest: manifestEntry });
+    }
+
+    await runBounded(runnable, args.parallelLimit, async ({ validated, manifest: manifestEntry }) => {
+      const currentIndex = args.entries.findIndex((entry) => entry.epicNumber === validated.epicNumber);
+      const queueContext = buildQueueSessionContext({
+        manifest: args.manifest,
+        entries: args.entries,
+        currentIndex,
+        branchAncestryMode: 'independent',
+        baseBranch: args.config.baseBranch,
+        previousSessionBranch: null,
+        previousSessionPrUrl: null,
+        risks: args.risks,
+      });
+      applyQueueContextToManifestEntry(manifestEntry, queueContext);
+      const contextPath = join(queueDir, `epic-${validated.epicNumber}-context.json`);
+      const resultPath = join(queueDir, `epic-${validated.epicNumber}-result.json`);
+      const absoluteLogPath = join(queueDir, `epic-${validated.epicNumber}.log`);
+      manifestEntry.logPath = join('.alpha-loop', 'sessions', args.manifest.queueId, `epic-${validated.epicNumber}.log`);
+      manifestEntry.status = 'running';
+      manifestEntry.startedAt = new Date().toISOString();
+      let result: EpicExecutionResult;
+      try {
+        writeJsonAtomic(contextPath, queueContext);
+        writeQueueManifestUpdate(args.manifest);
+        log.step(`Wave ${wave.waveNumber}: starting epic #${validated.epicNumber} (log: ${manifestEntry.logPath})`);
+        result = await spawnQueueChild({
+          epicNumber: validated.epicNumber,
+          contextPath,
+          resultPath,
+          logPath: absoluteLogPath,
+          options: args.options,
+        });
+      } catch (err) {
+        result = buildEpicFailureResult(validated.epicNumber, {
+          code: 'epic-run-error',
+          message: `Epic #${validated.epicNumber} worker could not be launched: ${err instanceof Error ? err.message : err}`,
+          issueNum: validated.epicNumber,
+          exitCode: 1,
+        });
+      }
+      applyQueueChildResult(manifestEntry, result);
+      writeQueueManifestUpdate(args.manifest);
+      if (result.status === 'success') {
+        log.success(`Wave ${wave.waveNumber}: epic #${validated.epicNumber} complete`);
+      } else {
+        log.error(stopReasonForEpicResult(result));
+      }
+    });
+
+    const waveEntries = wave.epicIds.map((epicNumber) => entriesByEpic.get(epicNumber)).filter(Boolean) as EpicQueueManifestEntry[];
+    const dependencySkipped = waveEntries.filter((entry) => entry.dependencyFailure);
+    const failed = waveEntries.filter((entry) => entry.status === 'failure');
+    if (runnable.length === 0 && dependencySkipped.length > 0) {
+      wave.status = 'skipped';
+    } else if (failed.length > 0 || dependencySkipped.length > 0) {
+      wave.status = 'failure';
+    } else {
+      wave.status = 'success';
+    }
+    wave.endedAt = new Date().toISOString();
+    writeQueueManifestUpdate(args.manifest);
+  }
+
+  const failedEntries = args.manifest.epics.filter((entry) => entry.status === 'failure');
+  const dependencySkipped = args.manifest.epics.filter((entry) => entry.dependencyFailure);
+  args.manifest.endedAt = new Date().toISOString();
+  if (failedEntries.length === 0 && dependencySkipped.length === 0) {
+    args.manifest.status = 'success';
+    writeQueueManifestUpdate(args.manifest);
+    log.success(`Epic queue complete: ${args.manifest.epics.length} epic${args.manifest.epics.length === 1 ? '' : 's'}`);
+    return;
+  }
+
+  const failedSummary = failedEntries.length > 0
+    ? `${failedEntries.map((entry) => `#${entry.epicNumber}`).join(', ')} failed`
+    : '';
+  const skippedSummary = dependencySkipped.length > 0
+    ? `${dependencySkipped.map((entry) => `#${entry.epicNumber}`).join(', ')} dependency-skipped`
+    : '';
+  args.manifest.status = 'stopped';
+  args.manifest.stopReason = `Epic queue completed with failures: ${[failedSummary, skippedSummary].filter(Boolean).join('; ')}`;
+  writeQueueManifestUpdate(args.manifest);
+  throw new QueueExecutionError({
+    code: 'epic-queue-stopped',
+    message: args.manifest.stopReason,
+    exitCode: 1,
+    logged: false,
+    manifest: args.manifest,
+  });
+}
+
 async function runEpicQueue(config: Config, options: RunOptions): Promise<void> {
   rejectIncompatibleEpicQueueOptions(options);
 
@@ -2348,13 +2912,15 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
   }
 
   let branchAncestryMode: BranchAncestryMode;
+  let parallelLimit: number | undefined;
   try {
     branchAncestryMode = normalizeQueueBranchMode(options.queueBranchMode);
+    parallelLimit = normalizeParallelLimit(options.parallel, branchAncestryMode);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error(message);
     throw new CommandExitError({
-      code: 'invalid-queue-branch-mode',
+      code: options.parallel !== undefined ? 'invalid-parallel' : 'invalid-queue-branch-mode',
       message,
       exitCode: 1,
       logged: true,
@@ -2370,7 +2936,13 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
       log.error(error.message);
     }
     if (!config.dryRun) {
-      writeQueueManifestUpdate(createEpicQueueValidationFailureManifest(epicNumbers, validation.errors, new Date(), branchAncestryMode));
+      writeQueueManifestUpdate(createEpicQueueValidationFailureManifest(
+        epicNumbers,
+        validation.errors,
+        new Date(),
+        branchAncestryMode,
+        parallelLimit ?? 1,
+      ));
     }
     throw new QueueExecutionError({
       code: 'epic-queue-validation-failed',
@@ -2381,13 +2953,41 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
   }
 
   if (config.dryRun) {
-    printDryRunEpicQueue(validation.entries);
+    printDryRunEpicQueue(validation.entries, parallelLimit);
     return;
   }
 
-  const manifest = createEpicQueueManifest(validation.entries, new Date(), branchAncestryMode);
+  if (parallelLimit !== undefined) {
+    // Shared generated assets and context live in the coordinator checkout.
+    // Prepare them once before children begin worktree-only execution.
+    syncProjectAgentAssets(config);
+    await refreshProjectContextAndCommit(config);
+  }
+
+  const scheduledWaves = parallelLimit !== undefined
+    ? buildEpicQueueWaves(validation.entries)
+    : validation.entries.map((entry) => [entry]);
+  const manifest = createEpicQueueManifest(
+    validation.entries,
+    new Date(),
+    branchAncestryMode,
+    parallelLimit ?? 1,
+    scheduledWaves,
+  );
   const queueRisks = buildQueueRiskMap(validation.entries);
   writeQueueManifestUpdate(manifest);
+
+  if (parallelLimit !== undefined) {
+    await runParallelEpicQueue({
+      config,
+      options,
+      entries: validation.entries,
+      manifest,
+      risks: queueRisks,
+      parallelLimit,
+    });
+    return;
+  }
 
   const queueConfig: Config = {
     ...config,
@@ -2412,7 +3012,14 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
     if (!manifestEntry) continue;
 
     if (manifestEntry.status === 'skipped') {
+      const skippedWave = manifest.waves.find((wave) => wave.waveNumber === manifestEntry.waveNumber);
+      if (skippedWave) {
+        skippedWave.status = 'skipped';
+        skippedWave.startedAt = manifestEntry.endedAt;
+        skippedWave.endedAt = manifestEntry.endedAt;
+      }
       log.info(`Skipping epic #${validatedEntry.epicNumber}: ${manifestEntry.skipReason}`);
+      writeQueueManifestUpdate(manifest);
       continue;
     }
 
@@ -2427,6 +3034,11 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
       risks: queueRisks,
     });
     applyQueueContextToManifestEntry(manifestEntry, queueContext);
+    const manifestWave = manifest.waves.find((wave) => wave.waveNumber === manifestEntry.waveNumber);
+    if (manifestWave) {
+      manifestWave.status = 'running';
+      manifestWave.startedAt = new Date().toISOString();
+    }
     manifestEntry.status = 'running';
     manifestEntry.startedAt = new Date().toISOString();
     writeQueueManifestUpdate(manifest);
@@ -2457,6 +3069,10 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
     manifestEntry.status = result.status === 'success' ? 'success' : 'failure';
 
     if (result.status !== 'success') {
+      if (manifestWave) {
+        manifestWave.status = 'failure';
+        manifestWave.endedAt = manifestEntry.endedAt;
+      }
       manifest.status = 'stopped';
       manifest.stopReason = stopReasonForEpicResult(result);
       manifest.endedAt = manifestEntry.endedAt;
@@ -2472,6 +3088,10 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
       });
     }
 
+    if (manifestWave) {
+      manifestWave.status = 'success';
+      manifestWave.endedAt = manifestEntry.endedAt;
+    }
     writeQueueManifestUpdate(manifest);
     if (previousSessionManifestEntry) {
       previousSessionManifestEntry.nextSessionBranch = result.sessionBranch;
@@ -2503,6 +3123,14 @@ export async function runCommand(options: RunOptions): Promise<void> {
         message,
         exitCode: 1,
         logged: true,
+      });
+    }
+
+    if (options.parallel !== undefined && options.epics === undefined) {
+      throw new CommandExitError({
+        code: 'invalid-parallel',
+        message: '--parallel can only be used with --epics',
+        exitCode: 1,
       });
     }
 
@@ -2549,6 +3177,62 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
     // --epic <N> overrides everything except --verify-only.
     if (options.epic !== undefined) {
+      const hasQueueContext = options.queueContext !== undefined;
+      const hasQueueResult = options.queueResult !== undefined;
+      if (hasQueueContext !== hasQueueResult) {
+        throw new CommandExitError({
+          code: 'invalid-queue-worker-context',
+          message: 'Internal queue workers require both --queue-context and --queue-result',
+          exitCode: 1,
+        });
+      }
+      if (options.queueContext && options.queueResult) {
+        const artifactPaths = resolveQueueWorkerArtifactPaths(
+          options.queueContext,
+          options.queueResult,
+          options.epic,
+        );
+        const queue = readQueueWorkerContext(artifactPaths.contextPath);
+        if (queue.queueId !== artifactPaths.queueId) {
+          throw new CommandExitError({
+            code: 'invalid-queue-worker-context',
+            message: `Queue worker context id ${queue.queueId} does not match artifact directory ${artifactPaths.queueId}`,
+            exitCode: 1,
+          });
+        }
+        // Queue workers must always own distinct session branches. A repository-level
+        // merge_to setting is valid for standalone runs, but inheriting it here would
+        // send every parallel worker to the same branch.
+        const workerConfig: Config = { ...config, autoMerge: true, mergeTo: '' };
+        let result: EpicExecutionResult;
+        if (queue.currentEpic.number !== options.epic) {
+          result = buildEpicFailureResult(options.epic, {
+            code: 'epic-run-error',
+            message: `Queue worker context targets epic #${queue.currentEpic.number}, not #${options.epic}`,
+            issueNum: options.epic,
+            exitCode: 1,
+          });
+        } else {
+          try {
+            result = await runSingleEpicExecution({
+              config: workerConfig,
+              epicNumber: options.epic,
+              options: { ...options, stopOnPartialEpic: true },
+              queue,
+            });
+          } catch (err) {
+            result = buildEpicFailureResult(options.epic, {
+              code: 'epic-run-error',
+              message: `Epic #${options.epic} failed with an unhandled error: ${err instanceof Error ? err.message : err}`,
+              issueNum: options.epic,
+              exitCode: 1,
+            });
+          }
+        }
+        writeJsonAtomic(artifactPaths.resultPath, result);
+        if (result.status !== 'success') process.exitCode = 1;
+        return;
+      }
       const result = await runSingleEpicExecution({
         config,
         epicNumber: options.epic,

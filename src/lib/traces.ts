@@ -270,6 +270,60 @@ export function writeCosts(
 }
 
 /**
+ * Persist one writer's pipeline results and recompute the session-wide
+ * scores.json from every writer's sidecar — same shape as persistStepCosts,
+ * so a per-issue write can never clobber another issue's scores.
+ */
+export function persistIssueScores(
+  session: string,
+  scope: string,
+  results: PipelineResultForScores[],
+  projectDir?: string,
+): void {
+  const dir = join(runDir(session, projectDir), 'score-results');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${scope}.json`), JSON.stringify(results, null, 2) + '\n');
+
+  const all: PipelineResultForScores[] = [];
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith('.json')) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(join(dir, file), 'utf-8')) as PipelineResultForScores[];
+      if (Array.isArray(parsed)) all.push(...parsed);
+    } catch { /* skip corrupt sidecar */ }
+  }
+  writeScores(session, computeScores(all), projectDir);
+}
+
+/**
+ * Persist one writer's raw step costs and recompute the session-wide
+ * costs.json from every writer's sidecar. Each writer (an issue, a batch, a
+ * finalize pass) owns one sidecar keyed by `scope`, last write wins for that
+ * scope only — so a deferred background task finishing after a later issue's
+ * write can no longer clobber that issue's costs.
+ */
+export function persistStepCosts(
+  session: string,
+  scope: string,
+  stepCosts: StepCost[],
+  projectDir?: string,
+): void {
+  const dir = join(runDir(session, projectDir), 'step-costs');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${scope}.json`), JSON.stringify(stepCosts, null, 2) + '\n');
+
+  const all: StepCost[] = [];
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith('.json')) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(join(dir, file), 'utf-8')) as StepCost[];
+      if (Array.isArray(parsed)) all.push(...parsed);
+    } catch { /* skip corrupt sidecar */ }
+  }
+  writeCosts(session, computeCosts(all), projectDir);
+}
+
+/**
  * Compute scores.json from pipeline results.
  */
 export function computeScores(results: PipelineResultForScores[]): ScoresJson {

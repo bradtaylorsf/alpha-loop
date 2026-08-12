@@ -1,7 +1,10 @@
+import { EventEmitter } from 'node:events';
+import { join } from 'node:path';
 import { formatEpicPickerMeta, formatMilestonePickerMeta, runCommand, runSingleEpicExecution } from '../../src/commands/run';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
+  shellQuote: (value: string) => `'${String(value).replace(/'/g, `'\\''`)}'`,
 }));
 
 jest.mock('../../src/lib/logger', () => ({
@@ -39,13 +42,20 @@ jest.mock('../../src/lib/pipeline', () => ({
   processIssue: jest.fn(),
   processBatch: jest.fn(),
   finalizeQuickRun: jest.fn(),
+  runFullSuiteGate: jest.fn(),
   readGateResult: jest.fn(() => ({ passed: true, summary: '', findings: [] })),
   formatGateFindings: jest.fn(() => ''),
 }));
 
+jest.mock('../../src/lib/agent', () => ({
+  spawnAgent: jest.fn(),
+}));
+
 jest.mock('../../src/lib/session', () => ({
   createSession: jest.fn(),
+  ensureSessionWorktree: jest.fn(),
   finalizeSession: jest.fn(),
+  recordSessionBackgroundTaskError: jest.fn(),
   recordSessionIssue: jest.fn(),
   recordSessionPolicyDecision: jest.fn(),
   saveResult: jest.fn(),
@@ -112,23 +122,31 @@ jest.mock('node:fs', () => ({
   readFileSync: jest.fn(),
   writeFileSync: jest.fn(),
   mkdirSync: jest.fn(),
+  openSync: jest.fn().mockReturnValue(99),
+  closeSync: jest.fn(),
   renameSync: jest.fn(),
   unlinkSync: jest.fn(),
+}));
+
+jest.mock('node:child_process', () => ({
+  spawn: jest.fn(),
 }));
 
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
-import { processIssue, processBatch, finalizeQuickRun } from '../../src/lib/pipeline';
-import { setupWorktree } from '../../src/lib/worktree';
-import { createSession, finalizeSession, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
+import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, type PipelineResult } from '../../src/lib/pipeline';
+import { cleanupWorktree, setupWorktree } from '../../src/lib/worktree';
+import { createSession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
 import { extractLearnings, generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
 import { syncAgentAssets } from '../../src/commands/sync';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { emitLifecycleEvent } from '../../src/lib/events';
+import { spawnAgent } from '../../src/lib/agent';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
@@ -143,10 +161,14 @@ const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue
 const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue>;
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockFinalizeQuickRun = finalizeQuickRun as jest.MockedFunction<typeof finalizeQuickRun>;
+const mockRunFullSuiteGate = runFullSuiteGate as jest.MockedFunction<typeof runFullSuiteGate>;
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
+const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
+const mockEnsureSessionWorktree = ensureSessionWorktree as jest.MockedFunction<typeof ensureSessionWorktree>;
 const mockReleaseSessionLock = releaseSessionLock as jest.MockedFunction<typeof releaseSessionLock>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
+const mockRecordSessionBackgroundTaskError = recordSessionBackgroundTaskError as jest.MockedFunction<typeof recordSessionBackgroundTaskError>;
 const mockTransitionSessionStatus = transitionSessionStatus as jest.MockedFunction<typeof transitionSessionStatus>;
 const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
 const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
@@ -160,6 +182,8 @@ const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileS
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
+const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
+const mockSpawn = spawn as jest.MockedFunction<typeof spawn>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -176,6 +200,8 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     labelReady: 'ready',
     maxTestRetries: 3,
     testCommand: 'pnpm test',
+    testScope: 'full',
+    changedTestCommand: '',
     devCommand: 'pnpm dev',
     skipTests: false,
     skipReview: false,
@@ -231,13 +257,21 @@ beforeEach(() => {
     resultsDir: '/tmp/sessions',
     logsDir: '/tmp/sessions/logs',
     results: [],
+    pendingBackgroundTasks: [],
   });
   mockFinalizeSession.mockResolvedValue(null);
+  mockEnsureSessionWorktree.mockImplementation(async (session) => {
+    session.worktreePath = `/tmp/${String(session.name).replace(/\//g, '-')}`;
+    return session.worktreePath;
+  });
+  mockCleanupWorktree.mockResolvedValue({ status: 'removed', path: '/tmp/session-worktree' });
+  mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: 'Review passed', duration: 1 });
   mockPollIssues.mockReturnValue([]);
   mockListEpics.mockReturnValue([]);
   mockGetEpicSubIssues.mockReturnValue([]);
   mockGetIssueWithComments.mockReturnValue(null);
   mockProcessBatch.mockResolvedValue([]);
+  mockRunFullSuiteGate.mockResolvedValue({ testsPassing: true, testOutput: 'All tests passed' });
   mockContextNeedsRefresh.mockReturnValue(false);
   mockSyncAgentAssets.mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] });
 });
@@ -489,6 +523,230 @@ describe('runCommand', () => {
     expect(mockFinalizeSession).not.toHaveBeenCalled();
     expect(mockWriteFileSync).not.toHaveBeenCalled();
     expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('--parallel requires an epic queue in independent branch mode and a positive limit', async () => {
+    await runCommand({ parallel: 2 });
+    expect(mockLog.error).toHaveBeenCalledWith('--parallel can only be used with --epics');
+    expect(process.exitCode).toBe(1);
+
+    process.exitCode = undefined;
+    await runCommand({ epics: '205,166', parallel: 2, queueBranchMode: 'stacked', dryRun: true });
+    expect(mockLog.error).toHaveBeenCalledWith('--parallel requires --queue-branch-mode independent; stacked queues are inherently sequential');
+    expect(process.exitCode).toBe(1);
+
+    process.exitCode = undefined;
+    await runCommand({ epics: '205,166', parallel: 0, queueBranchMode: 'independent', dryRun: true });
+    expect(mockLog.error).toHaveBeenCalledWith('--parallel requires a positive integer');
+    expect(process.exitCode).toBe(1);
+    expect(mockGetIssueWithComments).not.toHaveBeenCalled();
+  });
+
+  test('--parallel dry-run prints dependency waves without spawning children', async () => {
+    const issues = new Map([
+      [30, { number: 30, title: 'Dependent', body: 'Depends on #10.', labels: ['epic'], state: 'OPEN' }],
+      [10, { number: 10, title: 'Independent A', body: '', labels: ['epic'], state: 'OPEN' }],
+      [20, { number: 20, title: 'Independent B', body: '', labels: ['epic'], state: 'OPEN' }],
+    ]);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (issues.get(issueNum) as any) ?? null);
+
+    await runCommand({ epics: '30,10,20', parallel: 2, queueBranchMode: 'independent', dryRun: true });
+
+    expect(mockLog.dry).toHaveBeenCalledWith('Parallel schedule (limit 2):');
+    expect(mockLog.dry).toHaveBeenCalledWith('  Wave 1: #10, #20');
+    expect(mockLog.dry).toHaveBeenCalledWith('  Wave 2: #30 (depends on #10)');
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  test('--parallel runs bounded dependency waves and skips only failed dependents', async () => {
+    const issues = new Map([
+      [10, { number: 10, title: 'Fails', body: '', labels: ['epic'], state: 'OPEN' }],
+      [20, { number: 20, title: 'Succeeds', body: '', labels: ['epic'], state: 'OPEN' }],
+      [30, { number: 30, title: 'Blocked by failure', body: 'Depends on #10.', labels: ['epic'], state: 'OPEN' }],
+      [40, { number: 40, title: 'Still runnable', body: 'Depends on #20.', labels: ['epic'], state: 'OPEN' }],
+      [50, { number: 50, title: 'Transitively blocked', body: 'Depends on #30.', labels: ['epic'], state: 'OPEN' }],
+    ]);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (issues.get(issueNum) as any) ?? null);
+
+    const childResults = new Map<string, string>();
+    const launched: number[] = [];
+    let active = 0;
+    let maxActive = 0;
+    mockExistsSync.mockImplementation((filePath: any) => childResults.has(String(filePath)));
+    mockReadFileSync.mockImplementation((filePath: any) => childResults.get(String(filePath)) ?? '');
+    mockSpawn.mockImplementation(((_command: string, args: readonly string[]) => {
+      const child = new EventEmitter();
+      const epicArg = args.indexOf('--epic');
+      const resultArg = args.indexOf('--queue-result');
+      const epicNumber = Number(args[epicArg + 1]);
+      const resultPath = args[resultArg + 1];
+      launched.push(epicNumber);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      queueMicrotask(() => {
+        const failed = epicNumber === 10;
+        childResults.set(resultPath, JSON.stringify({
+          epicNumber,
+          sessionName: `session/epic-${epicNumber}`,
+          sessionBranch: `session/epic-${epicNumber}`,
+          sessionPrUrl: failed ? null : `https://github.com/owner/repo/pull/${epicNumber}`,
+          status: failed ? 'failure' : 'success',
+          failures: failed ? [{ code: 'pipeline-failure', message: 'worker failed', issueNum: epicNumber }] : [],
+          verificationClosedEpic: !failed,
+        }));
+        active -= 1;
+        child.emit('close', failed ? 1 : 0);
+      });
+      return child as any;
+    }) as any);
+
+    await runCommand({ epics: '10,20,30,40,50', parallel: 2, queueBranchMode: 'independent' });
+
+    expect(maxActive).toBe(2);
+    expect(launched).toEqual([10, 20, 40]);
+    expect(process.exitCode).toBe(1);
+    const manifest = JSON.parse(String(mockWriteFileSync.mock.calls.at(-1)?.[1]));
+    expect(manifest.parallelLimit).toBe(2);
+    expect(manifest.waves.map((wave: any) => [wave.epicIds, wave.status])).toEqual([
+      [[10, 20], 'failure'],
+      [[30, 40], 'failure'],
+      [[50], 'skipped'],
+    ]);
+    expect(manifest.epics.map((entry: any) => [entry.epicNumber, entry.status])).toEqual([
+      [10, 'failure'],
+      [20, 'success'],
+      [30, 'skipped'],
+      [40, 'success'],
+      [50, 'skipped'],
+    ]);
+    expect(manifest.epics[2].dependencyFailure.failedEpicIds).toEqual([10]);
+    expect(manifest.epics[4].dependencyFailure.failedEpicIds).toEqual([10, 30]);
+    expect(manifest.epics[1].logPath).toContain('epic-20.log');
+    expect(mockSyncAgentAssets).toHaveBeenCalledTimes(1);
+    expect(mockContextNeedsRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  test('internal queue workers persist a structured result artifact before exiting', async () => {
+    const queueDir = join(process.cwd(), '.alpha-loop', 'sessions', 'queue-test');
+    const contextPath = join(queueDir, 'epic-77-context.json');
+    const resultPath = join(queueDir, 'epic-77-result.json');
+    mockReadFileSync.mockImplementation((filePath: any) => {
+      if (String(filePath) === contextPath) {
+        return JSON.stringify({
+          queueId: 'queue-test',
+          queueIndex: 1,
+          queueTotal: 1,
+          currentEpic: { number: 77, title: 'Missing epic' },
+          previousEpic: null,
+          nextEpic: null,
+          previousSessionBranch: null,
+          previousSessionPrUrl: null,
+          branchAncestryMode: 'independent',
+          branchedFromBranch: 'master',
+          dependsOnSessionBranch: null,
+          dependsOnSessionPrUrl: null,
+          rebaseOntoBranch: null,
+          dependencyWarnings: [],
+          overlapWarnings: [],
+        });
+      }
+      return '';
+    });
+
+    await runCommand({
+      epic: 77,
+      queueContext: contextPath,
+      queueResult: resultPath,
+      queueBranchMode: 'independent',
+      autoMerge: true,
+    });
+
+    const resultWrite = mockWriteFileSync.mock.calls.find(([filePath]) => String(filePath).startsWith(`${resultPath}.tmp-`));
+    expect(resultWrite).toBeDefined();
+    expect(JSON.parse(String(resultWrite?.[1]))).toEqual(expect.objectContaining({
+      epicNumber: 77,
+      status: 'failure',
+      failures: [expect.objectContaining({ code: 'epic-not-found' })],
+    }));
+    expect(process.exitCode).toBe(1);
+  });
+
+  test('internal queue workers leave shared project preparation to the coordinator', async () => {
+    const queueDir = join(process.cwd(), '.alpha-loop', 'sessions', 'queue-test');
+    const contextPath = join(queueDir, 'epic-77-context.json');
+    const resultPath = join(queueDir, 'epic-77-result.json');
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      mergeTo: 'shared-integration-branch',
+      skipPreflight: true,
+      skipVerify: true,
+      skipPostSessionReview: true,
+      autoCapture: false,
+    }) as any);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 77) {
+        return { number: 77, title: 'Worker epic', body: '- [ ] #78', labels: ['epic'], state: 'OPEN' } as any;
+      }
+      if (issueNum === 78) {
+        return { number: 78, title: 'Not ready', body: '', labels: [], state: 'OPEN' } as any;
+      }
+      return null;
+    });
+    mockReadFileSync.mockImplementation((filePath: any) => {
+      if (String(filePath) === contextPath) {
+        return JSON.stringify({
+          queueId: 'queue-test',
+          queueIndex: 1,
+          queueTotal: 1,
+          currentEpic: { number: 77, title: 'Worker epic' },
+          previousEpic: null,
+          nextEpic: null,
+          previousSessionBranch: null,
+          previousSessionPrUrl: null,
+          branchAncestryMode: 'independent',
+          branchedFromBranch: 'master',
+          dependsOnSessionBranch: null,
+          dependsOnSessionPrUrl: null,
+          rebaseOntoBranch: null,
+          dependencyWarnings: [],
+          overlapWarnings: [],
+        });
+      }
+      return '';
+    });
+
+    await runCommand({
+      epic: 77,
+      queueContext: contextPath,
+      queueResult: resultPath,
+      queueBranchMode: 'independent',
+      autoMerge: true,
+      skipTests: true,
+      skipReview: true,
+      skipLearn: true,
+    });
+
+    expect(mockSyncAgentAssets).not.toHaveBeenCalled();
+    expect(mockContextNeedsRefresh).not.toHaveBeenCalled();
+    expect(mockCreateSession).toHaveBeenCalledWith(
+      expect.objectContaining({ autoMerge: true, mergeTo: '' }),
+      expect.objectContaining({ epicNum: 77 }),
+    );
+  });
+
+  test('internal queue workers reject artifact paths outside the queue sessions directory', async () => {
+    await runCommand({
+      epic: 77,
+      queueContext: '/tmp/queue-context.json',
+      queueResult: '/tmp/queue-result.json',
+      queueBranchMode: 'independent',
+      autoMerge: true,
+    });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('queue worker artifact paths'));
+    expect(mockReadFileSync).not.toHaveBeenCalled();
+    expect(mockWriteFileSync).not.toHaveBeenCalled();
   });
 
   test('dry-run session preview does not sync assets or refresh generated context', async () => {
@@ -1278,8 +1536,206 @@ Coordinate hosted work.
     expect(mockFinalizeSession).toHaveBeenCalled();
   });
 
+  test('runs one full-suite session gate for effective changed scope', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: true,
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Test issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({});
+
+    expect(mockRunFullSuiteGate).toHaveBeenCalledTimes(1);
+    expect(mockRunFullSuiteGate).toHaveBeenCalledWith(expect.objectContaining({
+      issues: [{ number: 42, title: 'Test issue' }],
+      worktreePath: '/tmp/session-20260330-143000',
+    }));
+    expect(mockExec.mock.calls.some(([cmd, options]) => (
+      String(cmd).startsWith('git checkout') && options?.cwd === process.cwd()
+    ))).toBe(false);
+    expect(mockRunFullSuiteGate.mock.invocationCallOrder[0]).toBeLessThan(
+      mockFinalizeSession.mock.invocationCallOrder[0],
+    );
+  });
+
+  test('does not add a session gate when changed scope falls back to full runs', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: true,
+      testScope: 'changed',
+      changedTestCommand: '',
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Test issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({});
+
+    expect(mockRunFullSuiteGate).not.toHaveBeenCalled();
+  });
+
+  test('does not add a session gate when auto-merge is disabled', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: false,
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Test issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+
+    await runCommand({});
+
+    expect(mockRunFullSuiteGate).not.toHaveBeenCalled();
+  });
+
+  test('marks the session failed when the end-of-session full suite cannot be fixed', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: true,
+      testScope: 'changed',
+      changedTestCommand: 'pnpm jest --findRelatedTests {files}',
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Test issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+    mockRunFullSuiteGate.mockResolvedValue({ testsPassing: false, testOutput: 'still failing' });
+
+    await runCommand({});
+
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(
+      expect.any(Object),
+      'failed',
+      'failed',
+      expect.any(Object),
+    );
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('full test suite failed'));
+  });
+
+  test('signal cleanup also releases the dedicated session worktree', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: true,
+      skipPostSessionReview: true,
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Interrupted issue', body: 'Body', labels: ['ready'] },
+    ]);
+
+    let resolveIssue!: (result: PipelineResult) => void;
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    mockProcessIssue.mockImplementation(() => {
+      notifyStarted();
+      return new Promise((resolve) => { resolveIssue = resolve; });
+    });
+
+    let notifySessionCleanup!: () => void;
+    const sessionCleanup = new Promise<void>((resolve) => { notifySessionCleanup = resolve; });
+    mockCleanupWorktree.mockImplementation(async (options) => {
+      if (options.worktreePath?.includes('session-20260330-143000')) notifySessionCleanup();
+      return { status: 'removed', path: options.worktreePath ?? '/tmp/issue-worktree' };
+    });
+
+    const run = runCommand({});
+    await started;
+    process.emit('SIGINT');
+    await sessionCleanup;
+
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      worktreePath: '/tmp/session-20260330-143000',
+    }));
+
+    resolveIssue({
+      issueNum: 42,
+      title: 'Interrupted issue',
+      status: 'failure',
+      testsPassing: false,
+      verifyPassing: false,
+      verifySkipped: true,
+      duration: 1,
+      filesChanged: 0,
+    });
+    await run;
+  });
+
+  test('runs post-session review inside the dedicated session worktree', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: true,
+      skipPostSessionReview: false,
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Review issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Review issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 1,
+      filesChanged: 1,
+    });
+
+    await runCommand({});
+
+    expect(mockSpawnAgent).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: '/tmp/session-20260330-143000',
+    }));
+    expect(mockExec.mock.calls.some(([cmd, options]) => (
+      String(cmd).startsWith('git checkout') && options?.cwd === process.cwd()
+    ))).toBe(false);
+  });
+
   test('quick mode shares one worktree across issues and runs the finalize pass', async () => {
-    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true }) as any);
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true, autoMerge: true }) as any);
     mockPollIssues.mockReturnValue([
       { number: 42, title: 'First issue', body: 'Body A', labels: ['ready'] },
       { number: 43, title: 'Second issue', body: 'Body B', labels: ['ready'] },
@@ -1339,7 +1795,7 @@ Coordinate hosted work.
   });
 
   test('quick mode records a failure and keeps the session failed when the finalize pass fails tests', async () => {
-    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true }) as any);
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true, autoMerge: true }) as any);
     mockPollIssues.mockReturnValue([
       { number: 42, title: 'First issue', body: 'Body A', labels: ['ready'] },
     ]);
@@ -1365,7 +1821,65 @@ Coordinate hosted work.
 
     expect(mockFinalizeQuickRun).toHaveBeenCalledTimes(1);
     expect(mockTransitionSessionStatus).toHaveBeenCalledWith(expect.any(Object), 'failed', 'failed', expect.any(Object));
+
+    // Results handed to finalizeSession must be demoted — a failed finalize
+    // pass shipped nothing, so nothing may claim success (or "Closes #N").
+    const finalizedSession = mockFinalizeSession.mock.calls[0][0] as any;
+    const demoted = finalizedSession.results.find((r: any) => r.issueNum === 42);
+    expect(demoted.status).toBe('failure');
+    expect(demoted.testsPassing).toBe(false);
+    expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      issueNum: 42,
+      status: 'failure',
+    }));
   });
+
+  test('quick mode un-flips the epic checklist when the finalize pass fails', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true, autoMerge: true }) as any);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 900) {
+        return { number: 900, title: 'Quick epic', body: '- [ ] #901 Child issue', labels: ['epic'], state: 'OPEN' } as any;
+      }
+      if (issueNum === 901) {
+        return { number: 901, title: 'Child issue', body: 'Body', labels: ['ready'], state: 'OPEN' } as any;
+      }
+      return null;
+    });
+    mockSetupWorktree.mockResolvedValue({ path: '/tmp/quick-shared', branch: 'agent/issue-901', resumed: false });
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 901,
+      title: 'Child issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: false,
+      verifySkipped: true,
+      duration: 30,
+      filesChanged: 2,
+    });
+    mockFinalizeQuickRun.mockResolvedValue({
+      testsPassing: false,
+      testOutput: 'TESTS FAILED',
+      prUrl: 'https://github.com/owner/repo/pull/77',
+      merged: false,
+    });
+
+    await runCommand({ epic: 900 });
+
+    // Flipped on per-issue success, un-flipped when the deferred pass failed —
+    // the epic must never claim work whose code never reached the branch.
+    expect(mockUpdateEpicChecklist.mock.calls).toEqual([
+      ['owner/repo', 900, 901, true],
+      ['owner/repo', 900, 901, false],
+    ]);
+
+    // And the demotion itself — the mechanism that stops finalizeSession from
+    // emitting "Closes #901" — must hold independently of the checklist.
+    const finalizedSession = mockFinalizeSession.mock.calls[0][0] as any;
+    const demoted = finalizedSession.results.find((r: any) => r.issueNum === 901);
+    expect(demoted.status).toBe('failure');
+    expect(demoted.testsPassing).toBe(false);
+  });
+
 
   test('continues other eligible work when one issue is waiting for human feedback', async () => {
     mockPollIssues.mockReturnValue([
@@ -1433,6 +1947,106 @@ Coordinate hosted work.
       sessionName: 'session/20260330-143000',
     }));
     expect(mockFinalizeSession).toHaveBeenCalled();
+  });
+
+  test('starts the next sequential issue while background work is pending and drains before summary and finalization', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) =>
+      makeConfig({ ...overrides, autoMerge: true, skipPostSessionReview: true }) as any,
+    );
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'First issue', body: 'Body', labels: ['ready'] },
+      { number: 43, title: 'Second issue', body: 'Body', labels: ['ready'] },
+    ]);
+
+    let resolveBackground!: () => void;
+    const backgroundGate = new Promise<void>((resolve) => { resolveBackground = resolve; });
+    let signalSecondIssueStarted!: () => void;
+    const secondIssueStarted = new Promise<void>((resolve) => { signalSecondIssueStarted = resolve; });
+    let artifactReady = false;
+    let summarySawArtifact = false;
+    let finalizeSawArtifact = false;
+
+    mockProcessIssue.mockImplementation(async (issueNum: number, title: string, _body, _config, session) => {
+      if (issueNum === 42) {
+        const promise = backgroundGate.then(() => { artifactReady = true; });
+        void promise.catch(() => undefined);
+        (session.pendingBackgroundTasks ??= []).push({ issueNum, stage: 'learn', promise });
+      } else {
+        signalSecondIssueStarted();
+      }
+      return {
+        issueNum,
+        title,
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        duration: 60,
+        filesChanged: 5,
+      };
+    });
+    mockGenerateSessionSummary.mockImplementation(async () => {
+      summarySawArtifact = artifactReady;
+      return null;
+    });
+    mockFinalizeSession.mockImplementation(async () => {
+      finalizeSawArtifact = artifactReady;
+      return null;
+    });
+
+    const runPromise = runCommand({});
+    await secondIssueStarted;
+
+    expect(artifactReady).toBe(false);
+    expect(mockGenerateSessionSummary).not.toHaveBeenCalled();
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+
+    resolveBackground();
+    await runPromise;
+
+    expect(summarySawArtifact).toBe(true);
+    expect(finalizeSawArtifact).toBe(true);
+    expect(mockProcessIssue.mock.calls.map((call) => call[0])).toEqual([42, 43]);
+  });
+
+  test('records rejected background tasks without changing successful issue results', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) =>
+      makeConfig({ ...overrides, autoMerge: true, skipPostSessionReview: true }) as any,
+    );
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Successful issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockImplementation(async (issueNum: number, title: string, _body, _config, session) => {
+      const promise = Promise.reject(new Error('learning agent failed'));
+      void promise.catch(() => undefined);
+      (session.pendingBackgroundTasks ??= []).push({ issueNum, stage: 'learn', promise });
+      return {
+        issueNum,
+        title,
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        duration: 60,
+        filesChanged: 5,
+      };
+    });
+
+    await runCommand({});
+
+    expect(mockRecordSessionBackgroundTaskError).toHaveBeenCalledWith(expect.any(Object), {
+      issueNum: 42,
+      stage: 'learn',
+      message: 'learning agent failed',
+    });
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        results: [expect.objectContaining({ issueNum: 42, status: 'success' })],
+      }),
+      'completed',
+      'completed',
+      expect.any(Object),
+    );
   });
 
   test('processes a single epic scheduled in the requested milestone', async () => {

@@ -143,9 +143,17 @@ export function codexSandboxArgs(cwd: string): string[] {
     const result = exec('git rev-parse --git-common-dir', { cwd });
     if (result.exitCode !== 0 || !result.stdout.trim()) return [];
     const commonDir = resolve(cwd, result.stdout.trim());
-    const rel = relative(cwd, commonDir);
-    const insideCwd = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-    if (insideCwd) return [];
+    // Compare against the repo's working-tree root, not cwd: from a
+    // subdirectory of the primary checkout the common dir is outside cwd but
+    // still inside the checkout, and no grant is needed. Only a linked
+    // worktree (common dir outside its own toplevel) needs one.
+    const toplevelResult = exec('git rev-parse --show-toplevel', { cwd });
+    const toplevel = toplevelResult.exitCode === 0 && toplevelResult.stdout.trim()
+      ? resolve(toplevelResult.stdout.trim())
+      : cwd;
+    const rel = relative(toplevel, commonDir);
+    const insideCheckout = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    if (insideCheckout) return [];
     return ['-c', `sandbox_workspace_write.writable_roots=[${JSON.stringify(commonDir)}]`];
   } catch {
     return [];

@@ -2,7 +2,7 @@
  * Process Issue Pipeline — the 12-step orchestration for a single issue.
  */
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import { log } from './logger.js';
 import { exec, shellQuote } from './shell.js';
 import { spawnAgent, buildEndpointEnv } from './agent.js';
@@ -39,10 +39,12 @@ import {
   type BatchIssue,
   type EpicPromptContext,
 } from './prompts.js';
-import { runTests } from './testing.js';
+import { isChangedTestScopeEnabled, resolveTestCommand, runTests } from './testing.js';
+import type { TestRunOptions } from './testing.js';
 import { runVerify } from './verify.js';
 import { extractLearnings, getLearningContext } from './learning.js';
 import {
+  enqueueSessionBackgroundTask,
   saveResult,
   getPreviousResult,
   loadSessionManifest,
@@ -59,6 +61,7 @@ import {
   recordSessionWorktree,
   transitionHumanFeedbackSessionStatus,
   updateSessionManifest,
+  ensureSessionWorktree,
 } from './session.js';
 import {
   classifyFeedback,
@@ -78,7 +81,9 @@ import {
   writeRunManifest,
   writeConfigSnapshot,
   writeScores,
+  persistIssueScores,
   writeCosts,
+  persistStepCosts,
   computeScores,
   computeCosts,
   runDir,
@@ -110,6 +115,17 @@ import {
   type WebAppPreviewResolution,
   type WebAppVerificationSummary,
 } from './web-app-profile.js';
+
+async function refreshSessionWorktree(
+  session: SessionContext,
+  config: Config,
+  projectDir: string,
+): Promise<void> {
+  const sessionWorktreePath = await ensureSessionWorktree(session, config);
+  if (!sessionWorktreePath) return;
+  exec('git fetch origin', { cwd: projectDir });
+  exec(`git pull origin ${shellQuote(session.branch)} --no-edit --autostash`, { cwd: sessionWorktreePath });
+}
 
 /** Max diff size to include in learning analysis. */
 const MAX_DIFF_CHARS = 10_000;
@@ -999,13 +1015,17 @@ function parseGitStatusPaths(stdout: string): string[] {
 function autoCommitDirtyWorktree(worktreePath: string, commitMessage: string): string[] {
   const statusResult = exec('git status --porcelain', { cwd: worktreePath });
   // The pause-request artifact is control-plane data, never work product — it
-  // must not land in the branch or it would falsely pause later issues.
+  // must not land in the branch or it would falsely pause later issues. Match
+  // by basename so nested copies are excluded too.
   const paths = parseGitStatusPaths(statusResult.stdout)
-    .filter((path) => path !== PAUSE_REQUEST_FILE);
+    .filter((path) => basename(path) !== PAUSE_REQUEST_FILE);
   if (paths.length === 0) return [];
 
   log.warn(`Agent did not commit; auto-committing ${paths.length} files: ${paths.join(', ')}`);
-  const addResult = exec(`git add -A -- ${shellQuote(`:(exclude)${PAUSE_REQUEST_FILE}`)} .`, { cwd: worktreePath });
+  const addResult = exec(
+    `git add -A -- ${shellQuote(`:(exclude)${PAUSE_REQUEST_FILE}`)} ${shellQuote(`:(exclude,glob)**/${PAUSE_REQUEST_FILE}`)} .`,
+    { cwd: worktreePath },
+  );
   if (addResult.exitCode !== 0) {
     log.warn(`Could not stage fallback auto-commit paths: ${addResult.stderr || addResult.stdout}`);
     return [];
@@ -1016,6 +1036,52 @@ function autoCommitDirtyWorktree(worktreePath: string, commitMessage: string): s
     return [];
   }
   return paths;
+}
+
+function resolveIssueBaseCommit(worktreePath: string, baseRef: string): string {
+  const mergeBase = exec(`git merge-base HEAD ${shellQuote(baseRef)}`, { cwd: worktreePath });
+  if (mergeBase.exitCode === 0 && mergeBase.stdout.trim()) {
+    return mergeBase.stdout.trim();
+  }
+  const head = exec('git rev-parse HEAD', { cwd: worktreePath });
+  return head.exitCode === 0 ? head.stdout.trim() : '';
+}
+
+function changedFilesSince(worktreePath: string, baseCommit: string): string[] {
+  if (!baseCommit) return [];
+  const result = exec(`git diff --name-only ${shellQuote(baseCommit)}...HEAD`, { cwd: worktreePath });
+  return result.exitCode === 0 ? parseDiffNameOnly(result.stdout) : [];
+}
+
+type TestInvocation = {
+  command: string;
+  options?: TestRunOptions;
+};
+
+function resolvePipelineTestInvocation(
+  worktreePath: string,
+  baseCommit: string,
+  config: Config,
+): TestInvocation {
+  if (!isChangedTestScopeEnabled(config)) {
+    return { command: config.testCommand };
+  }
+  const options = { changedFiles: changedFilesSince(worktreePath, baseCommit) };
+  return {
+    command: resolveTestCommand(config, options).command,
+    options,
+  };
+}
+
+function runPipelineTests(
+  worktreePath: string,
+  config: Config,
+  logFile: string,
+  invocation: TestInvocation,
+) {
+  return invocation.options
+    ? runTests(worktreePath, config, logFile, invocation.options)
+    : runTests(worktreePath, config, logFile);
 }
 
 function commitLearningFiles(worktreePath: string, learningFiles: Array<string | null>, message: string): void {
@@ -1408,6 +1474,13 @@ export async function processIssue(
     return failureResult(issueNum, title, startTime);
   }
 
+  const issueBaseRef = config.autoMerge && session.branch !== config.baseBranch
+    ? session.branch
+    : `origin/${config.baseBranch}`;
+  const issueBaseCommit = isChangedTestScopeEnabled(config) && !config.dryRun && !quickWorktree
+    ? resolveIssueBaseCommit(worktreePath, issueBaseRef)
+    : '';
+
   const writeRecoverableCrashMarker = (err: unknown, step = currentStep): void => {
     if (config.dryRun) return;
     let commitCount = 0;
@@ -1666,7 +1739,11 @@ export async function processIssue(
         worktreePath,
         `feat: implement issue #${issueNum} - ${title}`,
       );
-    } else {
+    } else if (!isTransientError(implResult.output)) {
+      // Permanent failures keep a wip commit so the worktree is preserved for
+      // recovery. Transient failures (rate limits) are re-queued for a fresh
+      // retry — a wip commit here would pin the worktree via preserveIfCommits
+      // and carry half-finished work onto the branch the retry reuses.
       autoCommitDirtyWorktree(
         worktreePath,
         `wip: partial implementation of #${issueNum} (agent timed out or failed)`,
@@ -1767,7 +1844,8 @@ export async function processIssue(
   for (let attempt = 1; testsPassing ? false : attempt <= config.maxTestRetries; attempt++) {
     log.info(`Test attempt ${attempt} of ${config.maxTestRetries}`);
 
-    const commandDecision = evaluateCommandPolicy(config, testConfig.testCommand, { issueNum, title, stage: 'command' });
+    const testInvocation = resolvePipelineTestInvocation(worktreePath, issueBaseCommit, testConfig);
+    const commandDecision = evaluateCommandPolicy(config, testInvocation.command, { issueNum, title, stage: 'command' });
     if (!decisionAllowed(commandDecision)) {
       return pauseSessionForAutomationPolicy({
         issueNum,
@@ -1785,7 +1863,7 @@ export async function processIssue(
       });
     }
 
-    const testResult = runTests(worktreePath, testConfig, logFile);
+    const testResult = runPipelineTests(worktreePath, testConfig, logFile, testInvocation);
     testOutput = testResult.output;
 
     // Trace test output
@@ -2018,7 +2096,8 @@ export async function processIssue(
         if (pauseResult) return pauseResult;
 
         // Re-run tests before next review attempt
-        const commandDecision = evaluateCommandPolicy(config, testConfig.testCommand, { issueNum, title, stage: 'command' });
+        const testInvocation = resolvePipelineTestInvocation(worktreePath, issueBaseCommit, testConfig);
+        const commandDecision = evaluateCommandPolicy(config, testInvocation.command, { issueNum, title, stage: 'command' });
         if (!decisionAllowed(commandDecision)) {
           return pauseSessionForAutomationPolicy({
             issueNum,
@@ -2035,7 +2114,7 @@ export async function processIssue(
             verifySkipped: true,
           });
         }
-        const retest = runTests(worktreePath, testConfig, logFile);
+        const retest = runPipelineTests(worktreePath, testConfig, logFile, testInvocation);
         if (!retest.passed) {
           log.warn('Tests failed after review fixes — will be caught in final status');
           testOutput = retest.output;
@@ -2202,7 +2281,8 @@ export async function processIssue(
           if (pauseResult) return pauseResult;
 
           // Re-run tests before next verify attempt
-          const commandDecision = evaluateCommandPolicy(config, testConfig.testCommand, { issueNum, title, stage: 'command' });
+          const testInvocation = resolvePipelineTestInvocation(worktreePath, issueBaseCommit, testConfig);
+          const commandDecision = evaluateCommandPolicy(config, testInvocation.command, { issueNum, title, stage: 'command' });
           if (!decisionAllowed(commandDecision)) {
             return pauseSessionForAutomationPolicy({
               issueNum,
@@ -2219,7 +2299,7 @@ export async function processIssue(
               verifySkipped: false,
             });
           }
-          const retest = runTests(worktreePath, testConfig, logFile);
+          const retest = runPipelineTests(worktreePath, testConfig, logFile, testInvocation);
           if (!retest.passed) {
             log.warn('Tests failed after verify fixes');
             testOutput = retest.output;
@@ -2373,11 +2453,7 @@ export async function processIssue(
     ? `Review: ${reviewGate.summary}\n${reviewGate.findings.map((f) => `- [${f.severity}] ${f.description} (${f.fixed ? 'fixed' : 'unfixed'})`).join('\n')}`
     : `Review: ${reviewGate.summary || 'passed'}`;
 
-  // --- Step 8: Extract learnings ---
-  currentStep = 'learn';
-  recordSessionStage(session, 'learn');
-  log.step('Step 8: Extracting learnings');
-  const learningFile = quickWorktree ? null : await extractLearnings({
+  const learningOptions = {
     issueNum,
     title,
     status: testsPassing ? 'success' : 'failure',
@@ -2389,16 +2465,39 @@ export async function processIssue(
     verifyOutput,
     body,
     config,
-    outputRoot: worktreePath,
-    agentCwd: worktreePath,
     sessionLogsDir: session.logsDir,
     sessionName: session.name,
+    onAgentResult: (result: AgentResult): void => {
+      stepCosts.push(buildStepCost('learn', issueNum, result, config));
+      persistStepCosts(session.name, `issue-${issueNum}`, stepCosts);
+      recordStageTelemetry(session, issueNum, 'learn', result, config, {
+        profile: selectRoutingProfile(config, issueNum),
+      });
+    },
     ...epicOption,
-  });
+  };
+  const backgroundWorktreePath = session.worktreePath;
+  const deferLearning = !quickWorktree
+    && config.autoMerge
+    && !config.dryRun
+    && !config.skipLearn
+    && backgroundWorktreePath !== undefined;
 
   if (quickWorktree) {
     log.info('Quick mode: learning extraction deferred to the end-of-run epic-level pass');
-  } else {
+  } else if (config.skipLearn) {
+    log.info('Skipping learning extraction (skipLearn=true)');
+  } else if (!deferLearning) {
+    // Without a session branch, the artifact must still be created and committed
+    // before the issue PR so it cannot be orphaned in the parent checkout.
+    currentStep = 'learn';
+    recordSessionStage(session, 'learn');
+    log.step('Step 8: Extracting learnings');
+    const learningFile = await extractLearnings({
+      ...learningOptions,
+      outputRoot: worktreePath,
+      agentCwd: worktreePath,
+    });
     if (!config.dryRun) {
       commitLearningFiles(
         worktreePath,
@@ -2490,46 +2589,78 @@ export async function processIssue(
     log.dry('Would create PR');
   }
 
+  // --- Step 8 (deferred): Extract learnings on the session checkout ---
+  // Not gated on prUrl: the artifact lands in the session worktree and is
+  // committed by finalizeSession, so it reaches the session PR even when this
+  // issue's own PR did not materialize.
+  if (deferLearning && backgroundWorktreePath) {
+    currentStep = 'learn';
+    recordSessionStage(session, 'learn');
+    log.step('Step 8: Extracting learnings in the background');
+    enqueueSessionBackgroundTask(session, {
+      issueNum,
+      stage: 'learn',
+      run: async () => {
+        const learningFile = await extractLearnings({
+          ...learningOptions,
+          outputRoot: backgroundWorktreePath,
+          agentCwd: backgroundWorktreePath,
+        });
+        if (!learningFile) {
+          throw new Error(`Learning extraction produced no artifact for issue #${issueNum}`);
+        }
+      },
+    });
+    stepsCompleted.push('learn');
+  }
+
   // --- Step 9b: Post assumptions/decisions comment ---
   if (!config.dryRun && prUrl) {
     currentStep = 'assumptions';
     recordSessionStage(session, 'assumptions');
-    try {
-      const reviewSummary = reviewGate.summary || 'No review findings';
-      const assumptionsPrompt = buildAssumptionsPrompt({
-        issueNum,
-        title,
-        body,
-        diff: runDiff,
-        reviewSummary,
-      });
+    const reviewSummary = reviewGate.summary || 'No review findings';
+    const assumptionsPrompt = buildAssumptionsPrompt({
+      issueNum,
+      title,
+      body,
+      diff: runDiff,
+      reviewSummary,
+    });
 
-      tracePrompt(session, issueNum, 'assumptions', assumptionsPrompt);
+    tracePrompt(session, issueNum, 'assumptions', assumptionsPrompt);
+    enqueueSessionBackgroundTask(session, {
+      issueNum,
+      stage: 'assumptions',
+      run: async () => {
+        const assumptionsResult = await spawnAgent({
+          ...agentForStep(config, 'learn'),
+          prompt: assumptionsPrompt,
+          cwd: backgroundWorktreePath ?? projectDir,
+          logFile: join(session.logsDir, `issue-${issueNum}-assumptions.log`),
+          verbose: config.verbose,
+          timeout: config.agentTimeout * 1000,
+        });
 
-      const assumptionsResult = await spawnAgent({
-        ...agentForStep(config, 'learn'),
-        prompt: assumptionsPrompt,
-        cwd: worktreePath,
-        logFile: join(session.logsDir, `issue-${issueNum}-assumptions.log`),
-        verbose: config.verbose,
-        timeout: config.agentTimeout * 1000,
-      });
+        traceOutput(session, issueNum, 'assumptions', assumptionsResult.output);
+        stepCosts.push(buildStepCost('assumptions', issueNum, assumptionsResult, config));
+        persistStepCosts(session.name, `issue-${issueNum}`, stepCosts);
+        recordStageTelemetry(session, issueNum, 'assumptions', assumptionsResult, config, {
+          profile: selectRoutingProfile(config, issueNum),
+        });
 
-      traceOutput(session, issueNum, 'assumptions', assumptionsResult.output);
-      stepCosts.push(buildStepCost('assumptions', issueNum, assumptionsResult, config));
-      recordStageTelemetry(session, issueNum, 'assumptions', assumptionsResult, config, {
-        profile: selectRoutingProfile(config, issueNum),
-      });
+        if (assumptionsResult.exitCode !== 0 || !assumptionsResult.output.trim()) {
+          throw new Error(
+            `Assumptions agent failed for issue #${issueNum} ` +
+            `(exit ${assumptionsResult.exitCode}, output ${assumptionsResult.output.length} chars)`,
+          );
+        }
 
-      if (assumptionsResult.exitCode === 0 && assumptionsResult.output.trim()) {
         commentIssue(config.repo, issueNum,
           `## AI Implementation Notes\n\n${assumptionsResult.output.trim()}\n\n---\n_Posted by alpha-loop for user validation._`,
         );
         log.success('Posted assumptions/decisions comment');
-      }
-    } catch (err) {
-      log.warn(`Failed to post assumptions comment: ${err}`);
-    }
+      },
+    });
   }
 
   // --- Step 9c: Write full traces (Meta-Harness style) ---
@@ -2581,8 +2712,8 @@ export async function processIssue(
         filesChanged,
         stepsCompleted,
       };
-      writeScores(session.name, computeScores([issueScoreResult]));
-      writeCosts(session.name, computeCosts(stepCosts));
+      persistIssueScores(session.name, `issue-${issueNum}`, [issueScoreResult]);
+      persistStepCosts(session.name, `issue-${issueNum}`, stepCosts);
     } catch (err) {
       log.warn(`Failed to write traces for #${issueNum}: ${err}`);
     }
@@ -2592,15 +2723,22 @@ export async function processIssue(
   currentStep = 'status';
   recordSessionStage(session, 'status');
   log.step('Step 10: Updating issue status');
-  if (!config.dryRun) {
+  if (config.dryRun) {
+    log.dry('Would update issue status to in-review');
+  } else if (quickWorktree) {
+    // Quick mode: nothing has been tested, reviewed, or shipped yet. Say
+    // exactly that, and leave the in-review transition to the end-of-run
+    // finalize pass, which knows the real outcome.
+    commentIssue(config.repo, issueNum,
+      `Quick mode: implementation committed on the shared session branch.\n\nTests, review, and the PR are deferred to the end-of-run pass — this issue's status will be updated when that pass completes.\n\n---\n*Processed by alpha-loop in ${duration}s*`,
+    );
+  } else {
     const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
     updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In Review');
     labelIssue(config.repo, issueNum, 'in-review', 'in-progress');
     commentIssue(config.repo, issueNum,
       `Automated implementation complete.\n\n**PR**: ${prUrl ?? 'N/A'}\n**Tests**: ${testsStatus}\n**Review**: Attached to PR body.\n\n---\n*Processed by alpha-loop in ${duration}s*`,
     );
-  } else {
-    log.dry('Would update issue status to in-review');
   }
 
   const shouldRequestQa = !quickWorktree && !config.skipQa && (plan.qa?.needed || Boolean(webAppProfile));
@@ -2648,13 +2786,7 @@ export async function processIssue(
         mergePR(config.repo, worktreeBranch);
         mergeSucceeded = true;
 
-        // Update local repo to include merged changes
-        exec('git fetch origin', { cwd: projectDir });
-        const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
-        if (currentBranch !== session.branch) {
-          exec(`git checkout "${session.branch}"`, { cwd: projectDir });
-        }
-        exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+        await refreshSessionWorktree(session, config, projectDir);
       } catch (err) {
         log.warn(`Auto-merge failed: ${err}`);
       }
@@ -2860,6 +2992,13 @@ export async function processBatch(
     for (const issue of issues) requeueIssue(config, issue.number);
     return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
   }
+
+  const batchBaseRef = config.autoMerge && session.branch !== config.baseBranch
+    ? session.branch
+    : `origin/${config.baseBranch}`;
+  const batchBaseCommit = isChangedTestScopeEnabled(config) && !config.dryRun
+    ? resolveIssueBaseCommit(worktreePath, batchBaseRef)
+    : '';
 
   // --- Step 3: Fetch comments for all issues ---
   const issueComments = new Map<number, Comment[]>();
@@ -3097,7 +3236,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   for (let attempt = 1; testsPassing ? false : attempt <= config.maxTestRetries; attempt++) {
     log.info(`Test attempt ${attempt} of ${config.maxTestRetries}`);
 
-    const commandDecision = evaluateCommandPolicy(config, config.testCommand, {
+    const testInvocation = resolvePipelineTestInvocation(worktreePath, batchBaseCommit, config);
+    const commandDecision = evaluateCommandPolicy(config, testInvocation.command, {
       issueNum: issues[0]?.number,
       title: issues[0]?.title,
       stage: 'command',
@@ -3128,7 +3268,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       return results;
     }
 
-    const testResult = runTests(worktreePath, config, logFile);
+    const testResult = runPipelineTests(worktreePath, config, logFile, testInvocation);
     testOutput = testResult.output;
     if (!config.dryRun) {
       traceTest(session.name, issues[0].number, attempt, testOutput);
@@ -3266,7 +3406,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           exec(`git commit -m "fix: address batch review findings (attempt ${attempt})"`, { cwd: worktreePath });
         }
 
-        const retest = runTests(worktreePath, config, logFile);
+        const testInvocation = resolvePipelineTestInvocation(worktreePath, batchBaseCommit, config);
+        const retest = runPipelineTests(worktreePath, config, logFile, testInvocation);
         if (!retest.passed) {
           log.warn('Tests failed after review fixes');
           testOutput = retest.output;
@@ -3534,8 +3675,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           filesChanged: r.filesChanged,
           stepsCompleted,
         }));
-      writeScores(session.name, computeScores(scoreResults));
-      writeCosts(session.name, computeCosts(stepCosts));
+      persistIssueScores(session.name, `batch-${issueNums.join('-')}`, scoreResults);
+      persistStepCosts(session.name, `batch-${issueNums.join('-')}`, stepCosts);
 
       // Config snapshot
       try {
@@ -3560,12 +3701,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       try {
         mergePR(config.repo, worktreeBranch);
         mergeSucceeded = true;
-        exec('git fetch origin', { cwd: projectDir });
-        const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
-        if (currentBranch !== session.branch) {
-          exec(`git checkout "${session.branch}"`, { cwd: projectDir });
-        }
-        exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+        await refreshSessionWorktree(session, config, projectDir);
       } catch (err) {
         log.warn(`Auto-merge failed: ${err}`);
       }
@@ -3630,6 +3766,91 @@ export type QuickFinalizeResult = {
   merged: boolean;
 };
 
+export type FullSuiteGateOptions = {
+  /** Issues included in the session, used to scope the fix prompt. */
+  issues: Array<{ number: number; title: string }>;
+  config: Config;
+  session: SessionContext;
+  /** Worktree containing the aggregate session changes. */
+  worktreePath: string;
+  /** Optional log file override. */
+  logFile?: string;
+  /** Label used in logs and trace filenames. */
+  label?: string;
+};
+
+export type FullSuiteGateResult = {
+  testsPassing: boolean;
+  testOutput: string;
+};
+
+/**
+ * Run the configured full test suite with the standard agent fix loop.
+ * This is shared by quick-mode finalization and changed-scope session gates.
+ */
+export async function runFullSuiteGate(options: FullSuiteGateOptions): Promise<FullSuiteGateResult> {
+  const {
+    issues,
+    config,
+    session,
+    worktreePath,
+    logFile = join(session.logsDir, 'session-full-tests.log'),
+    label = 'Session full-suite gate',
+  } = options;
+  const tracePrefix = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+  if (config.dryRun) {
+    log.dry(`Would run ${label.toLowerCase()}`);
+    return { testsPassing: true, testOutput: '' };
+  }
+
+  log.step(`${label}: running full test suite`);
+  recordSessionStage(session, 'test');
+  autoCommitDirtyWorktree(worktreePath, 'chore: commit remaining changes before full-suite test gate');
+
+  let testsPassing = false;
+  let testOutput = '';
+  for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
+    log.info(`${label} test attempt ${attempt} of ${config.maxTestRetries}`);
+    const testResult = runTests(worktreePath, config, logFile, { forceFull: true });
+    testOutput = testResult.output;
+    writeTraceToSubdir(session.name, 'tests', `${tracePrefix}-${attempt}.log`, testOutput);
+
+    if (testResult.passed) {
+      testsPassing = true;
+      log.success(`All tests passed on attempt ${attempt}`);
+      break;
+    }
+
+    if (attempt < config.maxTestRetries) {
+      log.warn(`Tests failed on attempt ${attempt}, invoking agent to fix...`);
+      const issueList = issues.map((issue) => `#${issue.number} (${issue.title})`).join(', ');
+      const fixPrompt = `The full test suite is failing after implementing these session issues: ${issueList} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix ONLY code related to the issues listed above — do NOT modify test infrastructure, build scripts, or unrelated files\n3. Run the full test suite again to verify\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed`;
+
+      writeTraceToSubdir(session.name, 'prompts', `${tracePrefix}-fix-${attempt}.md`, fixPrompt);
+      try {
+        const fixResult = await spawnAgent({
+          ...agentForStep(config, 'test_fix'),
+          prompt: fixPrompt,
+          cwd: worktreePath,
+          logFile: join(session.logsDir, `${tracePrefix}-fix-${attempt}.log`),
+          verbose: config.verbose,
+          timeout: config.agentTimeout * 1000,
+        });
+        writeTraceToSubdir(session.name, 'outputs', `${tracePrefix}-fix-${attempt}.log`, fixResult.output);
+      } catch (err) {
+        log.warn(`Full-suite fix agent failed: ${err instanceof Error ? err.message : err}`);
+      }
+      autoCommitDirtyWorktree(worktreePath, `fix: resolve full-suite test failures (attempt ${attempt})`);
+    } else {
+      log.warn(`Tests still failing after ${config.maxTestRetries} attempts`);
+      testOutput = `TESTS FAILED after ${config.maxTestRetries} fix attempts. Latest output:\n${testOutput}`;
+    }
+  }
+
+  return { testsPassing, testOutput };
+}
+
 function buildQuickPRBody(
   issues: Array<{ number: number; title: string }>,
   testsPassing: boolean,
@@ -3671,50 +3892,14 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
     return { testsPassing: true, testOutput: '', merged: false };
   }
 
-  log.step('Quick finalize: running deferred test pass');
-  recordSessionStage(session, 'test');
-
-  // Safety net: commit anything an implement agent left uncommitted.
-  autoCommitDirtyWorktree(worktreePath, 'chore: commit remaining quick-mode changes');
-
-  let testsPassing = false;
-  let testOutput = '';
-  for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
-    log.info(`Quick test attempt ${attempt} of ${config.maxTestRetries}`);
-    const testResult = runTests(worktreePath, config, logFile);
-    testOutput = testResult.output;
-
-    if (testResult.passed) {
-      testsPassing = true;
-      log.success(`All tests passed on attempt ${attempt}`);
-      break;
-    }
-
-    if (attempt < config.maxTestRetries) {
-      log.warn(`Tests failed on attempt ${attempt}, invoking agent to fix...`);
-      const issueList = issues.map((issue) => `#${issue.number} (${issue.title})`).join(', ');
-      const fixPrompt = `Tests are failing after implementing these issues in quick mode: ${issueList} (attempt ${attempt} of ${config.maxTestRetries}). Fix the failing tests.\n\nTest output:\n${testOutput}\n\nInstructions:\n1. Read the failing test output carefully and identify the ROOT CAUSE\n2. Fix ONLY code related to the issues listed above — do NOT modify test infrastructure, build scripts, or unrelated files\n3. Run the tests again to verify\n4. Commit your fixes with a DESCRIPTIVE message that explains WHAT you fixed and WHY it failed`;
-
-      writeTraceToSubdir(session.name, 'prompts', `quick-fix-${attempt}.md`, fixPrompt);
-      try {
-        const fixResult = await spawnAgent({
-          ...agentForStep(config, 'test_fix'),
-          prompt: fixPrompt,
-          cwd: worktreePath,
-          logFile: join(session.logsDir, `quick-fix-${attempt}.log`),
-          verbose: config.verbose,
-          timeout: config.agentTimeout * 1000,
-        });
-        writeTraceToSubdir(session.name, 'outputs', `quick-fix-${attempt}.log`, fixResult.output);
-      } catch (err) {
-        log.warn(`Quick fix agent failed: ${err instanceof Error ? err.message : err}`);
-      }
-      autoCommitDirtyWorktree(worktreePath, `fix: resolve quick-mode test failures (attempt ${attempt})`);
-    } else {
-      log.warn(`Tests still failing after ${config.maxTestRetries} attempts`);
-      testOutput = `TESTS FAILED after ${config.maxTestRetries} fix attempts. Latest output:\n${testOutput}`;
-    }
-  }
+  const { testsPassing, testOutput } = await runFullSuiteGate({
+    issues,
+    config,
+    session,
+    worktreePath,
+    logFile,
+    label: 'Quick finalize',
+  });
 
   // Single PR for all quick-mode issues, targeting the session branch when
   // auto-merge is on (the session PR to base stays the reviewable artifact).
@@ -3727,6 +3912,32 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
     : `feat: quick session (${issueNums})`;
 
   let prUrl: string | undefined;
+
+  // Deferred Step 10: per-issue Step 10 in quick mode posts only an honest
+  // "deferred" note — the in-review transition happens here, gated on what
+  // actually shipped. On failure the issues are labeled failed instead of
+  // silently keeping stale claims.
+  const updateIssueOutcomes = (shipped: boolean): void => {
+    for (const issue of issues) {
+      try {
+        if (shipped) {
+          updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'In Review');
+          labelIssue(config.repo, issue.number, 'in-review', 'in-progress');
+          commentIssue(config.repo, issue.number,
+            `Quick-mode finalize pass complete.\n\n**PR**: ${prUrl}\n**Tests**: PASSING\n**Review**: covered by the post-session holistic review on the session PR.`,
+          );
+        } else {
+          labelIssue(config.repo, issue.number, 'failed', 'in-progress');
+          commentIssue(config.repo, issue.number,
+            `Quick-mode finalize pass did not ship this issue.\n\n**Tests**: ${testsPassing ? 'PASSING' : 'FAILING'}\n**PR**: ${prUrl ?? 'not created'} (unmerged)\n\nThe implementation commits are preserved on \`${worktreeBranch}\` — recover with \`alpha-loop resume\` or re-run the epic.`,
+          );
+        }
+      } catch (err) {
+        log.warn(`Quick finalize: could not update issue #${issue.number} status: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  };
+
   try {
     prUrl = createPR({
       repo: config.repo,
@@ -3741,6 +3952,7 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
   } catch (err) {
     log.error(`Failed to create quick-mode PR: ${err instanceof Error ? err.message : err}`);
     log.warn(`Worktree preserved at ${worktreePath} — branch ${worktreeBranch} holds all quick-mode commits`);
+    updateIssueOutcomes(false);
     return { testsPassing, testOutput, merged: false };
   }
 
@@ -3751,33 +3963,38 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
     try {
       mergePR(config.repo, worktreeBranch);
       merged = true;
-      // Update local session branch to include the merged quick work.
-      exec('git fetch origin', { cwd: projectDir });
-      const currentBranch = exec('git rev-parse --abbrev-ref HEAD', { cwd: projectDir }).stdout;
-      if (currentBranch !== session.branch) {
-        exec(`git checkout "${session.branch}"`, { cwd: projectDir });
-      }
-      exec(`git pull origin "${session.branch}"`, { cwd: projectDir });
+      await refreshSessionWorktree(session, config, projectDir);
     } catch (err) {
       log.warn(`Quick PR auto-merge failed: ${err instanceof Error ? err.message : err}`);
     }
   }
+  // With auto-merge off, a passing PR to base IS the shipped state — the
+  // human merges it. With auto-merge on, only an actual merge counts.
+  const shipped = merged || (!config.autoMerge && testsPassing && prUrl !== undefined);
+  updateIssueOutcomes(shipped);
 
-  // The orchestrator owns the shared worktree; clean it up now that the
-  // deferred pass is complete. Preserve it when the work didn't merge.
-  const cleanup = await cleanupWorktree({
-    issueNum: issues[0]?.number ?? 0,
-    projectDir,
-    autoCleanup: config.autoCleanup,
-    preserveIfCommits: !merged,
-    worktreePath,
-  });
-  recordSessionCleanup(session, {
-    status: cleanup.status,
-    worktreePath: cleanup.path,
-    reason: cleanup.reason,
-    at: new Date().toISOString(),
-  });
+  // Post-merge bookkeeping must never throw out of this function: the caller
+  // treats a throw as "nothing shipped" and demotes results — wrong once the
+  // merge has landed. Contain cleanup failures to a warning.
+  try {
+    // The orchestrator owns the shared worktree; clean it up now that the
+    // deferred pass is complete. Preserve it when the work didn't merge.
+    const cleanup = await cleanupWorktree({
+      issueNum: issues[0]?.number ?? 0,
+      projectDir,
+      autoCleanup: config.autoCleanup,
+      preserveIfCommits: !merged,
+      worktreePath,
+    });
+    recordSessionCleanup(session, {
+      status: cleanup.status,
+      worktreePath: cleanup.path,
+      reason: cleanup.reason,
+      at: new Date().toISOString(),
+    });
+  } catch (err) {
+    log.warn(`Quick finalize: post-merge cleanup failed (work is shipped and safe): ${err instanceof Error ? err.message : err}`);
+  }
 
   return { testsPassing, testOutput, prUrl, merged };
 }
