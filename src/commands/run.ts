@@ -203,6 +203,7 @@ type CommandExitErrorCode =
   | 'invalid-queue-worker-context'
   | 'epic-queue-validation-failed'
   | 'epic-queue-stopped'
+  | 'project-context-refresh-required'
   | 'session-interrupt-cleanup-failed'
   | 'session-locked';
 
@@ -991,41 +992,52 @@ function syncProjectAgentAssets(config: Config): void {
   }
 }
 
-async function refreshProjectContextAndCommit(config: Config): Promise<void> {
-  if (contextNeedsRefresh()) {
-    if (config.dryRun) {
-      log.dry('Would refresh project context and instructions');
-    } else {
-      log.info('Project context is stale or missing. Generating...');
-      const { scanCommand } = await import('./scan.js');
-      scanCommand();
-    }
-  } else {
+async function refreshProjectContext(config: Config): Promise<void> {
+  if (!contextNeedsRefresh()) {
     log.info('Project context is fresh');
+    return;
   }
 
-  if (config.dryRun) return;
+  if (config.dryRun) {
+    log.dry('Would refresh project context and instructions');
+    return;
+  }
+
+  log.info('Project context is stale or missing. Generating...');
+  const { scanCommand } = await import('./scan.js');
+  scanCommand();
 
   const statusResult = exec('git status --porcelain .alpha-loop/ AGENTS.md CLAUDE.md');
-  if (!statusResult.stdout.trim()) return;
-
-  const validation = validateGeneratedMarkdownForCommit(process.cwd(), statusResult.stdout);
-  if (!validation.valid) {
-    log.warn('Skipping generated context/instructions auto-commit because validation failed:');
-    for (const error of validation.errors) {
-      log.warn(`  ${error}`);
+  if (!statusResult.stdout.trim()) {
+    if (contextNeedsRefresh()) {
+      throw new CommandExitError({
+        code: 'project-context-refresh-required',
+        message: 'Project context refresh did not produce a fresh context file. ' +
+          'Run "alpha-loop scan", review the output, and commit it through a pull request before retrying.',
+      });
     }
     return;
   }
 
-  log.info('New files generated — committing so worktrees include them...');
-  exec('git add .alpha-loop/ AGENTS.md CLAUDE.md 2>/dev/null || true');
-  const diffCheck = exec('git diff --cached --quiet');
-  if (diffCheck.exitCode !== 0) {
-    exec('git commit -m "chore: add project vision and context for alpha-loop"');
-    exec(`git push origin "${config.baseBranch}"`);
-    log.success('Vision and context committed to ' + config.baseBranch);
+  const validation = validateGeneratedMarkdownForCommit(process.cwd(), statusResult.stdout);
+  if (!validation.valid) {
+    log.warn('Generated context/instructions failed validation:');
+    for (const error of validation.errors) {
+      log.warn(`  ${error}`);
+    }
+    throw new CommandExitError({
+      code: 'project-context-refresh-required',
+      message: 'Project context refresh failed validation. Fix the generated files on an issue branch ' +
+        'and commit them through a pull request before retrying.',
+    });
   }
+
+  throw new CommandExitError({
+    code: 'project-context-refresh-required',
+    message: 'Project context was refreshed and left uncommitted. Review the generated files, ' +
+      'commit them on an issue branch, and merge them through a pull request before retrying. ' +
+      `Alpha Loop will not push directly to ${config.baseBranch}.`,
+  });
 }
 
 async function executeSessionRun(
@@ -1259,9 +1271,10 @@ async function executeSessionRun(
     }
   }
 
-  // If vision or context were created/updated, commit them so worktrees get them.
+  // Refresh project metadata before queue discovery. If generated content changes,
+  // stop so it can be reviewed and merged through a normal branch/PR first.
   if (!isParallelQueueWorker) {
-    await refreshProjectContextAndCommit(config);
+    await refreshProjectContext(config);
   }
 
   // --- Fetch issue queue ---
@@ -2961,7 +2974,7 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
     // Shared generated assets and context live in the coordinator checkout.
     // Prepare them once before children begin worktree-only execution.
     syncProjectAgentAssets(config);
-    await refreshProjectContextAndCommit(config);
+    await refreshProjectContext(config);
   }
 
   const scheduledWaves = parallelLimit !== undefined
