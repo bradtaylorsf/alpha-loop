@@ -687,12 +687,15 @@ describe('spawnAgent default local env injection', () => {
 });
 
 describe('codexSandboxArgs', () => {
-  test('grants the parent .git dir as a writable root in linked worktrees', () => {
-    mockShellExec.mockReturnValue({
-      stdout: '/repo/.git\n',
-      stderr: '',
-      exitCode: 0,
+  const gitMock = (commonDir: string, toplevel: string) =>
+    mockShellExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git rev-parse --git-common-dir') return { stdout: `${commonDir}\n`, stderr: '', exitCode: 0 };
+      if (cmd === 'git rev-parse --show-toplevel') return { stdout: `${toplevel}\n`, stderr: '', exitCode: 0 };
+      return { stdout: '', stderr: '', exitCode: 1 };
     });
+
+  test('grants the parent .git dir as a writable root in linked worktrees', () => {
+    gitMock('/repo/.git', '/repo/.worktrees/issue-1');
 
     expect(codexSandboxArgs('/repo/.worktrees/issue-1')).toEqual([
       '-c',
@@ -701,10 +704,18 @@ describe('codexSandboxArgs', () => {
     expect(mockShellExec).toHaveBeenCalledWith('git rev-parse --git-common-dir', { cwd: '/repo/.worktrees/issue-1' });
   });
 
-  test('returns no args for the primary checkout (.git already inside cwd)', () => {
-    mockShellExec.mockReturnValue({ stdout: '.git\n', stderr: '', exitCode: 0 });
+  test('returns no args for the primary checkout (.git already inside the toplevel)', () => {
+    gitMock('/repo/.git', '/repo');
 
     expect(codexSandboxArgs('/repo')).toEqual([]);
+  });
+
+  test('returns no args from a subdirectory of the primary checkout', () => {
+    // From /repo/src, the common dir is outside cwd but inside the toplevel —
+    // no grant is needed.
+    gitMock('/repo/.git', '/repo');
+
+    expect(codexSandboxArgs('/repo/src')).toEqual([]);
   });
 
   test('returns no args outside a git repo', () => {
@@ -714,7 +725,7 @@ describe('codexSandboxArgs', () => {
   });
 
   test('codex agent args include the writable-roots grant when in a linked worktree', () => {
-    mockShellExec.mockReturnValue({ stdout: '/repo/.git\n', stderr: '', exitCode: 0 });
+    gitMock('/repo/.git', '/repo/.worktrees/issue-9');
 
     const result = buildAgentArgs({
       agent: 'codex',

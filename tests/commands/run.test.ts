@@ -1795,7 +1795,7 @@ Coordinate hosted work.
   });
 
   test('quick mode records a failure and keeps the session failed when the finalize pass fails tests', async () => {
-    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true }) as any);
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true, autoMerge: true }) as any);
     mockPollIssues.mockReturnValue([
       { number: 42, title: 'First issue', body: 'Body A', labels: ['ready'] },
     ]);
@@ -1821,6 +1821,66 @@ Coordinate hosted work.
 
     expect(mockFinalizeQuickRun).toHaveBeenCalledTimes(1);
     expect(mockTransitionSessionStatus).toHaveBeenCalledWith(expect.any(Object), 'failed', 'failed', expect.any(Object));
+
+    // Results handed to finalizeSession must be demoted — a failed finalize
+    // pass shipped nothing, so nothing may claim success (or "Closes #N").
+    const finalizedSession = mockFinalizeSession.mock.calls[0][0] as any;
+    const demoted = finalizedSession.results.find((r: any) => r.issueNum === 42);
+    expect(demoted.status).toBe('failure');
+    expect(demoted.testsPassing).toBe(false);
+    expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      issueNum: 42,
+      status: 'failure',
+    }));
+  });
+
+  test('quick mode un-flips the epic checklist when the finalize pass fails', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true, autoMerge: true }) as any);
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 900) {
+        return { number: 900, title: 'Quick epic', body: '- [ ] #901 Child issue', labels: ['epic'], state: 'OPEN' } as any;
+      }
+      if (issueNum === 901) {
+        return { number: 901, title: 'Child issue', body: 'Body', labels: ['ready'], state: 'OPEN' } as any;
+      }
+      return null;
+    });
+    mockSetupWorktree.mockResolvedValue({ path: '/tmp/quick-shared', branch: 'agent/issue-901', resumed: false });
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 901,
+      title: 'Child issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: false,
+      verifySkipped: true,
+      duration: 30,
+      filesChanged: 2,
+    });
+    mockFinalizeQuickRun.mockResolvedValue({
+      testsPassing: false,
+      testOutput: 'TESTS FAILED',
+      prUrl: 'https://github.com/owner/repo/pull/77',
+      merged: false,
+    });
+
+    await runCommand({ epic: 900 });
+
+    // Flipped on per-issue success, un-flipped when the deferred pass failed —
+    // the epic must never claim work whose code never reached the branch.
+    expect(mockUpdateEpicChecklist.mock.calls).toEqual([
+      ['owner/repo', 900, 901, true],
+      ['owner/repo', 900, 901, false],
+    ]);
+  });
+
+  test('quick mode without auto_merge is rejected before any session is created', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true, autoMerge: false }) as any);
+
+    await runCommand({});
+
+    expect(process.exitCode).toBe(1);
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
   });
 
   test('continues other eligible work when one issue is waiting for human feedback', async () => {

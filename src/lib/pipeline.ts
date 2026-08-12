@@ -2,7 +2,7 @@
  * Process Issue Pipeline — the 12-step orchestration for a single issue.
  */
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import { log } from './logger.js';
 import { exec, shellQuote } from './shell.js';
 import { spawnAgent, buildEndpointEnv } from './agent.js';
@@ -82,6 +82,7 @@ import {
   writeConfigSnapshot,
   writeScores,
   writeCosts,
+  persistStepCosts,
   computeScores,
   computeCosts,
   runDir,
@@ -1013,13 +1014,17 @@ function parseGitStatusPaths(stdout: string): string[] {
 function autoCommitDirtyWorktree(worktreePath: string, commitMessage: string): string[] {
   const statusResult = exec('git status --porcelain', { cwd: worktreePath });
   // The pause-request artifact is control-plane data, never work product — it
-  // must not land in the branch or it would falsely pause later issues.
+  // must not land in the branch or it would falsely pause later issues. Match
+  // by basename so nested copies are excluded too.
   const paths = parseGitStatusPaths(statusResult.stdout)
-    .filter((path) => path !== PAUSE_REQUEST_FILE);
+    .filter((path) => basename(path) !== PAUSE_REQUEST_FILE);
   if (paths.length === 0) return [];
 
   log.warn(`Agent did not commit; auto-committing ${paths.length} files: ${paths.join(', ')}`);
-  const addResult = exec(`git add -A -- ${shellQuote(`:(exclude)${PAUSE_REQUEST_FILE}`)} .`, { cwd: worktreePath });
+  const addResult = exec(
+    `git add -A -- ${shellQuote(`:(exclude)${PAUSE_REQUEST_FILE}`)} ${shellQuote(`:(exclude,glob)**/${PAUSE_REQUEST_FILE}`)} .`,
+    { cwd: worktreePath },
+  );
   if (addResult.exitCode !== 0) {
     log.warn(`Could not stage fallback auto-commit paths: ${addResult.stderr || addResult.stdout}`);
     return [];
@@ -1733,7 +1738,11 @@ export async function processIssue(
         worktreePath,
         `feat: implement issue #${issueNum} - ${title}`,
       );
-    } else {
+    } else if (!isTransientError(implResult.output)) {
+      // Permanent failures keep a wip commit so the worktree is preserved for
+      // recovery. Transient failures (rate limits) are re-queued for a fresh
+      // retry — a wip commit here would pin the worktree via preserveIfCommits
+      // and carry half-finished work onto the branch the retry reuses.
       autoCommitDirtyWorktree(
         worktreePath,
         `wip: partial implementation of #${issueNum} (agent timed out or failed)`,
@@ -2459,7 +2468,7 @@ export async function processIssue(
     sessionName: session.name,
     onAgentResult: (result: AgentResult): void => {
       stepCosts.push(buildStepCost('learn', issueNum, result, config));
-      writeCosts(session.name, computeCosts(stepCosts));
+      persistStepCosts(session.name, `issue-${issueNum}`, stepCosts);
       recordStageTelemetry(session, issueNum, 'learn', result, config, {
         profile: selectRoutingProfile(config, issueNum),
       });
@@ -2580,7 +2589,10 @@ export async function processIssue(
   }
 
   // --- Step 8 (deferred): Extract learnings on the session checkout ---
-  if (deferLearning && prUrl && backgroundWorktreePath) {
+  // Not gated on prUrl: the artifact lands in the session worktree and is
+  // committed by finalizeSession, so it reaches the session PR even when this
+  // issue's own PR did not materialize.
+  if (deferLearning && backgroundWorktreePath) {
     currentStep = 'learn';
     recordSessionStage(session, 'learn');
     log.step('Step 8: Extracting learnings in the background');
@@ -2630,7 +2642,7 @@ export async function processIssue(
 
         traceOutput(session, issueNum, 'assumptions', assumptionsResult.output);
         stepCosts.push(buildStepCost('assumptions', issueNum, assumptionsResult, config));
-        writeCosts(session.name, computeCosts(stepCosts));
+        persistStepCosts(session.name, `issue-${issueNum}`, stepCosts);
         recordStageTelemetry(session, issueNum, 'assumptions', assumptionsResult, config, {
           profile: selectRoutingProfile(config, issueNum),
         });
@@ -2700,7 +2712,7 @@ export async function processIssue(
         stepsCompleted,
       };
       writeScores(session.name, computeScores([issueScoreResult]));
-      writeCosts(session.name, computeCosts(stepCosts));
+      persistStepCosts(session.name, `issue-${issueNum}`, stepCosts);
     } catch (err) {
       log.warn(`Failed to write traces for #${issueNum}: ${err}`);
     }
@@ -2710,15 +2722,22 @@ export async function processIssue(
   currentStep = 'status';
   recordSessionStage(session, 'status');
   log.step('Step 10: Updating issue status');
-  if (!config.dryRun) {
+  if (config.dryRun) {
+    log.dry('Would update issue status to in-review');
+  } else if (quickWorktree) {
+    // Quick mode: nothing has been tested, reviewed, or shipped yet. Say
+    // exactly that, and leave the in-review transition to the end-of-run
+    // finalize pass, which knows the real outcome.
+    commentIssue(config.repo, issueNum,
+      `Quick mode: implementation committed on the shared session branch.\n\nTests, review, and the PR are deferred to the end-of-run pass — this issue's status will be updated when that pass completes.\n\n---\n*Processed by alpha-loop in ${duration}s*`,
+    );
+  } else {
     const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
     updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In Review');
     labelIssue(config.repo, issueNum, 'in-review', 'in-progress');
     commentIssue(config.repo, issueNum,
       `Automated implementation complete.\n\n**PR**: ${prUrl ?? 'N/A'}\n**Tests**: ${testsStatus}\n**Review**: Attached to PR body.\n\n---\n*Processed by alpha-loop in ${duration}s*`,
     );
-  } else {
-    log.dry('Would update issue status to in-review');
   }
 
   const shouldRequestQa = !quickWorktree && !config.skipQa && (plan.qa?.needed || Boolean(webAppProfile));
@@ -3656,7 +3675,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           stepsCompleted,
         }));
       writeScores(session.name, computeScores(scoreResults));
-      writeCosts(session.name, computeCosts(stepCosts));
+      persistStepCosts(session.name, `batch-${issueNums.join('-')}`, stepCosts);
 
       // Config snapshot
       try {
@@ -3892,6 +3911,32 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
     : `feat: quick session (${issueNums})`;
 
   let prUrl: string | undefined;
+
+  // Deferred Step 10: per-issue Step 10 in quick mode posts only an honest
+  // "deferred" note — the in-review transition happens here, gated on what
+  // actually shipped. On failure the issues are labeled failed instead of
+  // silently keeping stale claims.
+  const updateIssueOutcomes = (shipped: boolean): void => {
+    for (const issue of issues) {
+      try {
+        if (shipped) {
+          updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'In Review');
+          labelIssue(config.repo, issue.number, 'in-review', 'in-progress');
+          commentIssue(config.repo, issue.number,
+            `Quick-mode finalize pass complete.\n\n**PR**: ${prUrl}\n**Tests**: PASSING\n**Review**: covered by the post-session holistic review on the session PR.`,
+          );
+        } else {
+          labelIssue(config.repo, issue.number, 'failed', 'in-progress');
+          commentIssue(config.repo, issue.number,
+            `Quick-mode finalize pass did not ship this issue.\n\n**Tests**: ${testsPassing ? 'PASSING' : 'FAILING'}\n**PR**: ${prUrl ?? 'not created'} (unmerged)\n\nThe implementation commits are preserved on \`${worktreeBranch}\` — recover with \`alpha-loop resume\` or re-run the epic.`,
+          );
+        }
+      } catch (err) {
+        log.warn(`Quick finalize: could not update issue #${issue.number} status: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  };
+
   try {
     prUrl = createPR({
       repo: config.repo,
@@ -3906,6 +3951,7 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
   } catch (err) {
     log.error(`Failed to create quick-mode PR: ${err instanceof Error ? err.message : err}`);
     log.warn(`Worktree preserved at ${worktreePath} — branch ${worktreeBranch} holds all quick-mode commits`);
+    updateIssueOutcomes(false);
     return { testsPassing, testOutput, merged: false };
   }
 
@@ -3921,6 +3967,10 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
       log.warn(`Quick PR auto-merge failed: ${err instanceof Error ? err.message : err}`);
     }
   }
+  // With auto-merge off, a passing PR to base IS the shipped state — the
+  // human merges it. With auto-merge on, only an actual merge counts.
+  const shipped = merged || (!config.autoMerge && testsPassing && prUrl !== undefined);
+  updateIssueOutcomes(shipped);
 
   // The orchestrator owns the shared worktree; clean it up now that the
   // deferred pass is complete. Preserve it when the work didn't merge.

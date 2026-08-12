@@ -193,6 +193,7 @@ type SessionExecutionResult = {
 type CommandExitErrorCode =
   | 'missing-repository'
   | 'missing-prerequisite'
+  | 'quick-requires-auto-merge'
   | 'ambiguous-milestone-epics'
   | 'invalid-verify-only'
   | 'incompatible-issue-options'
@@ -1615,6 +1616,31 @@ async function executeSessionRun(
 
       // --- Quick mode finalize: deferred tests + single PR for all issues ---
       if (quickWorktree && quickProcessed.length > 0) {
+        // Per-issue quick results report success on plan+build alone. If the
+        // deferred pass fails, those results and the epic checklist would
+        // claim shipped work whose code never reached the session branch —
+        // and the session PR would say "Closes #N" for unmerged issues.
+        // Demote everything this pass failed to ship.
+        const demoteQuickResults = (): void => {
+          for (const result of session.results) {
+            if (!quickProcessed.some((q) => q.number === result.issueNum)) continue;
+            if (result.status !== 'success' || isRecoveredRunResult(result)) continue;
+            result.status = 'failure';
+            result.testsPassing = false;
+            result.failureReason = 'permanent';
+            if (!config.dryRun) saveResult(session, result);
+          }
+          if (activeEpic !== undefined && !config.dryRun) {
+            for (const q of quickProcessed) {
+              try {
+                updateEpicChecklist(config.repo, activeEpic, q.number, false);
+                markEpicChecklistItem(epicChecklist, epicPromptContext, q.number, false);
+              } catch (err) {
+                log.warn(`Could not un-flip epic #${activeEpic} checklist for #${q.number}: ${err instanceof Error ? err.message : err}`);
+              }
+            }
+          }
+        };
         try {
           const quickResult = await finalizeQuickRun({
             issues: quickProcessed,
@@ -1637,26 +1663,33 @@ async function executeSessionRun(
           if (!quickResult.testsPassing) {
             const message = `Quick mode: deferred test pass failed after ${config.maxTestRetries} attempts — PR ${quickResult.prUrl ?? '(not created)'} left unmerged`;
             failures.push({ code: 'quick-finalize-failed', message });
+            demoteQuickResults();
             epicAbort = true; // skip epic verification on a known-broken state
           } else if (config.autoMerge && !quickResult.merged) {
             const message = `Quick mode: PR ${quickResult.prUrl ?? '(not created)'} could not be merged into ${session.branch}`;
             failures.push({ code: 'quick-finalize-failed', message });
+            demoteQuickResults();
             epicAbort = true;
           }
         } catch (err) {
           const message = `Quick mode finalize failed: ${err instanceof Error ? err.message : err}`;
           log.error(message);
           failures.push({ code: 'quick-finalize-failed', message });
+          demoteQuickResults();
           epicAbort = true;
         }
       } else if (quickWorktree && quickProcessed.length === 0 && !config.dryRun) {
         // Nothing succeeded — release the shared worktree (preserved if it
-        // holds commits, so partial work stays recoverable).
+        // holds commits, so partial work stays recoverable). A pause during
+        // plan leaves no commits, so also honor the session's waiting status
+        // — the pause path deliberately preserved this worktree.
+        const waitingResult = session.results.find((result) => result.status === 'waiting' && !isRecoveredRunResult(result));
         const cleanup = await cleanupWorktree({
           issueNum: issuesToProcess[0]?.number ?? 0,
           projectDir: process.cwd(),
           autoCleanup: config.autoCleanup,
           preserveIfCommits: true,
+          sessionStatus: waitingResult?.waitingStatus,
           worktreePath: quickWorktree.path,
         });
         recordSessionCleanup(session, {
@@ -3090,6 +3123,18 @@ export async function runCommand(options: RunOptions): Promise<void> {
       throw new CommandExitError({
         code: 'invalid-parallel',
         message: '--parallel can only be used with --epics',
+        exitCode: 1,
+      });
+    }
+
+    // Quick mode's deferred pass merges one PR into the session branch, and
+    // learnings ride the session worktree — both require auto-merge. Without
+    // it a quick run would complete with zero learning artifacts (extraction
+    // has no session worktree to land in) and no mergeable output.
+    if (config.quick && !config.autoMerge) {
+      throw new CommandExitError({
+        code: 'quick-requires-auto-merge',
+        message: 'quick mode requires auto_merge: true — the deferred test/PR pass ships through the session branch',
         exitCode: 1,
       });
     }

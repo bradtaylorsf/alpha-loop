@@ -85,6 +85,7 @@ jest.mock('../../src/lib/traces', () => ({
   writeConfigSnapshot: jest.fn(),
   writeScores: jest.fn(),
   writeCosts: jest.fn(),
+  persistStepCosts: jest.fn(),
   computeScores: jest.fn().mockReturnValue({}),
   computeCosts: jest.fn().mockReturnValue({}),
   runDir: jest.fn().mockReturnValue('/tmp/traces/run'),
@@ -157,7 +158,7 @@ import {
   transitionHumanFeedbackSessionStatus,
 } from '../../src/lib/session';
 import { buildIssuePlanPrompt, buildImplementPrompt, buildReviewPrompt, buildBatchPlanPrompt, buildBatchImplementPrompt, buildBatchReviewPrompt } from '../../src/lib/prompts';
-import { computeCosts, writeCosts, writeTraceToSubdir } from '../../src/lib/traces';
+import { computeCosts, persistStepCosts, writeCosts, writeTraceToSubdir } from '../../src/lib/traces';
 import { buildStageTelemetry, writeStageTelemetry } from '../../src/lib/telemetry';
 import { emitLifecycleEvent } from '../../src/lib/events';
 import type { Config } from '../../src/lib/config';
@@ -198,6 +199,7 @@ const mockBuildBatchReviewPrompt = buildBatchReviewPrompt as jest.MockedFunction
 const mockWriteTraceToSubdir = writeTraceToSubdir as jest.MockedFunction<typeof writeTraceToSubdir>;
 const mockComputeCosts = computeCosts as jest.MockedFunction<typeof computeCosts>;
 const mockWriteCosts = writeCosts as jest.MockedFunction<typeof writeCosts>;
+const mockPersistStepCosts = persistStepCosts as jest.MockedFunction<typeof persistStepCosts>;
 const mockBuildStageTelemetry = buildStageTelemetry as jest.MockedFunction<typeof buildStageTelemetry>;
 const mockWriteStageTelemetry = writeStageTelemetry as jest.MockedFunction<typeof writeStageTelemetry>;
 const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
@@ -392,7 +394,7 @@ describe('processIssue', () => {
     expect(mockLog.warn).toHaveBeenCalledWith(
       'Agent did not commit; auto-committing 2 files: src/lib/pipeline.ts, tests/lib/pipeline.test.ts',
     );
-    expect(mockExec).toHaveBeenCalledWith("git add -A -- ':(exclude)alpha-loop-pause-request.json' .", { cwd: '/tmp/worktree' });
+    expect(mockExec).toHaveBeenCalledWith("git add -A -- ':(exclude)alpha-loop-pause-request.json' ':(exclude,glob)**/alpha-loop-pause-request.json' .", { cwd: '/tmp/worktree' });
     expect(mockExec).toHaveBeenCalledWith(
       "git commit -m 'feat: implement issue #42 - Test issue'",
       { cwd: '/tmp/worktree' },
@@ -888,11 +890,10 @@ describe('processIssue', () => {
       42,
       expect.stringContaining('Assumed the existing API contract remains stable.'),
     );
-    expect(mockComputeCosts).toHaveBeenLastCalledWith(expect.arrayContaining([
+    expect(mockPersistStepCosts).toHaveBeenLastCalledWith('session/20260330-143000', 'issue-42', expect.arrayContaining([
       expect.objectContaining({ step: 'learn', issueNum: 42 }),
       expect.objectContaining({ step: 'assumptions', issueNum: 42 }),
     ]));
-    expect(mockWriteCosts).toHaveBeenLastCalledWith('session/20260330-143000', {});
     expect(mockBuildStageTelemetry).toHaveBeenCalledWith(
       expect.objectContaining({ output: 'Learning output' }),
       'learn',
@@ -2143,7 +2144,7 @@ describe('auto-commit before pause (sandboxed agents that cannot commit)', () =>
     // pause-request artifact itself is excluded from the commit.
     expect(result.status).toBe('waiting');
     expect(mockExec).toHaveBeenCalledWith(
-      "git add -A -- ':(exclude)alpha-loop-pause-request.json' .",
+      "git add -A -- ':(exclude)alpha-loop-pause-request.json' ':(exclude,glob)**/alpha-loop-pause-request.json' .",
       { cwd: '/tmp/worktree' },
     );
     expect(mockExec).toHaveBeenCalledWith(
@@ -2167,6 +2168,115 @@ describe('auto-commit before pause (sandboxed agents that cannot commit)', () =>
     expect(mockExec).not.toHaveBeenCalledWith(
       expect.stringContaining('git commit -m \'feat: implement issue #42'),
       expect.anything(),
+    );
+  });
+});
+
+describe('quick mode GitHub side effects (deferred honestly)', () => {
+  const quickWorktree = { path: '/tmp/quick-worktree', branch: 'agent/issue-100' };
+
+  test('never claims tests passed or moves the issue to in-review before the finalize pass', async () => {
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession(), {
+      quickWorktree,
+    });
+
+    expect(result.status).toBe('success');
+    expect(mockRunTests).not.toHaveBeenCalled();
+
+    // Step 10 posts only the honest deferred note — no "Tests: PASSING",
+    // no in-review label, no In Review project status.
+    expect(commentIssue).toHaveBeenCalledWith(
+      'owner/repo', 42, expect.stringContaining('deferred to the end-of-run pass'),
+    );
+    expect(commentIssue).not.toHaveBeenCalledWith(
+      'owner/repo', 42, expect.stringContaining('**Tests**: PASSING'),
+    );
+    expect(labelIssue).not.toHaveBeenCalledWith('owner/repo', 42, 'in-review', expect.anything());
+    expect(updateProjectStatus).not.toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'In Review');
+  });
+
+  test('finalizeQuickRun moves issues to in-review only after a real merge', async () => {
+    const issues = [{ number: 42, title: 'First issue' }];
+    await finalizeQuickRun({
+      issues,
+      config: makeConfig({ autoMerge: true }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+    });
+
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'in-review', 'in-progress');
+    expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'In Review');
+    expect(commentIssue).toHaveBeenCalledWith(
+      'owner/repo', 42, expect.stringContaining('**Tests**: PASSING'),
+    );
+  });
+
+  test('finalizeQuickRun labels issues failed when the deferred tests never pass', async () => {
+    mockRunTests.mockReturnValue({ passed: false, output: 'still failing' });
+    const issues = [{ number: 42, title: 'First issue' }];
+    await finalizeQuickRun({
+      issues,
+      config: makeConfig({ autoMerge: true }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+    });
+
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'failed', 'in-progress');
+    expect(labelIssue).not.toHaveBeenCalledWith('owner/repo', 42, 'in-review', expect.anything());
+    expect(commentIssue).toHaveBeenCalledWith(
+      'owner/repo', 42, expect.stringContaining('did not ship this issue'),
+    );
+  });
+});
+
+describe('transient-failure worktree disposition', () => {
+  test('a rate-limited implement agent requeues without a wip commit so the worktree is discarded', async () => {
+    mockSpawnAgent
+      .mockResolvedValueOnce({ exitCode: 0, output: 'plan ok', duration: 100 })
+      .mockResolvedValueOnce({ exitCode: 1, output: 'You have hit your usage limit', duration: 100 });
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: ' M src/foo.ts\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('failure');
+    expect(result.failureReason).toBe('transient');
+    // No wip commit: the retry starts fresh, and preserveIfCommits must not
+    // pin the worktree (pre-#378 behavior, deliberately restored).
+    expect(mockExec).not.toHaveBeenCalledWith(
+      expect.stringContaining('wip: partial implementation'),
+      expect.anything(),
+    );
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      issueNum: 42,
+      preserveIfCommits: true,
+    }));
+  });
+
+  test('a permanently failed implement agent still gets a wip commit for recovery', async () => {
+    mockSpawnAgent
+      .mockResolvedValueOnce({ exitCode: 0, output: 'plan ok', duration: 100 })
+      .mockResolvedValueOnce({ exitCode: 1, output: 'segfault, no retry hints here', duration: 100 });
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: ' M src/foo.ts\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('failure');
+    expect(result.failureReason).toBe('permanent');
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('wip: partial implementation of #42'),
+      { cwd: '/tmp/worktree' },
     );
   });
 });
