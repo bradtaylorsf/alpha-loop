@@ -140,6 +140,7 @@ export type EpicExecutionFailureCode =
   | 'epic-incomplete'
   | 'epic-run-error'
   | 'session-test-failed'
+  | 'session-review-failed'
   | 'quick-finalize-failed';
 
 export type EpicExecutionFailure = {
@@ -1920,6 +1921,8 @@ async function executeSessionRun(
       const reviewFile = join(projectDir, 'review-session.json');
       const reviewFileSession = join(session.logsDir, 'review-session.json');
 
+      let sessionReviewPassed = false;
+      let lastSessionReviewGate = readGateResult(reviewFile);
       for (let attempt = 1; attempt <= config.maxTestRetries; attempt++) {
         log.info(`Session review attempt ${attempt} of ${config.maxTestRetries}`);
 
@@ -1960,6 +1963,7 @@ async function executeSessionRun(
 
         // Read gate result
         const gate = readGateResult(reviewFile);
+        lastSessionReviewGate = gate;
 
         // Move gate file to session logs
         if (existsSync(reviewFile)) {
@@ -1969,6 +1973,7 @@ async function executeSessionRun(
         if (gate.passed) {
           log.success(`Session review passed: ${gate.summary || 'no issues found'}`);
           session.sessionReviewFindings = gate;
+          sessionReviewPassed = true;
           break;
         }
 
@@ -2010,6 +2015,13 @@ async function executeSessionRun(
           log.warn('Session review: max attempts reached, continuing with unfixed findings');
           session.sessionReviewFindings = gate;
         }
+      }
+
+      if (!sessionReviewPassed) {
+        session.sessionReviewFindings = lastSessionReviewGate;
+        const message = `Post-session review failed: ${lastSessionReviewGate.summary}`;
+        log.error(message);
+        failures.push({ code: 'session-review-failed', message, issueNum: activeEpic });
       }
 
       // Clean up gate file if it wasn't moved
@@ -3308,10 +3320,11 @@ export async function runCommand(options: RunOptions): Promise<void> {
       return;
     }
 
-    await runIssueSession(config, options, {
+    const result = await runIssueSession(config, options, {
       type: 'flat',
       activeMilestone: target.activeMilestone,
     });
+    if (result.failures.length > 0) process.exitCode = 1;
   } catch (err) {
     if (!isCommandExitError(err)) throw err;
     if (!err.logged) log.error(err.message);

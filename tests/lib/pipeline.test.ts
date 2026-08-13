@@ -1,4 +1,4 @@
-import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, buildPRBody } from '../../src/lib/pipeline';
+import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, buildPRBody, readGateResult } from '../../src/lib/pipeline';
 import type { SessionContext } from '../../src/lib/session';
 
 // Mock all dependencies
@@ -293,9 +293,13 @@ beforeEach(() => {
   jest.clearAllMocks();
   const { existsSync, readFileSync } = require('node:fs');
   (existsSync as jest.Mock).mockReset();
-  (existsSync as jest.Mock).mockReturnValue(false);
+  (existsSync as jest.Mock).mockImplementation((path: unknown) => String(path).includes('review-'));
   (readFileSync as jest.Mock).mockReset();
-  (readFileSync as jest.Mock).mockReturnValue('');
+  (readFileSync as jest.Mock).mockImplementation((path: unknown) => (
+    String(path).includes('review-')
+      ? JSON.stringify({ passed: true, summary: 'Review passed', findings: [] })
+      : ''
+  ));
 
   // Default: everything succeeds
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
@@ -323,6 +327,39 @@ beforeEach(() => {
 });
 
 describe('processIssue', () => {
+  test('fails closed when a review gate artifact is missing', async () => {
+    const { existsSync } = require('node:fs');
+    (existsSync as jest.Mock).mockReturnValue(false);
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({
+      maxTestRetries: 1,
+      skipVerify: true,
+    }), makeSession());
+
+    expect(result.status).toBe('failure');
+    expect(result.testsPassing).toBe(false);
+    expect(mockMergePR).not.toHaveBeenCalled();
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      'Code review did not produce a valid passing gate; blocking PR auto-merge',
+    );
+  });
+
+  test('parses missing and invalid gate artifacts as failures', () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    (existsSync as jest.Mock).mockReturnValueOnce(false).mockReturnValueOnce(true);
+    (readFileSync as jest.Mock).mockReturnValueOnce('{invalid');
+
+    const missing = readGateResult('/tmp/missing-review.json');
+    const invalid = readGateResult('/tmp/invalid-review.json');
+
+    for (const gate of [missing, invalid]) {
+      expect(gate.passed).toBe(false);
+      expect(gate.findings).toEqual([
+        expect.objectContaining({ severity: 'critical', fixed: false }),
+      ]);
+    }
+  });
+
   test('executes all pipeline steps in order and returns success', async () => {
     const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
 
@@ -1089,10 +1126,15 @@ describe('processIssue', () => {
     const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
     const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
 
-    mockExistsSync.mockImplementation((path: any) => String(path).includes('verify-issue-42.json'));
+    mockExistsSync.mockImplementation((path: any) => (
+      String(path).includes('verify-issue-42.json') || String(path).includes('review-issue-42.json')
+    ));
     mockReadFileSync.mockImplementation((path: any) => {
       if (String(path).includes('verify-issue-42.json')) {
         return JSON.stringify({ passed: true, summary: 'QA approval verified', findings: [] });
+      }
+      if (String(path).includes('review-issue-42.json')) {
+        return JSON.stringify({ passed: true, summary: 'Review passed', findings: [] });
       }
       return '';
     });
@@ -1160,7 +1202,9 @@ describe('processIssue', () => {
     const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
     const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
 
-    mockExistsSync.mockImplementation((path: any) => String(path).includes('plan-issue-42.json'));
+    mockExistsSync.mockImplementation((path: any) => (
+      String(path).includes('plan-issue-42.json') || String(path).includes('review-issue-42.json')
+    ));
     mockReadFileSync.mockImplementation((path: any) => {
       if (String(path).includes('plan-issue-42.json')) {
         return JSON.stringify({
@@ -1170,6 +1214,9 @@ describe('processIssue', () => {
           testing: { needed: false, reason: 'Covered by verification' },
           verification: { needed: true, method: 'playwright', instructions: 'Open app', reason: 'Runtime behavior' },
         });
+      }
+      if (String(path).includes('review-issue-42.json')) {
+        return JSON.stringify({ passed: true, summary: 'Review passed', findings: [] });
       }
       return '';
     });
@@ -1185,7 +1232,9 @@ describe('processIssue', () => {
     const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
     const mockReadFileSync = readFileSync as jest.MockedFunction<typeof import('node:fs').readFileSync>;
 
-    mockExistsSync.mockImplementation((path: any) => String(path).includes('plan-issue-42.json'));
+    mockExistsSync.mockImplementation((path: any) => (
+      String(path).includes('plan-issue-42.json') || String(path).includes('review-issue-42.json')
+    ));
     mockReadFileSync.mockImplementation((path: any) => {
       if (String(path).includes('plan-issue-42.json')) {
         return JSON.stringify({
@@ -1195,6 +1244,9 @@ describe('processIssue', () => {
           testing: { needed: false, reason: 'Verified live' },
           verification: { needed: true, method: 'playwright', instructions: 'Open app', reason: 'Runtime behavior' },
         });
+      }
+      if (String(path).includes('review-issue-42.json')) {
+        return JSON.stringify({ passed: true, summary: 'Review passed', findings: [] });
       }
       return '';
     });
@@ -1772,6 +1824,23 @@ describe('processBatch', () => {
     { number: 10, title: 'Issue 10', body: 'Body 10' },
     { number: 11, title: 'Issue 11', body: 'Body 11' },
   ];
+
+  test('blocks batch auto-merge when the review gate artifact is missing', async () => {
+    const { existsSync } = require('node:fs');
+    (existsSync as jest.Mock).mockReturnValue(false);
+
+    const results = await processBatch(
+      batchIssues,
+      makeConfig({ autoMerge: true, batch: true, maxTestRetries: 1 }),
+      makeSession(),
+    );
+
+    expect(results.every((result) => result.status === 'failure')).toBe(true);
+    expect(mockMergePR).not.toHaveBeenCalled();
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      'Batch review did not produce a valid passing gate; blocking PR auto-merge',
+    );
+  });
 
   test('re-queues every issue and stops before planning when setup fails', async () => {
     mockSetupWorktree.mockRejectedValue(
