@@ -345,6 +345,30 @@ describe('processIssue', () => {
     expect(mockCleanupWorktree).toHaveBeenCalled();
   });
 
+  test('re-queues and stops before planning when worktree setup fails', async () => {
+    mockSetupWorktree.mockRejectedValue(
+      new Error('Setup command failed (exit 1): pnpm browser:prepare'),
+    );
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig({
+      setupCommand: 'pnpm browser:prepare',
+    }), makeSession());
+
+    expect(result).toMatchObject({
+      status: 'failure',
+      failureReason: 'transient',
+      testsPassing: false,
+    });
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+    expect(mockRunTests).not.toHaveBeenCalled();
+    expect(mockCleanupWorktree).not.toHaveBeenCalled();
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
+    expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'Todo');
+    expect(mockLog.error).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to set up worktree for issue #42'),
+    );
+  });
+
   test('refreshes issue-scoped changed files for test retries', async () => {
     let changedDiffCalls = 0;
     mockExec.mockImplementation((cmd: string) => {
@@ -1748,6 +1772,28 @@ describe('processBatch', () => {
     { number: 10, title: 'Issue 10', body: 'Body 10' },
     { number: 11, title: 'Issue 11', body: 'Body 11' },
   ];
+
+  test('re-queues every issue and stops before planning when setup fails', async () => {
+    mockSetupWorktree.mockRejectedValue(
+      new Error('Setup command failed (exit 1): pnpm browser:prepare'),
+    );
+
+    const results = await processBatch(
+      batchIssues,
+      makeConfig({ batch: true, setupCommand: 'pnpm browser:prepare' }),
+      makeSession(),
+    );
+
+    expect(results).toHaveLength(2);
+    expect(results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ issueNum: 10, failureReason: 'transient' }),
+      expect.objectContaining({ issueNum: 11, failureReason: 'transient' }),
+    ]));
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+    expect(mockRunTests).not.toHaveBeenCalled();
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 10, 'ready', 'in-progress');
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 11, 'ready', 'in-progress');
+  });
 
   test('propagates cancellation into the active agent and starts no later stage', async () => {
     const controller = new AbortController();

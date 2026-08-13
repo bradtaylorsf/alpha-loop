@@ -334,6 +334,18 @@ describe('setupWorktree', () => {
     );
   });
 
+  test('fails when both dependency installation attempts fail', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('pnpm install')) {
+        return { stdout: '', stderr: 'dependency error', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(setupWorktree(baseOptions))
+      .rejects.toThrow('Dependency installation failed (exit 1)');
+  });
+
   test('runs setup command after dependency install', async () => {
     await setupWorktree({ ...baseOptions, setupCommand: 'python -m venv .venv' });
 
@@ -352,7 +364,7 @@ describe('setupWorktree', () => {
     expect(setupCalls).toHaveLength(0);
   });
 
-  test('continues when setup command fails', async () => {
+  test('fails closed when setup command fails', async () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('python')) {
         return { stdout: '', stderr: 'error', exitCode: 1 };
@@ -360,11 +372,9 @@ describe('setupWorktree', () => {
       return { stdout: '', stderr: '', exitCode: 0 };
     });
 
-    const result = await setupWorktree({ ...baseOptions, setupCommand: 'python -m venv .venv' });
-
-    // Should still return successfully
-    expect(result.branch).toBe('agent/issue-42');
-    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('Setup command failed'));
+    await expect(setupWorktree({ ...baseOptions, setupCommand: 'python -m venv .venv' }))
+      .rejects.toThrow('Setup command failed (exit 1): python -m venv .venv');
+    expect(log.warn).not.toHaveBeenCalledWith(expect.stringContaining('Setup command failed'));
   });
 
   test('skips pnpm install when skipInstall is true', async () => {

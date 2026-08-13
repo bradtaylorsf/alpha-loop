@@ -245,7 +245,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
       // Fall back to regular install
       const fallback = exec('pnpm install', { cwd: worktreePath });
       if (fallback.exitCode !== 0) {
-        log.warn('pnpm install had issues, continuing anyway...');
+        throw new Error(`Dependency installation failed (exit ${fallback.exitCode})`);
       }
     }
   }
@@ -255,7 +255,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
     log.info(`Running setup command: ${setupCommand}`);
     const setupResult = exec(setupCommand, { cwd: worktreePath });
     if (setupResult.exitCode !== 0) {
-      log.warn(`Setup command failed (exit ${setupResult.exitCode}), continuing anyway...`);
+      throw new Error(`Setup command failed (exit ${setupResult.exitCode}): ${setupCommand}`);
     }
   }
 
