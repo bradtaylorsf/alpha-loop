@@ -316,11 +316,15 @@ export type GateResult = {
   }>;
 };
 
-/** Default gate result when agent doesn't write one (assume pass). */
+/** Default gate result when an agent does not write a valid result. */
 const DEFAULT_GATE: GateResult = {
-  passed: true,
-  summary: 'Gate agent did not write a result file — assuming pass',
-  findings: [],
+  passed: false,
+  summary: 'Gate agent did not write a valid result file',
+  findings: [{
+    severity: 'critical',
+    description: 'The gate result artifact is missing or invalid; the gate cannot be verified.',
+    fixed: false,
+  }],
 };
 
 /** Default plan when planning fails or is skipped. */
@@ -2150,6 +2154,12 @@ export async function processIssue(
     }
   }
 
+  if (!quickWorktree && !config.skipReview && !config.dryRun && !reviewGate.passed) {
+    testsPassing = false;
+    testOutput = `${testOutput}\n\nCODE REVIEW FAILED\n${reviewGate.summary}`.trim();
+    log.warn('Code review did not produce a valid passing gate; blocking PR auto-merge');
+  }
+
   // --- Step 7: Verify gate (JSON-based) ---
   currentStep = 'verify';
   recordSessionStage(session, 'verify');
@@ -3455,6 +3465,12 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         }
       }
     }
+  }
+
+  if (!config.skipReview && !config.dryRun && !reviewGate.passed) {
+    testsPassing = false;
+    testOutput = `${testOutput}\n\nBATCH REVIEW FAILED\n${reviewGate.summary}`.trim();
+    log.warn('Batch review did not produce a valid passing gate; blocking PR auto-merge');
   }
 
   const duration = Math.round((Date.now() - startTime) / 1000);

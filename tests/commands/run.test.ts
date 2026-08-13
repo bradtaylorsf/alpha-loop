@@ -141,7 +141,7 @@ import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
-import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, type PipelineResult } from '../../src/lib/pipeline';
+import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, readGateResult, type PipelineResult } from '../../src/lib/pipeline';
 import { cleanupWorktree, setupWorktree } from '../../src/lib/worktree';
 import { createSession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, recordSessionError, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
@@ -167,6 +167,7 @@ const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockFinalizeQuickRun = finalizeQuickRun as jest.MockedFunction<typeof finalizeQuickRun>;
 const mockRunFullSuiteGate = runFullSuiteGate as jest.MockedFunction<typeof runFullSuiteGate>;
+const mockReadGateResult = readGateResult as jest.MockedFunction<typeof readGateResult>;
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
@@ -278,6 +279,7 @@ beforeEach(() => {
   mockGetIssueWithComments.mockReturnValue(null);
   mockProcessBatch.mockResolvedValue([]);
   mockRunFullSuiteGate.mockResolvedValue({ testsPassing: true, testOutput: 'All tests passed' });
+  mockReadGateResult.mockReturnValue({ passed: true, summary: 'Review passed', findings: [] });
   mockContextNeedsRefresh.mockReturnValue(false);
   mockSyncAgentAssets.mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] });
 });
@@ -1847,6 +1849,50 @@ Coordinate hosted work.
     expect(mockExec.mock.calls.some(([cmd, options]) => (
       String(cmd).startsWith('git checkout') && options?.cwd === process.cwd()
     ))).toBe(false);
+  });
+
+  test('fails the session when post-session review omits its gate artifact', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: true,
+      maxTestRetries: 1,
+      skipPostSessionReview: false,
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Review issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'Review issue',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 1,
+      filesChanged: 1,
+    });
+    mockReadGateResult.mockReturnValue({
+      passed: false,
+      summary: 'Gate agent did not write a valid result file',
+      findings: [{
+        severity: 'critical',
+        description: 'Missing gate artifact',
+        fixed: false,
+      }],
+    });
+
+    await runCommand({});
+
+    expect(process.exitCode).toBe(1);
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(
+      expect.anything(),
+      'failed',
+      'failed',
+      expect.anything(),
+    );
+    expect(mockLog.error).toHaveBeenCalledWith(
+      'Post-session review failed: Gate agent did not write a valid result file',
+    );
   });
 
   test('quick mode shares one worktree across issues and runs the finalize pass', async () => {
