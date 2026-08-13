@@ -4,6 +4,7 @@ import {
   setIssueMilestone, listOpenIssues, addIssueToProject,
   getIssueBody, updateEpicIssueBody, commentChildEpicBacklink,
   listRoadmapEpics, listEpics, getEpicSubIssues, updateProjectStatus,
+  getMergedPRForIssue,
 } from '../../src/lib/github';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -1138,5 +1139,107 @@ describe('addIssueToProject', () => {
     const { log: mockLog } = require('../../src/lib/logger');
     addIssueToProject('owner', 7, 'owner/repo', 42);
     expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to add issue'));
+  });
+});
+
+describe('getMergedPRForIssue', () => {
+  test('uses the earliest exact closing PR from the issue timeline', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify([[
+        {
+          event: 'cross-referenced',
+          source: {
+            issue: {
+              html_url: 'https://github.com/owner/repo/pull/13',
+              body: 'Implements the feature.\n\nCloses #7',
+              pull_request: {
+                html_url: 'https://github.com/owner/repo/pull/13',
+                merged_at: '2026-08-12T23:32:13Z',
+              },
+            },
+          },
+        },
+        {
+          event: 'cross-referenced',
+          source: {
+            issue: {
+              html_url: 'https://github.com/owner/repo/pull/23',
+              body: 'Closes #19. Unblocks #7 and epic #6.',
+              pull_request: {
+                html_url: 'https://github.com/owner/repo/pull/23',
+                merged_at: '2026-08-13T02:13:51Z',
+              },
+            },
+          },
+        },
+        {
+          event: 'cross-referenced',
+          source: {
+            issue: {
+              html_url: 'https://github.com/owner/repo/pull/35',
+              body: 'Session integration.\n\nCloses #7',
+              pull_request: {
+                html_url: 'https://github.com/owner/repo/pull/35',
+                merged_at: '2026-08-13T08:58:30Z',
+              },
+            },
+          },
+        },
+      ]]),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    expect(getMergedPRForIssue('owner/repo', 7)).toBe('https://github.com/owner/repo/pull/13');
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('/issues/7/timeline'));
+    expect(mockExec).toHaveBeenCalledTimes(1);
+  });
+
+  test('recognizes a session PR that closes multiple child issues', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify([[
+        {
+          event: 'cross-referenced',
+          source: {
+            issue: {
+              html_url: 'https://github.com/owner/repo/pull/14',
+              body: 'Closes #10\nCloses #11',
+              pull_request: {
+                html_url: 'https://github.com/owner/repo/pull/14',
+                merged_at: '2026-08-13T04:51:23Z',
+              },
+            },
+          },
+        },
+      ]]),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    expect(getMergedPRForIssue('owner/repo', 11)).toBe('https://github.com/owner/repo/pull/14');
+  });
+
+  test('filters fuzzy search hits when the timeline is unavailable', () => {
+    mockExec
+      .mockReturnValueOnce({ stdout: '', stderr: 'timeline unavailable', exitCode: 1 })
+      .mockReturnValueOnce({
+        stdout: JSON.stringify([
+          {
+            url: 'https://github.com/owner/repo/pull/23',
+            body: 'Closes #19. Unblocks #7.',
+            mergedAt: '2026-08-13T02:13:51Z',
+          },
+          {
+            url: 'https://github.com/owner/repo/pull/13',
+            body: 'closes: #7',
+            mergedAt: '2026-08-12T23:32:13Z',
+          },
+        ]),
+        stderr: '',
+        exitCode: 0,
+      });
+
+    expect(getMergedPRForIssue('owner/repo', 7)).toBe('https://github.com/owner/repo/pull/13');
+    expect(mockExec).toHaveBeenLastCalledWith(expect.stringContaining('--limit 100'));
   });
 });

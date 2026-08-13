@@ -1121,19 +1121,96 @@ export function updateEpicChecklist(repo: string, epicNum: number, subIssueNum: 
   updateIssue(repo, epicNum, { body: newBody });
 }
 
+type ClosingPullRequest = {
+  url: string;
+  body: string;
+  mergedAt: string;
+};
+
+type TimelinePage = Array<{
+  event?: string;
+  source?: {
+    issue?: {
+      html_url?: string;
+      body?: string | null;
+      pull_request?: {
+        html_url?: string;
+        merged_at?: string | null;
+      } | null;
+    } | null;
+  } | null;
+}>;
+
+function closingKeywordPattern(issueNum: number): RegExp {
+  return new RegExp(
+    `(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s*:?\\s*#${issueNum}(?!\\d)`,
+    'i',
+  );
+}
+
+function earliestClosingPullRequest(
+  candidates: ClosingPullRequest[],
+  issueNum: number,
+): string | null {
+  const pattern = closingKeywordPattern(issueNum);
+  return candidates
+    .filter((candidate) => candidate.url && candidate.mergedAt && pattern.test(candidate.body))
+    .sort((a, b) => a.mergedAt.localeCompare(b.mergedAt) || a.url.localeCompare(b.url))[0]?.url ?? null;
+}
+
+function closingPullRequestsFromTimeline(stdout: string): ClosingPullRequest[] {
+  const parsed = JSON.parse(stdout) as TimelinePage[] | TimelinePage;
+  const pages = Array.isArray(parsed[0]) ? parsed as TimelinePage[] : [parsed as TimelinePage];
+  return pages.flat().flatMap((event): ClosingPullRequest[] => {
+    const issue = event.event === 'cross-referenced' ? event.source?.issue : null;
+    const pullRequest = issue?.pull_request;
+    const url = pullRequest?.html_url ?? issue?.html_url;
+    if (!url || !pullRequest?.merged_at) return [];
+    return [{ url, body: issue?.body ?? '', mergedAt: pullRequest.merged_at }];
+  });
+}
+
 /**
- * Find the merged PR URL that closed `issueNum`, or null if none.
- * Uses GitHub's search for `closes:#N` — matches the convention used by
- * `buildPRBody()` in pipeline.ts.
+ * Find the merged PR URL that declared it would close `issueNum`, or null if
+ * none exists. GitHub's issue timeline is authoritative for cross-references;
+ * the earliest merged closing PR is the focused implementation PR when a later
+ * session PR repeats the same closing keyword.
+ *
+ * Search is retained as a compatibility fallback, but its fuzzy results are
+ * fetched in bulk and filtered by an exact closing-keyword match. Never trust
+ * an arbitrary `--limit 1` search hit.
  */
 export function getMergedPRForIssue(repo: string, issueNum: number): string | null {
-  const result = ghExec(
-    `gh pr list --repo "${repo}" --search "closes:#${issueNum}" --state merged --json url --limit 1`,
+  const timeline = ghExec(
+    `gh api --paginate --slurp -H "Accept: application/vnd.github+json" "repos/${repo}/issues/${issueNum}/timeline?per_page=100"`,
   );
-  if (result.exitCode !== 0) return null;
+  if (timeline.exitCode === 0) {
+    try {
+      const url = earliestClosingPullRequest(closingPullRequestsFromTimeline(timeline.stdout), issueNum);
+      if (url) return url;
+    } catch {
+      log.warn(`Failed to parse issue #${issueNum} timeline while resolving its merged PR`);
+    }
+  }
+
+  const fallback = ghExec(
+    `gh pr list --repo "${repo}" --search "closes:#${issueNum}" --state merged --json url,body,mergedAt --limit 100`,
+  );
+  if (fallback.exitCode !== 0) return null;
   try {
-    const prs = JSON.parse(result.stdout) as Array<{ url: string }>;
-    return prs[0]?.url ?? null;
+    const prs = JSON.parse(fallback.stdout) as Array<{
+      url?: string;
+      body?: string | null;
+      mergedAt?: string | null;
+    }>;
+    return earliestClosingPullRequest(
+      prs.flatMap((pr): ClosingPullRequest[] => (
+        pr.url && pr.mergedAt
+          ? [{ url: pr.url, body: pr.body ?? '', mergedAt: pr.mergedAt }]
+          : []
+      )),
+      issueNum,
+    );
   } catch {
     return null;
   }
