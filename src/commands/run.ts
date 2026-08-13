@@ -21,6 +21,7 @@ import {
   ensureSessionWorktree,
   finalizeSession,
   recordSessionBackgroundTaskError,
+  recordSessionError,
   recordSessionIssue,
   recordSessionPolicyDecision,
   saveResult,
@@ -205,6 +206,7 @@ type CommandExitErrorCode =
   | 'epic-queue-stopped'
   | 'project-context-refresh-required'
   | 'session-interrupt-cleanup-failed'
+  | 'session-worktree-setup-failed'
   | 'session-locked';
 
 class CommandExitError extends Error {
@@ -940,7 +942,25 @@ async function runIssueSession(
   let completed = false;
   try {
     if (config.autoMerge) {
-      await ensureSessionWorktree(session, config);
+      try {
+        await ensureSessionWorktree(session, config);
+      } catch (err) {
+        const message = `Failed to set up session worktree: ${err instanceof Error ? err.message : err}`;
+        log.error(message);
+        recordSessionError(session, {
+          issueNum: session.currentIssueNum ?? session.epic,
+          stage: 'worktree',
+          message,
+        });
+        transitionSessionStatus(session, 'failed', 'failed');
+        throw new CommandExitError({
+          code: 'session-worktree-setup-failed',
+          message,
+          exitCode: 1,
+          logged: true,
+          cause: err,
+        });
+      }
     }
     const result = await executeSessionRun(config, options, target, session, {
       activeEpic,

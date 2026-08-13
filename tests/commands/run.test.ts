@@ -56,6 +56,7 @@ jest.mock('../../src/lib/session', () => ({
   ensureSessionWorktree: jest.fn(),
   finalizeSession: jest.fn(),
   recordSessionBackgroundTaskError: jest.fn(),
+  recordSessionError: jest.fn(),
   recordSessionIssue: jest.fn(),
   recordSessionPolicyDecision: jest.fn(),
   saveResult: jest.fn(),
@@ -142,7 +143,7 @@ import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
 import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, type PipelineResult } from '../../src/lib/pipeline';
 import { cleanupWorktree, setupWorktree } from '../../src/lib/worktree';
-import { createSession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
+import { createSession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, recordSessionError, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
 import { extractLearnings, generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
@@ -173,6 +174,7 @@ const mockEnsureSessionWorktree = ensureSessionWorktree as jest.MockedFunction<t
 const mockReleaseSessionLock = releaseSessionLock as jest.MockedFunction<typeof releaseSessionLock>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
 const mockRecordSessionBackgroundTaskError = recordSessionBackgroundTaskError as jest.MockedFunction<typeof recordSessionBackgroundTaskError>;
+const mockRecordSessionError = recordSessionError as jest.MockedFunction<typeof recordSessionError>;
 const mockTransitionSessionStatus = transitionSessionStatus as jest.MockedFunction<typeof transitionSessionStatus>;
 const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
 const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
@@ -288,6 +290,48 @@ afterEach(() => {
 });
 
 describe('runCommand', () => {
+  test('records a durable failure when session worktree setup conflicts', async () => {
+    const session = {
+      name: 'session/epic-6-answer-engine',
+      branch: 'session/epic-6-answer-engine',
+      resultsDir: '/tmp/sessions/epic-6',
+      logsDir: '/tmp/sessions/epic-6/logs',
+      manifestPath: '/tmp/sessions/epic-6/session.json',
+      results: [],
+      pendingBackgroundTasks: [],
+      epic: 6,
+      lock: { path: '/tmp/sessions/epic-6/session.lock', owner: 'test' },
+    } as any;
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      autoMerge: true,
+      ...overrides,
+    }) as any);
+    mockCreateSession.mockReturnValue(session);
+    mockEnsureSessionWorktree.mockRejectedValue(
+      new Error("session branch is already used by worktree at '/repo'"),
+    );
+    mockGetIssueWithComments.mockReturnValue({
+      number: 6,
+      title: 'Answer Engine',
+      body: '- [ ] #10 Child',
+      labels: ['epic'],
+    });
+
+    await expect(runCommand({ epic: 6 })).resolves.toBeUndefined();
+
+    expect(process.exitCode).toBe(1);
+    expect(mockRecordSessionError).toHaveBeenCalledWith(session, {
+      issueNum: 6,
+      stage: 'worktree',
+      message: expect.stringContaining('session branch is already used'),
+    });
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(session, 'failed', 'failed');
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockProcessBatch).not.toHaveBeenCalled();
+    expect(mockReleaseSessionLock).toHaveBeenCalledWith(session.lock);
+    expect(mockLog.error).toHaveBeenCalledTimes(1);
+  });
+
   test('picker metadata shows epic milestone membership and scheduled epic counts', () => {
     const epic = {
       number: 195,
