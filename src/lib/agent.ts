@@ -119,6 +119,8 @@ export type AgentOptions = {
   maxTurns?: number;
   /** Resume the most recent agent session in the CWD instead of starting fresh. */
   resume?: boolean;
+  /** Cancel the active CLI process when the owning run is interrupted. */
+  signal?: AbortSignal;
   /**
    * Env-var overrides merged over `process.env` when spawning the child.
    * Callers MUST compute this per stage (see `buildEndpointEnv`) so that a
@@ -410,6 +412,16 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       }, FORCE_KILL_GRACE_MS);
     }
 
+    const handleAbort = () => {
+      terminateChild(
+        'Agent cancelled by the owning session; terminating process...',
+        130,
+        getOutput() + '\n[ABORTED] Agent cancelled by the owning session.',
+      );
+    };
+    options.signal?.addEventListener('abort', handleAbort, { once: true });
+    if (options.signal?.aborted) handleAbort();
+
     function resultExitCode() {
       return parsedResultIsError ? 1 : 0;
     }
@@ -520,6 +532,7 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       if (agentTimeoutTimer) clearTimeout(agentTimeoutTimer);
       if (resultGraceTimer) clearTimeout(resultGraceTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      options.signal?.removeEventListener('abort', handleAbort);
       if (useStreamJson && !sawStreamResult && lineBuffer.trim()) {
         processStreamJsonLine(child.stdout, lineBuffer.trim());
         lineBuffer = '';

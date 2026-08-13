@@ -488,6 +488,26 @@ describe('spawnAgent', () => {
     expect(result.outputTokens).toBeUndefined();
   });
 
+  test('terminates the active CLI and returns an aborted result when its signal fires', async () => {
+    let closeHandler!: (code: number | null) => void;
+    mockChild.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+      if (event === 'close') closeHandler = cb;
+    });
+    mockChild.kill.mockImplementation(() => {
+      queueMicrotask(() => closeHandler(null));
+      return true;
+    });
+    const controller = new AbortController();
+
+    const resultPromise = spawnAgent({ ...baseOptions, signal: controller.signal });
+    controller.abort(new Error('test shutdown'));
+    const result = await resultPromise;
+
+    expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(result.exitCode).toBe(130);
+    expect(result.output).toContain('[ABORTED]');
+  });
+
   test('forwards env option merged over process.env', async () => {
     mockChild.on.mockImplementation((event: string, cb: Function) => {
       if (event === 'close') setTimeout(() => cb(0), 10);

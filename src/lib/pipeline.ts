@@ -489,6 +489,8 @@ export type PipelineResumeStage = 'implementation' | 'verification' | 'clarifica
 
 export type PipelineOptions = {
   epicContext?: EpicPromptContext;
+  /** Abort the active agent stage when the owning run receives a signal. */
+  signal?: AbortSignal;
   resumeContext?: string;
   resumeStage?: PipelineResumeStage;
   existingPrUrl?: string | null;
@@ -506,6 +508,15 @@ export type PipelineOptions = {
     branch: string;
   };
 };
+
+function throwIfPipelineAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  if (reason instanceof Error) throw reason;
+  const error = new Error('Pipeline aborted by the owning session');
+  error.name = 'AbortError';
+  throw error;
+}
 
 const PAUSE_REQUEST_FILE = 'alpha-loop-pause-request.json';
 
@@ -1338,6 +1349,7 @@ export async function processIssue(
   const escalationEvents: EscalationEvent[] = [];
   let currentStep = 'status';
   const { trackerOverride, options: pipelineOptions } = resolvePipelineOptions(trackerOrOptions, maybeOptions);
+  throwIfPipelineAborted(pipelineOptions.signal);
   const tracker = trackerOverride ?? new EscalationTracker({
     statePath: defaultEscalationStatePath(projectDir),
   });
@@ -1598,12 +1610,14 @@ export async function processIssue(
       const planCtx = stageCtx('plan');
       const planResult = await spawnStageAgent({
         ...agentForStep(config, 'plan'),
+        signal: pipelineOptions.signal,
         prompt: planPrompt,
         cwd: worktreePath,
         logFile: join(session.logsDir, `issue-${issueNum}-plan.log`),
         verbose: config.verbose,
         timeout: config.agentTimeout * 1000,
       }, config, planCtx);
+      throwIfPipelineAborted(pipelineOptions.signal);
 
       // Trace the plan output and costs
       traceOutput(session, issueNum, 'plan', planResult.output);
@@ -1639,7 +1653,8 @@ export async function processIssue(
       } else {
         log.warn('Planning agent did not write plan file, using defaults (run all tests, skip verify)');
       }
-    } catch {
+    } catch (err) {
+      throwIfPipelineAborted(pipelineOptions.signal);
       log.warn('Planning stage failed, using defaults');
     }
   } else {
@@ -1716,6 +1731,7 @@ export async function processIssue(
     const implCtx = stageCtx('build');
     const implResult = await spawnStageAgent({
       ...agentForStep(config, 'implement'),
+      signal: pipelineOptions.signal,
       prompt: implementPrompt,
       cwd: worktreePath,
 
@@ -1723,6 +1739,7 @@ export async function processIssue(
       verbose: config.verbose,
       timeout: config.agentTimeout * 1000,
     }, config, implCtx);
+    throwIfPipelineAborted(pipelineOptions.signal);
 
     // Trace the implement output and costs
     traceOutput(session, issueNum, 'implement', implResult.output);
@@ -1890,6 +1907,7 @@ export async function processIssue(
         const fixCtx = stageCtx('test_write');
         const fixResult = await spawnStageAgent({
           ...agentForStep(config, 'test_fix'),
+          signal: pipelineOptions.signal,
           prompt: fixPrompt,
           cwd: worktreePath,
           resume: true,
@@ -1898,6 +1916,7 @@ export async function processIssue(
           timeout: config.agentTimeout * 1000,
           resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
         }, config, fixCtx);
+        throwIfPipelineAborted(pipelineOptions.signal);
 
         // Trace fix output and costs
         traceOutput(session, issueNum, `fix-${attempt}`, fixResult.output);
@@ -2020,12 +2039,14 @@ export async function processIssue(
         const reviewCtx = stageCtx('review');
         const reviewResult = await spawnStageAgent({
           ...agentForStep(config, 'review'),
+          signal: pipelineOptions.signal,
           prompt: reviewPrompt,
           cwd: worktreePath,
           logFile: join(session.logsDir, `issue-${issueNum}-review${attempt > 1 ? `-${attempt}` : ''}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
         }, config, reviewCtx);
+        throwIfPipelineAborted(pipelineOptions.signal);
 
         // Trace review output and costs
         traceOutput(session, issueNum, `review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
@@ -2033,7 +2054,8 @@ export async function processIssue(
         recordStageTelemetry(session, issueNum, 'review', reviewResult, config, reviewCtx);
 
         reviewOutput = reviewResult.output;
-      } catch {
+      } catch (err) {
+        throwIfPipelineAborted(pipelineOptions.signal);
         log.warn('Code review failed, continuing without review');
         reviewOutput = 'Code review could not be completed';
         break;
@@ -2070,6 +2092,7 @@ export async function processIssue(
         const reviewFixCtx = stageCtx('build');
         const reviewFixResult = await spawnStageAgent({
           ...agentForStep(config, 'implement'),
+          signal: pipelineOptions.signal,
           prompt: fixPrompt,
           cwd: worktreePath,
           resume: true,
@@ -2078,6 +2101,7 @@ export async function processIssue(
           timeout: config.agentTimeout * 1000,
           resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
         }, config, reviewFixCtx);
+        throwIfPipelineAborted(pipelineOptions.signal);
 
         // Trace review-fix output and costs
         traceOutput(session, issueNum, `review-fix-${attempt}`, reviewFixResult.output);
@@ -2255,6 +2279,7 @@ export async function processIssue(
           const verifyFixCtx = stageCtx('test_exec');
           const verifyFixResult = await spawnStageAgent({
             ...agentForStep(config, 'implement'),
+            signal: pipelineOptions.signal,
             prompt: fixPrompt,
             cwd: worktreePath,
             resume: true,
@@ -2263,6 +2288,7 @@ export async function processIssue(
             timeout: config.agentTimeout * 1000,
             resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
           }, config, verifyFixCtx);
+          throwIfPipelineAborted(pipelineOptions.signal);
 
           // Trace verify-fix output and costs
           traceOutput(session, issueNum, `verify-fix-${attempt}`, verifyFixResult.output);
@@ -2634,6 +2660,7 @@ export async function processIssue(
       run: async () => {
         const assumptionsResult = await spawnAgent({
           ...agentForStep(config, 'learn'),
+          signal: pipelineOptions.signal,
           prompt: assumptionsPrompt,
           cwd: backgroundWorktreePath ?? projectDir,
           logFile: join(session.logsDir, `issue-${issueNum}-assumptions.log`),
@@ -2884,6 +2911,7 @@ export async function processBatch(
   session: SessionContext,
   options: PipelineOptions = {},
 ): Promise<PipelineResult[]> {
+  throwIfPipelineAborted(options.signal);
   const startTime = Date.now();
   const projectDir = process.cwd();
   const stepCosts: StepCost[] = [];
@@ -3043,12 +3071,14 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
       const planResult = await spawnAgent({
         ...agentForStep(config, 'plan'),
+        signal: options.signal,
         prompt: planPrompt,
         cwd: worktreePath,
         logFile: join(session.logsDir, `batch-plan.log`),
         verbose: config.verbose,
         timeout: config.agentTimeout * 1000,
       });
+      throwIfPipelineAborted(options.signal);
 
       traceOutput(session, issues[0].number, 'batch-plan', planResult.output);
       stepCosts.push(buildStepCost('plan', issues[0].number, planResult, config));
@@ -3084,7 +3114,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         }
       }
       stepsCompleted.push('plan');
-    } catch {
+    } catch (err) {
+      throwIfPipelineAborted(options.signal);
       log.warn('Batch planning failed, using defaults for all issues');
     }
   }
@@ -3116,12 +3147,14 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
     const implResult = await spawnAgent({
       ...agentForStep(config, 'implement'),
+      signal: options.signal,
       prompt: implementPrompt,
       cwd: worktreePath,
       logFile: join(session.logsDir, `batch-implement.log`),
       verbose: config.verbose,
       timeout: config.agentTimeout * 1000,
     });
+    throwIfPipelineAborted(options.signal);
 
     traceOutput(session, issues[0].number, 'batch-implement', implResult.output);
     stepCosts.push(buildStepCost('implement', issues[0].number, implResult, config));
@@ -3291,6 +3324,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
         const fixResult = await spawnAgent({
           ...agentForStep(config, 'test_fix'),
+          signal: options.signal,
           prompt: fixPrompt,
           cwd: worktreePath,
           resume: true,
@@ -3299,6 +3333,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           timeout: config.agentTimeout * 1000,
           resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
         });
+        throwIfPipelineAborted(options.signal);
 
         traceOutput(session, issues[0].number, `batch-fix-${attempt}`, fixResult.output);
         stepCosts.push(buildStepCost('test_fix', issues[0].number, fixResult, config));
@@ -3344,12 +3379,14 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
         const reviewResult = await spawnAgent({
           ...agentForStep(config, 'review'),
+          signal: options.signal,
           prompt: reviewPrompt,
           cwd: worktreePath,
           logFile: join(session.logsDir, `batch-review${attempt > 1 ? `-${attempt}` : ''}.log`),
           verbose: config.verbose,
           timeout: config.agentTimeout * 1000,
         });
+        throwIfPipelineAborted(options.signal);
 
         traceOutput(session, issues[0].number, `batch-review${attempt > 1 ? `-${attempt}` : ''}`, reviewResult.output);
         stepCosts.push(buildStepCost('review', issues[0].number, reviewResult, config));
@@ -3357,7 +3394,8 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           profile: selectRoutingProfile(config, issues[0].number),
         });
         reviewOutput = reviewResult.output;
-      } catch {
+      } catch (err) {
+        throwIfPipelineAborted(options.signal);
         log.warn('Batch review failed, continuing without review');
         break;
       }
@@ -3385,6 +3423,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
         const reviewFixResult = await spawnAgent({
           ...agentForStep(config, 'implement'),
+          signal: options.signal,
           prompt: fixPrompt,
           cwd: worktreePath,
           resume: true,
@@ -3393,6 +3432,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           timeout: config.agentTimeout * 1000,
           resultGraceMs: RESUMED_FIX_RESULT_GRACE_MS,
         });
+        throwIfPipelineAborted(options.signal);
 
         traceOutput(session, issues[0].number, `batch-review-fix-${attempt}`, reviewFixResult.output);
         stepCosts.push(buildStepCost('review', issues[0].number, reviewFixResult, config));

@@ -1706,7 +1706,7 @@ Coordinate hosted work.
     expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('full test suite failed'));
   });
 
-  test('signal cleanup also releases the dedicated session worktree', async () => {
+  test('one SIGINT aborts the active issue, skips the remaining queue, and finalizes once', async () => {
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
       ...overrides,
       autoMerge: true,
@@ -1714,43 +1714,65 @@ Coordinate hosted work.
     }) as any);
     mockPollIssues.mockReturnValue([
       { number: 42, title: 'Interrupted issue', body: 'Body', labels: ['ready'] },
+      { number: 43, title: 'Must not start', body: 'Body', labels: ['ready'] },
     ]);
 
-    let resolveIssue!: (result: PipelineResult) => void;
     let notifyStarted!: () => void;
     const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
-    mockProcessIssue.mockImplementation(() => {
+    mockProcessIssue.mockImplementation((_issueNum, _title, _body, _config, _session, options) => {
       notifyStarted();
-      return new Promise((resolve) => { resolveIssue = resolve; });
-    });
-
-    let notifySessionCleanup!: () => void;
-    const sessionCleanup = new Promise<void>((resolve) => { notifySessionCleanup = resolve; });
-    mockCleanupWorktree.mockImplementation(async (options) => {
-      if (options.worktreePath?.includes('session-20260330-143000')) notifySessionCleanup();
-      return { status: 'removed', path: options.worktreePath ?? '/tmp/issue-worktree' };
+      const signal = (options as { signal: AbortSignal }).signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
     });
 
     const run = runCommand({});
     await started;
     process.emit('SIGINT');
-    await sessionCleanup;
+    await run;
 
+    expect(mockProcessIssue).toHaveBeenCalledTimes(1);
+    expect((mockProcessIssue.mock.calls[0][5] as { signal: AbortSignal }).signal.aborted).toBe(true);
     expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
       worktreePath: '/tmp/session-20260330-143000',
     }));
+    expect(mockFinalizeSession).toHaveBeenCalledTimes(1);
+  });
 
-    resolveIssue({
-      issueNum: 42,
-      title: 'Interrupted issue',
-      status: 'failure',
-      testsPassing: false,
-      verifyPassing: false,
-      verifySkipped: true,
-      duration: 1,
-      filesChanged: 0,
+  test('one SIGINT aborts the active batch and never starts the next batch', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      autoMerge: true,
+      batch: true,
+      batchSize: 1,
+      skipPostSessionReview: true,
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Interrupted batch', body: 'Body', labels: ['ready'] },
+      { number: 43, title: 'Must not start', body: 'Body', labels: ['ready'] },
+    ]);
+
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    mockProcessBatch.mockImplementation((_issues, _config, _session, options) => {
+      notifyStarted();
+      const signal = options?.signal;
+      if (!signal) throw new Error('expected run cancellation signal');
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
     });
+
+    const run = runCommand({ batch: true, batchSize: 1 });
+    await started;
+    process.emit('SIGINT');
     await run;
+
+    expect(mockProcessBatch).toHaveBeenCalledTimes(1);
+    expect(mockProcessBatch.mock.calls[0][0].map((issue) => issue.number)).toEqual([42]);
+    expect(mockProcessBatch.mock.calls[0][3]?.signal?.aborted).toBe(true);
+    expect(mockFinalizeSession).toHaveBeenCalledTimes(1);
   });
 
   test('runs post-session review inside the dedicated session worktree', async () => {
