@@ -2444,6 +2444,43 @@ Coordinate batch children.
     expect(mockProcessIssue).not.toHaveBeenCalled();
   });
 
+  test('stops an epic batch queue after a transient setup failure', async () => {
+    const epicBody = `## Ordered Sub-Issues
+- [ ] #189 First child
+- [ ] #190 Second child`;
+
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) {
+        return { number: 195, title: 'Parent Epic', body: epicBody, labels: ['epic'] };
+      }
+      if (issueNum === 189) {
+        return { number: 189, title: 'First child', body: 'First body', labels: ['ready'] };
+      }
+      if (issueNum === 190) {
+        return { number: 190, title: 'Second child', body: 'Second body', labels: ['ready'] };
+      }
+      return null;
+    });
+    mockProcessBatch.mockResolvedValueOnce([
+      {
+        issueNum: 189,
+        title: 'First child',
+        status: 'failure',
+        failureReason: 'transient',
+        testsPassing: false,
+        verifyPassing: false,
+        verifySkipped: false,
+        duration: 1,
+        filesChanged: 0,
+      },
+    ]);
+
+    await runCommand({ epic: 195, dryRun: true, batch: true, batchSize: 1 });
+
+    expect(mockProcessBatch).toHaveBeenCalledTimes(1);
+    expect(mockProcessBatch.mock.calls[0][0].map((issue) => issue.number)).toEqual([189]);
+  });
+
   test('does not pass epic context for flat runs', async () => {
     mockPollIssues.mockReturnValue([
       { number: 42, title: 'Test issue', body: 'Body', labels: ['ready'] },

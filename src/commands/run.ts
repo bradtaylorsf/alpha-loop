@@ -1508,7 +1508,7 @@ async function executeSessionRun(
 
           // Stop if any issue hit a transient error
           if (results.some((r) => r.failureReason === 'transient' && !isRecoveredRunResult(r))) {
-            log.warn('Agent hit a rate/usage limit — stopping session to avoid wasting cycles');
+            log.warn('Transient pipeline failure — stopping session before the next batch');
             break;
           }
         } catch (err) {
@@ -1613,7 +1613,7 @@ async function executeSessionRun(
 
           // Stop processing if agent hit a transient error (usage/rate limit)
           if (result.failureReason === 'transient' && !isRecoveredRunResult(result)) {
-            log.warn('Agent hit a rate/usage limit — stopping session to avoid wasting cycles');
+            log.warn('Transient pipeline failure — stopping session before the next issue');
             break;
           }
         } catch (err) {

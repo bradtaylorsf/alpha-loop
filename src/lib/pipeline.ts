@@ -1483,7 +1483,7 @@ export async function processIssue(
       // Re-queue instead of marking failed — this is a setup issue, not an implementation failure
       requeueIssue(config, issueNum);
     }
-    return failureResult(issueNum, title, startTime);
+    return failureResult(issueNum, title, startTime, 'transient');
   }
 
   const issueBaseRef = config.autoMerge && session.branch !== config.baseBranch
@@ -3018,7 +3018,7 @@ export async function processBatch(
     });
     // Re-queue issues back to ready state so they aren't stuck as "In Progress"
     for (const issue of issues) requeueIssue(config, issue.number);
-    return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
+    return issues.map((i) => failureResult(i.number, i.title, startTime, 'transient'));
   }
 
   const batchBaseRef = config.autoMerge && session.branch !== config.baseBranch
