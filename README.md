@@ -72,7 +72,7 @@ For planned feature work, use epics as the unit you schedule and ship:
 3. `alpha-loop run --epic <N>` ships the epic's child issues in checklist order. Agents working on each child issue receive the parent epic goal, acceptance criteria, and sibling checklist as context.
 4. `alpha-loop roadmap --queue` recommends the next ordered epic queue, explains blockers and risks, and prints the exact `alpha-loop run --epics ...` command.
 5. `alpha-loop run --epics <A,B,C>` runs several parent epics back-to-back in that exact order, with a separate session branch and PR for each epic.
-6. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
+6. `alpha-loop run --verify-only <N>` pins the configured base branch to a commit SHA and re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
 
 Use `alpha-loop run --issue <N>` when you need to restart or process exactly one ready issue. If that issue appears in exactly one open parent epic checklist, the agent receives that parent epic context and the resulting PR still includes `Part of #<epic>`; if multiple open epics reference it, Alpha Loop exits instead of guessing.
 
@@ -348,7 +348,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run --epics <ids>` | Process an ordered comma-separated queue of epics, one session branch and PR per epic |
 | `alpha-loop run --epics <ids> --queue-branch-mode independent` | Run queued epics without stacking later session branches on earlier ones |
 | `alpha-loop run --epics <ids> --queue-branch-mode independent --parallel <n>` | Run up to `n` dependency-ready epics concurrently in topological waves |
-| `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
+| `alpha-loop run --verify-only <N>` | Pin the configured base branch to a commit SHA and run just the epic verification pass |
 | `alpha-loop daemon` | Run hosted daemon mode continuously for repo stewardship |
 | `alpha-loop daemon --mode feedback-only` | Poll feedback and resume eligible sessions without triage or new work selection |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
@@ -867,7 +867,7 @@ The queue is validated before any work starts. Each listed issue must exist, be 
 
 Parallel worker output is stored in `.alpha-loop/sessions/queue-<timestamp>/epic-<N>.log`. The atomic `queue.json` manifest records the concurrency limit, waves, dependencies, per-epic status and log path, and dependency-failure skips. Use `alpha-loop history queue-<timestamp>` to inspect progress. `--parallel` requires independent mode; stacked branches are inherently sequential. `--dry-run` prints the validated wave schedule without mutating GitHub or git state.
 
-Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
+Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop pins the active session branch to a commit SHA and runs a fresh-agent verification pass against each sub-issue's acceptance criteria and resulting PR merge commit. On `pass` the epic is auto-closed; on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps and naming the inspected SHA. Audit metadata is stored in the durable session manifest; `--verify-only` writes `epic-verification.json` in its dedicated `.alpha-loop/sessions/verify-*` directory.
 
 See [docs/epics.md](docs/epics.md) for the full feature reference, including `--verify-only`, the `prefer_epics` config option, skip rules, and safety rails.
 
@@ -923,6 +923,7 @@ What needs to be done.
 | `.alpha-loop/sessions/<session>/session.json` | No (gitignored) | Durable resumable session state with issue, branch, worktree, PR, stage, status, prompts, transcripts, and logs |
 | `.alpha-loop/sessions/<session>/session.lock` | No (gitignored) | Held by the live run or resume that owns the session; a second run of the same epic/milestone fails fast, and locks from dead processes are reclaimed automatically |
 | `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, dependency waves, concurrency, session PRs, logs, and failures |
+| `.alpha-loop/sessions/verify-<epic>-<timestamp>/epic-verification.json` | No (gitignored) | Verify-only audit with pinned/reported SHAs, merged PR commits, verdict, and fresh-agent memory mode |
 | `.alpha-loop/feedback/` | No (gitignored) | Local idempotency records for external feedback adapter events |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |

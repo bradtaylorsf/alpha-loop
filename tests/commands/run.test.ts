@@ -32,6 +32,8 @@ jest.mock('../../src/lib/github', () => ({
   getEpicSubIssues: jest.fn().mockReturnValue([]),
   getIssueWithComments: jest.fn(),
   getMergedPRForIssue: jest.fn(),
+  getMergedPRMetadata: jest.fn(),
+  resolveCommitSha: jest.fn(),
   updateEpicChecklist: jest.fn(),
   commentIssue: jest.fn(),
   closeIssue: jest.fn(),
@@ -59,11 +61,13 @@ jest.mock('../../src/lib/session', () => ({
   recordSessionError: jest.fn(),
   recordSessionIssue: jest.fn(),
   recordSessionPolicyDecision: jest.fn(),
+  recordEpicVerificationAudit: jest.fn(),
   saveResult: jest.fn(),
   transitionHumanFeedbackSessionStatus: jest.fn(),
   recordSessionCleanup: jest.fn(),
   transitionSessionStatus: jest.fn(),
   updateSessionManifest: jest.fn(),
+  writeEpicVerificationAuditArtifact: jest.fn().mockReturnValue('/tmp/verify/epic-verification.json'),
 }));
 
 jest.mock('../../src/lib/session-lock', () => ({
@@ -76,6 +80,22 @@ jest.mock('../../src/lib/verify-epic', () => ({
     verdict: 'pass',
     comment: 'Epic verified',
     parsed: { verdict: 'pass', summary: 'Epic verified', findings: [] },
+    verificationTarget: {
+      ref: 'master',
+      sha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      resolvedAt: '2026-08-14T12:00:00.000Z',
+    },
+    audit: {
+      epicNumber: 195,
+      pinnedRef: 'master',
+      pinnedSha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      inspectedRef: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      resolvedAt: '2026-08-14T12:00:00.000Z',
+      mergedPRs: [],
+      verdict: 'pass',
+      verifiedAt: '2026-08-14T12:01:00.000Z',
+      agent: { resume: false, memoryMode: 'fresh' },
+    },
   }),
 }));
 
@@ -140,10 +160,10 @@ jest.mock('node:child_process', () => ({
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
-import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
+import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, getMergedPRForIssue, getMergedPRMetadata, resolveCommitSha, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
 import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, readGateResult, type PipelineResult } from '../../src/lib/pipeline';
 import { cleanupWorktree, setupWorktree } from '../../src/lib/worktree';
-import { createSession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, recordSessionError, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
+import { createSession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, recordSessionError, transitionSessionStatus, recordSessionPolicyDecision, recordEpicVerificationAudit, saveResult, writeEpicVerificationAuditArtifact } from '../../src/lib/session';
 import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
 import { extractLearnings, generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
@@ -152,6 +172,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { emitLifecycleEvent } from '../../src/lib/events';
 import { spawnAgent } from '../../src/lib/agent';
+import { verifyEpic } from '../../src/lib/verify-epic';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
@@ -160,6 +181,9 @@ const mockPollIssues = pollIssues as jest.MockedFunction<typeof pollIssues>;
 const mockListEpics = listEpics as jest.MockedFunction<typeof listEpics>;
 const mockGetEpicSubIssues = getEpicSubIssues as jest.MockedFunction<typeof getEpicSubIssues>;
 const mockGetIssueWithComments = getIssueWithComments as jest.MockedFunction<typeof getIssueWithComments>;
+const mockGetMergedPRForIssue = getMergedPRForIssue as jest.MockedFunction<typeof getMergedPRForIssue>;
+const mockGetMergedPRMetadata = getMergedPRMetadata as jest.MockedFunction<typeof getMergedPRMetadata>;
+const mockResolveCommitSha = resolveCommitSha as jest.MockedFunction<typeof resolveCommitSha>;
 const mockUpdateEpicChecklist = updateEpicChecklist as jest.MockedFunction<typeof updateEpicChecklist>;
 const mockLabelIssue = labelIssue as jest.MockedFunction<typeof labelIssue>;
 const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue>;
@@ -178,6 +202,7 @@ const mockRecordSessionBackgroundTaskError = recordSessionBackgroundTaskError as
 const mockRecordSessionError = recordSessionError as jest.MockedFunction<typeof recordSessionError>;
 const mockTransitionSessionStatus = transitionSessionStatus as jest.MockedFunction<typeof transitionSessionStatus>;
 const mockRecordSessionPolicyDecision = recordSessionPolicyDecision as jest.MockedFunction<typeof recordSessionPolicyDecision>;
+const mockRecordEpicVerificationAudit = recordEpicVerificationAudit as jest.MockedFunction<typeof recordEpicVerificationAudit>;
 const mockSaveResult = saveResult as jest.MockedFunction<typeof saveResult>;
 const mockGenerateSessionSummary = generateSessionSummary as jest.MockedFunction<typeof generateSessionSummary>;
 const mockExtractLearnings = extractLearnings as jest.MockedFunction<typeof extractLearnings>;
@@ -190,6 +215,8 @@ const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
+const mockVerifyEpic = verifyEpic as jest.MockedFunction<typeof verifyEpic>;
+const mockWriteEpicVerificationAuditArtifact = writeEpicVerificationAuditArtifact as jest.MockedFunction<typeof writeEpicVerificationAuditArtifact>;
 const mockSpawn = spawn as jest.MockedFunction<typeof spawn>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
@@ -277,6 +304,10 @@ beforeEach(() => {
   mockListEpics.mockReturnValue([]);
   mockGetEpicSubIssues.mockReturnValue([]);
   mockGetIssueWithComments.mockReturnValue(null);
+  mockGetMergedPRForIssue.mockReturnValue(null);
+  mockGetMergedPRMetadata.mockReturnValue(null);
+  mockResolveCommitSha.mockReturnValue('34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2');
+  mockRecordEpicVerificationAudit.mockReturnValue({} as any);
   mockProcessBatch.mockResolvedValue([]);
   mockRunFullSuiteGate.mockResolvedValue({ testsPassing: true, testOutput: 'All tests passed' });
   mockReadGateResult.mockReturnValue({ passed: true, summary: 'Review passed', findings: [] });
@@ -396,6 +427,21 @@ describe('runCommand', () => {
       verificationClosedEpic: true,
     }));
     expect(mockUpdateEpicChecklist).toHaveBeenCalledWith('owner/repo', 195, 201, true);
+    expect(mockResolveCommitSha).toHaveBeenCalledWith('owner/repo', 'session/20260330-143000');
+    expect(mockVerifyEpic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verificationTarget: expect.objectContaining({
+          ref: 'session/20260330-143000',
+          sha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+        }),
+      }),
+      expect.any(Object),
+      '/tmp/sessions/logs',
+    );
+    expect(mockRecordEpicVerificationAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ branch: 'session/20260330-143000' }),
+      expect.objectContaining({ verdict: 'pass' }),
+    );
     expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
       type: 'session.started',
       session: expect.objectContaining({ name: 'session/20260330-143000' }),
@@ -407,6 +453,42 @@ describe('runCommand', () => {
       }),
     }));
     expect(mockExit).not.toHaveBeenCalled();
+  });
+
+  test('does not pass epic verification when its durable audit cannot be persisted', async () => {
+    const config = makeConfig({ autoMerge: true, skipPostSessionReview: true }) as any;
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) {
+        return { number: 195, title: 'Parent Epic', body: '- [ ] #201 Build child', labels: ['epic'] };
+      }
+      if (issueNum === 201) {
+        return { number: 201, title: 'Build child', body: 'Child body', labels: ['ready'] };
+      }
+      return null;
+    });
+    mockGetEpicSubIssues.mockReturnValue([{ number: 201, checked: true, lineIndex: 0 }]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 201,
+      title: 'Build child',
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 60,
+      filesChanged: 5,
+    });
+    mockRecordEpicVerificationAudit.mockReturnValue(null);
+
+    const result = await runSingleEpicExecution({ config, epicNumber: 195 });
+
+    expect(result.status).toBe('failure');
+    expect(result.verificationClosedEpic).toBe(false);
+    expect(result.failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: 'epic-verification-failed',
+        message: expect.stringContaining('Could not persist'),
+      }),
+    ]));
   });
 
   test('runSingleEpicExecution fails fast when another live run holds the session lock', async () => {
@@ -1357,6 +1439,12 @@ describe('runCommand', () => {
       return null;
     });
     mockGetEpicSubIssues.mockReturnValue([{ number: 201, checked: true, lineIndex: 0 }]);
+    mockGetMergedPRForIssue.mockReturnValue('https://github.com/owner/repo/pull/501');
+    mockGetMergedPRMetadata.mockReturnValue({
+      url: 'https://github.com/owner/repo/pull/501',
+      mergeCommitSha: 'a4670c1f3ac86c916a0f4f5d4dc6f7150d15b5c3',
+      mergedAt: '2026-08-14T11:00:00.000Z',
+    });
 
     await runCommand({ verifyOnly: 195 });
 
@@ -1364,6 +1452,54 @@ describe('runCommand', () => {
     expect(mockProcessIssue).not.toHaveBeenCalled();
     expect(mockFinalizeSession).not.toHaveBeenCalled();
     expect(mockGetEpicSubIssues).toHaveBeenCalledWith('owner/repo', 195);
+    expect(mockResolveCommitSha).toHaveBeenCalledWith('owner/repo', 'master');
+    expect(mockVerifyEpic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verificationTarget: expect.objectContaining({
+          ref: 'master',
+          sha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+        }),
+        mergedPRs: [expect.objectContaining({
+          mergeCommitSha: 'a4670c1f3ac86c916a0f4f5d4dc6f7150d15b5c3',
+        })],
+      }),
+      expect.any(Object),
+      expect.stringContaining('/verify-195-'),
+    );
+    expect(mockWriteEpicVerificationAuditArtifact).toHaveBeenCalledWith(
+      expect.stringContaining('/verify-195-'),
+      expect.objectContaining({ agent: { resume: false, memoryMode: 'fresh' } }),
+    );
+    expect(mockRecordEpicVerificationAudit).not.toHaveBeenCalled();
+  });
+
+  test('--verify-only fails without spawning the verifier when the base ref cannot be pinned', async () => {
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) {
+        return { number: 195, title: 'Parent Epic', body: '- [x] #201 Build child', labels: ['epic'] };
+      }
+      if (issueNum === 201) {
+        return { number: 201, title: 'Build child', body: 'Child body', labels: ['ready'] };
+      }
+      return null;
+    });
+    mockGetEpicSubIssues.mockReturnValue([{ number: 201, checked: true, lineIndex: 0 }]);
+    mockResolveCommitSha.mockReturnValue(null);
+
+    await runCommand({ verifyOnly: 195 });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockVerifyEpic).not.toHaveBeenCalled();
+    expect(mockWriteEpicVerificationAuditArtifact).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        pinnedRef: 'master',
+        pinnedSha: null,
+        inspectedRef: null,
+        verdict: 'unavailable',
+        error: expect.stringContaining('Could not resolve'),
+      }),
+    );
   });
 
   test('--issue dry-run processes exactly the requested standalone issue', async () => {

@@ -141,6 +141,12 @@ jest.mock('../../src/lib/github', () => ({
   getEpicSubIssues: jest.fn(() => []),
   getIssueWithComments: jest.fn(),
   getMergedPRForIssue: jest.fn(() => null),
+  getMergedPRMetadata: jest.fn(() => ({
+    url: 'https://github.com/owner/repo/pull/301',
+    mergeCommitSha: 'a4670c1f3ac86c916a0f4f5d4dc6f7150d15b5c3',
+    mergedAt: '2026-08-14T11:00:00.000Z',
+  })),
+  resolveCommitSha: jest.fn(() => '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2'),
   updateEpicChecklist: jest.fn(),
   labelIssue: jest.fn(),
 }));
@@ -164,6 +170,8 @@ jest.mock('../../src/lib/session', () => ({
   recordSessionCleanup: jest.fn(),
   transitionSessionStatus: jest.fn(),
   updateSessionManifest: jest.fn(),
+  recordEpicVerificationAudit: jest.fn(() => ({})),
+  writeEpicVerificationAuditArtifact: jest.fn(() => '/tmp/session/epic-verification.json'),
 }));
 
 jest.mock('../../src/lib/worktree', () => ({
@@ -213,7 +221,28 @@ jest.mock('../../src/lib/verify-epic', () => ({
   verifyEpic: jest.fn().mockResolvedValue({
     verdict: 'pass',
     comment: 'Epic verified',
-    parsed: { verdict: 'pass', summary: 'Epic verified', findings: [] },
+    parsed: {
+      inspectedRef: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      verdict: 'pass',
+      summary: 'Epic verified',
+      findings: [],
+    },
+    verificationTarget: {
+      ref: 'master',
+      sha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      resolvedAt: '2026-08-14T12:00:00.000Z',
+    },
+    audit: {
+      epicNumber: 195,
+      pinnedRef: 'master',
+      pinnedSha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      inspectedRef: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      resolvedAt: '2026-08-14T12:00:00.000Z',
+      mergedPRs: [],
+      verdict: 'pass',
+      verifiedAt: '2026-08-14T12:01:00.000Z',
+      agent: { resume: false, memoryMode: 'fresh' },
+    },
   }),
 }));
 
@@ -284,7 +313,28 @@ function clearPhaseMocks(): void {
   mockVerifyEpic.mockResolvedValue({
     verdict: 'pass',
     comment: 'Epic verified',
-    parsed: { verdict: 'pass', summary: 'Epic verified', findings: [] },
+    parsed: {
+      inspectedRef: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      verdict: 'pass',
+      summary: 'Epic verified',
+      findings: [],
+    },
+    verificationTarget: {
+      ref: 'master',
+      sha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      resolvedAt: '2026-08-14T12:00:00.000Z',
+    },
+    audit: {
+      epicNumber: 195,
+      pinnedRef: 'master',
+      pinnedSha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      inspectedRef: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      resolvedAt: '2026-08-14T12:00:00.000Z',
+      mergedPRs: [],
+      verdict: 'pass',
+      verifiedAt: '2026-08-14T12:01:00.000Z',
+      agent: { resume: false, memoryMode: 'fresh' },
+    },
   });
 }
 
@@ -452,7 +502,14 @@ describe('epic-first planning workflow', () => {
       expect.objectContaining({
         epic: expect.objectContaining({ number: 195 }),
         subIssues: [expect.objectContaining({ number: 201 })],
-        mergedPRUrls: ['https://github.com/owner/repo/pull/301'],
+        mergedPRs: [expect.objectContaining({
+          url: 'https://github.com/owner/repo/pull/301',
+          mergeCommitSha: 'a4670c1f3ac86c916a0f4f5d4dc6f7150d15b5c3',
+        })],
+        verificationTarget: expect.objectContaining({
+          ref: 'session/epic-first',
+          sha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+        }),
       }),
       expect.any(Object),
       '/tmp/session/logs',

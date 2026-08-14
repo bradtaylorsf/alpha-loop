@@ -1,4 +1,5 @@
-import { createSession, ensureSessionWorktree, saveResult, getPreviousResult, finalizeSession, writeCrashMarker, loadCrashMarkers, clearCrashMarker } from '../../src/lib/session';
+import { createSession, ensureSessionWorktree, saveResult, getPreviousResult, finalizeSession, writeCrashMarker, loadCrashMarkers, clearCrashMarker, recordEpicVerificationAudit, writeEpicVerificationAuditArtifact } from '../../src/lib/session';
+import type { EpicVerificationAudit } from '../../src/lib/session';
 import type { PipelineResult } from '../../src/lib/pipeline';
 import type { BranchAncestryMode, QueueSessionContext } from '../../src/lib/epic-queue';
 
@@ -220,6 +221,61 @@ describe('createSession', () => {
     expect(mockRenameSync).toHaveBeenCalledWith(
       expect.stringContaining('session.json.tmp'),
       expect.stringContaining('session.json'),
+    );
+  });
+
+  test('persists epic verification audit metadata in the durable manifest', () => {
+    const session = createSession(makeConfig(), { epicNum: 397, epicTitle: 'Pinned verification' });
+    const initialWrite = mockWriteFileSync.mock.calls.find((call) => String(call[0]).endsWith('session.json.tmp'));
+    const initialManifest = String(initialWrite?.[1]);
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue(initialManifest);
+    const audit: EpicVerificationAudit = {
+      epicNumber: 397,
+      pinnedRef: 'session/epic-397-pinned-verification',
+      pinnedSha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      inspectedRef: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      resolvedAt: '2026-08-14T12:00:00.000Z',
+      mergedPRs: [{
+        issueNum: 398,
+        url: 'https://github.com/owner/repo/pull/501',
+        mergeCommitSha: 'a4670c1f3ac86c916a0f4f5d4dc6f7150d15b5c3',
+      }],
+      verdict: 'pass',
+      verifiedAt: '2026-08-14T12:01:00.000Z',
+      agent: { resume: false, memoryMode: 'fresh' },
+    };
+
+    recordEpicVerificationAudit(session, audit);
+
+    const updatedWrite = mockWriteFileSync.mock.calls.at(-1);
+    expect(String(updatedWrite?.[0])).toContain('session.json.tmp');
+    expect(JSON.parse(String(updatedWrite?.[1])).epicVerification).toEqual(audit);
+  });
+
+  test('writes the standalone verify-only audit artifact atomically', () => {
+    const audit = {
+      epicNumber: 397,
+      pinnedRef: 'master',
+      pinnedSha: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      inspectedRef: '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2',
+      resolvedAt: '2026-08-14T12:00:00.000Z',
+      mergedPRs: [],
+      verdict: 'pass',
+      verifiedAt: '2026-08-14T12:01:00.000Z',
+      agent: { resume: false, memoryMode: 'fresh' },
+    } satisfies EpicVerificationAudit;
+
+    const artifactPath = writeEpicVerificationAuditArtifact('/tmp/verify-397', audit);
+
+    expect(artifactPath).toBe('/tmp/verify-397/epic-verification.json');
+    expect(mockWriteFileSync).toHaveBeenCalledWith(
+      '/tmp/verify-397/epic-verification.json.tmp',
+      `${JSON.stringify(audit, null, 2)}\n`,
+    );
+    expect(mockRenameSync).toHaveBeenCalledWith(
+      '/tmp/verify-397/epic-verification.json.tmp',
+      '/tmp/verify-397/epic-verification.json',
     );
   });
 

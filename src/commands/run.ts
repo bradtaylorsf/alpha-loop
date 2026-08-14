@@ -9,8 +9,9 @@ import { exec, shellQuote } from '../lib/shell.js';
 import { loadConfig, assertSafeShellArg, resolveStepConfig, type Config } from '../lib/config.js';
 import {
   pollIssues, listMilestones, listEpics, getEpicSubIssues, getIssueWithComments,
-  getMergedPRForIssue, updateEpicChecklist, commentIssue, closeIssue, labelIssue,
-  type Milestone, type Issue,
+  getMergedPRForIssue, getMergedPRMetadata, resolveCommitSha,
+  updateEpicChecklist, commentIssue, closeIssue, labelIssue,
+  type Milestone, type Issue, type MergedPullRequestMetadata,
 } from '../lib/github.js';
 import { buildEpicSummary, parseSubIssues } from '../lib/epics.js';
 import { verifyEpic } from '../lib/verify-epic.js';
@@ -24,11 +25,14 @@ import {
   recordSessionError,
   recordSessionIssue,
   recordSessionPolicyDecision,
+  recordEpicVerificationAudit,
   saveResult,
   transitionHumanFeedbackSessionStatus,
   recordSessionCleanup,
   transitionSessionStatus,
   updateSessionManifest,
+  writeEpicVerificationAuditArtifact,
+  type EpicVerificationAudit,
   type SessionContext,
   type SessionStage,
   type SessionStatus,
@@ -51,7 +55,7 @@ import { spawnAgent } from '../lib/agent.js';
 import { buildSessionReviewPrompt, type EpicPromptContext } from '../lib/prompts.js';
 import { writeTraceToSubdir } from '../lib/traces.js';
 import { validateGeneratedMarkdownForCommit } from '../lib/scan-validation.js';
-import { closeSync, openSync, readFileSync, existsSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, parseDependencies, type ValidationReport } from '../lib/validation.js';
 import { hasLabel } from '../lib/labels.js';
 import { emitLifecycleEvent } from '../lib/events.js';
@@ -703,23 +707,106 @@ async function runEpicVerificationFlow(
   }
 
   const subIssues: Issue[] = [];
-  const mergedPRUrls: Array<string | null> = [];
+  const mergedPRs: Array<MergedPullRequestMetadata | null> = [];
+  let unresolvedMergedPR: { issueNum: number; url: string } | null = null;
   for (const ref of refs) {
     const sub = getIssueWithComments(config.repo, ref.number);
     if (!sub) continue;
     subIssues.push(sub);
-    mergedPRUrls.push(getMergedPRForIssue(config.repo, ref.number));
+    const prUrl = getMergedPRForIssue(config.repo, ref.number);
+    if (!prUrl) {
+      mergedPRs.push(null);
+      continue;
+    }
+    const metadata = getMergedPRMetadata(config.repo, prUrl);
+    if (!metadata) {
+      unresolvedMergedPR ??= { issueNum: ref.number, url: prUrl };
+      mergedPRs.push(null);
+      continue;
+    }
+    mergedPRs.push(metadata);
   }
 
-  const logsDir = session?.logsDir
-    ?? join(process.cwd(), '.alpha-loop', 'sessions', `verify-${epicNum}-${Date.now()}`, 'logs');
+  const verificationSessionDir = session?.resultsDir
+    ?? join(process.cwd(), '.alpha-loop', 'sessions', `verify-${epicNum}-${Date.now()}`);
+  const logsDir = session?.logsDir ?? join(verificationSessionDir, 'logs');
 
   if (!session) {
-    const { mkdirSync } = await import('node:fs');
     mkdirSync(logsDir, { recursive: true });
   }
 
-  const result = await verifyEpic({ epic, subIssues, mergedPRUrls }, config, logsDir);
+  const persistAudit = (audit: EpicVerificationAudit): void => {
+    if (session) {
+      const manifest = recordEpicVerificationAudit(session, audit);
+      if (!manifest) {
+        throw new Error(`Could not persist epic #${epicNum} verification audit in the session manifest`);
+      }
+      return;
+    }
+    const artifactPath = writeEpicVerificationAuditArtifact(verificationSessionDir, audit);
+    log.info(`Epic verification audit saved: ${artifactPath}`);
+  };
+
+  const pinnedRef = session?.branch ?? config.baseBranch;
+  const resolvedAt = new Date().toISOString();
+  const pinnedSha = resolveCommitSha(config.repo, pinnedRef);
+  const auditMergedPRs = subIssues.flatMap((issue, index) => {
+    const pr = mergedPRs[index];
+    return pr ? [{ issueNum: issue.number, url: pr.url, mergeCommitSha: pr.mergeCommitSha }] : [];
+  });
+  if (!pinnedSha) {
+    const message = `Could not resolve epic #${epicNum} verification ref '${pinnedRef}' to an immutable commit SHA`;
+    log.error(message);
+    persistAudit({
+      epicNumber: epicNum,
+      pinnedRef,
+      pinnedSha: null,
+      inspectedRef: null,
+      resolvedAt,
+      mergedPRs: auditMergedPRs,
+      verdict: 'unavailable',
+      verifiedAt: new Date().toISOString(),
+      agent: { resume: false, memoryMode: 'fresh' },
+      error: message,
+    });
+    return {
+      epicNumber: epicNum,
+      status: 'failure',
+      closedEpic: false,
+      failure: { code: 'epic-verification-failed', message, issueNum: epicNum, exitCode: 1 },
+    };
+  }
+
+  if (unresolvedMergedPR) {
+    const message = `Could not resolve the resulting merge commit for sub-issue #${unresolvedMergedPR.issueNum} PR ${unresolvedMergedPR.url}`;
+    log.error(message);
+    persistAudit({
+      epicNumber: epicNum,
+      pinnedRef,
+      pinnedSha,
+      inspectedRef: null,
+      resolvedAt,
+      mergedPRs: auditMergedPRs,
+      verdict: 'unavailable',
+      verifiedAt: new Date().toISOString(),
+      agent: { resume: false, memoryMode: 'fresh' },
+      error: message,
+    });
+    return {
+      epicNumber: epicNum,
+      status: 'failure',
+      closedEpic: false,
+      failure: { code: 'epic-verification-failed', message, issueNum: unresolvedMergedPR.issueNum, exitCode: 1 },
+    };
+  }
+
+  const result = await verifyEpic({
+    epic,
+    subIssues,
+    mergedPRs,
+    verificationTarget: { ref: pinnedRef, sha: pinnedSha, resolvedAt },
+  }, config, logsDir);
+  persistAudit(result.audit);
 
   if (config.dryRun) {
     log.dry(`[verify-only] Would post comment on #${epicNum} (verdict=${result.verdict})`);

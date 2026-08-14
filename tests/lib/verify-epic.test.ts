@@ -29,6 +29,8 @@ import { ghExec } from '../../src/lib/rate-limit.js';
 
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
 const mockGhExec = ghExec as jest.MockedFunction<typeof ghExec>;
+const PINNED_SHA = '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2';
+const SECOND_MERGE_SHA = 'a4670c1f3ac86c916a0f4f5d4dc6f7150d15b5c3';
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -102,9 +104,22 @@ function makeInput(overrides: Partial<VerifyEpicInput> = {}): VerifyEpicInput {
       makeIssue({ number: 10, title: 'Sub A' }),
       makeIssue({ number: 11, title: 'Sub B' }),
     ],
-    mergedPRUrls: [
-      'https://github.com/owner/repo/pull/201',
-      'https://github.com/owner/repo/pull/202',
+    verificationTarget: {
+      ref: 'master',
+      sha: PINNED_SHA,
+      resolvedAt: '2026-08-14T12:00:00.000Z',
+    },
+    mergedPRs: [
+      {
+        url: 'https://github.com/owner/repo/pull/201',
+        mergeCommitSha: PINNED_SHA,
+        mergedAt: '2026-08-12T12:00:00Z',
+      },
+      {
+        url: 'https://github.com/owner/repo/pull/202',
+        mergeCommitSha: SECOND_MERGE_SHA,
+        mergedAt: '2026-08-12T12:30:00Z',
+      },
     ],
     ...overrides,
   };
@@ -126,6 +141,7 @@ Here is my assessment:
 
 \`\`\`json
 {
+  "inspectedRef": "${PINNED_SHA}",
   "verdict": "pass",
   "summary": "All criteria met.",
   "findings": [
@@ -149,6 +165,7 @@ Here is my assessment:
     const agentOutput = `
 \`\`\`json
 {
+  "inspectedRef": "${PINNED_SHA}",
   "verdict": "partial",
   "summary": "Some criteria met.",
   "findings": [
@@ -166,7 +183,7 @@ Here is my assessment:
     expect(result.parsed.findings).toHaveLength(2);
   });
 
-  test('returns DEFAULT_VERDICT (partial) when agent output has no json fence', async () => {
+  test('returns a non-passing verdict when agent output has no json fence', async () => {
     mockSpawnAgent.mockResolvedValue({
       exitCode: 0,
       output: 'I reviewed the epic but could not produce a structured output.',
@@ -175,7 +192,7 @@ Here is my assessment:
 
     const result = await verifyEpic(makeInput(), makeConfig(), STUB_LOGS_DIR);
 
-    expect(result.verdict).toBe('partial');
+    expect(result.verdict).toBe('fail');
     expect(result.parsed.summary).toContain('could not be parsed');
     expect(result.parsed.findings).toHaveLength(0);
   });
@@ -184,6 +201,7 @@ Here is my assessment:
     const agentOutput = `
 \`\`\`json
 {
+  "inspectedRef": "${PINNED_SHA}",
   "verdict": "pass",
   "summary": "All evaluated criteria passed.",
   "findings": [
@@ -195,7 +213,11 @@ Here is my assessment:
     mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: agentOutput, duration: 3000 });
 
     // Sub-issue 11 has no merged PR
-    const input = makeInput({ mergedPRUrls: ['https://github.com/owner/repo/pull/201', null] });
+    const input = makeInput({ mergedPRs: [{
+      url: 'https://github.com/owner/repo/pull/201',
+      mergeCommitSha: PINNED_SHA,
+      mergedAt: '2026-08-12T12:00:00Z',
+    }, null] });
 
     const result = await verifyEpic(input, makeConfig(), STUB_LOGS_DIR);
 
@@ -205,10 +227,11 @@ Here is my assessment:
     expect(result.comment).toMatch(/capped/i);
   });
 
-  test('does NOT cap verdict at partial when all mergedPRUrls are present and agent says pass', async () => {
+  test('does NOT cap verdict at partial when all merged PR metadata is present and agent says pass', async () => {
     const agentOutput = `
 \`\`\`json
 {
+  "inspectedRef": "${PINNED_SHA}",
   "verdict": "pass",
   "summary": "All criteria met.",
   "findings": []
@@ -227,6 +250,7 @@ Here is my assessment:
     const agentOutput = `
 \`\`\`json
 {
+  "inspectedRef": "${PINNED_SHA}",
   "verdict": "partial",
   "summary": "Mixed results.",
   "findings": [
@@ -249,16 +273,16 @@ Here is my assessment:
     expect(validFinding?.verdict).toBe('met');
   });
 
-  test('returns DEFAULT_VERDICT when agent call throws', async () => {
+  test('returns a non-passing verdict when agent call throws', async () => {
     mockSpawnAgent.mockRejectedValue(new Error('Agent process crashed'));
 
     const result = await verifyEpic(makeInput(), makeConfig(), STUB_LOGS_DIR);
 
-    expect(result.verdict).toBe('partial');
+    expect(result.verdict).toBe('fail');
     expect(result.parsed.summary).toContain('could not be parsed');
   });
 
-  test('returns DEFAULT_VERDICT when agent output contains invalid JSON', async () => {
+  test('returns a non-passing verdict when agent output contains invalid JSON', async () => {
     mockSpawnAgent.mockResolvedValue({
       exitCode: 0,
       output: '```json\n{ "verdict": "pass", INVALID JSON }\n```',
@@ -267,7 +291,7 @@ Here is my assessment:
 
     const result = await verifyEpic(makeInput(), makeConfig(), STUB_LOGS_DIR);
 
-    expect(result.verdict).toBe('partial');
+    expect(result.verdict).toBe('fail');
     expect(result.parsed.findings).toHaveLength(0);
   });
 
@@ -275,12 +299,12 @@ Here is my assessment:
     const agentOutput = `
 First fence (should be ignored):
 \`\`\`json
-{ "verdict": "fail", "summary": "Draft", "findings": [] }
+{ "inspectedRef": "${PINNED_SHA}", "verdict": "fail", "summary": "Draft", "findings": [] }
 \`\`\`
 
 Final fence (authoritative):
 \`\`\`json
-{ "verdict": "pass", "summary": "Authoritative result.", "findings": [] }
+{ "inspectedRef": "${PINNED_SHA}", "verdict": "pass", "summary": "Authoritative result.", "findings": [] }
 \`\`\`
 `;
     mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: agentOutput, duration: 3000 });
@@ -295,6 +319,7 @@ Final fence (authoritative):
     const agentOutput = `
 \`\`\`json
 {
+  "inspectedRef": "${PINNED_SHA}",
   "verdict": "pass",
   "summary": "All done.",
   "findings": [
@@ -312,10 +337,12 @@ Final fence (authoritative):
     expect(result.comment).toContain('#10');
     expect(result.comment).toContain('#11');
     expect(result.comment).toContain('PASS');
+    expect(result.comment).toContain(`**Pinned snapshot:** \`master\` at \`${PINNED_SHA}\``);
+    expect(result.comment).toContain(`**Verifier reported:** \`${PINNED_SHA}\``);
   });
 
   test('uses reviewModel when set in config', async () => {
-    mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: '```json\n{"verdict":"pass","summary":"ok","findings":[]}\n```', duration: 1000 });
+    mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: `\`\`\`json\n{"inspectedRef":"${PINNED_SHA}","verdict":"pass","summary":"ok","findings":[]}\n\`\`\``, duration: 1000 });
 
     await verifyEpic(makeInput(), makeConfig({ reviewModel: 'sonnet' }), STUB_LOGS_DIR);
 
@@ -325,7 +352,7 @@ Final fence (authoritative):
   });
 
   test('falls back to config.model when reviewModel is not set', async () => {
-    mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: '```json\n{"verdict":"pass","summary":"ok","findings":[]}\n```', duration: 1000 });
+    mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: `\`\`\`json\n{"inspectedRef":"${PINNED_SHA}","verdict":"pass","summary":"ok","findings":[]}\n\`\`\``, duration: 1000 });
 
     await verifyEpic(makeInput(), makeConfig({ reviewModel: '', model: 'haiku' }), STUB_LOGS_DIR);
 
@@ -337,7 +364,7 @@ Final fence (authoritative):
   test('treats the current verify-only invocation as the evidence-producing gate', async () => {
     mockSpawnAgent.mockResolvedValue({
       exitCode: 0,
-      output: '```json\n{"verdict":"pass","summary":"ok","findings":[]}\n```',
+      output: `\`\`\`json\n{"inspectedRef":"${PINNED_SHA}","verdict":"pass","summary":"ok","findings":[]}\n\`\`\``,
       duration: 1000,
     });
 
@@ -347,6 +374,63 @@ Final fence (authoritative):
     expect(prompt).toContain('authoritative `alpha-loop run --verify-only 165` gate');
     expect(prompt).toContain('Do not require a prior passing verify-only result');
     expect(prompt).toContain('older attempt failed');
+  });
+
+  test('pins repository inspection to the immutable SHA and starts a fresh agent session', async () => {
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: `\`\`\`json\n{"inspectedRef":"${PINNED_SHA}","verdict":"pass","summary":"ok","findings":[]}\n\`\`\``,
+      duration: 1000,
+    });
+
+    await verifyEpic(makeInput(), makeConfig(), STUB_LOGS_DIR);
+
+    expect(mockSpawnAgent).toHaveBeenCalledWith(expect.objectContaining({ resume: false }));
+    const prompt = mockSpawnAgent.mock.calls[0]?.[0].prompt ?? '';
+    expect(prompt).toContain(`Pinned verification ref: master`);
+    expect(prompt).toContain(`Pinned verification SHA: ${PINNED_SHA}`);
+    expect(prompt).toContain('Do not inspect ambient `HEAD`');
+    expect(prompt).toContain('SHA-qualified');
+    expect(prompt).toContain(`Resulting merge commit: ${SECOND_MERGE_SHA}`);
+  });
+
+  test.each([
+    ['missing', ''],
+    ['mismatched', SECOND_MERGE_SHA],
+  ])('returns a non-passing verdict when inspectedRef is %s', async (_case, inspectedRef) => {
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: `\`\`\`json\n{"inspectedRef":"${inspectedRef}","verdict":"pass","summary":"ok","findings":[]}\n\`\`\``,
+      duration: 1000,
+    });
+
+    const result = await verifyEpic(makeInput(), makeConfig(), STUB_LOGS_DIR);
+
+    expect(result.verdict).not.toBe('pass');
+    expect(result.verificationTarget.sha).toBe(PINNED_SHA);
+    expect(result.comment).toContain(`\`${PINNED_SHA}\``);
+  });
+
+  test('returns the pinned target and auditable fresh-session metadata', async () => {
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: `\`\`\`json\n{"inspectedRef":"${PINNED_SHA}","verdict":"pass","summary":"ok","findings":[]}\n\`\`\``,
+      duration: 1000,
+    });
+
+    const result = await verifyEpic(makeInput(), makeConfig(), STUB_LOGS_DIR);
+
+    expect(result.audit).toEqual(expect.objectContaining({
+      epicNumber: 165,
+      pinnedRef: 'master',
+      pinnedSha: PINNED_SHA,
+      inspectedRef: PINNED_SHA,
+      verdict: 'pass',
+      agent: { resume: false, memoryMode: 'fresh' },
+    }));
+    expect(result.audit.mergedPRs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ issueNum: 11, mergeCommitSha: SECOND_MERGE_SHA }),
+    ]));
   });
 
   test('includes bounded PR checks and issue comments as untrusted verification evidence', async () => {
@@ -370,7 +454,7 @@ Final fence (authoritative):
     });
     mockSpawnAgent.mockResolvedValue({
       exitCode: 0,
-      output: '```json\n{"verdict":"pass","summary":"ok","findings":[]}\n```',
+      output: `\`\`\`json\n{"inspectedRef":"${PINNED_SHA}","verdict":"pass","summary":"ok","findings":[]}\n\`\`\``,
       duration: 1000,
     });
     const input = makeInput({
@@ -384,7 +468,11 @@ Final fence (authoritative):
           }],
         }),
       ],
-      mergedPRUrls: ['https://github.com/owner/repo/pull/201'],
+      mergedPRs: [{
+        url: 'https://github.com/owner/repo/pull/201',
+        mergeCommitSha: PINNED_SHA,
+        mergedAt: '2026-08-12T12:00:00Z',
+      }],
     });
 
     await verifyEpic(input, makeConfig(), STUB_LOGS_DIR);
