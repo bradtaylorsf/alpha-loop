@@ -261,6 +261,44 @@ describe('parseTriageAnalysisResponse', () => {
       epicGroups: [],
     })).toThrow('findings[0].selected');
   });
+
+  it('rejects findings whose displayed action does not match the executed category', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [{ ...finding, action: 'rewrite' }],
+      epicGroups: [],
+    })).toThrow('action must be close for category stale');
+  });
+
+  it.each([
+    ['unclear', 'rewrite', 'rewrittenBody'],
+    ['too_large', 'split', 'splitInto'],
+    ['duplicate', 'merge', 'duplicateOf'],
+    ['enrich', 'enrich', 'enrichedBody'],
+  ])('rejects %s findings without the payload needed to execute them', (category, action, field) => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [{ ...finding, category, action }],
+      epicGroups: [],
+    })).toThrow(field);
+  });
+
+  it('rejects multiple findings for one issue so selection cannot execute an unselected entry', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [finding, { ...finding, selected: false }],
+      epicGroups: [],
+    })).toThrow('findings[1].issueNum duplicates issue #10');
+  });
+
+  it('rejects a duplicate finding that targets itself', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [{
+        ...finding,
+        category: 'duplicate',
+        action: 'merge',
+        duplicateOf: finding.issueNum,
+      }],
+      epicGroups: [],
+    })).toThrow('duplicateOf must reference a different issue');
+  });
 });
 
 describe('triage plan artifacts', () => {

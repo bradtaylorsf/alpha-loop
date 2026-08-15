@@ -72,6 +72,14 @@ export type TriageAnalysis = {
   epicGroups: ProposedEpicGroup[];
 };
 
+const TRIAGE_ACTION_BY_CATEGORY: Record<TriageCategory, TriageAction> = {
+  stale: 'close',
+  unclear: 'rewrite',
+  too_large: 'split',
+  duplicate: 'merge',
+  enrich: 'enrich',
+};
+
 export const TRIAGE_PLAN_VERSION = 1 as const;
 
 export type TriagePlanArtifact = {
@@ -517,18 +525,55 @@ function normalizeTriageFinding(value: unknown, index: number): TriageFinding {
     throw new Error(`${context}.action must be a supported triage action`);
   }
 
-  return {
+  const category = value.category as TriageCategory;
+  const action = value.action as TriageAction;
+  if (action !== TRIAGE_ACTION_BY_CATEGORY[category]) {
+    throw new Error(`${context}.action must be ${TRIAGE_ACTION_BY_CATEGORY[category]} for category ${category}`);
+  }
+
+  const finding: TriageFinding = {
     issueNum: issueNum as number,
     title: requireString(value, 'title', context),
-    category: value.category as TriageCategory,
+    category,
     reason: requireString(value, 'reason', context),
-    action: value.action as TriageAction,
+    action,
     rewrittenBody: normalizeOptionalString(value, 'rewrittenBody', context),
     enrichedBody: normalizeOptionalString(value, 'enrichedBody', context),
     splitInto: normalizeOptionalStringArray(value, 'splitInto', context),
     duplicateOf: normalizeOptionalIssueNumber(value, 'duplicateOf', context),
     selected: normalizeSelected(value, context),
   };
+
+  if (category === 'unclear' && finding.rewrittenBody === undefined) {
+    throw new Error(`${context}.rewrittenBody is required for category unclear`);
+  }
+  if (category === 'too_large' && (!finding.splitInto || finding.splitInto.length === 0)) {
+    throw new Error(`${context}.splitInto must contain at least one title for category too_large`);
+  }
+  if (category === 'duplicate' && finding.duplicateOf === undefined) {
+    throw new Error(`${context}.duplicateOf is required for category duplicate`);
+  }
+  if (category === 'duplicate' && finding.duplicateOf === finding.issueNum) {
+    throw new Error(`${context}.duplicateOf must reference a different issue`);
+  }
+  if (category === 'enrich' && finding.enrichedBody === undefined) {
+    throw new Error(`${context}.enrichedBody is required for category enrich`);
+  }
+
+  return finding;
+}
+
+function normalizeTriageFindings(findings: unknown[]): TriageFinding[] {
+  const normalized = findings.map((finding, index) => normalizeTriageFinding(finding, index));
+  const seenIssueNumbers = new Set<number>();
+  for (let index = 0; index < normalized.length; index++) {
+    const issueNum = normalized[index].issueNum;
+    if (seenIssueNumbers.has(issueNum)) {
+      throw new Error(`findings[${index}].issueNum duplicates issue #${issueNum}`);
+    }
+    seenIssueNumbers.add(issueNum);
+  }
+  return normalized;
 }
 
 function normalizeProposedEpicGroup(value: unknown, index: number): ProposedEpicGroup {
@@ -555,7 +600,7 @@ function normalizeProposedEpicGroup(value: unknown, index: number): ProposedEpic
 export function normalizeTriageAnalysis(value: unknown): TriageAnalysis {
   if (Array.isArray(value)) {
     return {
-      findings: value.map((finding, index) => normalizeTriageFinding(finding, index)),
+      findings: normalizeTriageFindings(value),
       epicGroups: [],
     };
   }
@@ -575,7 +620,7 @@ export function normalizeTriageAnalysis(value: unknown): TriageAnalysis {
   }
 
   return {
-    findings: findings.map((finding, index) => normalizeTriageFinding(finding, index)),
+    findings: normalizeTriageFindings(findings),
     epicGroups: epicGroups.map((group, index) => normalizeProposedEpicGroup(group, index)),
   };
 }
