@@ -970,11 +970,28 @@ describe('closeIssue', () => {
     );
   });
 
-  test('closes issue with reason', () => {
+  test('closes issue with the completed CLI reason', () => {
+    closeIssue('owner/repo', 42, 'completed');
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'gh issue close 42 --repo "owner/repo" --reason "completed"',
+    );
+  });
+
+  test('maps the not_planned API reason to the not planned CLI reason', () => {
     closeIssue('owner/repo', 42, 'not_planned');
 
     expect(mockExec).toHaveBeenCalledWith(
-      expect.stringContaining('--reason "not_planned"'),
+      'gh issue close 42 --repo "owner/repo" --reason "not planned"',
+    );
+    expect(mockExec).not.toHaveBeenCalledWith(expect.stringContaining('not_planned'));
+  });
+
+  test('closes a duplicate with its canonical issue number', () => {
+    closeIssue('owner/repo', 42, 'duplicate', 17);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'gh issue close 42 --repo "owner/repo" --reason "duplicate" --duplicate-of 17',
     );
   });
 

@@ -368,7 +368,7 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
           if (finding.duplicateOf != null) {
             commentIssue(config.repo, finding.issueNum,
               `Closing as duplicate of #${finding.duplicateOf}.\n\n_Triaged by alpha-loop._`);
-            closeIssue(config.repo, finding.issueNum, 'not_planned');
+            closeIssue(config.repo, finding.issueNum, 'duplicate', finding.duplicateOf);
             log.success(`Closed duplicate #${finding.issueNum} (duplicate of #${finding.duplicateOf})`);
             applied++;
           } else {
