@@ -35,7 +35,9 @@ jest.mock('../../src/lib/rate-limit', () => {
   const projectKey = (owner: string, projectNum: number) => `${owner}/${projectNum}`;
 
   return {
-    ghExec: jest.fn((cmd: string) => shell.exec(cmd)),
+    ghExec: jest.fn((cmd: string, options?: { cwd?: string; timeout?: number }) => (
+      options ? shell.exec(cmd, options) : shell.exec(cmd)
+    )),
     getProjectCache: jest.fn(
       (owner: string, projectNum: number) => projectCache.get(projectKey(owner, projectNum)) ?? null,
     ),
@@ -588,6 +590,10 @@ describe('mergePR', () => {
     return JSON.stringify({ createdAt, statusCheckRollup });
   }
 
+  function mergedMetadata(): string {
+    return JSON.stringify({ state: 'MERGED', mergedAt: now.toISOString() });
+  }
+
   beforeEach(() => {
     jest.useFakeTimers();
     jest.setSystemTime(now);
@@ -602,6 +608,9 @@ describe('mergePR', () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('gh pr list')) {
         return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
       }
       if (cmd.includes('gh pr view')) {
         const checks = viewCount === 0
@@ -633,6 +642,9 @@ describe('mergePR', () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('gh pr list')) {
         return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
       }
       if (cmd.includes('gh pr view')) {
         return {
@@ -700,6 +712,29 @@ describe('mergePR', () => {
     expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
   });
 
+  test.each(['NEUTRAL', 'SKIPPED'])('treats a %s conclusion as a successful terminal check', async (conclusion) => {
+    const oldCreatedAt = new Date(now.getTime() - 20_000).toISOString();
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'Optional job', status: 'COMPLETED', conclusion }], oldCreatedAt),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate)).resolves.toBe(true);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(true);
+  });
+
   test('blocks after the registration window when no checks appear and checks are required', async () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('gh pr list')) {
@@ -724,6 +759,9 @@ describe('mergePR', () => {
       if (cmd.includes('gh pr list')) {
         return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
       }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
+      }
       if (cmd.includes('gh pr view')) {
         return { stdout: metadata([], oldCreatedAt), stderr: '', exitCode: 0 };
       }
@@ -745,6 +783,9 @@ describe('mergePR', () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('gh pr list')) {
         return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
       }
       if (cmd.includes('gh pr view')) {
         return {
@@ -772,6 +813,9 @@ describe('mergePR', () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('gh pr list')) {
         return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
       }
       if (cmd.includes('gh pr view')) {
         return {
@@ -823,6 +867,28 @@ describe('mergePR', () => {
     expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
   });
 
+  test('bounds each check query by the remaining merge-gate deadline', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return { stdout: metadata([]), stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', {
+      ...blockGate,
+      timeoutSeconds: 10,
+    });
+    const checkQuery = mockExec.mock.calls.find(([cmd]) => String(cmd).includes('statusCheckRollup'));
+
+    expect(checkQuery?.[1]).toEqual({ timeout: 10_000 });
+    await jest.advanceTimersByTimeAsync(10_000);
+    await expect(mergePromise).resolves.toBe(false);
+  });
+
   test('returns false when no PR is found', async () => {
     mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });
 
@@ -860,6 +926,32 @@ describe('mergePR', () => {
       }
       if (cmd.includes('gh pr merge')) {
         return { stdout: '', stderr: 'merge rejected', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate)).resolves.toBe(false);
+  });
+
+  test('returns false when the merge command exits zero but the PR remains open', async () => {
+    const oldCreatedAt = new Date(now.getTime() - 20_000).toISOString();
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return {
+          stdout: JSON.stringify({ state: 'OPEN', mergedAt: null }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }], oldCreatedAt),
+          stderr: '',
+          exitCode: 0,
+        };
       }
       return { stdout: '', stderr: '', exitCode: 0 };
     });

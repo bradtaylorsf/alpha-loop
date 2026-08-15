@@ -21,6 +21,7 @@ const MAX_PR_BODY_CHARS = 60_000;
 const CHECK_POLL_INTERVAL_MS = 5_000;
 const CHECK_REGISTRATION_TIMEOUT_MS = 30_000;
 const MIN_PR_AGE_BEFORE_MERGE_MS = 10_000;
+const MERGE_CONFIRM_TIMEOUT_MS = 15_000;
 
 export type Comment = {
   author: string;
@@ -457,15 +458,16 @@ type PRCheckSnapshot = {
 
 type CheckState = 'success' | 'pending' | 'failure';
 
-const SUCCESS_STATES = new Set(['SUCCESS']);
+// GitHub treats neutral and skipped checks as successful terminal results for
+// merge requirements. Blocking them would strand PRs whose CI intentionally
+// skips an optional job.
+const SUCCESS_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 const PENDING_STATES = new Set(['EXPECTED', 'PENDING', 'QUEUED', 'IN_PROGRESS', 'REQUESTED', 'WAITING']);
 const FAILURE_STATES = new Set([
   'ACTION_REQUIRED',
   'CANCELLED',
   'ERROR',
   'FAILURE',
-  'NEUTRAL',
-  'SKIPPED',
   'STALE',
   'STARTUP_FAILURE',
   'TIMED_OUT',
@@ -501,9 +503,10 @@ function normalizeCheckState(check: StatusCheck): CheckState {
   return 'pending';
 }
 
-function fetchPRCheckSnapshot(repo: string, prNum: number): PRCheckSnapshot | null {
+function fetchPRCheckSnapshot(repo: string, prNum: number, timeoutMs: number): PRCheckSnapshot | null {
   const result = ghExec(
     `gh pr view ${prNum} --repo ${shellQuote(repo)} --json createdAt,statusCheckRollup`,
+    { timeout: timeoutMs },
   );
   if (result.exitCode !== 0 || !result.stdout) {
     const detail = result.stderr.trim();
@@ -546,7 +549,17 @@ async function waitForMergeGate(
   let loggedTimeoutAgeDelay = false;
 
   while (true) {
-    const snapshot = fetchPRCheckSnapshot(repo, prNum);
+    // A synchronous gh call without a timeout could exceed both the initial
+    // registration window and the overall gate deadline. Bound it by the
+    // closest applicable deadline so network stalls fail closed.
+    const queryDeadline = !sawChecks && gate.requireChecks
+      ? Math.min(deadline, registrationDeadline)
+      : deadline;
+    const snapshot = fetchPRCheckSnapshot(
+      repo,
+      prNum,
+      Math.max(1, queryDeadline - Date.now()),
+    );
     const now = Date.now();
 
     if (snapshot) {
@@ -635,6 +648,32 @@ async function waitForMergeGate(
   }
 }
 
+function confirmPRMerged(repo: string, prNum: number): boolean {
+  const result = ghExec(
+    `gh pr view ${prNum} --repo ${shellQuote(repo)} --json state,mergedAt`,
+    { timeout: MERGE_CONFIRM_TIMEOUT_MS },
+  );
+  if (result.exitCode !== 0 || !result.stdout) {
+    const detail = result.stderr.trim();
+    log.error(`Could not verify that PR #${prNum} merged${detail ? `: ${detail}` : ''}`);
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(result.stdout) as { state?: string; mergedAt?: string | null };
+    if (parsed.state?.toUpperCase() === 'MERGED' && parsed.mergedAt) {
+      return true;
+    }
+  } catch {
+    // Fall through to the fail-closed diagnostic below.
+  }
+
+  log.error(
+    `Merge command completed for PR #${prNum}, but GitHub does not report it as merged; leaving recovery state intact`,
+  );
+  return false;
+}
+
 /**
  * Wait for GitHub checks, then merge a PR by branch name when the gate permits.
  */
@@ -682,6 +721,9 @@ export async function mergePR(
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to merge PR #${prNum}: ${result.stderr}`);
+    return false;
+  }
+  if (!confirmPRMerged(repo, prNum)) {
     return false;
   }
   log.info(`PR #${prNum} merged`);
