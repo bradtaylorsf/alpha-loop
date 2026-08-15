@@ -125,6 +125,7 @@ export function evaluatePromotion(
       // Tie on cost (no savings) blocks — costSavingsMin is strictly required.
       if (pipelineSuccessDelta < successDeltaFloor) continue;
       if (costSavingsPct < costSavingsMin) continue;
+      if (candidate.tool_error_rate == null) continue;
       if (candidate.tool_error_rate >= toolErrorCeiling) continue;
 
       proposals.push({

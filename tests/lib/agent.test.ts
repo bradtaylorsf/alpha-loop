@@ -382,7 +382,7 @@ describe('spawnAgent', () => {
       if (event !== 'close') return;
       queueMicrotask(() => {
         const lines = [
-          JSON.stringify({ type: 'thread.started', model: 'gpt-5.4-codex' }),
+          JSON.stringify({ type: 'thread.started', thread_id: 'thread-1' }),
           JSON.stringify({ type: 'item.started', item: { id: 'tool-1', type: 'command_execution', status: 'in_progress' } }),
           JSON.stringify({ type: 'item.completed', item: { id: 'tool-1', type: 'command_execution', status: 'failed', exit_code: 1 } }),
           JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'Implemented.' } }),
@@ -396,13 +396,39 @@ describe('spawnAgent', () => {
       });
     });
 
-    const result = await spawnAgent({ ...baseOptions, agent: 'codex', model: '' });
+    const result = await spawnAgent({ ...baseOptions, agent: 'codex', model: 'gpt-5.4-codex' });
 
     expect(result.output).toBe('Implemented.');
     expect(result.model).toBe('gpt-5.4-codex');
     expect(result.inputTokens).toBe(1234);
     expect(result.outputTokens).toBe(321);
     expect(result.costUsd).toBeUndefined();
+    expect(result.toolCalls).toBe(1);
+    expect(result.toolErrors).toBe(1);
+  });
+
+  test('counts only documented Codex tool items and treats declined calls as errors', async () => {
+    let stdoutHandler: Function;
+    mockStdout.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'data') stdoutHandler = cb;
+    });
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event !== 'close') return;
+      queueMicrotask(() => {
+        stdoutHandler(Buffer.from([
+          JSON.stringify({ type: 'item.started', item: { id: 'todo-1', type: 'todo_list', items: [] } }),
+          JSON.stringify({ type: 'item.completed', item: { id: 'todo-1', type: 'todo_list', items: [] } }),
+          JSON.stringify({ type: 'item.completed', item: { id: 'warning-1', type: 'error', message: 'non-fatal warning' } }),
+          JSON.stringify({ type: 'item.completed', item: { id: 'tool-1', type: 'command_execution', status: 'declined' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 2 } }),
+          '',
+        ].join('\n')));
+        cb(0);
+      });
+    });
+
+    const result = await spawnAgent({ ...baseOptions, agent: 'codex', model: 'gpt-5.4-codex' });
+
     expect(result.toolCalls).toBe(1);
     expect(result.toolErrors).toBe(1);
   });
@@ -416,7 +442,7 @@ describe('spawnAgent', () => {
       if (event !== 'close') return;
       queueMicrotask(() => {
         stdoutHandler(Buffer.from([
-          JSON.stringify({ type: 'step_start', part: { type: 'step-start', model: { modelID: 'qwen3-coder' } } }),
+          JSON.stringify({ type: 'step_start', part: { id: 'part-0', type: 'step-start' } }),
           JSON.stringify({ type: 'tool_use', part: { id: 'part-1', type: 'tool', callID: 'call-1', tool: 'bash', state: { status: 'completed' } } }),
           JSON.stringify({ type: 'text', part: { id: 'part-2', type: 'text', text: 'Done locally.' } }),
           JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', cost: 0, tokens: { input: 456, output: 78 } } }),
@@ -426,10 +452,10 @@ describe('spawnAgent', () => {
       });
     });
 
-    const result = await spawnAgent({ ...baseOptions, agent: 'opencode', model: '' });
+    const result = await spawnAgent({ ...baseOptions, agent: 'opencode', model: 'openai/qwen3-coder' });
 
     expect(result.output).toBe('Done locally.');
-    expect(result.model).toBe('qwen3-coder');
+    expect(result.model).toBe('openai/qwen3-coder');
     expect(result.costUsd).toBe(0);
     expect(result.inputTokens).toBe(456);
     expect(result.outputTokens).toBe(78);

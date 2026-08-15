@@ -82,7 +82,8 @@ export type RoutingCell = {
   pipeline_success_rate: number;
   cost_per_issue_shipped: number | null;
   median_wall_time_s: number;
-  tool_error_rate: number;
+  /** Errors per measured tool call; null when the cell emitted no tool calls. */
+  tool_error_rate: number | null;
   delta_cost_per_issue_shipped_vs_baseline?: number | null;
   delta_median_wall_time_s_vs_baseline?: number | null;
   delta_tool_error_rate_vs_baseline?: number | null;
@@ -125,7 +126,7 @@ export function buildStageTelemetry(
     model?: string;
   },
 ): StageTelemetry {
-  const model = agentResult.model || ctx.model || 'unknown';
+  const model = agentResult.model?.trim() || ctx.model?.trim() || 'unknown';
   const endpointName = ctx.endpoint ?? 'default';
 
   let tokensIn: number;
@@ -182,12 +183,13 @@ function stagesJsonlPath(runDirPath: string): string {
 
 /** Normalize current and legacy telemetry without granting legacy values measurement authority. */
 export function normalizeStageTelemetry(parsed: Partial<StageTelemetry>): StageTelemetry {
+  const costSource = parsed.cost_source ?? 'unmeasured';
   return {
     ...parsed,
     model: parsed.model?.trim() || 'unknown',
     token_source: parsed.token_source ?? 'unmeasured',
-    cost_usd: parsed.cost_source == null ? null : (parsed.cost_usd ?? null),
-    cost_source: parsed.cost_source ?? 'unmeasured',
+    cost_usd: costSource === 'unmeasured' ? null : (parsed.cost_usd ?? null),
+    cost_source: costSource,
   } as StageTelemetry;
 }
 
@@ -279,7 +281,8 @@ function median(values: number[]): number {
  *   number of shipped (status=success, filesChanged>0, not recovered) issues in the sessions
  *   where this cell ran.
  * - `median_wall_time_s`: median wall_time_s across invocations.
- * - `tool_error_rate`: sum(tool_errors) / sum(tool_calls || runs).
+ * - `tool_error_rate`: sum(tool_errors) / sum(tool_calls), or null when no
+ *   tool calls were measured.
  * - Delta columns compare each cell against the cell at the same `stage` with
  *   `model` matching the baseline. When `baseline` is 'all-frontier' (default)
  *   we pick the highest-cost cell per stage as the baseline (frontier).
@@ -397,7 +400,7 @@ export function aggregateRouting(
     const completeCost = b.cost_measurement_runs === b.runs;
     const totalCostUsd = completeCost ? Math.round(b.total_cost_usd * 10000) / 10000 : null;
     const cost_per_issue_shipped = shipped > 0 && totalCostUsd != null ? totalCostUsd / shipped : null;
-    const tool_error_rate = b.tool_calls > 0 ? b.tool_errors / b.tool_calls : (b.runs > 0 ? b.tool_errors / b.runs : 0);
+    const tool_error_rate = b.tool_calls > 0 ? b.tool_errors / b.tool_calls : null;
 
     cells.push({
       stage: b.stage,
@@ -414,7 +417,7 @@ export function aggregateRouting(
       pipeline_success_rate: Math.round(pipeline_success_rate * 1000) / 1000,
       cost_per_issue_shipped: cost_per_issue_shipped != null ? Math.round(cost_per_issue_shipped * 10000) / 10000 : null,
       median_wall_time_s: Math.round(median(b.wall_times) * 1000) / 1000,
-      tool_error_rate: Math.round(tool_error_rate * 10000) / 10000,
+      tool_error_rate: tool_error_rate == null ? null : Math.round(tool_error_rate * 10000) / 10000,
     });
   }
 
@@ -445,7 +448,9 @@ export function aggregateRouting(
     cell.delta_median_wall_time_s_vs_baseline =
       Math.round((cell.median_wall_time_s - b.median_wall_time_s) * 1000) / 1000;
     cell.delta_tool_error_rate_vs_baseline =
-      Math.round((cell.tool_error_rate - b.tool_error_rate) * 10000) / 10000;
+      cell.tool_error_rate != null && b.tool_error_rate != null
+        ? Math.round((cell.tool_error_rate - b.tool_error_rate) * 10000) / 10000
+        : null;
     cell.delta_pipeline_success_rate_vs_baseline =
       Math.round((cell.pipeline_success_rate - b.pipeline_success_rate) * 1000) / 1000;
   }
@@ -501,7 +506,7 @@ export function formatRoutingReport(agg: RoutingAggregation, opts: { json?: bool
   lines.push(`  Baseline: ${agg.filters.baseline} (highest-cost cell per stage)`);
   lines.push('');
 
-  const header = ['stage', 'model', 'runs', 'tok_in', 'tok_out', 'cost_usd', 'cost/issue', 'wall_s', 'err_rate', 'Δcost/issue'];
+  const header = ['stage', 'model', 'runs', 'tok_in', 'tok_out', 'cost_usd', 'cost/issue', 'wall_s', 'tool_err/call', 'Δcost/issue'];
   lines.push(header.join('\t'));
   for (const c of agg.cells) {
     const costPerIssue = c.cost_per_issue_shipped != null ? `$${c.cost_per_issue_shipped.toFixed(4)}` : 'n/a';
@@ -520,7 +525,7 @@ export function formatRoutingReport(agg: RoutingAggregation, opts: { json?: bool
       totalCost,
       costPerIssue,
       c.median_wall_time_s.toFixed(2),
-      c.tool_error_rate.toFixed(4),
+      c.tool_error_rate == null ? 'n/a' : c.tool_error_rate.toFixed(4),
       deltaStr,
     ].join('\t'));
   }

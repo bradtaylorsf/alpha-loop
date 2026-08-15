@@ -239,6 +239,18 @@ describe('writeStageTelemetry / readStageTelemetry', () => {
     expect(entries[0].cost_source).toBe('unmeasured');
     expect(entries[0].cost_usd).toBeNull();
   });
+
+  it('normalizes explicitly unmeasured historical zero cost to null', () => {
+    mkdirSync(tmp, { recursive: true });
+    writeFileSync(join(tmp, 'stages.jsonl'), JSON.stringify({
+      stage: 'implement', model: 'unknown', endpoint: 'default',
+      tokens_in: 100, tokens_out: 50, token_source: 'estimated',
+      cost_usd: 0, cost_source: 'unmeasured', wall_time_s: 1,
+      tool_calls: 0, tool_errors: 0, stage_success: true, started_at: 'x',
+    }) + '\n');
+
+    expect(readStageTelemetry(tmp)[0].cost_usd).toBeNull();
+  });
 });
 
 describe('aggregateRouting', () => {
@@ -350,6 +362,16 @@ describe('aggregateRouting', () => {
     ];
     const agg = aggregateRouting(items, [manifest('S', 1)]);
     expect(agg.cells[0].tool_error_rate).toBeCloseTo(0.08, 4);
+  });
+
+  it('reports a zero-tool-call error rate as unmeasured instead of changing units', () => {
+    const agg = aggregateRouting(
+      [{ session: 'S', entries: [entry('implement', 'm', 0.1, 10, 0, 2)] }],
+      [manifest('S', 1)],
+    );
+
+    expect(agg.cells[0].tool_error_rate).toBeNull();
+    expect(formatRoutingReport(agg)).toContain('\tn/a\t');
   });
 
   it('computes delta vs all-frontier baseline (highest-cost cell per stage)', () => {

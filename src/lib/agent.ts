@@ -101,6 +101,15 @@ const DEFAULT_RESULT_GRACE_MS = 60 * 1000;
 /** Time to wait for SIGTERM before forcing a stuck child down. */
 const FORCE_KILL_GRACE_MS = 5 * 1000;
 
+/** Codex exec JSONL item types that represent actual agent tool activity. */
+const CODEX_TOOL_ITEM_TYPES = new Set([
+  'command_execution',
+  'file_change',
+  'mcp_tool_call',
+  'collab_tool_call',
+  'web_search',
+]);
+
 export type AgentOptions = {
   agent: AgentType;
   model: string;
@@ -536,7 +545,7 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
           logLine = formatStreamJsonLine(line);
         } else if (options.agent === 'codex' || options.agent === 'ollama') {
           const item = asRecord(obj.item);
-          const isToolItem = item != null && item.type !== 'agent_message' && item.type !== 'reasoning';
+          const isToolItem = typeof item?.type === 'string' && CODEX_TOOL_ITEM_TYPES.has(item.type);
           parsedModel = emittedModel(obj, item) ?? parsedModel;
           if (obj.type === 'turn.completed') {
             addUsage(asRecord(obj.usage));
@@ -552,7 +561,10 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
             recordTool(item.id);
           } else if (isToolItem && item && obj.type === 'item.completed') {
             const exitCode = numeric(item.exit_code);
-            const failed = item.status === 'failed' || item.error != null || (exitCode != null && exitCode !== 0);
+            const failed = item.status === 'failed'
+              || item.status === 'declined'
+              || item.error != null
+              || (exitCode != null && exitCode !== 0);
             recordTool(item.id, failed);
           }
         } else if (options.agent === 'opencode') {

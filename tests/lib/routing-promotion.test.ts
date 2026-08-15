@@ -120,6 +120,14 @@ describe('evaluatePromotion', () => {
     expect(proposals).toHaveLength(0);
   });
 
+  it('blocks when tool error rate is unmeasured', () => {
+    const proposals = evaluatePromotion([
+      frontier(),
+      local({ tool_error_rate: null }),
+    ]);
+    expect(proposals).toHaveLength(0);
+  });
+
   it('passes when pipeline_success_delta equals -0.03 (inclusive)', () => {
     const proposals = evaluatePromotion([
       frontier({ pipeline_success_rate: 0.90 }),
