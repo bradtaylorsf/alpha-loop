@@ -381,7 +381,7 @@ export function estimateCost(
 export type MergeGateConfig = {
   /** Block an empty status check rollup instead of treating it as success. */
   requireChecks: boolean;
-  /** Maximum number of seconds to wait for checks to appear and conclude. */
+  /** Seconds to wait for checks before applying the timeout policy. */
   timeoutSeconds: number;
   /** Whether an inconclusive timeout blocks or permits the merge. */
   onTimeout: 'block' | 'warn';
@@ -677,10 +677,10 @@ function parseMergeGate(raw: unknown): MergeGateConfig {
     else console.warn(`[config] merge_gate.require_checks: expected a boolean (got ${String(r.require_checks)}); using true`);
   }
   if (r.timeout_seconds !== undefined) {
-    if (typeof r.timeout_seconds === 'number' && Number.isFinite(r.timeout_seconds) && r.timeout_seconds > 0) {
+    if (typeof r.timeout_seconds === 'number' && Number.isFinite(r.timeout_seconds) && r.timeout_seconds >= 1) {
       gate.timeoutSeconds = Math.floor(r.timeout_seconds);
     } else {
-      console.warn(`[config] merge_gate.timeout_seconds: expected a positive number (got ${String(r.timeout_seconds)}); using 900`);
+      console.warn(`[config] merge_gate.timeout_seconds: expected a number of at least 1 (got ${String(r.timeout_seconds)}); using 900`);
     }
   }
   if (r.on_timeout !== undefined) {
@@ -707,10 +707,10 @@ function applyMergeGateOverride(
     else console.warn(`[config] mergeGate.requireChecks override: expected a boolean (got ${String(r.requireChecks)}); ignoring`);
   }
   if (r.timeoutSeconds !== undefined) {
-    if (typeof r.timeoutSeconds === 'number' && Number.isFinite(r.timeoutSeconds) && r.timeoutSeconds > 0) {
+    if (typeof r.timeoutSeconds === 'number' && Number.isFinite(r.timeoutSeconds) && r.timeoutSeconds >= 1) {
       gate.timeoutSeconds = Math.floor(r.timeoutSeconds);
     } else {
-      console.warn(`[config] mergeGate.timeoutSeconds override: expected a positive number (got ${String(r.timeoutSeconds)}); ignoring`);
+      console.warn(`[config] mergeGate.timeoutSeconds override: expected a number of at least 1 (got ${String(r.timeoutSeconds)}); ignoring`);
     }
   }
   if (r.onTimeout !== undefined) {

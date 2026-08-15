@@ -767,6 +767,41 @@ describe('mergePR', () => {
     expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(expected);
   });
 
+  test('on_timeout warn cannot recreate a single-digit merge', async () => {
+    let mergeAgeMs = -1;
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'CI', status: 'IN_PROGRESS', conclusion: null }]),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (cmd.includes('gh pr merge')) {
+        mergeAgeMs = Date.now() - now.getTime();
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', {
+      requireChecks: true,
+      timeoutSeconds: 1,
+      onTimeout: 'warn',
+    });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(mergeAgeMs).toBe(-1);
+
+    await jest.advanceTimersByTimeAsync(8_999);
+    expect(mergeAgeMs).toBe(-1);
+    await jest.advanceTimersByTimeAsync(1);
+
+    await expect(mergePromise).resolves.toBe(true);
+    expect(mergeAgeMs).toBeGreaterThanOrEqual(10_000);
+  });
+
   test('blocks query and parse uncertainty on timeout by default', async () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('gh pr list')) {

@@ -226,6 +226,25 @@ max_test_retries: 5
     warn.mockRestore();
   });
 
+  it('rejects a merge gate timeout that floors below one second', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation();
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `merge_gate:
+  timeout_seconds: 0.5
+`,
+    );
+
+    expect(loadConfig().mergeGate.timeoutSeconds).toBe(900);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('merge_gate.timeout_seconds'));
+
+    expect(loadConfig({
+      mergeGate: { timeoutSeconds: 0.5 } as Config['mergeGate'],
+    }).mergeGate.timeoutSeconds).toBe(900);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('mergeGate.timeoutSeconds override'));
+    warn.mockRestore();
+  });
+
   it('merges partial programmatic merge gate overrides without dropping safe defaults', () => {
     const config = loadConfig({
       mergeGate: { timeoutSeconds: 45 } as Config['mergeGate'],

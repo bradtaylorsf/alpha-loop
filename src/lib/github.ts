@@ -543,6 +543,7 @@ async function waitForMergeGate(
   const registrationDeadline = Math.min(deadline, startedAt + CHECK_REGISTRATION_TIMEOUT_MS);
   let sawChecks = false;
   let loggedWaiting = false;
+  let loggedTimeoutAgeDelay = false;
 
   while (true) {
     const snapshot = fetchPRCheckSnapshot(repo, prNum);
@@ -590,6 +591,21 @@ async function waitForMergeGate(
 
     if (now >= deadline) {
       if (gate.onTimeout === 'warn') {
+        // Even the explicit fail-open policy must not recreate the observable
+        // single-digit merge signature. Continue polling during this short
+        // delay so a terminal failure can still block the merge.
+        const ageReference = Math.min(snapshot?.createdAt ?? startedAt, startedAt);
+        const earliestMergeAt = ageReference + MIN_PR_AGE_BEFORE_MERGE_MS;
+        if (now < earliestMergeAt) {
+          if (!loggedTimeoutAgeDelay) {
+            log.warn(
+              `Merge gate timed out after ${gate.timeoutSeconds}s for PR #${prNum}; delaying the fail-open merge until the PR is at least ${MIN_PR_AGE_BEFORE_MERGE_MS / 1_000}s old`,
+            );
+            loggedTimeoutAgeDelay = true;
+          }
+          await sleep(Math.max(1, Math.min(CHECK_POLL_INTERVAL_MS, earliestMergeAt - now)));
+          continue;
+        }
         log.warn(
           `Merge gate timed out after ${gate.timeoutSeconds}s for PR #${prNum}; proceeding because merge_gate.on_timeout is warn`,
         );
