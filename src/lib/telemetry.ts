@@ -525,7 +525,7 @@ export function formatRoutingReport(agg: RoutingAggregation, opts: { json?: bool
       totalCost,
       costPerIssue,
       c.median_wall_time_s.toFixed(2),
-      c.tool_error_rate == null ? 'n/a' : c.tool_error_rate.toFixed(4),
+      c.tool_error_rate == null ? '—' : c.tool_error_rate.toFixed(4),
       deltaStr,
     ].join('\t'));
   }

@@ -109,6 +109,22 @@ describe('reportRoutingCommand', () => {
     expect(implCell.cost_per_issue_shipped).toBeCloseTo(0.1, 4);
   });
 
+  it('keeps zero-tool-call error rates null in JSON and renders an em dash in text', () => {
+    seedSession(tmp, 'session/A', [
+      entry({ stage: 'implement', model: 'codex', tool_calls: 0, tool_errors: 2 }),
+    ], { shipped: 1 });
+
+    reportRoutingCommand({ projectDir: tmp, json: true });
+    const parsed = JSON.parse(logs.join('\n'));
+    expect(parsed.cells[0].tool_error_rate).toBeNull();
+
+    logs = [];
+    reportRoutingCommand({ projectDir: tmp });
+    const output = logs.join('\n');
+    expect(output).toContain('tool_err/call');
+    expect(output).toContain('\t—\t');
+  });
+
   it('filters by --profile', () => {
     seedSession(tmp, 'session/A', [
       entry({ stage: 'implement', model: 'a', cost_usd: 0.1, profile: 'alpha' }),

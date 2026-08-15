@@ -167,9 +167,10 @@ build  claude-sonnet-4-6        42  800000   160000    $7.5600      $0.1800    7
 build  qwen3-coder-30b-a3b      38  700000   140000    $0.0000      $0.0000    88.00          0.0170      -$0.1800
 ```
 
-`tool_err/call` is always errors per measured tool call. It renders `n/a`
-when a cell has no measured calls, and such a cell is not eligible for
-automatic promotion.
+`tool_err/call` is always errors per measured tool call. It renders `—` (and
+serializes as `null` in JSON) when a cell has no measured calls, and such a
+cell is not eligible for automatic promotion. It does not describe stage
+failures; stage outcomes are recorded separately as `stage_success`.
 
 A stage is eligible for promotion to its local candidate when, over ≥30
 runs: cost-per-issue savings ≥ 40%, pipeline-success delta ≥ −3%, and

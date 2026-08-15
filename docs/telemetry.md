@@ -95,8 +95,10 @@ Outputs per (stage, model) cells:
 - `cost_per_issue_shipped` — `sum(cost_usd) / shipped_issues`, `null` when no
   issues shipped or when any run in the cell has unmeasured cost
 - `median_wall_time_s` — median wall-clock time per invocation
-- `tool_error_rate` — `sum(tool_errors) / sum(tool_calls)`; `null` / `n/a`
-  when no tool calls were measured. The column never switches to errors per run.
+- `tool_error_rate` — `sum(tool_errors) / sum(tool_calls)`; JSON reports `null`
+  and the text `tool_err/call` column renders `—` when no tool calls were
+  measured. The column never switches to errors per run. This is a tool-error
+  ratio, not a stage failure rate; use `stage_success` for invocation outcomes.
 - `delta_*_vs_baseline` — delta vs the highest-cost cell for the same stage
   (the implicit "all-frontier" reference)
 
