@@ -26,11 +26,11 @@ jest.mock('../../src/lib/pipeline', () => ({
 }));
 
 jest.mock('../../src/lib/github', () => ({
-  labelIssue: jest.fn(),
+  labelIssue: jest.fn(() => true),
   commentIssue: jest.fn(),
   createPR: jest.fn(),
   getIssueWithComments: jest.fn(),
-  updateProjectStatus: jest.fn(),
+  updateProjectStatus: jest.fn(() => true),
 }));
 
 jest.mock('../../src/lib/learning', () => ({

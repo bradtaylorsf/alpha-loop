@@ -1,6 +1,6 @@
 jest.mock('../../src/lib/github', () => ({
   commentIssue: jest.fn(() => true),
-  labelIssue: jest.fn(),
+  labelIssue: jest.fn(() => true),
 }));
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

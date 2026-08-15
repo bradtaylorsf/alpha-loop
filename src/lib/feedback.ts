@@ -771,7 +771,9 @@ export function ingestFeedback(input: IngestFeedbackInput): FeedbackIngestResult
 
   if (sessionUpdate.resumeCommand && association.issueNumber) {
     for (const change of githubLabelChangesForStatus('resume_requested', input.readyLabel ?? 'ready')) {
-      labelIssue(repo, association.issueNumber, change.add, change.remove);
+      if (!labelIssue(repo, association.issueNumber, change.add, change.remove)) {
+        throw new Error(`Failed to update resume-requested labels on ${repo}#${association.issueNumber}.`);
+      }
     }
   }
 

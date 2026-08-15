@@ -223,7 +223,7 @@ function pollIssuesByLabel(repo: string, label: string, limit: number, milestone
 /**
  * Add/remove labels on an issue.
  */
-export function labelIssue(repo: string, issueNum: number, addLabel: string, removeLabel?: string): void {
+export function labelIssue(repo: string, issueNum: number, addLabel: string, removeLabel?: string): boolean {
   const args = [`gh issue edit ${issueNum} --repo "${repo}" --add-label "${addLabel}"`];
   if (removeLabel) {
     args[0] += ` --remove-label "${removeLabel}"`;
@@ -231,7 +231,9 @@ export function labelIssue(repo: string, issueNum: number, addLabel: string, rem
   const result = ghExec(args[0], undefined, true);
   if (result.exitCode !== 0) {
     log.warn(`Failed to update labels on issue #${issueNum}: ${result.stderr}`);
+    return false;
   }
+  return true;
 }
 
 /**
@@ -262,14 +264,16 @@ export function commentIssue(repo: string, issueNum: number, body: string): bool
 /**
  * Assign an issue to a user.
  */
-export function assignIssue(repo: string, issueNum: number, assignee: string): void {
+export function assignIssue(repo: string, issueNum: number, assignee: string): boolean {
   const result = ghExec(
     `gh issue edit ${issueNum} --repo "${repo}" --add-assignee "${assignee}"`,
     undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to assign issue #${issueNum} to ${assignee}: ${result.stderr}`);
+    return false;
   }
+  return true;
 }
 
 export type CreatePROptions = {
@@ -398,16 +402,24 @@ export function createPR(options: CreatePROptions): string {
       `gh pr list --repo ${shellQuote(repo)} --head ${quotedHead} --json number,url --limit 1`,
     );
     if (existingResult.exitCode === 0 && existingResult.stdout) {
+      let existing: Array<{ number: number; url: string }> = [];
       try {
-        const existing = JSON.parse(existingResult.stdout) as Array<{ number: number; url: string }>;
-        if (existing.length > 0) {
-          const prUrl = existing[0].url;
-          log.info(`PR already exists: ${prUrl}, updating...`);
-          ghExec(`gh pr edit ${existing[0].number} --repo ${shellQuote(repo)} --base ${shellQuote(base)} --title ${shellQuote(title)} --body-file ${shellQuote(bodyFile)}`, undefined, true);
-          return prUrl;
-        }
+        existing = JSON.parse(existingResult.stdout) as Array<{ number: number; url: string }>;
       } catch {
         // Fall through to create
+      }
+      if (existing.length > 0) {
+        const prUrl = existing[0].url;
+        log.info(`PR already exists: ${prUrl}, updating...`);
+        const editResult = ghExec(
+          `gh pr edit ${existing[0].number} --repo ${shellQuote(repo)} --base ${shellQuote(base)} --title ${shellQuote(title)} --body-file ${shellQuote(bodyFile)}`,
+          undefined,
+          true,
+        );
+        if (editResult.exitCode !== 0) {
+          throw new Error(`Failed to update PR #${existing[0].number}: ${editResult.stderr}`);
+        }
+        return prUrl;
       }
     }
 
@@ -429,14 +441,15 @@ export function createPR(options: CreatePROptions): string {
 /**
  * Merge a PR by branch name.
  */
-export function mergePR(repo: string, head: string, method: 'squash' | 'merge' = 'squash'): void {
+export function mergePR(repo: string, head: string, method: 'squash' | 'merge' = 'squash'): boolean {
   // Find the PR number by branch
   const listResult = ghExec(
     `gh pr list --repo "${repo}" --head "${head}" --json number --limit 1`,
   );
   if (listResult.exitCode !== 0 || !listResult.stdout) {
-    log.warn(`No PR found to merge for branch ${head}`);
-    return;
+    const detail = listResult.stderr.trim();
+    log.warn(`No PR found to merge for branch ${head}${detail ? `: ${detail}` : ''}`);
+    return false;
   }
 
   let prNum: number;
@@ -444,12 +457,16 @@ export function mergePR(repo: string, head: string, method: 'squash' | 'merge' =
     const prs = JSON.parse(listResult.stdout) as Array<{ number: number }>;
     if (prs.length === 0) {
       log.warn(`No PR found to merge for branch ${head}`);
-      return;
+      return false;
+    }
+    if (!Number.isInteger(prs[0]?.number)) {
+      log.warn('Failed to parse PR list');
+      return false;
     }
     prNum = prs[0].number;
   } catch {
     log.warn('Failed to parse PR list');
-    return;
+    return false;
   }
 
   const mergeFlag = method === 'squash' ? '--squash' : '--merge';
@@ -458,9 +475,11 @@ export function mergePR(repo: string, head: string, method: 'squash' | 'merge' =
     undefined, true,
   );
   if (result.exitCode !== 0) {
-    throw new Error(`Failed to merge PR #${prNum}: ${result.stderr}`);
+    log.warn(`Failed to merge PR #${prNum}: ${result.stderr}`);
+    return false;
   }
   log.info(`PR #${prNum} merged`);
+  return true;
 }
 
 function projectFailureReason(message: string, detail?: string): string {
@@ -488,15 +507,15 @@ export function updateProjectStatus(
   owner: string,
   issueNum: number,
   status: string,
-): void {
+): boolean {
   if (!projectNum || projectNum <= 0) {
-    return;
+    return true;
   }
 
   // ── Resolve project metadata (cached on success, disabled on failure) ─
   let cache = getProjectCache(owner, projectNum);
   if (cache?.disabled) {
-    return;
+    return false;
   }
 
   if (!cache) {
@@ -510,7 +529,7 @@ export function updateProjectStatus(
         projectNum,
         projectFailureReason('Could not list project fields', fieldResult.stderr),
       );
-      return;
+      return false;
     }
 
     let fieldId: string | undefined;
@@ -532,12 +551,12 @@ export function updateProjectStatus(
       }
     } catch {
       disableProjectStatus(owner, projectNum, 'Failed to parse project fields');
-      return;
+      return false;
     }
 
     if (!fieldId || optionMap.size === 0) {
       disableProjectStatus(owner, projectNum, 'Could not resolve project Status field');
-      return;
+      return false;
     }
 
     // Fetch project ID
@@ -550,7 +569,7 @@ export function updateProjectStatus(
         projectNum,
         projectFailureReason('Could not view project', projectResult.stderr),
       );
-      return;
+      return false;
     }
 
     let projectId: string | undefined;
@@ -559,12 +578,12 @@ export function updateProjectStatus(
       projectId = data.id;
     } catch {
       disableProjectStatus(owner, projectNum, 'Failed to parse project data');
-      return;
+      return false;
     }
 
     if (!projectId) {
       disableProjectStatus(owner, projectNum, 'Could not get project ID');
-      return;
+      return false;
     }
 
     cache = { projectId, fieldId, optionMap };
@@ -573,14 +592,14 @@ export function updateProjectStatus(
   }
 
   if (cache.disabled) {
-    return;
+    return false;
   }
 
   // ── Resolve option ID for the requested status ──────────────────────
   const optionId = cache.optionMap.get(status);
   if (!optionId) {
     disableProjectStatus(owner, projectNum, `Could not resolve project option for status '${status}'`);
-    return;
+    return false;
   }
 
   // ── Find the item ID for this issue ─────────────────────────────────
@@ -598,7 +617,7 @@ export function updateProjectStatus(
       projectNum,
       projectFailureReason(`Could not resolve project item for #${issueNum}`, itemResult.stderr),
     );
-    return;
+    return false;
   }
 
   let itemId: string | undefined;
@@ -607,12 +626,12 @@ export function updateProjectStatus(
     itemId = data.id;
   } catch {
     disableProjectStatus(owner, projectNum, 'Failed to parse project item response');
-    return;
+    return false;
   }
 
   if (!itemId) {
     disableProjectStatus(owner, projectNum, `Could not find project item for issue #${issueNum}`);
-    return;
+    return false;
   }
 
   // ── Update the item ─────────────────────────────────────────────────
@@ -626,10 +645,11 @@ export function updateProjectStatus(
       projectNum,
       projectFailureReason(`Failed to update project status for #${issueNum}`, editResult.stderr),
     );
-    return;
+    return false;
   }
 
   log.info(`Project board: #${issueNum} -> ${status}`);
+  return true;
 }
 
 /**
@@ -687,18 +707,47 @@ export function updateIssue(repo: string, issueNum: number, updates: { title?: s
   }
 }
 
+const CLI_REASON = {
+  completed: 'completed',
+  not_planned: 'not planned',
+  duplicate: 'duplicate',
+} as const;
+
 /**
- * Close an issue with an optional reason.
+ * Close an issue with an optional reason and verify that it is closed.
  */
-export function closeIssue(repo: string, issueNum: number, reason?: 'completed' | 'not_planned'): void {
-  const reasonFlag = reason ? ` --reason "${reason}"` : '';
+export function closeIssue(
+  repo: string,
+  issueNum: number,
+  reason?: keyof typeof CLI_REASON,
+  duplicateOf?: number,
+): boolean {
+  const reasonFlag = reason ? ` --reason "${CLI_REASON[reason]}"` : '';
+  const duplicateFlag = duplicateOf != null ? ` --duplicate-of ${duplicateOf}` : '';
   const result = ghExec(
-    `gh issue close ${issueNum} --repo "${repo}"${reasonFlag}`,
+    `gh issue close ${issueNum} --repo "${repo}"${reasonFlag}${duplicateFlag}`,
     undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to close issue #${issueNum}: ${result.stderr}`);
+    return false;
   }
+
+  const stateResult = ghExec(
+    `gh issue view ${issueNum} --repo "${repo}" --json state --jq .state`,
+  );
+  if (stateResult.exitCode !== 0) {
+    log.warn(`Failed to verify issue #${issueNum} state after close: ${stateResult.stderr}`);
+    return false;
+  }
+
+  const state = stateResult.stdout.trim().toUpperCase();
+  if (state !== 'CLOSED') {
+    log.warn(`Issue #${issueNum} remains ${state || 'in an unknown state'} after close command`);
+    return false;
+  }
+
+  return true;
 }
 
 /**
@@ -762,14 +811,16 @@ export function createMilestone(repo: string, title: string, description: string
 /**
  * Assign an issue to a milestone by title.
  */
-export function setIssueMilestone(repo: string, issueNum: number, milestoneTitle: string): void {
+export function setIssueMilestone(repo: string, issueNum: number, milestoneTitle: string): boolean {
   const result = ghExec(
     `gh issue edit ${issueNum} --repo "${repo}" --milestone ${JSON.stringify(milestoneTitle)}`,
     undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to set milestone on issue #${issueNum}: ${result.stderr}`);
+    return false;
   }
+  return true;
 }
 
 /**
@@ -1031,7 +1082,7 @@ export function commentChildEpicBacklink(repo: string, childIssueNum: number, ep
 /**
  * Add an issue to a GitHub Project v2.
  */
-export function addIssueToProject(owner: string, projectNum: number, repo: string, issueNum: number): void {
+export function addIssueToProject(owner: string, projectNum: number, repo: string, issueNum: number): boolean {
   const issueUrl = `https://github.com/${repo}/issues/${issueNum}`;
   const result = ghExec(
     `gh project item-add ${projectNum} --owner "${owner}" --url "${issueUrl}"`,
@@ -1039,7 +1090,9 @@ export function addIssueToProject(owner: string, projectNum: number, repo: strin
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to add issue #${issueNum} to project: ${result.stderr}`);
+    return false;
   }
+  return true;
 }
 
 /**
@@ -1102,7 +1155,7 @@ export function getEpicSubIssues(repo: string, epicNum: number): SubIssueRef[] {
  * either external mutation since this session started or a bug — either way,
  * loud failure, not silent drift.
  */
-export function updateEpicChecklist(repo: string, epicNum: number, subIssueNum: number, checked: boolean): void {
+export function updateEpicChecklist(repo: string, epicNum: number, subIssueNum: number, checked: boolean): boolean {
   const epic = getIssueWithComments(repo, epicNum);
   if (!epic) {
     throw new Error(`updateEpicChecklist: could not fetch epic #${epicNum}`);
@@ -1116,9 +1169,9 @@ export function updateEpicChecklist(repo: string, epicNum: number, subIssueNum: 
   const newBody = flipChecklistItem(epic.body, subIssueNum, checked);
   if (newBody === epic.body) {
     // Already in the requested state — no-op.
-    return;
+    return true;
   }
-  updateIssue(repo, epicNum, { body: newBody });
+  return updateIssue(repo, epicNum, { body: newBody });
 }
 
 type ClosingPullRequest = {

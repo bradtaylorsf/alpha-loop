@@ -1657,7 +1657,9 @@ export async function finalizeSession(
     const boardStatus = config.autoMerge ? 'In Review' : 'Done';
     for (const r of session.results) {
       if (r.status === 'success' && !isRecoveredSessionResult(r) && config.project > 0) {
-        updateProjectStatus(config.repo, config.project, config.repoOwner, r.issueNum, boardStatus);
+        if (!updateProjectStatus(config.repo, config.project, config.repoOwner, r.issueNum, boardStatus)) {
+          log.warn(`Session PR created, but project status for issue #${r.issueNum} was not updated to ${boardStatus}`);
+        }
       }
     }
 
