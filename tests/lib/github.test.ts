@@ -1265,13 +1265,11 @@ describe('addIssueToProject', () => {
 });
 
 describe('mutation wrapper contracts', () => {
-  test('exported ghExec mutation wrappers declare a non-void result', () => {
-    const fileName = resolve(process.cwd(), 'src/lib/github.ts');
-    const sourceText = readFileSync(fileName, 'utf-8');
+  function voidGhExecWrappers(sourceText: string, fileName = 'github.ts'): string[] {
     const sourceFile = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true);
     const offenders: string[] = [];
 
-    const containsMutationGhExec = (node: ts.Node): boolean => {
+    const containsGhExec = (node: ts.Node): boolean => {
       let found = false;
       const visit = (child: ts.Node): void => {
         if (found) return;
@@ -1279,7 +1277,6 @@ describe('mutation wrapper contracts', () => {
           ts.isCallExpression(child)
           && ts.isIdentifier(child.expression)
           && child.expression.text === 'ghExec'
-          && child.arguments[2]?.kind === ts.SyntaxKind.TrueKeyword
         ) {
           found = true;
           return;
@@ -1290,15 +1287,58 @@ describe('mutation wrapper contracts', () => {
       return found;
     };
 
+    const containsVoid = (type: ts.TypeNode | undefined): boolean => {
+      if (!type) return true;
+      let found = false;
+      const visit = (node: ts.Node): void => {
+        if (node.kind === ts.SyntaxKind.VoidKeyword || node.kind === ts.SyntaxKind.UndefinedKeyword) {
+          found = true;
+          return;
+        }
+        if (!found) ts.forEachChild(node, visit);
+      };
+      visit(type);
+      return found;
+    };
+
+    const isExported = (node: ts.Node & { modifiers?: ts.NodeArray<ts.ModifierLike> }): boolean => (
+      Boolean(node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword))
+    );
+
     for (const statement of sourceFile.statements) {
-      if (!ts.isFunctionDeclaration(statement) || !statement.name || !statement.body) continue;
-      const exported = statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
-      if (!exported || !containsMutationGhExec(statement.body)) continue;
-      const returnType = statement.type?.getText(sourceFile);
-      if (!returnType || returnType === 'void') offenders.push(statement.name.text);
+      if (ts.isFunctionDeclaration(statement) && statement.name && statement.body && isExported(statement)) {
+        if (containsGhExec(statement.body) && containsVoid(statement.type)) {
+          offenders.push(statement.name.text);
+        }
+        continue;
+      }
+
+      if (!ts.isVariableStatement(statement) || !isExported(statement)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+        if (!ts.isArrowFunction(declaration.initializer) && !ts.isFunctionExpression(declaration.initializer)) continue;
+        if (containsGhExec(declaration.initializer.body) && containsVoid(declaration.initializer.type)) {
+          offenders.push(declaration.name.text);
+        }
+      }
     }
 
-    expect(offenders).toEqual([]);
+    return offenders;
+  }
+
+  test('exported ghExec wrappers declare a non-void result', () => {
+    const fileName = resolve(process.cwd(), 'src/lib/github.ts');
+    expect(voidGhExecWrappers(readFileSync(fileName, 'utf-8'), fileName)).toEqual([]);
+  });
+
+  test.each([
+    ['function declaration', 'export function mutate(): void { ghExec("gh issue edit 1"); }'],
+    ['async function', 'export async function mutate(): Promise<void> { ghExec("gh issue edit 1", undefined, true); }'],
+    ['void union', 'export function mutate(): boolean | void { ghExec("gh issue edit 1", undefined, true); }'],
+    ['arrow function', 'export const mutate = (): void => { ghExec("gh issue edit 1", undefined, true); };'],
+    ['inferred result', 'export const mutate = () => { ghExec("gh issue edit 1", undefined, true); };'],
+  ])('rejects a void ghExec wrapper expressed as a %s', (_shape, sourceText) => {
+    expect(voidGhExecWrappers(sourceText)).toEqual(['mutate']);
   });
 });
 
