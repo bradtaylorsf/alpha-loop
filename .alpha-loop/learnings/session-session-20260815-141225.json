@@ -1,0 +1,89 @@
+{
+  "name": "session/20260815-141225",
+  "branch": "session/20260815-141225",
+  "completed": "2026-08-15T21:41:14.520Z",
+  "results": [
+    {
+      "issueNum": 408,
+      "title": "fix: first run after context goes stale always aborts — refreshProjectContext has no success path",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/428",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1311,
+      "filesChanged": 3
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 78192,
+      "tokens_out": 60148,
+      "cost_usd": 0,
+      "wall_time_s": 247.448,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-15T21:12:46.516Z",
+      "issue_num": 408
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 697535,
+      "tokens_out": 536565,
+      "cost_usd": 0,
+      "wall_time_s": 700.915,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-15T21:16:54.424Z",
+      "issue_num": 408
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 159723,
+      "tokens_out": 122864,
+      "cost_usd": 0,
+      "wall_time_s": 347.627,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-15T21:28:39.753Z",
+      "issue_num": 408
+    },
+    {
+      "stage": "learn",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 7072,
+      "tokens_out": 5440,
+      "cost_usd": 0,
+      "wall_time_s": 12.923,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-15T21:34:41.690Z",
+      "issue_num": 408
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 50865,
+      "tokens_out": 39127,
+      "cost_usd": 0,
+      "wall_time_s": 70.239,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-15T21:34:41.715Z",
+      "issue_num": 408
+    }
+  ]
+}
