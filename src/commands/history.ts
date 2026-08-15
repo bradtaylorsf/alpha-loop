@@ -13,7 +13,7 @@ import {
 } from '../lib/session.js';
 import { DEFAULT_SESSION_RETENTION, loadConfig, type SessionRetentionConfig } from '../lib/config.js';
 import { isWaitingFeedbackStatus } from '../lib/session-state.js';
-import { readStageTelemetry } from '../lib/telemetry.js';
+import { normalizeStageTelemetry, readStageTelemetry } from '../lib/telemetry.js';
 import type { StageTelemetry } from '../lib/telemetry.js';
 import { isRecoveredResult } from '../lib/pipeline.js';
 import type { PipelineResult } from '../lib/pipeline.js';
@@ -641,7 +641,7 @@ function loadStageTelemetry(sessionName: string, projectDir?: string): StageTele
   }
   const manifests = loadManifests(projectDir);
   const manifest = manifests.get(sessionName);
-  return manifest?.stages ?? [];
+  return (manifest?.stages ?? []).map((entry) => normalizeStageTelemetry(entry));
 }
 
 function fmtNumber(n: number, digits = 0): string {
@@ -649,6 +649,12 @@ function fmtNumber(n: number, digits = 0): string {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
+}
+
+function fmtTelemetryTokens(entry: StageTelemetry, value: number): string {
+  if (entry.token_source === 'reported') return fmtNumber(value);
+  if (entry.token_source === 'estimated') return `~${fmtNumber(value)}`;
+  return 'n/a';
 }
 
 export function historyTelemetry(sessionName: string, projectDir?: string): void {
@@ -669,20 +675,28 @@ export function historyTelemetry(sessionName: string, projectDir?: string): void
   let totalTokensOut = 0;
   let totalWall = 0;
   let totalErrs = 0;
+  let measuredTokenRuns = 0;
+  let measuredCostRuns = 0;
 
   for (const e of entries) {
-    totalCost += e.cost_usd;
-    totalTokensIn += e.tokens_in;
-    totalTokensOut += e.tokens_out;
+    if (e.cost_usd != null && e.cost_source !== 'unmeasured') {
+      totalCost += e.cost_usd;
+      measuredCostRuns++;
+    }
+    if (e.token_source === 'reported') {
+      totalTokensIn += e.tokens_in;
+      totalTokensOut += e.tokens_out;
+      measuredTokenRuns++;
+    }
     totalWall += e.wall_time_s;
     totalErrs += e.tool_errors;
     console.log([
       e.stage,
       e.model,
       e.endpoint,
-      fmtNumber(e.tokens_in),
-      fmtNumber(e.tokens_out),
-      `$${e.cost_usd.toFixed(4)}`,
+      fmtTelemetryTokens(e, e.tokens_in),
+      fmtTelemetryTokens(e, e.tokens_out),
+      e.cost_usd == null ? 'n/a' : `$${e.cost_usd.toFixed(4)}`,
       e.wall_time_s.toFixed(2),
       String(e.tool_errors),
       e.stage_success ? 'ok' : 'fail',
@@ -690,7 +704,11 @@ export function historyTelemetry(sessionName: string, projectDir?: string): void
   }
 
   console.log('');
-  console.log(`Totals: ${entries.length} stage(s), ${fmtNumber(totalTokensIn)} in / ${fmtNumber(totalTokensOut)} out, $${totalCost.toFixed(4)}, ${totalWall.toFixed(1)}s wall, ${totalErrs} tool error(s)`);
+  const tokenTotals = measuredTokenRuns > 0
+    ? `${fmtNumber(totalTokensIn)} in / ${fmtNumber(totalTokensOut)} out${measuredTokenRuns < entries.length ? ' (measured only)' : ''}`
+    : 'tokens n/a';
+  const costTotal = measuredCostRuns === entries.length ? `$${totalCost.toFixed(4)}` : 'cost n/a';
+  console.log(`Totals: ${entries.length} stage(s), ${tokenTotals}, ${costTotal}, ${totalWall.toFixed(1)}s wall, ${totalErrs} tool error(s)`);
 }
 
 function manifestAgeMs(manifest: DurableSessionManifest, fallbackTimestamp: string): number {

@@ -461,20 +461,26 @@ export function evaluateRuntimePolicy(
 
 export function evaluateCostPolicy(
   config: Config,
-  args: { issueCostUsd?: number; sessionCostUsd?: number; issueNum?: number; title?: string },
+  args: { issueCostUsd?: number | null; sessionCostUsd?: number | null; issueNum?: number; title?: string },
 ): AutomationPolicyDecision {
   const policy = normalizeAutomationPolicy(config.automationPolicy);
   const reasons: string[] = [];
   if (
+    (policy.maxIssueCostUsd > 0 && args.issueCostUsd === null)
+    || (policy.maxSessionCostUsd > 0 && args.sessionCostUsd === null)
+  ) {
+    reasons.push('Cost measurement unavailable; configured automation budgets cannot be enforced safely.');
+  }
+  if (
     policy.maxIssueCostUsd > 0
-    && args.issueCostUsd !== undefined
+    && args.issueCostUsd != null
     && args.issueCostUsd >= policy.maxIssueCostUsd
   ) {
     reasons.push(`Maximum issue budget reached ($${args.issueCostUsd.toFixed(4)} / $${policy.maxIssueCostUsd.toFixed(4)}).`);
   }
   if (
     policy.maxSessionCostUsd > 0
-    && args.sessionCostUsd !== undefined
+    && args.sessionCostUsd != null
     && args.sessionCostUsd >= policy.maxSessionCostUsd
   ) {
     reasons.push(`Maximum session budget reached ($${args.sessionCostUsd.toFixed(4)} / $${policy.maxSessionCostUsd.toFixed(4)}).`);
