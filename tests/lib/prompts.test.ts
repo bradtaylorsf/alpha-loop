@@ -117,7 +117,7 @@ describe('buildImplementPrompt', () => {
 
     expect(prompt).toContain('## Before You Start');
     expect(prompt).toContain('## After Implementing');
-    expect(prompt).toContain('git commit -m "chore: Add login page (closes #42)"');
+    expect(prompt).toContain("git commit -m 'chore: Add login page (closes #42)'");
   });
 
   test('preserves a prefixed bug title in commit guidance', () => {
@@ -128,8 +128,22 @@ describe('buildImplementPrompt', () => {
       labels: ['bug'],
     });
 
-    expect(prompt).toContain('git commit -m "fix: Correct release classification (closes #410)"');
+    expect(prompt).toContain("git commit -m 'fix: Correct release classification (closes #410)'");
     expect(prompt).not.toContain('feat: fix:');
+  });
+
+  test('shell-quotes untrusted issue titles in commit guidance', () => {
+    const prompt = buildImplementPrompt({
+      issueNum: 410,
+      title: "fix: Keep $(touch /tmp/pwned), `id`, and user's data literal",
+      body: 'Keep shell metacharacters inert.',
+      labels: ['bug'],
+    });
+
+    expect(prompt).toContain(
+      "git commit -m 'fix: Keep $(touch /tmp/pwned), `id`, and user'\\''s data literal (closes #410)'",
+    );
+    expect(prompt).not.toContain('git commit -m "fix: Keep $(');
   });
 
   test('includes parent epic context and narrow scope guidance when provided', () => {
@@ -403,10 +417,26 @@ describe('buildBatchImplementPrompt', () => {
       ],
     });
 
-    expect(prompt).toContain('git commit -m "fix: Correct it (closes #10)"');
-    expect(prompt).toContain('git commit -m "feat: Add it (closes #11)"');
-    expect(prompt).toContain('git commit -m "chore: Maintain it (closes #12)"');
+    expect(prompt).toContain("git commit -m 'fix: Correct it (closes #10)'");
+    expect(prompt).toContain("git commit -m 'feat: Add it (closes #11)'");
+    expect(prompt).toContain("git commit -m 'chore: Maintain it (closes #12)'");
     expect(prompt).not.toContain('git commit -m "feat: <title>');
+  });
+
+  test('shell-quotes every issue-specific batch commit command', () => {
+    const prompt = buildBatchImplementPrompt({
+      issues: [{
+        issueNum: 10,
+        title: "Fix $(touch /tmp/pwned) and user's data",
+        body: 'Keep shell metacharacters inert.',
+        labels: ['bug'],
+      }],
+    });
+
+    expect(prompt).toContain(
+      "git commit -m 'fix: Fix $(touch /tmp/pwned) and user'\\''s data (closes #10)'",
+    );
+    expect(prompt).not.toContain('git commit -m "fix: Fix $(');
   });
 });
 
