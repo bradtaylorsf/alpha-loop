@@ -228,7 +228,7 @@ describe('triage command', () => {
     expect(mockCommentIssue).toHaveBeenCalledWith(
       'owner/repo', 4, expect.stringContaining('duplicate of #1'),
     );
-    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 4, 'not_planned');
+    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 4, 'duplicate', 1);
 
     expect(log.success).toHaveBeenCalledWith(expect.stringContaining('Applied'));
   });
@@ -491,7 +491,7 @@ describe('triage command', () => {
     expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 1, 'not_planned');
     expect(mockUpdateIssue).toHaveBeenCalledWith('owner/repo', 2, { body: expect.any(String) });
     expect(mockCreateIssue).toHaveBeenCalledTimes(3);
-    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 4, 'not_planned');
+    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 4, 'duplicate', 1);
     expect(log.info).toHaveBeenCalledWith(expect.stringContaining('--yes: applying all'));
   });
 
