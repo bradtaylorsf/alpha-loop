@@ -22,12 +22,15 @@ jest.mock('../../src/lib/logger', () => ({
   },
 }));
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   extractJsonFromResponse,
   parseTriageAnalysisResponse,
   normalizeTriageAnalysis,
+  saveTriagePlan,
+  loadTriagePlan,
   formatIssueTable,
   formatTriageFindings,
   formatEpicGroupProposals,
@@ -45,6 +48,7 @@ import {
   type PlannedMilestone,
   type TriageFinding,
   type ProposedEpicGroup,
+  type TriageAnalysis,
   type PlanDraft,
 } from '../../src/lib/planning';
 import type { Issue, Milestone, RoadmapEpicContext } from '../../src/lib/github';
@@ -244,6 +248,132 @@ describe('parseTriageAnalysisResponse', () => {
         existingEpicIssueNum: 0,
       }],
     })).toThrow('epicGroups[0].existingEpicIssueNum');
+  });
+
+  it('rejects malformed triage findings instead of trusting artifact-shaped objects', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [{ ...finding, issueNum: '10' }],
+      epicGroups: [],
+    })).toThrow('findings[0].issueNum');
+
+    expect(() => normalizeTriageAnalysis({
+      findings: [{ ...finding, selected: 'yes' }],
+      epicGroups: [],
+    })).toThrow('findings[0].selected');
+  });
+
+  it('rejects findings whose displayed action does not match the executed category', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [{ ...finding, action: 'rewrite' }],
+      epicGroups: [],
+    })).toThrow('action must be close for category stale');
+  });
+
+  it.each([
+    ['unclear', 'rewrite', 'rewrittenBody'],
+    ['too_large', 'split', 'splitInto'],
+    ['duplicate', 'merge', 'duplicateOf'],
+    ['enrich', 'enrich', 'enrichedBody'],
+  ])('rejects %s findings without the payload needed to execute them', (category, action, field) => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [{ ...finding, category, action }],
+      epicGroups: [],
+    })).toThrow(field);
+  });
+
+  it('rejects multiple findings for one issue so selection cannot execute an unselected entry', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [finding, { ...finding, selected: false }],
+      epicGroups: [],
+    })).toThrow('findings[1].issueNum duplicates issue #10');
+  });
+
+  it('rejects a duplicate finding that targets itself', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [{
+        ...finding,
+        category: 'duplicate',
+        action: 'merge',
+        duplicateOf: finding.issueNum,
+      }],
+      epicGroups: [],
+    })).toThrow('duplicateOf must reference a different issue');
+  });
+});
+
+describe('triage plan artifacts', () => {
+  const analysis: TriageAnalysis = {
+    findings: [{
+      issueNum: 61,
+      title: 'Completed epic',
+      category: 'stale',
+      reason: 'All work shipped',
+      action: 'close',
+      selected: true,
+    }],
+    epicGroups: [{
+      title: 'Epic: Phase one',
+      goal: 'Ship phase one.',
+      rationale: 'These issues form one deliverable.',
+      orderedChildIssueNumbers: [70, 71],
+      acceptanceCriteria: ['- [ ] Phase one ships'],
+      selected: false,
+    }],
+  };
+
+  let projectDir: string;
+
+  beforeEach(() => {
+    projectDir = mkdtempSync(join(tmpdir(), 'alpha-loop-triage-plan-'));
+  });
+
+  afterEach(() => {
+    rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  it('saves and loads a versioned, repository-bound normalized analysis', () => {
+    const createdAt = '2026-08-15T19:30:45.123Z';
+    const relativePath = saveTriagePlan('owner/repo', analysis, projectDir, createdAt);
+    const absolutePath = join(projectDir, relativePath);
+
+    expect(relativePath).toBe('.alpha-loop/triage-2026-08-15T19-30-45-123Z.json');
+    expect(JSON.parse(readFileSync(absolutePath, 'utf-8'))).toEqual({
+      version: 1,
+      repo: 'owner/repo',
+      createdAt,
+      analysis,
+    });
+    expect(loadTriagePlan(absolutePath, 'OWNER/REPO')).toEqual({
+      version: 1,
+      repo: 'owner/repo',
+      createdAt,
+      analysis,
+    });
+  });
+
+  it.each([
+    ['missing file', null, 'Unable to read triage plan'],
+    ['malformed JSON', '{nope', 'Unable to read triage plan'],
+    ['unsupported version', JSON.stringify({ version: 2, repo: 'owner/repo', createdAt: '2026-08-15T19:30:45.123Z', analysis }), 'Unsupported triage plan version'],
+    ['malformed schema', JSON.stringify({ version: 1, repo: 'owner/repo', createdAt: '2026-08-15T19:30:45.123Z', analysis: { findings: 'nope', epicGroups: [] } }), 'findings must be an array'],
+  ])('fails closed for a %s', (_label, contents, expectedMessage) => {
+    const artifactPath = join(projectDir, 'triage.json');
+    if (contents != null) writeFileSync(artifactPath, contents, 'utf-8');
+
+    expect(() => loadTriagePlan(artifactPath, 'owner/repo')).toThrow(expectedMessage);
+  });
+
+  it('rejects an artifact created for another repository', () => {
+    const artifactPath = join(projectDir, saveTriagePlan(
+      'other/repo',
+      analysis,
+      projectDir,
+      '2026-08-15T19:30:45.123Z',
+    ));
+
+    expect(() => loadTriagePlan(artifactPath, 'owner/repo')).toThrow(
+      'Triage plan is for other/repo, but the configured repository is owner/repo',
+    );
   });
 });
 
