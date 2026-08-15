@@ -250,6 +250,91 @@ describe('createSession', () => {
     expect(mockExec.mock.calls.some(([cmd, options]) => String(cmd).includes('git checkout') && options?.cwd === process.cwd())).toBe(false);
   });
 
+  test('commits prepared generated files before pushing and opening the draft PR', async () => {
+    const events: string[] = [];
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('git ls-remote --heads')) return { stdout: '', stderr: '', exitCode: 0 };
+      if (cmd.startsWith('git diff --cached --quiet --')) return { stdout: '', stderr: '', exitCode: 1 };
+      if (cmd.startsWith('git commit')) events.push('commit');
+      if (cmd.startsWith('git push')) events.push('push');
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockCreatePR.mockImplementation(() => {
+      events.push('pr');
+      return 'https://github.com/owner/repo/pull/408';
+    });
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config, { epicNum: 408, epicTitle: 'Refresh Context' });
+
+    await ensureSessionWorktree(session, config, {
+      prepare: async (worktreePath) => {
+        events.push(`prepare:${worktreePath}`);
+        return {
+          commitMessage: 'chore: refresh project context',
+          paths: ['.alpha-loop/context.md', 'AGENTS.md'],
+        };
+      },
+    });
+
+    expect(events).toEqual([
+      expect.stringMatching(/^prepare:.*session-epic-408-refresh-context$/),
+      'commit',
+      'push',
+      'pr',
+    ]);
+    expect(mockExec).toHaveBeenCalledWith(
+      "git commit -m 'chore: refresh project context' -- '.alpha-loop/context.md' 'AGENTS.md'",
+      { cwd: expect.stringContaining('.worktrees/session-epic-408-refresh-context') },
+    );
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('git commit --allow-empty'))).toBe(false);
+  });
+
+  test('does not publish a new session branch when preparation fails', async () => {
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config, { epicNum: 408, epicTitle: 'Refresh Context' });
+
+    await expect(ensureSessionWorktree(session, config, {
+      prepare: () => { throw new Error('invalid generated markdown'); },
+    })).rejects.toThrow('invalid generated markdown');
+
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git push origin'))).toBe(false);
+    expect(mockCreatePR).not.toHaveBeenCalled();
+  });
+
+  test('pushes prepared context onto an existing resumed session branch without opening another PR', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('git ls-remote --heads')) {
+        return { stdout: 'abc refs/heads/session/epic-408-refresh-context', stderr: '', exitCode: 0 };
+      }
+      if (cmd.startsWith('git diff --cached --quiet --')) return { stdout: '', stderr: '', exitCode: 1 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mockSetupWorktree.mockImplementation(async (options) => ({
+      path: options.worktreePath ?? '/project/.worktrees/session-test',
+      branch: options.branch ?? `agent/issue-${options.issueNum}`,
+      resumed: true,
+    }));
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config, { epicNum: 408, epicTitle: 'Refresh Context' });
+
+    await ensureSessionWorktree(session, config, {
+      prepare: () => ({
+        commitMessage: 'chore: refresh project context',
+        paths: ['.alpha-loop/context.md'],
+      }),
+    });
+
+    expect(mockExec).toHaveBeenCalledWith(
+      "git commit -m 'chore: refresh project context' -- '.alpha-loop/context.md'",
+      { cwd: expect.stringContaining('.worktrees/session-epic-408-refresh-context') },
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      "git push origin 'session/epic-408-refresh-context'",
+      { cwd: expect.stringContaining('.worktrees/session-epic-408-refresh-context') },
+    );
+    expect(mockCreatePR).not.toHaveBeenCalled();
+  });
+
   test('does not create session branch in dryRun mode', () => {
     createSession(makeConfig({ autoMerge: true, dryRun: true }));
 
