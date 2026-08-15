@@ -365,16 +365,26 @@ const VALID_AUTOMATION_POLICY_CATEGORIES: readonly AutomationPolicyCategory[] = 
 
 /**
  * Estimate cost in USD from token counts and a pricing table.
- * Returns 0 if the model is not in the pricing table.
+ * Returns null when the model is not in the pricing table. A configured 0/0
+ * price remains a measured, genuinely free invocation.
  */
+const warnedUnknownPricingKeys = new Set<string>();
+
 export function estimateCost(
   model: string,
   inputTokens: number,
   outputTokens: number,
   pricing: Record<string, ModelPricing>,
-): number {
+): number | null {
   const p = pricing[model];
-  if (!p) return 0;
+  if (!p) {
+    const key = model.trim() || '<empty>';
+    if (!warnedUnknownPricingKeys.has(key)) {
+      warnedUnknownPricingKeys.add(key);
+      console.warn(`[config] no pricing configured for model "${key}"; cost will be unmeasured`);
+    }
+    return null;
+  }
   return (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
 }
 
@@ -1492,7 +1502,8 @@ export function resolveStepConfig(
   const fallbackModel = step === 'review'
     ? (config.reviewModel || config.model)
     : config.model;
-  const model = stepOverride?.model ?? fallbackModel;
+  const agentChanged = stepOverride?.agent != null && stepOverride.agent !== config.agent;
+  const model = stepOverride?.model ?? (agentChanged ? '' : fallbackModel);
   return { agent, model };
 }
 

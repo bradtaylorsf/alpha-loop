@@ -612,8 +612,8 @@ eval_dir: .alpha-loop/evals
 | `automation_policy.max_paused_sessions` | `0` | Maximum paused/waiting sessions (`0` = unlimited) |
 | `automation_policy.max_issues_per_session` | `0` | Maximum issues hosted automation may process in one session (`0` = unlimited) |
 | `automation_policy.max_session_minutes` | `0` | Runtime limit for hosted automation sessions (`0` = unlimited) |
-| `automation_policy.max_session_cost_usd` | `0` | Estimated session budget limit (`0` = unlimited) |
-| `automation_policy.max_issue_cost_usd` | `0` | Estimated per-issue budget limit (`0` = unlimited) |
+| `automation_policy.max_session_cost_usd` | `0` | Measured session budget limit; unmeasured cost pauses enforcement (`0` = unlimited) |
+| `automation_policy.max_issue_cost_usd` | `0` | Measured per-issue budget limit; unmeasured cost pauses enforcement (`0` = unlimited) |
 | `daemon.mode` | `full` | Hosted daemon mode: `full`, `triage-only`, `feedback-only`, or `run-only` |
 | `daemon.triage_interval` | `900` | Seconds between intake triage ticks |
 | `daemon.feedback_interval` | `60` | Seconds between feedback poll and resume ticks |
@@ -789,6 +789,12 @@ routing:
 **Profile as a list (A/B):** `profile` may also be an array of names (e.g. `[hybrid-v1, all-local]`). Alpha Loop picks one deterministically per-issue so reruns of the same issue select the same profile — this makes profile comparisons reproducible.
 
 **Backwards compatibility:** If you don't set `routing`, alpha-loop uses the top-level `agent:` / `model:` / `pipeline:` exactly as before — no behavior change.
+
+Routing telemetry distinguishes provider-reported tokens from output-length
+estimates. Unknown model pricing is rendered as `n/a` and excluded from cost
+baselines; `$0` is reserved for an agent-reported zero or an explicit `0/0`
+pricing entry. See [docs/telemetry.md](docs/telemetry.md) for provenance and
+coverage fields.
 
 ### Local Model Support
 

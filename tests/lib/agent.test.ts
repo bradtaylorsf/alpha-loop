@@ -90,7 +90,7 @@ describe('buildAgentArgs', () => {
     });
 
     expect(result.command).toBe('codex');
-    expect(result.args).toEqual(['exec', '--model', 'gpt-4', '--full-auto']);
+    expect(result.args).toEqual(['exec', '--model', 'gpt-4', '--full-auto', '--json']);
   });
 
   test('constructs correct args for opencode agent', () => {
@@ -102,7 +102,7 @@ describe('buildAgentArgs', () => {
     });
 
     expect(result.command).toBe('opencode');
-    expect(result.args).toEqual(['run', '--model', 'deepseek']);
+    expect(result.args).toEqual(['run', '--model', 'deepseek', '--format', 'json']);
   });
 
   test('omits --model when model is empty', () => {
@@ -163,7 +163,7 @@ describe('buildAgentArgs', () => {
     });
 
     expect(result.command).toBe('opencode');
-    expect(result.args).toEqual(['run', '--model', 'deepseek']);
+    expect(result.args).toEqual(['run', '--model', 'deepseek', '--format', 'json']);
   });
 
   test('resume false does not add --continue for claude', () => {
@@ -371,6 +371,70 @@ describe('spawnAgent', () => {
     expect(result.costUsd).toBe(1.234);
     expect(result.inputTokens).toBe(50000);
     expect(result.outputTokens).toBe(12000);
+  });
+
+  test('parses chunked Codex JSONL usage, final text, and unique tool failures', async () => {
+    let stdoutHandler: Function;
+    mockStdout.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'data') stdoutHandler = cb;
+    });
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event !== 'close') return;
+      queueMicrotask(() => {
+        const lines = [
+          JSON.stringify({ type: 'thread.started', model: 'gpt-5.4-codex' }),
+          JSON.stringify({ type: 'item.started', item: { id: 'tool-1', type: 'command_execution', status: 'in_progress' } }),
+          JSON.stringify({ type: 'item.completed', item: { id: 'tool-1', type: 'command_execution', status: 'failed', exit_code: 1 } }),
+          JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'Implemented.' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1234, output_tokens: 321 } }),
+          '',
+        ].join('\n');
+        const split = Math.floor(lines.length / 2);
+        stdoutHandler(Buffer.from(lines.slice(0, split)));
+        stdoutHandler(Buffer.from(lines.slice(split)));
+        cb(0);
+      });
+    });
+
+    const result = await spawnAgent({ ...baseOptions, agent: 'codex', model: '' });
+
+    expect(result.output).toBe('Implemented.');
+    expect(result.model).toBe('gpt-5.4-codex');
+    expect(result.inputTokens).toBe(1234);
+    expect(result.outputTokens).toBe(321);
+    expect(result.costUsd).toBeUndefined();
+    expect(result.toolCalls).toBe(1);
+    expect(result.toolErrors).toBe(1);
+  });
+
+  test('parses OpenCode JSONL cost, tokens, text, and tool calls', async () => {
+    let stdoutHandler: Function;
+    mockStdout.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'data') stdoutHandler = cb;
+    });
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event !== 'close') return;
+      queueMicrotask(() => {
+        stdoutHandler(Buffer.from([
+          JSON.stringify({ type: 'step_start', part: { type: 'step-start', model: { modelID: 'qwen3-coder' } } }),
+          JSON.stringify({ type: 'tool_use', part: { id: 'part-1', type: 'tool', callID: 'call-1', tool: 'bash', state: { status: 'completed' } } }),
+          JSON.stringify({ type: 'text', part: { id: 'part-2', type: 'text', text: 'Done locally.' } }),
+          JSON.stringify({ type: 'step_finish', part: { type: 'step-finish', cost: 0, tokens: { input: 456, output: 78 } } }),
+          '',
+        ].join('\n')));
+        cb(0);
+      });
+    });
+
+    const result = await spawnAgent({ ...baseOptions, agent: 'opencode', model: '' });
+
+    expect(result.output).toBe('Done locally.');
+    expect(result.model).toBe('qwen3-coder');
+    expect(result.costUsd).toBe(0);
+    expect(result.inputTokens).toBe(456);
+    expect(result.outputTokens).toBe(78);
+    expect(result.toolCalls).toBe(1);
+    expect(result.toolErrors).toBe(0);
   });
 
   test('resolves from Claude stream-json result when the child never closes', async () => {
@@ -760,6 +824,7 @@ describe('codexSandboxArgs', () => {
       '--model', 'gpt-5.4',
       '--full-auto',
       '-c', 'sandbox_workspace_write.writable_roots=["/repo/.git"]',
+      '--json',
     ]);
   });
 });

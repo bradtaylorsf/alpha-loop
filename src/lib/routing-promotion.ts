@@ -284,10 +284,12 @@ function pickFrontier(cells: RoutingCell[]): RoutingCell | null {
   // Highest total cost = frontier, mirroring telemetry.aggregateRouting's
   // baseline choice. Break ties by higher cost_per_issue so we don't promote
   // against a volume-heavy local cell that happens to lead on total spend.
-  const eligible = cells.filter((c) => !isLocalCell(c));
+  const eligible = cells.filter((c) => !isLocalCell(c) && c.total_cost_usd != null);
   if (eligible.length === 0) return null;
   return [...eligible].sort((a, b) => {
-    if (b.total_cost_usd !== a.total_cost_usd) return b.total_cost_usd - a.total_cost_usd;
+    const totalCostDelta = (b.total_cost_usd ?? Number.NEGATIVE_INFINITY)
+      - (a.total_cost_usd ?? Number.NEGATIVE_INFINITY);
+    if (totalCostDelta !== 0) return totalCostDelta;
     const ac = a.cost_per_issue_shipped ?? 0;
     const bc = b.cost_per_issue_shipped ?? 0;
     return bc - ac;

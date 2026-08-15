@@ -666,12 +666,14 @@ describe('history', () => {
         {
           stage: 'plan', model: 'sonnet', endpoint: 'anthropic-prod',
           tokens_in: 1000, tokens_out: 500, cost_usd: 0.015,
+          token_source: 'reported', cost_source: 'reported',
           wall_time_s: 5.5, tool_calls: 3, tool_errors: 0,
           stage_success: true, started_at: '2026-04-23T12:00:00.000Z',
         },
         {
           stage: 'implement', model: 'qwen', endpoint: 'lmstudio',
           tokens_in: 5000, tokens_out: 1500, cost_usd: 0,
+          token_source: 'reported', cost_source: 'priced',
           wall_time_s: 40, tool_calls: 12, tool_errors: 2,
           stage_success: true, started_at: '2026-04-23T12:05:00.000Z',
         },
@@ -719,6 +721,8 @@ describe('history', () => {
       const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
       expect(output).toContain('plan');
       expect(output).toContain('sonnet');
+      expect(output).toContain('n/a');
+      expect(output).not.toContain('$0.0000');
     });
   });
 

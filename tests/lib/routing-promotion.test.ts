@@ -19,7 +19,9 @@ const frontier = (over: Partial<RoutingCell> = {}): RoutingCell => ({
   runs: 50,
   tokens_in: 0,
   tokens_out: 0,
+  token_measurement_runs: 50,
   total_cost_usd: 100,
+  cost_measurement_runs: 50,
   pipeline_success_rate: 0.9,
   cost_per_issue_shipped: 1.00,
   median_wall_time_s: 20,
@@ -35,7 +37,9 @@ const local = (over: Partial<RoutingCell> = {}): RoutingCell => ({
   runs: 50,
   tokens_in: 0,
   tokens_out: 0,
+  token_measurement_runs: 50,
   total_cost_usd: 0,
+  cost_measurement_runs: 50,
   pipeline_success_rate: 0.88,
   cost_per_issue_shipped: 0.30,
   median_wall_time_s: 45,
@@ -51,6 +55,17 @@ describe('evaluatePromotion', () => {
     expect(proposals[0].from.model).toBe('claude-sonnet-4-6');
     expect(proposals[0].to.model).toBe('qwen3-coder-30b-a3b');
     expect(proposals[0].metrics.runs).toBe(50);
+  });
+
+  it('excludes cells with incomplete cost measurements from promotion', () => {
+    expect(evaluatePromotion([
+      frontier(),
+      local({ total_cost_usd: null, cost_measurement_runs: 49, cost_per_issue_shipped: null }),
+    ])).toHaveLength(0);
+    expect(evaluatePromotion([
+      frontier({ total_cost_usd: null, cost_measurement_runs: 49, cost_per_issue_shipped: null }),
+      local(),
+    ])).toHaveLength(0);
   });
 
   it('blocks when sample size is below 30 runs', () => {
@@ -210,7 +225,9 @@ describe('evaluateDemotion', () => {
         runs: 30,
         tokens_in: 0,
         tokens_out: 0,
+        token_measurement_runs: 30,
         total_cost_usd: 0,
+        cost_measurement_runs: 30,
         pipeline_success_rate: 0.95, // baseline 95%, current 100% → no drop
         cost_per_issue_shipped: 1,
         median_wall_time_s: 20,
@@ -226,7 +243,9 @@ describe('evaluateDemotion', () => {
         runs: 30,
         tokens_in: 0,
         tokens_out: 0,
+        token_measurement_runs: 30,
         total_cost_usd: 0,
+        cost_measurement_runs: 30,
         pipeline_success_rate: 0.95,
         cost_per_issue_shipped: 1,
         median_wall_time_s: 20,
@@ -247,7 +266,9 @@ describe('evaluateDemotion', () => {
         runs: 10,
         tokens_in: 0,
         tokens_out: 0,
+        token_measurement_runs: 10,
         total_cost_usd: 0,
+        cost_measurement_runs: 10,
         pipeline_success_rate: 1.0,
         cost_per_issue_shipped: 1,
         median_wall_time_s: 20,
