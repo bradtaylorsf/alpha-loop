@@ -175,6 +175,7 @@ describe('triage command', () => {
     mockGetIssueBody.mockReturnValue('');
     mockUpdateEpicIssueBody.mockReturnValue(true);
     mockCommentChildEpicBacklink.mockReturnValue(true);
+    mockCloseIssue.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -231,6 +232,42 @@ describe('triage command', () => {
     expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 4, 'duplicate', 1);
 
     expect(log.success).toHaveBeenCalledWith(expect.stringContaining('Applied'));
+  });
+
+  it.each([
+    {
+      label: 'stale',
+      finding: SAMPLE_FINDINGS[0],
+      successMessage: 'Closed stale issue #1',
+      failureMessage: '#1: failed to close stale issue',
+    },
+    {
+      label: 'split parent',
+      finding: SAMPLE_FINDINGS[2],
+      successMessage: 'Closed #3 after splitting',
+      failureMessage: '#3: failed to close issue after splitting',
+    },
+    {
+      label: 'duplicate',
+      finding: SAMPLE_FINDINGS[3],
+      successMessage: 'Closed duplicate #4',
+      failureMessage: '#4: failed to close as duplicate of #1',
+    },
+  ])('does not report a failed $label close as successful', async ({ finding, successMessage, failureMessage }) => {
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({ findings: [finding], epicGroups: [] });
+    mockCloseIssue.mockReturnValue(false);
+    if (finding.category === 'too_large') {
+      mockCreateIssue.mockReturnValueOnce(10).mockReturnValueOnce(11).mockReturnValueOnce(12);
+    }
+
+    await triageCommand({ yes: true });
+
+    expect(log.success).not.toHaveBeenCalledWith(expect.stringContaining(successMessage));
+    expect(log.warn).toHaveBeenCalledWith('Applied 0 of 1 triage action(s)');
+    expect(log.warn).toHaveBeenCalledWith('1 operation(s) failed:');
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining(failureMessage));
   });
 
   it('exits gracefully on agent failure', async () => {
