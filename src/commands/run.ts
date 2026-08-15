@@ -1569,7 +1569,7 @@ async function executeSessionRun(
           issuesToProcess = [];
         }
       }
-      const quickProcessed: Array<{ number: number; title: string }> = [];
+      const quickProcessed: Array<{ number: number; title: string; labels?: string[] }> = [];
 
       for (const issue of issuesToProcess) {
         // Check duration limit before each issue
@@ -1602,6 +1602,7 @@ async function executeSessionRun(
             session,
             {
               signal: runAbortController.signal,
+              issueLabels: issue.labels,
               ...(epicPromptContext ? { epicContext: epicPromptContext } : {}),
               ...(quickWorktree ? { quickWorktree } : {}),
             },
@@ -1609,7 +1610,7 @@ async function executeSessionRun(
           if (runAbortController.signal.aborted) break;
           session.results.push(result);
           if (quickWorktree && result.status === 'success' && !isRecoveredRunResult(result)) {
-            quickProcessed.push({ number: issue.number, title: issue.title });
+            quickProcessed.push({ number: issue.number, title: issue.title, labels: issue.labels });
           }
 
           // Flip the epic checklist box when this sub-issue succeeded.
