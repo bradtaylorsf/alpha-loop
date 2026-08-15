@@ -171,10 +171,70 @@ max_test_retries: 5
     expect(config.dryRun).toBe(false);
     expect(config.skipTests).toBe(false);
     expect(config.autoMerge).toBe(true);
+    expect(config.mergeGate).toEqual({
+      requireChecks: true,
+      timeoutSeconds: 900,
+      onTimeout: 'block',
+    });
     expect(config.autoCleanup).toBe(true);
     expect(config.sessionRetention).toEqual({
       pausedWorktreeDays: 0,
       completedWorktreeDays: 30,
+    });
+  });
+
+  it('loads merge gate settings from nested config', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `merge_gate:
+  require_checks: false
+  timeout_seconds: 120
+  on_timeout: warn
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.mergeGate).toEqual({
+      requireChecks: false,
+      timeoutSeconds: 120,
+      onTimeout: 'warn',
+    });
+  });
+
+  it('warns and falls back per field for invalid merge gate settings', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation();
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `merge_gate:
+  require_checks: yes
+  timeout_seconds: 0
+  on_timeout: merge-anyway
+`,
+    );
+
+    const config = loadConfig();
+
+    expect(config.mergeGate).toEqual({
+      requireChecks: true,
+      timeoutSeconds: 900,
+      onTimeout: 'block',
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('merge_gate.require_checks'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('merge_gate.timeout_seconds'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('merge_gate.on_timeout'));
+    warn.mockRestore();
+  });
+
+  it('merges partial programmatic merge gate overrides without dropping safe defaults', () => {
+    const config = loadConfig({
+      mergeGate: { timeoutSeconds: 45 } as Config['mergeGate'],
+    });
+
+    expect(config.mergeGate).toEqual({
+      requireChecks: true,
+      timeoutSeconds: 45,
+      onTimeout: 'block',
     });
   });
 

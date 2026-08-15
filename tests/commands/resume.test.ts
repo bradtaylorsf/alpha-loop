@@ -135,6 +135,7 @@ function baseConfig(overrides: Partial<Config> = {}): Config {
     maxSessionDuration: 0,
     milestone: '',
     autoMerge: false,
+    mergeGate: { requireChecks: true, timeoutSeconds: 900, onTimeout: 'block' },
     mergeTo: '',
     autoCleanup: true,
     runFull: false,

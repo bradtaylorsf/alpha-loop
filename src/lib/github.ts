@@ -8,6 +8,7 @@ import { exec, shellQuote } from './shell.js';
 import { ghExec, getProjectCache, setProjectCache } from './rate-limit.js';
 import { log } from './logger.js';
 import { labelName } from './labels.js';
+import { DEFAULT_MERGE_GATE_CONFIG, type MergeGateConfig } from './config.js';
 import {
   findUnparsedSubIssueChecklistLines,
   flipChecklistItem,
@@ -17,6 +18,9 @@ import {
 
 /** Max PR body length. GitHub supports 65536 but we leave room for metadata. */
 const MAX_PR_BODY_CHARS = 60_000;
+const CHECK_POLL_INTERVAL_MS = 5_000;
+const CHECK_REGISTRATION_TIMEOUT_MS = 30_000;
+const MIN_PR_AGE_BEFORE_MERGE_MS = 10_000;
 
 export type Comment = {
   author: string;
@@ -438,13 +442,195 @@ export function createPR(options: CreatePROptions): string {
   }
 }
 
+type StatusCheck = {
+  name?: string;
+  context?: string;
+  status?: string | null;
+  conclusion?: string | null;
+  state?: string | null;
+};
+
+type PRCheckSnapshot = {
+  createdAt: number;
+  checks: StatusCheck[];
+};
+
+type CheckState = 'success' | 'pending' | 'failure';
+
+const SUCCESS_STATES = new Set(['SUCCESS']);
+const PENDING_STATES = new Set(['EXPECTED', 'PENDING', 'QUEUED', 'IN_PROGRESS', 'REQUESTED', 'WAITING']);
+const FAILURE_STATES = new Set([
+  'ACTION_REQUIRED',
+  'CANCELLED',
+  'ERROR',
+  'FAILURE',
+  'NEUTRAL',
+  'SKIPPED',
+  'STALE',
+  'STARTUP_FAILURE',
+  'TIMED_OUT',
+]);
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function checkName(check: StatusCheck): string {
+  return check.name || check.context || 'unnamed check';
+}
+
+function normalizeCheckState(check: StatusCheck): CheckState {
+  const conclusion = check.conclusion?.toUpperCase();
+  if (conclusion) {
+    if (SUCCESS_STATES.has(conclusion)) return 'success';
+    if (FAILURE_STATES.has(conclusion)) return 'failure';
+    return 'pending';
+  }
+
+  const state = check.state?.toUpperCase();
+  if (state) {
+    if (SUCCESS_STATES.has(state)) return 'success';
+    if (FAILURE_STATES.has(state)) return 'failure';
+    if (PENDING_STATES.has(state)) return 'pending';
+  }
+
+  // CheckRun.status becomes COMPLETED before GitHub consistently exposes its
+  // conclusion. A bare COMPLETED value is therefore inconclusive, not green.
+  const status = check.status?.toUpperCase();
+  if (status && FAILURE_STATES.has(status)) return 'failure';
+  return 'pending';
+}
+
+function fetchPRCheckSnapshot(repo: string, prNum: number): PRCheckSnapshot | null {
+  const result = ghExec(
+    `gh pr view ${prNum} --repo ${shellQuote(repo)} --json createdAt,statusCheckRollup`,
+  );
+  if (result.exitCode !== 0 || !result.stdout) {
+    const detail = result.stderr.trim();
+    log.warn(`Could not read checks for PR #${prNum}${detail ? `: ${detail}` : ''}`);
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(result.stdout) as {
+      createdAt?: string;
+      statusCheckRollup?: unknown;
+    };
+    const createdAt = Date.parse(parsed.createdAt ?? '');
+    if (!Number.isFinite(createdAt) || !Array.isArray(parsed.statusCheckRollup)) {
+      log.warn(`Could not parse check status for PR #${prNum}`);
+      return null;
+    }
+    return {
+      createdAt,
+      checks: parsed.statusCheckRollup.filter(
+        (check): check is StatusCheck => Boolean(check) && typeof check === 'object',
+      ),
+    };
+  } catch {
+    log.warn(`Could not parse check status for PR #${prNum}`);
+    return null;
+  }
+}
+
+async function waitForMergeGate(
+  repo: string,
+  prNum: number,
+  gate: MergeGateConfig,
+): Promise<boolean> {
+  const startedAt = Date.now();
+  const deadline = startedAt + gate.timeoutSeconds * 1_000;
+  const registrationDeadline = Math.min(deadline, startedAt + CHECK_REGISTRATION_TIMEOUT_MS);
+  let sawChecks = false;
+  let loggedWaiting = false;
+
+  while (true) {
+    const snapshot = fetchPRCheckSnapshot(repo, prNum);
+    const now = Date.now();
+
+    if (snapshot) {
+      if (snapshot.checks.length === 0) {
+        if (!gate.requireChecks) {
+          const ageMs = now - snapshot.createdAt;
+          if (ageMs >= MIN_PR_AGE_BEFORE_MERGE_MS) {
+            log.warn(`PR #${prNum} has no checks; merging because merge_gate.require_checks is false`);
+            return true;
+          }
+        } else if (now >= registrationDeadline) {
+          log.error(
+            `Blocking merge for PR #${prNum}: no checks appeared within ${Math.ceil((registrationDeadline - startedAt) / 1_000)}s and merge_gate.require_checks is true`,
+          );
+          return false;
+        }
+      } else {
+        if (!sawChecks) {
+          log.info(`Merge gate found ${snapshot.checks.length} check(s) for PR #${prNum}; waiting for completion`);
+          sawChecks = true;
+        }
+        const states = snapshot.checks.map((check) => ({ check, state: normalizeCheckState(check) }));
+        const failed = states.filter(({ state }) => state === 'failure');
+        if (failed.length > 0) {
+          const detail = failed.map(({ check }) => {
+            const result = check.conclusion || check.state || check.status || 'UNKNOWN';
+            return `${checkName(check)}=${result}`;
+          }).join(', ');
+          log.error(`Blocking merge for PR #${prNum}: checks did not pass (${detail})`);
+          return false;
+        }
+
+        if (states.every(({ state }) => state === 'success')) {
+          const ageMs = now - snapshot.createdAt;
+          if (ageMs >= MIN_PR_AGE_BEFORE_MERGE_MS) {
+            log.info(`All ${states.length} check(s) passed for PR #${prNum}`);
+            return true;
+          }
+        }
+      }
+    }
+
+    if (now >= deadline) {
+      if (gate.onTimeout === 'warn') {
+        log.warn(
+          `Merge gate timed out after ${gate.timeoutSeconds}s for PR #${prNum}; proceeding because merge_gate.on_timeout is warn`,
+        );
+        return true;
+      }
+      log.error(
+        `Blocking merge for PR #${prNum}: checks did not conclude within ${gate.timeoutSeconds}s`,
+      );
+      return false;
+    }
+
+    if (!loggedWaiting) {
+      log.info(`Waiting up to ${gate.timeoutSeconds}s for checks on PR #${prNum}`);
+      loggedWaiting = true;
+    }
+    let nextBoundary = deadline;
+    if (snapshot?.checks.length === 0 && gate.requireChecks) {
+      nextBoundary = Math.min(nextBoundary, registrationDeadline);
+    }
+    if (snapshot && (
+      snapshot.checks.length === 0 && !gate.requireChecks
+      || snapshot.checks.length > 0 && snapshot.checks.every((check) => normalizeCheckState(check) === 'success')
+    )) {
+      nextBoundary = Math.min(nextBoundary, snapshot.createdAt + MIN_PR_AGE_BEFORE_MERGE_MS);
+    }
+    await sleep(Math.max(1, Math.min(CHECK_POLL_INTERVAL_MS, nextBoundary - now)));
+  }
+}
+
 /**
- * Merge a PR by branch name.
+ * Wait for GitHub checks, then merge a PR by branch name when the gate permits.
  */
-export function mergePR(repo: string, head: string, method: 'squash' | 'merge' = 'squash'): boolean {
+export async function mergePR(
+  repo: string,
+  head: string,
+  method: 'squash' | 'merge' = 'squash',
+  gate: MergeGateConfig = DEFAULT_MERGE_GATE_CONFIG,
+): Promise<boolean> {
   // Find the PR number by branch
   const listResult = ghExec(
-    `gh pr list --repo "${repo}" --head "${head}" --json number --limit 1`,
+    `gh pr list --repo ${shellQuote(repo)} --head ${shellQuote(head)} --json number --limit 1`,
   );
   if (listResult.exitCode !== 0 || !listResult.stdout) {
     const detail = listResult.stderr.trim();
@@ -469,9 +655,13 @@ export function mergePR(repo: string, head: string, method: 'squash' | 'merge' =
     return false;
   }
 
+  if (!await waitForMergeGate(repo, prNum, gate)) {
+    return false;
+  }
+
   const mergeFlag = method === 'squash' ? '--squash' : '--merge';
   const result = ghExec(
-    `gh pr merge ${prNum} --repo "${repo}" ${mergeFlag} --delete-branch`,
+    `gh pr merge ${prNum} --repo ${shellQuote(repo)} ${mergeFlag} --delete-branch`,
     undefined, true,
   );
   if (result.exitCode !== 0) {

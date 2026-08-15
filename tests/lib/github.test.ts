@@ -574,36 +574,225 @@ describe('createPR', () => {
 });
 
 describe('mergePR', () => {
-  test('merges with squash by default', () => {
+  const blockGate = {
+    requireChecks: true,
+    timeoutSeconds: 60,
+    onTimeout: 'block' as const,
+  };
+  const now = new Date('2026-08-15T19:00:00.000Z');
+
+  function metadata(
+    statusCheckRollup: Array<Record<string, unknown>>,
+    createdAt = now.toISOString(),
+  ): string {
+    return JSON.stringify({ createdAt, statusCheckRollup });
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(now);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('waits for delayed checks to appear and pass before merging', async () => {
+    let viewCount = 0;
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        const checks = viewCount === 0
+          ? []
+          : viewCount < 7
+            ? [{ name: 'CI', status: 'IN_PROGRESS', conclusion: null }]
+            : [{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+        viewCount += 1;
+        return { stdout: metadata(checks), stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+
+    await jest.advanceTimersByTimeAsync(30_000);
+    await expect(mergePromise).resolves.toBe(true);
+    const mergeCall = mockExec.mock.calls.find(([cmd]) => String(cmd).includes('gh pr merge'));
+    expect(mergeCall?.[0]).toContain('--squash');
+    expect(mergeCall?.[0]).toContain('--delete-branch');
+  });
+
+  test('never merges a loop-authored PR in single-digit seconds', async () => {
+    let mergeAgeMs = -1;
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
         return {
-          stdout: JSON.stringify([{ number: 5 }]),
+          stdout: metadata([{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }]),
           stderr: '',
           exitCode: 0,
         };
       }
       if (cmd.includes('gh pr merge')) {
-        return { stdout: '', stderr: '', exitCode: 0 };
+        mergeAgeMs = Date.now() - now.getTime();
       }
       return { stdout: '', stderr: '', exitCode: 0 };
     });
 
-    const merged = mergePR('owner/repo', 'agent/issue-42');
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate);
+    await jest.advanceTimersByTimeAsync(9_999);
+    expect(mergeAgeMs).toBe(-1);
+    await jest.advanceTimersByTimeAsync(1);
 
-    expect(merged).toBe(true);
-    const mergeCall = mockExec.mock.calls.find(
-      (call) => typeof call[0] === 'string' && call[0].includes('gh pr merge'),
-    );
-    expect(mergeCall?.[0]).toContain('--squash');
-    expect(mergeCall?.[0]).toContain('--delete-branch');
+    await expect(mergePromise).resolves.toBe(true);
+    expect(mergeAgeMs).toBeGreaterThanOrEqual(10_000);
   });
 
-  test('returns false when no PR is found', () => {
+  test('blocks immediately when an observed check fails', async () => {
+    let viewCount = 0;
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        const checks = viewCount++ === 0
+          ? [{ name: 'CI', status: 'IN_PROGRESS', conclusion: null }]
+          : [
+            { name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' },
+            { name: 'Tests', status: 'COMPLETED', conclusion: 'FAILURE' },
+          ];
+        return { stdout: metadata(checks), stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate);
+    await jest.advanceTimersByTimeAsync(5_000);
+
+    await expect(mergePromise).resolves.toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+  });
+
+  test.each(['CANCELLED', 'TIMED_OUT'])('blocks on a %s check conclusion', async (conclusion) => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'CI', status: 'COMPLETED', conclusion }]),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate)).resolves.toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+  });
+
+  test('blocks after the registration window when no checks appear and checks are required', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return { stdout: metadata([]), stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate);
+    await jest.advanceTimersByTimeAsync(30_000);
+
+    await expect(mergePromise).resolves.toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+  });
+
+  test('permits an empty rollup only when requireChecks is explicitly false', async () => {
+    const oldCreatedAt = new Date(now.getTime() - 20_000).toISOString();
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return { stdout: metadata([], oldCreatedAt), stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', {
+      ...blockGate,
+      requireChecks: false,
+    })).resolves.toBe(true);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(true);
+  });
+
+  test.each([
+    { onTimeout: 'block' as const, expected: false },
+    { onTimeout: 'warn' as const, expected: true },
+  ])('$onTimeout policy returns $expected when checks remain pending at timeout', async ({ onTimeout, expected }) => {
+    const oldCreatedAt = new Date(now.getTime() - 20_000).toISOString();
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'CI', status: 'IN_PROGRESS', conclusion: null }], oldCreatedAt),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', {
+      requireChecks: true,
+      timeoutSeconds: 12,
+      onTimeout,
+    });
+    await jest.advanceTimersByTimeAsync(12_000);
+
+    await expect(mergePromise).resolves.toBe(expected);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(expected);
+  });
+
+  test('blocks query and parse uncertainty on timeout by default', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return { stdout: 'not-json', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', {
+      ...blockGate,
+      timeoutSeconds: 10,
+    });
+    await jest.advanceTimersByTimeAsync(10_000);
+
+    await expect(mergePromise).resolves.toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+  });
+
+  test('returns false when no PR is found', async () => {
     mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });
 
     const { log: mockLog } = require('../../src/lib/logger');
-    const merged = mergePR('owner/repo', 'agent/issue-42');
+    const merged = await mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate);
 
     expect(merged).toBe(false);
     expect(mockLog.warn).toHaveBeenCalledWith(
@@ -615,18 +804,32 @@ describe('mergePR', () => {
     { stdout: '', stderr: 'lookup failed', exitCode: 1 },
     { stdout: 'not-json', stderr: '', exitCode: 0 },
     { stdout: '[{}]', stderr: '', exitCode: 0 },
-  ])('returns false when PR lookup cannot identify a PR', (lookupResult) => {
+  ])('returns false when PR lookup cannot identify a PR', async (lookupResult) => {
     mockExec.mockReturnValue(lookupResult);
 
-    expect(mergePR('owner/repo', 'agent/issue-42')).toBe(false);
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate)).resolves.toBe(false);
   });
 
-  test('returns false when the merge command fails', () => {
-    mockExec
-      .mockReturnValueOnce({ stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 })
-      .mockReturnValueOnce({ stdout: '', stderr: 'checks failed', exitCode: 1 });
+  test('returns false when the merge command fails after checks pass', async () => {
+    const oldCreatedAt = new Date(now.getTime() - 20_000).toISOString();
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }], oldCreatedAt),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (cmd.includes('gh pr merge')) {
+        return { stdout: '', stderr: 'merge rejected', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
 
-    expect(mergePR('owner/repo', 'agent/issue-42')).toBe(false);
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate)).resolves.toBe(false);
   });
 });
 

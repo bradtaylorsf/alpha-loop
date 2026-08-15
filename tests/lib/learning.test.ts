@@ -74,6 +74,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipLearn: false,
     skipE2e: false,
     autoMerge: false,
+    mergeGate: { requireChecks: true, timeoutSeconds: 900, onTimeout: 'block' },
     mergeTo: '',
     autoCleanup: true,
     runFull: false,
