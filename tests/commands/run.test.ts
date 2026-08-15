@@ -366,13 +366,34 @@ describe('runCommand', () => {
   });
 
   test('fails closed before issue processing when a stale scan does not write fresh context', async () => {
-    const config = makeConfig({ autoMerge: true, skipTests: true, skipPostSessionReview: true }) as any;
+    const config = makeConfig({
+      autoMerge: true,
+      skipTests: true,
+      skipPostSessionReview: true,
+    }) as unknown as ReturnType<typeof loadConfig>;
     const issue = { number: 408, title: 'Refresh context', body: 'Fix stale refresh', labels: ['ready'] };
     mockContextNeedsRefresh.mockReturnValue(true);
     mockScanProject.mockReturnValue({ contextWritten: false, instructionsWritten: true });
 
     await expect(runSingleIssueExecution({ config, issueNumber: issue.number, issue }))
       .rejects.toThrow(/did not produce fresh project context/i);
+
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+  });
+
+  test('fails closed before issue processing when a stale scan does not write fresh instructions', async () => {
+    const config = makeConfig({
+      autoMerge: true,
+      skipTests: true,
+      skipPostSessionReview: true,
+    }) as unknown as ReturnType<typeof loadConfig>;
+    const issue = { number: 408, title: 'Refresh context', body: 'Fix stale refresh', labels: ['ready'] };
+    mockContextNeedsRefresh.mockReturnValue(true);
+    mockScanProject.mockReturnValue({ contextWritten: true, instructionsWritten: false });
+
+    await expect(runSingleIssueExecution({ config, issueNumber: issue.number, issue }))
+      .rejects.toThrow(/did not produce fresh managed instructions/i);
 
     expect(mockProcessIssue).not.toHaveBeenCalled();
     expect(mockFinalizeSession).not.toHaveBeenCalled();

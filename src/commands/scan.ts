@@ -100,15 +100,16 @@ IMPORTANT: Do NOT add testing procedures, git workflow, code review checklists, 
 const AGENT_TIMEOUT = 5 * 60 * 1000;
 
 function runPromptFile(projectDir: string, agentCmd: string, prompt: string, prefix: string) {
-  const promptFile = path.join(tmpdir(), `alpha-loop-${prefix}-${Date.now()}.txt`);
-  fs.writeFileSync(promptFile, prompt, 'utf-8');
+  const promptDir = fs.mkdtempSync(path.join(tmpdir(), `alpha-loop-${prefix}-`));
+  const promptFile = path.join(promptDir, 'prompt.txt');
   try {
+    fs.writeFileSync(promptFile, prompt, 'utf-8');
     return exec(
       `${agentCmd} < "${promptFile}" 2>/dev/null`,
       { cwd: projectDir, timeout: AGENT_TIMEOUT },
     );
   } finally {
-    try { fs.unlinkSync(promptFile); } catch { /* cleanup best-effort */ }
+    try { fs.rmSync(promptDir, { recursive: true, force: true }); } catch { /* cleanup best-effort */ }
   }
 }
 

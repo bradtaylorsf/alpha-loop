@@ -1062,10 +1062,14 @@ async function prepareSessionProjectFiles(
     const scanResult = scanProject(worktreePath, config);
     const backupPath = join(worktreePath, '.alpha-loop', 'templates', 'instructions.md.bak');
     if (existsSync(backupPath)) unlinkSync(backupPath);
-    if (!scanResult.contextWritten) {
+    if (!scanResult.contextWritten || !scanResult.instructionsWritten) {
+      const missingOutputs = [
+        !scanResult.contextWritten ? 'project context' : '',
+        !scanResult.instructionsWritten ? 'managed instructions' : '',
+      ].filter(Boolean).join(' or ');
       throw new CommandExitError({
         code: 'project-context-refresh-required',
-        message: 'Project context refresh did not produce fresh project context. ' +
+        message: `Project context refresh did not produce fresh ${missingOutputs}. ` +
           'Review the scan output and retry; no session branch or pull request was published.',
       });
     }

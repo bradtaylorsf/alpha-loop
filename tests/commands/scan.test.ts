@@ -132,6 +132,28 @@ describe('scan', () => {
     }
   });
 
+  it('uses unique prompt files for concurrent workers even when timestamps match', () => {
+    jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+    mockExec.mockImplementation(() => {
+      const invocation = mockExec.mock.calls.length;
+      return {
+        stdout: invocation % 2 === 1 ? validContext : validInstructions,
+        stderr: '',
+        exitCode: 0,
+      };
+    });
+
+    scanProject(tmpDir, { agent: 'claude', model: '' });
+    scanProject(tmpDir, { agent: 'claude', model: '' });
+
+    const promptFiles = mockExec.mock.calls.map(([command]) => {
+      const match = command.match(/< "([^"]+)"/);
+      expect(match).not.toBeNull();
+      return match?.[1];
+    });
+    expect(new Set(promptFiles).size).toBe(promptFiles.length);
+  });
+
   it('overwrites existing context file on re-run', () => {
     const contextDir = path.join(tmpDir, '.alpha-loop');
     fs.mkdirSync(contextDir, { recursive: true });
