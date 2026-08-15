@@ -22,12 +22,15 @@ jest.mock('../../src/lib/logger', () => ({
   },
 }));
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   extractJsonFromResponse,
   parseTriageAnalysisResponse,
   normalizeTriageAnalysis,
+  saveTriagePlan,
+  loadTriagePlan,
   formatIssueTable,
   formatTriageFindings,
   formatEpicGroupProposals,
@@ -45,6 +48,7 @@ import {
   type PlannedMilestone,
   type TriageFinding,
   type ProposedEpicGroup,
+  type TriageAnalysis,
   type PlanDraft,
 } from '../../src/lib/planning';
 import type { Issue, Milestone, RoadmapEpicContext } from '../../src/lib/github';
@@ -244,6 +248,94 @@ describe('parseTriageAnalysisResponse', () => {
         existingEpicIssueNum: 0,
       }],
     })).toThrow('epicGroups[0].existingEpicIssueNum');
+  });
+
+  it('rejects malformed triage findings instead of trusting artifact-shaped objects', () => {
+    expect(() => normalizeTriageAnalysis({
+      findings: [{ ...finding, issueNum: '10' }],
+      epicGroups: [],
+    })).toThrow('findings[0].issueNum');
+
+    expect(() => normalizeTriageAnalysis({
+      findings: [{ ...finding, selected: 'yes' }],
+      epicGroups: [],
+    })).toThrow('findings[0].selected');
+  });
+});
+
+describe('triage plan artifacts', () => {
+  const analysis: TriageAnalysis = {
+    findings: [{
+      issueNum: 61,
+      title: 'Completed epic',
+      category: 'stale',
+      reason: 'All work shipped',
+      action: 'close',
+      selected: true,
+    }],
+    epicGroups: [{
+      title: 'Epic: Phase one',
+      goal: 'Ship phase one.',
+      rationale: 'These issues form one deliverable.',
+      orderedChildIssueNumbers: [70, 71],
+      acceptanceCriteria: ['- [ ] Phase one ships'],
+      selected: false,
+    }],
+  };
+
+  let projectDir: string;
+
+  beforeEach(() => {
+    projectDir = mkdtempSync(join(tmpdir(), 'alpha-loop-triage-plan-'));
+  });
+
+  afterEach(() => {
+    rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  it('saves and loads a versioned, repository-bound normalized analysis', () => {
+    const createdAt = '2026-08-15T19:30:45.123Z';
+    const relativePath = saveTriagePlan('owner/repo', analysis, projectDir, createdAt);
+    const absolutePath = join(projectDir, relativePath);
+
+    expect(relativePath).toBe('.alpha-loop/triage-2026-08-15T19-30-45-123Z.json');
+    expect(JSON.parse(readFileSync(absolutePath, 'utf-8'))).toEqual({
+      version: 1,
+      repo: 'owner/repo',
+      createdAt,
+      analysis,
+    });
+    expect(loadTriagePlan(absolutePath, 'OWNER/REPO')).toEqual({
+      version: 1,
+      repo: 'owner/repo',
+      createdAt,
+      analysis,
+    });
+  });
+
+  it.each([
+    ['missing file', null, 'Unable to read triage plan'],
+    ['malformed JSON', '{nope', 'Unable to read triage plan'],
+    ['unsupported version', JSON.stringify({ version: 2, repo: 'owner/repo', createdAt: '2026-08-15T19:30:45.123Z', analysis }), 'Unsupported triage plan version'],
+    ['malformed schema', JSON.stringify({ version: 1, repo: 'owner/repo', createdAt: '2026-08-15T19:30:45.123Z', analysis: { findings: 'nope', epicGroups: [] } }), 'findings must be an array'],
+  ])('fails closed for a %s', (_label, contents, expectedMessage) => {
+    const artifactPath = join(projectDir, 'triage.json');
+    if (contents != null) writeFileSync(artifactPath, contents, 'utf-8');
+
+    expect(() => loadTriagePlan(artifactPath, 'owner/repo')).toThrow(expectedMessage);
+  });
+
+  it('rejects an artifact created for another repository', () => {
+    const artifactPath = join(projectDir, saveTriagePlan(
+      'other/repo',
+      analysis,
+      projectDir,
+      '2026-08-15T19:30:45.123Z',
+    ));
+
+    expect(() => loadTriagePlan(artifactPath, 'owner/repo')).toThrow(
+      'Triage plan is for other/repo, but the configured repository is owner/repo',
+    );
   });
 });
 

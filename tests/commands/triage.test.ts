@@ -42,6 +42,8 @@ jest.mock('../../src/lib/logger', () => ({
 
 jest.mock('../../src/lib/planning', () => ({
   parseTriageAnalysisResponse: jest.fn(),
+  saveTriagePlan: jest.fn(() => '.alpha-loop/triage-2026-08-15T19-30-45-123Z.json'),
+  loadTriagePlan: jest.fn(),
   formatTriageFindings: jest.fn(() => 'FORMATTED FINDINGS'),
   formatEpicGroupProposals: jest.fn(() => 'FORMATTED EPIC PROPOSALS'),
   buildPlanningContext: jest.fn(() => ({
@@ -78,7 +80,12 @@ jest.mock('../../src/lib/github', () => ({
 import { checkbox, confirm } from '@inquirer/prompts';
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
-import { parseTriageAnalysisResponse, formatEpicGroupProposals } from '../../src/lib/planning';
+import {
+  parseTriageAnalysisResponse,
+  saveTriagePlan,
+  loadTriagePlan,
+  formatEpicGroupProposals,
+} from '../../src/lib/planning';
 import {
   listOpenIssuesWithComments,
   closeIssue,
@@ -94,6 +101,8 @@ const mockCheckbox = checkbox as jest.MockedFunction<typeof checkbox>;
 const mockConfirm = confirm as jest.MockedFunction<typeof confirm>;
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockParseTriageAnalysis = parseTriageAnalysisResponse as jest.MockedFunction<typeof parseTriageAnalysisResponse>;
+const mockSaveTriagePlan = saveTriagePlan as jest.MockedFunction<typeof saveTriagePlan>;
+const mockLoadTriagePlan = loadTriagePlan as jest.MockedFunction<typeof loadTriagePlan>;
 const mockFormatEpicGroupProposals = formatEpicGroupProposals as jest.MockedFunction<typeof formatEpicGroupProposals>;
 const mockListOpenIssuesWithComments = listOpenIssuesWithComments as jest.MockedFunction<typeof listOpenIssuesWithComments>;
 const mockCloseIssue = closeIssue as jest.MockedFunction<typeof closeIssue>;
@@ -171,6 +180,9 @@ describe('triage command', () => {
   beforeEach(() => {
     consoleSpy = jest.spyOn(console, 'log').mockImplementation();
     jest.clearAllMocks();
+    mockSaveTriagePlan.mockReset();
+    mockSaveTriagePlan.mockReturnValue('.alpha-loop/triage-2026-08-15T19-30-45-123Z.json');
+    mockLoadTriagePlan.mockReset();
     mockCreateIssue.mockReturnValue(0);
     mockGetIssueBody.mockReturnValue('');
     mockUpdateIssue.mockReturnValue(true);
@@ -345,8 +357,137 @@ describe('triage command', () => {
     expect(mockUpdateIssue).not.toHaveBeenCalled();
     expect(mockCreateIssue).not.toHaveBeenCalled();
     expect(mockCommentIssue).not.toHaveBeenCalled();
+    expect(mockSaveTriagePlan).toHaveBeenCalledWith(
+      'owner/repo',
+      SAMPLE_ANALYSIS,
+      process.cwd(),
+    );
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('triage --apply'));
     // Should not show interactive prompts in dry-run
     expect(mockCheckbox).not.toHaveBeenCalled();
+  });
+
+  it('saves the exact filtered analysis displayed by dry-run', async () => {
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({
+      findings: [SAMPLE_FINDINGS[0]],
+      epicGroups: [
+        SAMPLE_EPIC_GROUPS[0],
+        {
+          ...SAMPLE_EPIC_GROUPS[0],
+          title: 'Epic: Invalid unknown issue group',
+          orderedChildIssueNumbers: [2, 999],
+        },
+      ],
+    });
+
+    await triageCommand({ dryRun: true });
+
+    expect(mockSaveTriagePlan).toHaveBeenCalledWith(
+      'owner/repo',
+      {
+        findings: [SAMPLE_FINDINGS[0]],
+        epicGroups: [SAMPLE_EPIC_GROUPS[0]],
+      },
+      process.cwd(),
+    );
+  });
+
+  it('saves an empty analysis so a no-op preview is replayable', async () => {
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({ findings: [], epicGroups: [] });
+
+    await triageCommand({ dryRun: true });
+
+    expect(mockSaveTriagePlan).toHaveBeenCalledWith(
+      'owner/repo',
+      { findings: [], epicGroups: [] },
+      process.cwd(),
+    );
+    expect(log.dry).toHaveBeenCalled();
+  });
+
+  it('replays the dry-run plan unchanged without invoking or parsing a second agent response', async () => {
+    const persistedAnalysis = {
+      findings: [
+        SAMPLE_FINDINGS[0],
+        { ...SAMPLE_FINDINGS[3], selected: false },
+      ],
+      epicGroups: [
+        { ...SAMPLE_EPIC_GROUPS[0], selected: false },
+        { ...SAMPLE_EPIC_GROUPS[0], title: 'Epic: Persisted selection', selected: true },
+      ],
+    };
+    let savedAnalysis: typeof persistedAnalysis | undefined;
+    mockSaveTriagePlan.mockImplementation((_repo, analysis) => {
+      savedAnalysis = analysis as typeof persistedAnalysis;
+      return '.alpha-loop/reviewed.json';
+    });
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{"first":"analysis"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue(persistedAnalysis);
+
+    await triageCommand({ dryRun: true });
+
+    expect(savedAnalysis).toEqual(persistedAnalysis);
+    expect(mockCloseIssue).not.toHaveBeenCalled();
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+
+    mockExec.mockClear();
+    mockParseTriageAnalysis.mockClear();
+    mockLoadTriagePlan.mockImplementation(() => ({
+      version: 1,
+      repo: 'owner/repo',
+      createdAt: '2026-08-15T19:30:45.123Z',
+      analysis: savedAnalysis!,
+    }));
+    mockCreateIssue.mockReturnValueOnce(250);
+
+    await triageCommand({ apply: '.alpha-loop/reviewed.json', yes: true });
+
+    expect(mockLoadTriagePlan).toHaveBeenCalledWith('.alpha-loop/reviewed.json', 'owner/repo');
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(mockParseTriageAnalysis).not.toHaveBeenCalled();
+    expect(mockCloseIssue).toHaveBeenCalledTimes(1);
+    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 1, 'not_planned');
+    expect(mockCloseIssue).not.toHaveBeenCalledWith('owner/repo', 4, expect.anything(), expect.anything());
+    expect(mockCreateIssue).toHaveBeenCalledTimes(1);
+    expect(mockCreateIssue).toHaveBeenCalledWith(
+      'owner/repo',
+      'Epic: Persisted selection',
+      expect.any(String),
+      ['epic'],
+    );
+  });
+
+  it.each([
+    ['invalid', 'Unsupported triage plan version: 2'],
+    ['for another repository', 'Triage plan is for other/repo, but the configured repository is owner/repo'],
+  ])('fails closed before fetching issues or mutating when a replay artifact is %s', async (_label, message) => {
+    mockLoadTriagePlan.mockImplementation(() => {
+      throw new Error(message);
+    });
+
+    await triageCommand({ apply: '.alpha-loop/invalid.json', yes: true });
+
+    expect(log.error).toHaveBeenCalledWith(`Cannot apply triage plan: ${message}`);
+    expect(mockListOpenIssuesWithComments).not.toHaveBeenCalled();
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(mockCloseIssue).not.toHaveBeenCalled();
+    expect(mockUpdateIssue).not.toHaveBeenCalled();
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+    expect(mockCommentIssue).not.toHaveBeenCalled();
+  });
+
+  it('rejects --dry-run with --apply before loading or generating a plan', async () => {
+    await triageCommand({ dryRun: true, apply: '.alpha-loop/reviewed.json' });
+
+    expect(log.error).toHaveBeenCalledWith(expect.stringContaining('cannot be combined'));
+    expect(mockLoadTriagePlan).not.toHaveBeenCalled();
+    expect(mockListOpenIssuesWithComments).not.toHaveBeenCalled();
+    expect(mockExec).not.toHaveBeenCalled();
   });
 
   it('displays epic proposals separately from cleanup findings in dry-run mode', async () => {
