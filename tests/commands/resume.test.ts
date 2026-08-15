@@ -374,6 +374,7 @@ describe('resumeCommand', () => {
         logsDir: expect.stringContaining('.alpha-loop/sessions/session/20260530-120000/logs'),
       }),
       expect.objectContaining({
+        issueLabels: ['needs-human-input'],
         resumeStage: 'clarification',
         existingPrUrl: null,
         savedWorktree: {
@@ -581,7 +582,7 @@ describe('resumeCommand', () => {
     });
     mockGhExec.mockImplementation((cmd: string) => {
       if (cmd === `gh pr list --repo 'owner/repo' --head 'agent/issue-269' --state open --json number --limit 1`) return ok('[]');
-      if (cmd === `gh issue view 269 --repo 'owner/repo' --json title`) return ok('{"title":"Recover artifact exports"}');
+      if (cmd === `gh issue view 269 --repo 'owner/repo' --json title,labels`) return ok('{"title":"Recover artifact exports","labels":[]}');
       if (cmd === `gh pr list --repo 'owner/repo' --head 'session/epic-226' --state open --json number,url --limit 1`) {
         return ok('[{"number":999,"url":"https://github.com/owner/repo/pull/999"}]');
       }
@@ -641,7 +642,7 @@ describe('resumeCommand', () => {
     });
     mockGhExec.mockImplementation((cmd: string) => {
       if (cmd === `gh pr list --repo 'owner/repo' --head 'agent/issue-269' --state open --json number --limit 1`) return ok('[]');
-      if (cmd === `gh issue view 269 --repo 'owner/repo' --json title`) return ok('{"title":"Recover artifact exports"}');
+      if (cmd === `gh issue view 269 --repo 'owner/repo' --json title,labels`) return ok('{"title":"Recover artifact exports","labels":[{"name":"bug"}]}');
       if (cmd === `gh pr list --repo 'owner/repo' --head 'session/epic-123' --state open --json number,url --limit 1`) {
         return ok('[{"number":999,"url":"https://github.com/owner/repo/pull/999"}]');
       }
@@ -673,7 +674,7 @@ describe('resumeCommand', () => {
       repo: 'owner/repo',
       base: 'master',
       head: 'agent/issue-269',
-      title: 'feat: Recover artifact exports (closes #269)',
+      title: 'fix: Recover artifact exports (closes #269)',
       body: expect.stringContaining('Treat this PR as WIP until those checks pass.'),
       cwd: tempDir!,
     }));

@@ -115,6 +115,7 @@ import {
   type WebAppPreviewResolution,
   type WebAppVerificationSummary,
 } from './web-app-profile.js';
+import { conventionalBatchTitle, conventionalTitle } from './conventional-commits.js';
 
 async function refreshSessionWorktree(
   session: SessionContext,
@@ -493,6 +494,8 @@ export type PipelineResumeStage = 'implementation' | 'verification' | 'clarifica
 
 export type PipelineOptions = {
   epicContext?: EpicPromptContext;
+  /** Labels from the source issue, used to derive release-safe commit and PR titles. */
+  issueLabels?: string[];
   /** Abort the active agent stage when the owning run receives a signal. */
   signal?: AbortSignal;
   resumeContext?: string;
@@ -1719,6 +1722,7 @@ export async function processIssue(
       issueNum,
       title,
       body,
+      labels: pipelineOptions.issueLabels,
       comments: issueComments.length > 0 ? issueComments : undefined,
       planContent: plan.implementation || undefined,
       ...epicOption,
@@ -1758,7 +1762,10 @@ export async function processIssue(
     if (implResult.exitCode === 0) {
       autoCommittedPaths = autoCommitDirtyWorktree(
         worktreePath,
-        `feat: implement issue #${issueNum} - ${title}`,
+        conventionalTitle(
+          { title, labels: pipelineOptions.issueLabels },
+          `(closes #${issueNum})`,
+        ),
       );
     } else if (!isTransientError(implResult.output)) {
       // Permanent failures keep a wip commit so the worktree is preserved for
@@ -2600,7 +2607,10 @@ export async function processIssue(
         repo: config.repo,
         base: prBase,
         head: worktreeBranch,
-        title: `feat: ${title} (closes #${issueNum})`,
+        title: conventionalTitle(
+          { title, labels: pipelineOptions.issueLabels },
+          `(closes #${issueNum})`,
+        ),
         body: prBody,
         cwd: worktreePath,
       });
@@ -2916,7 +2926,7 @@ export async function processIssue(
  * After the batch completes, each issue is individually updated with labels, comments, and PR.
  */
 export async function processBatch(
-  issues: Array<{ number: number; title: string; body: string }>,
+  issues: Array<{ number: number; title: string; body: string; labels?: string[] }>,
   config: Config,
   session: SessionContext,
   options: PipelineOptions = {},
@@ -3055,6 +3065,7 @@ export async function processBatch(
     issueNum: i.number,
     title: i.title,
     body: i.body,
+    labels: i.labels,
     comments: issueComments.get(i.number)?.map((c) => ({
       author: c.author,
       body: c.body,
@@ -3218,7 +3229,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     const issueRefs = issues.map((i) => `#${i.number}`).join(', ');
     autoCommittedPaths = autoCommitDirtyWorktree(
       worktreePath,
-      `feat: batch implement issues ${issueRefs}`,
+      conventionalBatchTitle(issues, `batch implement issues ${issueRefs}`),
     );
 
     stepsCompleted.push('implement');
@@ -3610,7 +3621,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         repo: config.repo,
         base: prBase,
         head: worktreeBranch,
-        title: `feat: batch implementation (${issueRefs})`,
+        title: conventionalBatchTitle(issues, `batch implementation (${issueRefs})`),
         body: prBody,
         cwd: worktreePath,
       });
@@ -3806,7 +3817,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
 export type QuickFinalizeOptions = {
   /** Issues that were implemented on the shared worktree, in processing order. */
-  issues: Array<{ number: number; title: string }>;
+  issues: Array<{ number: number; title: string; labels?: string[] }>;
   config: Config;
   session: SessionContext;
   worktreePath: string;
@@ -3964,8 +3975,8 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
   const prBase = config.autoMerge ? session.branch : config.baseBranch;
   const issueNums = issues.map((issue) => `#${issue.number}`).join(', ');
   const prTitle = epicNum !== undefined
-    ? `feat: quick session for epic #${epicNum} (${issueNums})`
-    : `feat: quick session (${issueNums})`;
+    ? conventionalBatchTitle(issues, `quick session for epic #${epicNum} (${issueNums})`)
+    : conventionalBatchTitle(issues, `quick session (${issueNums})`);
 
   let prUrl: string | undefined;
 

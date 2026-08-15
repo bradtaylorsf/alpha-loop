@@ -117,7 +117,19 @@ describe('buildImplementPrompt', () => {
 
     expect(prompt).toContain('## Before You Start');
     expect(prompt).toContain('## After Implementing');
-    expect(prompt).toContain('git commit -m "feat: Add login page (closes #42)"');
+    expect(prompt).toContain('git commit -m "chore: Add login page (closes #42)"');
+  });
+
+  test('preserves a prefixed bug title in commit guidance', () => {
+    const prompt = buildImplementPrompt({
+      issueNum: 410,
+      title: 'fix: Correct release classification',
+      body: 'Use the issue type.',
+      labels: ['bug'],
+    });
+
+    expect(prompt).toContain('git commit -m "fix: Correct release classification (closes #410)"');
+    expect(prompt).not.toContain('feat: fix:');
   });
 
   test('includes parent epic context and narrow scope guidance when provided', () => {
@@ -380,6 +392,21 @@ describe('buildBatchImplementPrompt', () => {
 
     expect(prompt).toContain('## Parent Epic Context');
     expect(prompt).toContain('Keep this batch limited to the listed issues');
+  });
+
+  test('provides exact commit titles derived for every issue', () => {
+    const prompt = buildBatchImplementPrompt({
+      issues: [
+        { issueNum: 10, title: 'fix: Correct it', body: 'Body', labels: ['bug'] },
+        { issueNum: 11, title: 'Add it', body: 'Body', labels: ['enhancement'] },
+        { issueNum: 12, title: 'Maintain it', body: 'Body' },
+      ],
+    });
+
+    expect(prompt).toContain('git commit -m "fix: Correct it (closes #10)"');
+    expect(prompt).toContain('git commit -m "feat: Add it (closes #11)"');
+    expect(prompt).toContain('git commit -m "chore: Maintain it (closes #12)"');
+    expect(prompt).not.toContain('git commit -m "feat: <title>');
   });
 });
 
