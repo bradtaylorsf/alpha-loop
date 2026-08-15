@@ -86,6 +86,23 @@ describe('reportRoutingCommand', () => {
     expect(output).toContain('sonnet');
   });
 
+  it('includes flat verify-only trace spend without requiring a learning manifest', () => {
+    const traceDir = join(tmp, '.alpha-loop', 'traces', 'verify-396-1786797296000');
+    mkdirSync(traceDir, { recursive: true });
+    writeFileSync(
+      join(traceDir, 'stages.jsonl'),
+      `${JSON.stringify(entry({ stage: 'verify', model: 'opus', cost_usd: 0.42 }))}\n`,
+    );
+
+    reportRoutingCommand({ projectDir: tmp });
+
+    const output = logs.join('\n');
+    expect(output).toContain('1 session(s)');
+    expect(output).toContain('verify');
+    expect(output).toContain('opus');
+    expect(output).toContain('$0.4200');
+  });
+
   it('emits valid JSON matching the documented schema when --json set', () => {
     seedSession(tmp, 'session/A', [
       entry({ stage: 'plan', model: 'opus', cost_usd: 0.2 }),

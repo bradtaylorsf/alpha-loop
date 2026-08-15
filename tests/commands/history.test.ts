@@ -154,6 +154,82 @@ function createDurableManifest(
   );
 }
 
+function createVerifySessionFixture(
+  sessionsDir: string,
+  name: string,
+  options: { manifest?: boolean; verdict?: 'pass' | 'partial' | 'fail'; log?: string } = {},
+): string {
+  const dir = path.join(sessionsDir, name);
+  const logsDir = path.join(dir, 'logs');
+  fs.mkdirSync(logsDir, { recursive: true });
+  if (options.log !== undefined) {
+    fs.writeFileSync(path.join(logsDir, 'epic-893-verify.log'), options.log);
+  }
+  if (options.manifest) {
+    const epicNumber = Number(name.match(/^verify-(\d+)-/)?.[1] ?? 893);
+    const startedAt = '2025-08-11T02:40:00.000Z';
+    fs.writeFileSync(path.join(dir, 'session.json'), JSON.stringify({
+      version: 1,
+      sessionId: name,
+      name,
+      issueNumber: null,
+      issueNumbers: [],
+      parentEpicNumber: epicNumber,
+      branch: 'master',
+      baseBranch: 'master',
+      prUrl: null,
+      sessionPrUrl: null,
+      status: 'completed',
+      stage: 'completed',
+      labels: [],
+      feedback: {
+        currentStatus: 'running',
+        question: null,
+        resumeInstructions: null,
+        qaChecklist: [],
+        prUrl: null,
+        previewUrl: null,
+        classification: null,
+        followUpIssueNumber: null,
+        followUpIssueUrl: null,
+        transitionHistory: [],
+        events: [],
+        updatedAt: startedAt,
+      },
+      harness: { agent: 'claude', model: 'opus', reviewModel: 'opus', command: 'claude', testCommand: 'pnpm test' },
+      command: 'claude',
+      worktree: null,
+      lastKnownBranch: null,
+      currentIssue: null,
+      issues: [],
+      prompts: [],
+      promptPath: null,
+      promptHash: null,
+      transcripts: [],
+      transcriptPath: null,
+      logs: {
+        sessionDir: `.alpha-loop/sessions/${name}`,
+        logsDir: `.alpha-loop/sessions/${name}/logs`,
+        traceDir: `.alpha-loop/traces/${name}`,
+        files: [],
+      },
+      screenshots: [],
+      previewUrl: null,
+      timestamps: { createdAt: startedAt, startedAt, updatedAt: startedAt, endedAt: startedAt },
+      lastEventId: null,
+      errors: [],
+      epic: epicNumber,
+      verification: {
+        epicNumber,
+        status: options.verdict === 'pass' ? 'pass' : 'needs-human-input',
+        verdict: options.verdict ?? 'pass',
+        closedEpic: options.verdict === 'pass',
+      },
+    }, null, 2));
+  }
+  return dir;
+}
+
 function createQueueManifest(sessionsDir: string): void {
   const queueDir = path.join(sessionsDir, 'queue-20260521T101112Z');
   fs.mkdirSync(queueDir, { recursive: true });
@@ -352,6 +428,38 @@ describe('history', () => {
       expect(output).toContain('1 issue');
     });
 
+    it('recognizes legacy flat verify sessions and derives completion, verdict, and epoch timestamp from logs', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createVerifySessionFixture(sessionsDir, 'verify-893-1754880000000', {
+        log: '```json\n{"verdict":"pass","summary":"All criteria met","findings":[]}\n```\n',
+      });
+      createSession(sessionsDir, '20250811-030000', [
+        { issueNum: 894, title: 'Later normal session', status: 'success', duration: 1 },
+      ]);
+
+      historyList(sessionsDir, tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('verify-893-1754880000000');
+      expect(output).not.toContain('verify-893-1754880000000/logs');
+      expect(output).toContain('2025-08-11');
+      expect(output).toContain('completed');
+      expect(output).toContain('verdict=pass');
+      expect(output).not.toContain('running (empty)');
+      expect(output.indexOf('session/20250811-030000')).toBeLessThan(output.indexOf('verify-893-1754880000000'));
+    });
+
+    it('uses unknown instead of running for an empty session with no manifest or result', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      fs.mkdirSync(path.join(sessionsDir, 'session', '20250115-100000'), { recursive: true });
+
+      historyList(sessionsDir, tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('unknown (empty)');
+      expect(output).not.toContain('running (empty)');
+    });
+
     it('lists multi-epic queue manifests with status and pending counts', () => {
       const sessionsDir = path.join(tmpDir, '.alpha-loop', 'sessions');
       createQueueManifest(sessionsDir);
@@ -368,6 +476,22 @@ describe('history', () => {
   });
 
   describe('historyDetail', () => {
+    it('surfaces the stored verdict from a manifest-backed verify session', () => {
+      const sessionsDir = path.join(tmpDir, 'sessions');
+      createVerifySessionFixture(sessionsDir, 'verify-893-1754880000000', {
+        manifest: true,
+        verdict: 'partial',
+      });
+
+      historyDetail(sessionsDir, 'verify-893-1754880000000', tmpDir);
+
+      const output = consoleSpy.mock.calls.map((c: unknown[]) => c[0]).join('\n');
+      expect(output).toContain('Session:  verify-893-1754880000000');
+      expect(output).toContain('Status:   completed (completed)');
+      expect(output).toContain('Verdict:  partial');
+      expect(output).toContain('Epic:     #893');
+    });
+
     it('shows session detail with issues', () => {
       const sessionsDir = path.join(tmpDir, 'sessions');
       createSession(sessionsDir, '20250115-103000', [
