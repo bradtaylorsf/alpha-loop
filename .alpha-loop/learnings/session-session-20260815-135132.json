@@ -1,0 +1,89 @@
+{
+  "name": "session/20260815-135132",
+  "branch": "session/20260815-135132",
+  "completed": "2026-08-15T21:12:00.428Z",
+  "results": [
+    {
+      "issueNum": 410,
+      "title": "fix: loop hardcodes feat: on every PR and commit — double prefix, and bug fixes bump the minor version",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/422",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 884,
+      "filesChanged": 4
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 63857,
+      "tokens_out": 49121,
+      "cost_usd": 0,
+      "wall_time_s": 155.34,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-15T20:51:50.076Z",
+      "issue_num": 410
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 511645,
+      "tokens_out": 393573,
+      "cost_usd": 0,
+      "wall_time_s": 513.035,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-15T20:54:25.900Z",
+      "issue_num": 410
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 115096,
+      "tokens_out": 88535,
+      "cost_usd": 0,
+      "wall_time_s": 201.238,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-15T21:03:03.390Z",
+      "issue_num": 410
+    },
+    {
+      "stage": "learn",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 6001,
+      "tokens_out": 4616,
+      "cost_usd": 0,
+      "wall_time_s": 11.116,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-15T21:06:39.985Z",
+      "issue_num": 410
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 20514,
+      "tokens_out": 15780,
+      "cost_usd": 0,
+      "wall_time_s": 58.788,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-08-15T21:06:40.008Z",
+      "issue_num": 410
+    }
+  ]
+}
