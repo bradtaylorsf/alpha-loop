@@ -38,7 +38,7 @@ Each line is a JSON object with the following shape:
 
 | Field            | Type              | Notes                                                                 |
 |------------------|-------------------|-----------------------------------------------------------------------|
-| `stage`          | string            | `plan`, `implement`, `test_fix`, `review`, `review_fix`, `verify_fix`, `assumptions`, `batch-plan`, `batch-implement`, `batch-test_fix`, `batch-review`, `batch-review_fix` |
+| `stage`          | string            | `plan`, `implement`, `test_fix`, `review`, `review_fix`, `verify`, `verify_fix`, `assumptions`, `batch-plan`, `batch-implement`, `batch-test_fix`, `batch-review`, `batch-review_fix` |
 | `model`          | string            | Model id used for this invocation                                     |
 | `endpoint`       | string            | Named endpoint from `routing.endpoints`; `default` when routing isn't used |
 | `endpoint_type`  | string            | `anthropic`, `anthropic_compat` (LM Studio), or `openai_compat` (Ollama) — optional |
@@ -64,6 +64,8 @@ back to the manifest's embedded `stages` array if present, otherwise print a
 Legacy stage records that lack provenance fields are retained but treated as
 unmeasured; their historical zeroes and token counts are not promoted to
 authoritative measurements.
+
+Verify-only runs write to `.alpha-loop/traces/verify-<epic>-<epoch>/stages.jsonl` and use `stage: "verify"`. They therefore contribute their agent invocation and any measured cost to routing reports even though they do not ship a child issue.
 
 ## CLI surface
 

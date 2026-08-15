@@ -1,4 +1,4 @@
-import { createSession, ensureSessionWorktree, saveResult, getPreviousResult, finalizeSession, writeCrashMarker, loadCrashMarkers, clearCrashMarker } from '../../src/lib/session';
+import { createSession, createVerifySession, ensureSessionWorktree, saveResult, getPreviousResult, finalizeSession, writeCrashMarker, loadCrashMarkers, clearCrashMarker } from '../../src/lib/session';
 import type { PipelineResult } from '../../src/lib/pipeline';
 import type { BranchAncestryMode, QueueSessionContext } from '../../src/lib/epic-queue';
 
@@ -391,6 +391,42 @@ describe('createSession', () => {
     expect(headMutations.length).toBeGreaterThan(0);
     expect(headMutations.every(([, options]) => sessionPaths.has(options?.cwd))).toBe(true);
     expect(headMutations.some(([, options]) => options?.cwd === process.cwd())).toBe(false);
+  });
+});
+
+describe('createVerifySession', () => {
+  test('creates a flat verify session with a durable running manifest and trace references', () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-08-15T12:34:56.000Z'));
+
+    try {
+      const session = createVerifySession(makeConfig(), 396);
+
+      expect(session.name).toBe('verify-396-1786797296000');
+      expect(session.resultsDir).toContain('.alpha-loop/sessions/verify-396-1786797296000');
+      expect(session.logsDir).toBe(`${session.resultsDir}/logs`);
+      expect(session.worktreePath).toBeUndefined();
+
+      const manifestWrite = mockWriteFileSync.mock.calls.find((call) => String(call[0]).endsWith('session.json.tmp'));
+      expect(manifestWrite).toBeDefined();
+      const manifest = JSON.parse(String(manifestWrite?.[1]));
+      expect(manifest).toEqual(expect.objectContaining({
+        name: session.name,
+        parentEpicNumber: 396,
+        status: 'running',
+        stage: 'verify',
+        worktree: null,
+        verification: {
+          epicNumber: 396,
+          status: 'running',
+          verdict: null,
+          closedEpic: false,
+        },
+      }));
+      expect(manifest.logs.traceDir).toBe('.alpha-loop/traces/verify-396-1786797296000');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

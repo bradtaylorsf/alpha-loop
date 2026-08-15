@@ -168,6 +168,13 @@ export type SessionWebAppArtifacts = {
   updatedAt: string;
 };
 
+export type VerifySessionMetadata = {
+  epicNumber: number;
+  status: 'running' | 'pass' | 'needs-human-input' | 'skipped' | 'failure';
+  verdict: 'pass' | 'partial' | 'fail' | null;
+  closedEpic: boolean;
+};
+
 export type DurableSessionManifest = {
   version: 1;
   sessionId: string;
@@ -226,6 +233,7 @@ export type DurableSessionManifest = {
   }>;
   cleanup?: SessionCleanupManifest;
   epic?: number;
+  verification?: VerifySessionMetadata;
   queue?: QueueSessionContext;
 };
 
@@ -1221,6 +1229,100 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
     log.info(`Session manifest saved: ${manifestPath}`);
   }
 
+  return session;
+}
+
+/**
+ * Create a lightweight verify-only session without a worktree or session branch.
+ * Verify sessions retain their historical flat directory layout so existing log
+ * paths remain valid, while gaining the same durable manifest and trace joins as
+ * normal sessions.
+ */
+export function createVerifySession(config: Config, epicNum: number): SessionContext {
+  const now = new Date();
+  const startedAt = now.toISOString();
+  const name = `verify-${epicNum}-${now.getTime()}`;
+  const projectDir = process.cwd();
+  const resultsDir = join(projectDir, '.alpha-loop', 'sessions', name);
+  const logsDir = join(resultsDir, 'logs');
+  const manifestPath = sessionManifestPath(resultsDir);
+  const traceDir = runDir(name, projectDir);
+  const session: SessionContext = {
+    id: sessionIdFromName(name),
+    name,
+    branch: config.baseBranch,
+    startedAt,
+    resultsDir,
+    logsDir,
+    manifestPath,
+    results: [],
+    pendingBackgroundTasks: [],
+    epic: epicNum,
+  };
+
+  if (config.dryRun) return session;
+
+  mkdirSync(resultsDir, { recursive: true });
+  mkdirSync(logsDir, { recursive: true });
+  const manifest: DurableSessionManifest = {
+    version: 1,
+    sessionId: session.id!,
+    name,
+    issueNumber: null,
+    issueNumbers: [],
+    parentEpicNumber: epicNum,
+    parentEpicTitle: null,
+    branch: config.baseBranch,
+    baseBranch: config.baseBranch,
+    prUrl: null,
+    sessionPrUrl: null,
+    status: 'running',
+    stage: 'verify',
+    labels: [],
+    feedback: initialHumanFeedbackState('running', startedAt),
+    harness: {
+      agent: config.agent,
+      model: config.model,
+      reviewModel: config.reviewModel,
+      command: config.agent,
+      testCommand: config.testCommand,
+    },
+    command: config.agent,
+    worktree: null,
+    lastKnownBranch: null,
+    currentIssue: null,
+    issues: [],
+    prompts: [],
+    promptPath: null,
+    promptHash: null,
+    transcripts: [],
+    transcriptPath: null,
+    logs: {
+      sessionDir: projectRelative(resultsDir, projectDir),
+      logsDir: projectRelative(logsDir, projectDir),
+      traceDir: projectRelative(traceDir, projectDir),
+      files: [],
+    },
+    screenshots: [],
+    previewUrl: null,
+    timestamps: {
+      createdAt: startedAt,
+      startedAt,
+      updatedAt: startedAt,
+    },
+    lastEventId: null,
+    policyDecisions: [],
+    errors: [],
+    epic: epicNum,
+    verification: {
+      epicNumber: epicNum,
+      status: 'running',
+      verdict: null,
+      closedEpic: false,
+    },
+  };
+  writeManifestFile(manifestPath, manifest);
+  log.info(`Verify session manifest saved: ${manifestPath}`);
   return session;
 }
 

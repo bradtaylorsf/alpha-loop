@@ -72,7 +72,7 @@ For planned feature work, use epics as the unit you schedule and ship:
 3. `alpha-loop run --epic <N>` ships the epic's child issues in checklist order. Agents working on each child issue receive the parent epic goal, acceptance criteria, and sibling checklist as context.
 4. `alpha-loop roadmap --queue` recommends the next ordered epic queue, explains blockers and risks, and prints the exact `alpha-loop run --epics ...` command.
 5. `alpha-loop run --epics <A,B,C>` runs several parent epics back-to-back in that exact order, with a separate session branch and PR for each epic.
-6. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria.
+6. `alpha-loop run --verify-only <N>` re-runs the epic verification pass when you need to re-check shipped child issues against the parent acceptance criteria. The verdict is persisted in `alpha-loop history`, and the verification agent's measured or explicitly unmeasured spend is included in telemetry reports.
 
 Use `alpha-loop run --issue <N>` when you need to restart or process exactly one ready issue. If that issue appears in exactly one open parent epic checklist, the agent receives that parent epic context and the resulting PR still includes `Part of #<epic>`; if multiple open epics reference it, Alpha Loop exits instead of guessing.
 
@@ -314,6 +314,7 @@ Use `--issue <N>` to resume a specific issue.
 
 `alpha-loop history <session>` shows both unrecovered `crash-<N>.json` markers and recovered result files separately from normal successes and failures.
 Durable session manifests also show active, paused, waiting-for-feedback, QA-requested, resumed, completed, failed, and cleaned-up states, including the saved branch needed to recreate a missing worktree.
+Verify-only runs appear under their flat `verify-<epic>-<epoch>` names with a terminal status and verdict. Legacy verify directories are inferred from their logs when possible; sessions with no manifest, result, crash marker, or parseable verdict display as `unknown`, never `running`.
 
 ### Feedback Ingestion (`alpha-loop feedback ingest`)
 
@@ -348,7 +349,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run --epics <ids>` | Process an ordered comma-separated queue of epics, one session branch and PR per epic |
 | `alpha-loop run --epics <ids> --queue-branch-mode independent` | Run queued epics without stacking later session branches on earlier ones |
 | `alpha-loop run --epics <ids> --queue-branch-mode independent --parallel <n>` | Run up to `n` dependency-ready epics concurrently in topological waves |
-| `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
+| `alpha-loop run --verify-only <N>` | Run just the epic verification pass; persist its verdict and include verification spend in telemetry |
 | `alpha-loop daemon` | Run hosted daemon mode continuously for repo stewardship |
 | `alpha-loop daemon --mode feedback-only` | Poll feedback and resume eligible sessions without triage or new work selection |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
@@ -927,6 +928,7 @@ What needs to be done.
 | `.alpha-loop/traces/` | No (gitignored) | Meta-Harness style execution traces per session |
 | `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
 | `.alpha-loop/sessions/<session>/session.json` | No (gitignored) | Durable resumable session state with issue, branch, worktree, PR, stage, status, prompts, transcripts, and logs |
+| `.alpha-loop/sessions/verify-<epic>-<epoch>/session.json` | No (gitignored) | Flat verify-only session manifest with terminal status, epic verdict, log path, and trace reference |
 | `.alpha-loop/sessions/<session>/session.lock` | No (gitignored) | Held by the live run or resume that owns the session; a second run of the same epic/milestone fails fast, and locks from dead processes are reclaimed automatically |
 | `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, dependency waves, concurrency, session PRs, logs, and failures |
 | `.alpha-loop/feedback/` | No (gitignored) | Local idempotency records for external feedback adapter events |
