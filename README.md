@@ -128,6 +128,8 @@ This lets you plan work in GitHub milestones and control exactly how much the lo
 
 When `auto_merge` is enabled (default), Alpha Loop creates a session branch (e.g., `session/20260331-002240`) and merges each issue's PR into it. This keeps your main branch clean until you're ready to merge the whole session.
 
+If project context is stale when a session starts, Alpha Loop regenerates context and managed agent instructions inside the isolated session worktree. Valid generated changes become the session branch's first commit before that branch is pushed or its draft PR is opened, so they follow the normal review path and never dirty or push the base-branch checkout. Invalid or missing scan output stops the session before publication.
+
 ### Learnings
 
 Each completed issue produces a learning file in `.alpha-loop/learnings/` that is committed with that issue's implementation PR. It includes:
@@ -865,7 +867,7 @@ alpha-loop run --epics 205,166,214
 
 The queue is validated before any work starts. Each listed issue must exist, be labeled `epic`, not be duplicated, and be open unless it is already closed as completed. Alpha Loop processes sequential queues in the given order, creates/finalizes one session branch and PR per epic, and stops on the first failure. By default, queues use `stacked` ancestry. For independent work, add `--queue-branch-mode independent --parallel 2`: Alpha Loop derives topological waves from queued `Depends on #N` references, runs up to two ready epics as child processes, and waits for each wave before starting dependents. A failed epic does not cancel siblings already running; unrelated later epics continue, failed dependents are recorded as skipped, and the queue exits nonzero.
 
-Parallel worker output is stored in `.alpha-loop/sessions/queue-<timestamp>/epic-<N>.log`. The atomic `queue.json` manifest records the concurrency limit, waves, dependencies, per-epic status and log path, and dependency-failure skips. Use `alpha-loop history queue-<timestamp>` to inspect progress. `--parallel` requires independent mode; stacked branches are inherently sequential. `--dry-run` prints the validated wave schedule without mutating GitHub or git state.
+Parallel worker output is stored in `.alpha-loop/sessions/queue-<timestamp>/epic-<N>.log`. The atomic `queue.json` manifest records the concurrency limit, waves, dependencies, per-epic status and log path, and dependency-failure skips. Each worker independently refreshes stale context only in its own session worktree and carries any generated changes on its own session branch; the coordinator does not write generated files to the shared checkout. Use `alpha-loop history queue-<timestamp>` to inspect progress. `--parallel` requires independent mode; stacked branches are inherently sequential. `--dry-run` prints the validated wave schedule without mutating GitHub or git state.
 
 Sub-issues are processed in checklist order (not issue-number order). Each sub-issue PR gets `Part of #165` appended, and the epic body's checkboxes auto-flip from `- [ ]` to `- [x]` as PRs merge. When every sub-issue has shipped, the loop runs a verification pass against each sub-issue's acceptance criteria — on `pass` the epic is auto-closed, on `partial` or `fail` it stays open with a `needs-human-input` label and a structured comment explaining the gaps.
 

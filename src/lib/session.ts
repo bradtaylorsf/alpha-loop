@@ -286,6 +286,21 @@ export type CreateSessionOptions = {
   queue?: QueueSessionContext;
 };
 
+export type SessionWorktreePreparation = {
+  /** Commit message used when preparation staged generated files. */
+  commitMessage: string;
+  /** Worktree-relative generated paths that preparation validated and staged. */
+  paths: string[];
+};
+
+export type EnsureSessionWorktreeOptions = {
+  createDraftPr?: boolean;
+  /** Runs after checkout setup but before the session branch is pushed or its PR is opened. */
+  prepare?: (
+    worktreePath: string,
+  ) => SessionWorktreePreparation | void | Promise<SessionWorktreePreparation | void>;
+};
+
 const RESUMABLE_STATUSES = new Set<SessionStatus>([
   'running',
   'human_input_requested',
@@ -1232,7 +1247,7 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
 export async function ensureSessionWorktree(
   session: SessionContext,
   config: Config,
-  options: { createDraftPr?: boolean } = {},
+  options: EnsureSessionWorktreeOptions = {},
 ): Promise<string | null> {
   if (config.dryRun || session.branch === config.baseBranch) return null;
   if (session.worktreePath) return session.worktreePath;
@@ -1257,6 +1272,13 @@ export async function ensureSessionWorktree(
   });
   session.worktreePath = worktree.path;
 
+  if (config.autoMerge && remoteExists) {
+    const reconciled = reconcileSessionBranchWithRemote(session.branch, worktree.path);
+    if (!reconciled) {
+      throw new Error(`Failed to reconcile existing session branch ${session.branch} before preparation`);
+    }
+  }
+
   if (config.autoMerge && !remoteExists) {
     if (worktree.resumed) {
       const reset = exec(`git reset --hard ${shellQuote(`origin/${branchSource}`)}`, { cwd: worktree.path });
@@ -1264,7 +1286,38 @@ export async function ensureSessionWorktree(
         throw new Error(`Failed to reset stale session branch ${session.branch}: ${reset.stderr}`);
       }
     }
-    exec(`git commit --allow-empty -m ${shellQuote(`chore: start session ${session.name}`)}`, { cwd: worktree.path });
+  }
+
+  const preparation = await options.prepare?.(worktree.path);
+  const preparationPaths = Array.from(new Set(
+    preparation?.paths.map((preparedPath) => preparedPath.trim()).filter(Boolean) ?? [],
+  ));
+  let preparedChanges = false;
+  if (preparationPaths.length > 0) {
+    const pathspecs = preparationPaths.map((preparedPath) => shellQuote(preparedPath)).join(' ');
+    const preparedDiff = exec(`git diff --cached --quiet -- ${pathspecs}`, { cwd: worktree.path });
+    preparedChanges = preparedDiff.exitCode !== 0;
+    if (preparedChanges) {
+      const commitResult = exec(
+        `git commit -m ${shellQuote(preparation?.commitMessage ?? `chore: prepare session ${session.name}`)} -- ${pathspecs}`,
+        { cwd: worktree.path },
+      );
+      if (commitResult.exitCode !== 0) {
+        throw new Error(`Failed to commit prepared session files: ${commitResult.stderr || commitResult.stdout}`);
+      }
+    }
+  }
+
+  if (config.autoMerge && !remoteExists) {
+    if (!preparedChanges) {
+      const startCommit = exec(
+        `git commit --allow-empty -m ${shellQuote(`chore: start session ${session.name}`)}`,
+        { cwd: worktree.path },
+      );
+      if (startCommit.exitCode !== 0) {
+        throw new Error(`Failed to create initial session commit: ${startCommit.stderr || startCommit.stdout}`);
+      }
+    }
     const pushResult = exec(`git push origin ${shellQuote(session.branch)}`, { cwd: worktree.path });
     if (pushResult.exitCode !== 0) {
       throw new Error(`Failed to push session branch ${session.branch}: ${pushResult.stderr}`);
@@ -1296,6 +1349,12 @@ export async function ensureSessionWorktree(
         log.warn('Could not create draft session PR — will create during finalization');
       }
     }
+  } else if (config.autoMerge && preparedChanges) {
+    const pushResult = exec(`git push origin ${shellQuote(session.branch)}`, { cwd: worktree.path });
+    if (pushResult.exitCode !== 0) {
+      throw new Error(`Failed to push prepared session files to ${session.branch}: ${pushResult.stderr}`);
+    }
+    log.success(`Updated session branch preparation: ${session.branch}`);
   } else if (config.autoMerge) {
     log.info(`Session branch already exists: ${session.branch}`);
   }

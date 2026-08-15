@@ -17,7 +17,7 @@ jest.mock('../../src/lib/agent', () => ({
   buildOneShotCommand: jest.fn(() => 'claude -p --allowedTools "" --output-format text'),
 }));
 
-import { scanCommand } from '../../src/commands/scan';
+import { scanCommand, scanProject } from '../../src/commands/scan';
 import { exec } from '../../src/lib/shell';
 import { buildOneShotCommand } from '../../src/lib/agent';
 
@@ -71,6 +71,7 @@ describe('scan', () => {
   let origCwd: () => string;
 
   beforeEach(() => {
+    jest.clearAllMocks();
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-test-'));
     origCwd = process.cwd;
     process.cwd = () => tmpDir;
@@ -101,6 +102,34 @@ describe('scan', () => {
     expect(fs.existsSync(contextFile)).toBe(true);
     expect(fs.readFileSync(contextFile, 'utf-8')).toContain('## Architecture');
     expect(mockBuildOneShotCommand).toHaveBeenCalledWith('claude', '', { textOnly: true });
+  });
+
+  it('can scan an explicit project directory without changing the CLI cwd', () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-project-test-'));
+    mockExec.mockReturnValueOnce({
+      stdout: validContext,
+      stderr: '',
+      exitCode: 0,
+    }).mockReturnValueOnce({
+      stdout: validInstructions,
+      stderr: '',
+      exitCode: 0,
+    });
+
+    try {
+      const result = scanProject(projectDir, { agent: 'claude', model: '' } as any);
+
+      expect(result).toEqual({ contextWritten: true, instructionsWritten: true });
+      expect(fs.existsSync(path.join(projectDir, '.alpha-loop', 'context.md'))).toBe(true);
+      expect(fs.existsSync(path.join(tmpDir, '.alpha-loop', 'context.md'))).toBe(false);
+      expect(mockExec).toHaveBeenNthCalledWith(
+        1,
+        expect.any(String),
+        expect.objectContaining({ cwd: projectDir }),
+      );
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
   });
 
   it('overwrites existing context file on re-run', () => {
