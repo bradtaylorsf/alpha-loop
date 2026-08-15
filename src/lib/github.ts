@@ -701,7 +701,7 @@ export function closeIssue(
   issueNum: number,
   reason?: keyof typeof CLI_REASON,
   duplicateOf?: number,
-): void {
+): boolean {
   const reasonFlag = reason ? ` --reason "${CLI_REASON[reason]}"` : '';
   const duplicateFlag = duplicateOf != null ? ` --duplicate-of ${duplicateOf}` : '';
   const result = ghExec(
@@ -710,7 +710,24 @@ export function closeIssue(
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to close issue #${issueNum}: ${result.stderr}`);
+    return false;
   }
+
+  const stateResult = ghExec(
+    `gh issue view ${issueNum} --repo "${repo}" --json state --jq .state`,
+  );
+  if (stateResult.exitCode !== 0) {
+    log.warn(`Failed to verify issue #${issueNum} state after close: ${stateResult.stderr}`);
+    return false;
+  }
+
+  const state = stateResult.stdout.trim().toUpperCase();
+  if (state !== 'CLOSED') {
+    log.warn(`Issue #${issueNum} remains ${state || 'in an unknown state'} after close command`);
+    return false;
+  }
+
+  return true;
 }
 
 /**
