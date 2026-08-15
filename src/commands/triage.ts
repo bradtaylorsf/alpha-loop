@@ -333,10 +333,13 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
             const preserved = original
               ? `<details><summary>Original description</summary>\n\n${original}\n\n</details>\n\n`
               : '';
-            updateIssue(config.repo, finding.issueNum, { body: preserved + finding.rewrittenBody });
-            commentIssue(config.repo, finding.issueNum, '_Issue rewritten by alpha-loop triage. Original description preserved above._');
-            log.success(`Rewrote body for #${finding.issueNum}`);
-            applied++;
+            if (updateIssue(config.repo, finding.issueNum, { body: preserved + finding.rewrittenBody })) {
+              commentIssue(config.repo, finding.issueNum, '_Issue rewritten by alpha-loop triage. Original description preserved above._');
+              log.success(`Rewrote body for #${finding.issueNum}`);
+              applied++;
+            } else {
+              failures.push(`#${finding.issueNum}: failed to rewrite issue body`);
+            }
           } else {
             log.warn(`No rewritten body for #${finding.issueNum}, skipping`);
           }
@@ -390,10 +393,13 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
         case 'enrich': {
           if (finding.enrichedBody) {
-            updateIssue(config.repo, finding.issueNum, { body: finding.enrichedBody });
-            commentIssue(config.repo, finding.issueNum, '_Issue enriched by alpha-loop triage. Original description preserved in collapsed block above._');
-            log.success(`Enriched #${finding.issueNum}`);
-            applied++;
+            if (updateIssue(config.repo, finding.issueNum, { body: finding.enrichedBody })) {
+              commentIssue(config.repo, finding.issueNum, '_Issue enriched by alpha-loop triage. Original description preserved in collapsed block above._');
+              log.success(`Enriched #${finding.issueNum}`);
+              applied++;
+            } else {
+              failures.push(`#${finding.issueNum}: failed to enrich issue body`);
+            }
           } else {
             log.warn(`No enriched body for #${finding.issueNum}, skipping`);
           }

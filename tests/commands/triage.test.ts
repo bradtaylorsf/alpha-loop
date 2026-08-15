@@ -173,6 +173,7 @@ describe('triage command', () => {
     jest.clearAllMocks();
     mockCreateIssue.mockReturnValue(0);
     mockGetIssueBody.mockReturnValue('');
+    mockUpdateIssue.mockReturnValue(true);
     mockUpdateEpicIssueBody.mockReturnValue(true);
     mockCommentChildEpicBacklink.mockReturnValue(true);
     mockCloseIssue.mockReturnValue(true);
@@ -267,6 +268,44 @@ describe('triage command', () => {
     expect(log.success).not.toHaveBeenCalledWith(expect.stringContaining(successMessage));
     expect(log.warn).toHaveBeenCalledWith('Applied 0 of 1 triage action(s)');
     expect(log.warn).toHaveBeenCalledWith('1 operation(s) failed:');
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining(failureMessage));
+  });
+
+  it.each([
+    {
+      label: 'rewrite',
+      finding: SAMPLE_FINDINGS[1],
+      successMessage: 'Rewrote body for #2',
+      failureMessage: '#2: failed to rewrite issue body',
+    },
+    {
+      label: 'enrichment',
+      finding: {
+        issueNum: 5,
+        title: 'Sparse issue',
+        category: 'enrich' as const,
+        reason: 'Missing implementation details',
+        action: 'enrich' as const,
+        enrichedBody: '## Summary\nAdd implementation details',
+        selected: true,
+      },
+      successMessage: 'Enriched #5',
+      failureMessage: '#5: failed to enrich issue body',
+    },
+  ])('does not report a failed $label mutation as successful', async ({ finding, successMessage, failureMessage }) => {
+    mockListOpenIssuesWithComments.mockReturnValue([
+      ...SAMPLE_ISSUES,
+      { number: 5, title: 'Sparse issue', body: 'Needs details', labels: [] },
+    ]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({ findings: [finding], epicGroups: [] });
+    mockUpdateIssue.mockReturnValue(false);
+
+    await triageCommand({ yes: true });
+
+    expect(log.success).not.toHaveBeenCalledWith(expect.stringContaining(successMessage));
+    expect(mockCommentIssue).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith('Applied 0 of 1 triage action(s)');
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining(failureMessage));
   });
 
