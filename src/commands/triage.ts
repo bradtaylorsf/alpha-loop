@@ -303,21 +303,26 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
   // ── Execute actions ────────────────────────────────────────────────────────
   const failures: string[] = [];
+  let attempted = 0;
   let applied = 0;
   let appliedEpics = 0;
   const appliedEpicNums: number[] = [];
 
   for (const finding of findings) {
     if (!selectedNums.includes(finding.issueNum)) continue;
+    attempted++;
 
     try {
       switch (finding.category) {
         case 'stale': {
           commentIssue(config.repo, finding.issueNum,
             `Closing as stale: ${finding.reason}\n\n_Triaged by alpha-loop._`);
-          closeIssue(config.repo, finding.issueNum, 'not_planned');
-          log.success(`Closed stale issue #${finding.issueNum}`);
-          applied++;
+          if (closeIssue(config.repo, finding.issueNum, 'not_planned')) {
+            log.success(`Closed stale issue #${finding.issueNum}`);
+            applied++;
+          } else {
+            failures.push(`#${finding.issueNum}: failed to close stale issue`);
+          }
           break;
         }
 
@@ -328,10 +333,13 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
             const preserved = original
               ? `<details><summary>Original description</summary>\n\n${original}\n\n</details>\n\n`
               : '';
-            updateIssue(config.repo, finding.issueNum, { body: preserved + finding.rewrittenBody });
-            commentIssue(config.repo, finding.issueNum, '_Issue rewritten by alpha-loop triage. Original description preserved above._');
-            log.success(`Rewrote body for #${finding.issueNum}`);
-            applied++;
+            if (updateIssue(config.repo, finding.issueNum, { body: preserved + finding.rewrittenBody })) {
+              commentIssue(config.repo, finding.issueNum, '_Issue rewritten by alpha-loop triage. Original description preserved above._');
+              log.success(`Rewrote body for #${finding.issueNum}`);
+              applied++;
+            } else {
+              failures.push(`#${finding.issueNum}: failed to rewrite issue body`);
+            }
           } else {
             log.warn(`No rewritten body for #${finding.issueNum}, skipping`);
           }
@@ -354,9 +362,12 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
               const links = createdNums.map((n) => `- #${n}`).join('\n');
               commentIssue(config.repo, finding.issueNum,
                 `Split into smaller issues:\n${links}\n\n_Triaged by alpha-loop._`);
-              closeIssue(config.repo, finding.issueNum, 'completed');
-              log.success(`Closed #${finding.issueNum} after splitting`);
-              applied++;
+              if (closeIssue(config.repo, finding.issueNum, 'completed')) {
+                log.success(`Closed #${finding.issueNum} after splitting`);
+                applied++;
+              } else {
+                failures.push(`#${finding.issueNum}: failed to close issue after splitting`);
+              }
             }
           } else {
             log.warn(`No split suggestions for #${finding.issueNum}, skipping`);
@@ -368,9 +379,12 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
           if (finding.duplicateOf != null) {
             commentIssue(config.repo, finding.issueNum,
               `Closing as duplicate of #${finding.duplicateOf}.\n\n_Triaged by alpha-loop._`);
-            closeIssue(config.repo, finding.issueNum, 'not_planned');
-            log.success(`Closed duplicate #${finding.issueNum} (duplicate of #${finding.duplicateOf})`);
-            applied++;
+            if (closeIssue(config.repo, finding.issueNum, 'duplicate', finding.duplicateOf)) {
+              log.success(`Closed duplicate #${finding.issueNum} (duplicate of #${finding.duplicateOf})`);
+              applied++;
+            } else {
+              failures.push(`#${finding.issueNum}: failed to close as duplicate of #${finding.duplicateOf}`);
+            }
           } else {
             log.warn(`No duplicate reference for #${finding.issueNum}, skipping`);
           }
@@ -379,10 +393,13 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
         case 'enrich': {
           if (finding.enrichedBody) {
-            updateIssue(config.repo, finding.issueNum, { body: finding.enrichedBody });
-            commentIssue(config.repo, finding.issueNum, '_Issue enriched by alpha-loop triage. Original description preserved in collapsed block above._');
-            log.success(`Enriched #${finding.issueNum}`);
-            applied++;
+            if (updateIssue(config.repo, finding.issueNum, { body: finding.enrichedBody })) {
+              commentIssue(config.repo, finding.issueNum, '_Issue enriched by alpha-loop triage. Original description preserved in collapsed block above._');
+              log.success(`Enriched #${finding.issueNum}`);
+              applied++;
+            } else {
+              failures.push(`#${finding.issueNum}: failed to enrich issue body`);
+            }
           } else {
             log.warn(`No enriched body for #${finding.issueNum}, skipping`);
           }
@@ -410,7 +427,12 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log('');
-  log.success(`Applied ${applied} triage action(s)`);
+  const actionSummary = `Applied ${applied} of ${attempted} triage action(s)`;
+  if (applied === attempted) {
+    log.success(actionSummary);
+  } else {
+    log.warn(actionSummary);
+  }
   if (appliedEpics > 0) {
     log.success(`Applied ${appliedEpics} epic proposal(s): ${appliedEpicNums.map((n) => `#${n}`).join(', ')}`);
   } else if (selectedEpicIndexes.length > 0) {

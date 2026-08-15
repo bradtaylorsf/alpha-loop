@@ -70,7 +70,7 @@ jest.mock('../../src/lib/github', () => ({
   listLabels: jest.fn(() => ['bug', 'enhancement', 'documentation']),
   createIssue: jest.fn(() => 0),
   createMilestone: jest.fn(() => 0),
-  addIssueToProject: jest.fn(),
+  addIssueToProject: jest.fn(() => true),
 }));
 
 jest.mock('node:fs', () => ({
@@ -164,6 +164,7 @@ describe('add command', () => {
       dryRun: false,
     } as ReturnType<typeof loadConfig>);
     mockListMilestones.mockReturnValue(SAMPLE_MILESTONES);
+    mockAddIssueToProject.mockReturnValue(true);
     (listLabels as jest.Mock).mockReturnValue(['bug', 'enhancement', 'documentation']);
   });
 
@@ -363,6 +364,30 @@ describe('add command', () => {
 
     expect(mockAddIssueToProject).toHaveBeenCalledWith('owner', 5, 'owner/repo', 42);
     expect(log.info).toHaveBeenCalledWith('Added to project board');
+  });
+
+  it('does not report a failed project-board addition as successful', async () => {
+    mockLoadConfig.mockReturnValue({
+      repo: 'owner/repo',
+      repoOwner: 'owner',
+      project: 5,
+      agent: 'claude' as const,
+      model: 'sonnet',
+      labelReady: 'ready',
+      dryRun: false,
+    } as ReturnType<typeof loadConfig>);
+    mockInput.mockResolvedValueOnce('Add dark mode');
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(makeSampleProposal());
+    mockCreateIssue.mockReturnValue(42);
+    mockAddIssueToProject.mockReturnValue(false);
+
+    await addCommand({ yes: true });
+
+    expect(log.info).not.toHaveBeenCalledWith('Added to project board');
+    expect(log.warn).toHaveBeenCalledWith(
+      'Issue #42 was created but could not be added to the project board',
+    );
   });
 
   it('handles failed issue creation', async () => {
