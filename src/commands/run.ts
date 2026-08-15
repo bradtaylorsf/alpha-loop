@@ -734,7 +734,22 @@ async function runEpicVerificationFlow(
 
   commentIssue(config.repo, epicNum, result.comment);
   if (result.verdict === 'pass') {
-    closeIssue(config.repo, epicNum, 'completed');
+    if (!closeIssue(config.repo, epicNum, 'completed')) {
+      const message = `Epic #${epicNum} passed verification but could not be closed`;
+      log.error(message);
+      return {
+        epicNumber: epicNum,
+        status: 'failure',
+        closedEpic: false,
+        verdict: result.verdict,
+        failure: {
+          code: 'epic-verification-failed',
+          message,
+          issueNum: epicNum,
+          exitCode: 1,
+        },
+      };
+    }
     log.success(`Epic #${epicNum} verified and closed`);
     return {
       epicNumber: epicNum,

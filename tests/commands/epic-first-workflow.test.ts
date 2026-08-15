@@ -281,6 +281,7 @@ Ship the settings workflow as one coordinated epic.
 function clearPhaseMocks(): void {
   jest.clearAllMocks();
   mockExec.mockReturnValue({ stdout: '/usr/bin/tool', stderr: '', exitCode: 0 });
+  mockCloseIssue.mockReturnValue(true);
   mockVerifyEpic.mockResolvedValue({
     verdict: 'pass',
     comment: 'Epic verified',

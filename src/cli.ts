@@ -147,8 +147,9 @@ program
 program
   .command('triage')
   .description('Analyze open issues, clean up backlog noise, and propose/apply epic groups')
-  .option('--dry-run', 'Display cleanup findings and epic proposals without making changes')
-  .option('-y, --yes', 'Skip interactive prompts, accept all AI recommendations')
+  .option('--dry-run', 'Display findings and save an exact replay plan without making changes')
+  .option('--apply <file>', 'Apply a saved triage plan without running AI analysis again')
+  .option('-y, --yes', 'Apply selected entries without prompts; use --apply to replay a reviewed plan')
   .action(async (options) => {
     const { triageCommand } = await import('./commands/triage.js');
     await triageCommand(options);

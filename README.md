@@ -67,7 +67,7 @@ alpha-loop run --issue 42
 
 For planned feature work, use epics as the unit you schedule and ship:
 
-1. `alpha-loop triage` reviews open issues, proposes cleanup, and groups related ready issues into parent epics with ordered child checklists.
+1. `alpha-loop triage --dry-run` reviews open issues, proposes cleanup, and groups related ready issues into parent epics with ordered child checklists. Review the saved `.alpha-loop/triage-<timestamp>.json`, then replay it with `alpha-loop triage --apply <file>` (and optionally `--yes`) so no second AI analysis can change the plan.
 2. `alpha-loop roadmap` schedules parent epic issues into milestones, while still scheduling standalone issues that are not part of an epic.
 3. `alpha-loop run --epic <N>` ships the epic's child issues in checklist order. Agents working on each child issue receive the parent epic goal, acceptance criteria, and sibling checklist as context.
 4. `alpha-loop roadmap --queue` recommends the next ordered epic queue, explains blockers and risks, and prints the exact `alpha-loop run --epics ...` command.
@@ -392,8 +392,10 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop plan --resume` | Create GitHub resources from the saved `.alpha-loop/plan.json` draft |
 | `alpha-loop plan --yes --seed <file>` | Non-interactive mode: accept all AI recommendations |
 | `alpha-loop triage` | Analyze open issues, clean up backlog noise, and propose/apply epic groups |
-| `alpha-loop triage --dry-run` | Display cleanup findings and epic proposals without making changes |
-| `alpha-loop triage --yes` | Non-interactive mode: apply AI-selected cleanup actions and epic proposals |
+| `alpha-loop triage --dry-run` | Display findings and save the exact reviewed plan to `.alpha-loop/triage-<timestamp>.json` without making changes |
+| `alpha-loop triage --apply <file>` | Apply a saved triage plan without running AI analysis again |
+| `alpha-loop triage --apply <file> --yes` | Non-interactive replay: apply only the entries marked `selected` in the saved plan |
+| `alpha-loop triage --yes` | Generate a new analysis and apply its selected entries without prompts; use `--apply` to replay a reviewed plan |
 | `alpha-loop roadmap` | Schedule parent epics and standalone issues into milestones using AI analysis |
 | `alpha-loop roadmap --queue` | Recommend the next ordered epic run queue without making changes |
 | `alpha-loop roadmap --queue --milestone <name>` | Recommend an epic run queue within a release or sprint milestone |
@@ -918,6 +920,7 @@ What needs to be done.
 | `.alpha-loop/context.md` | Yes | Auto-generated project context |
 | `.alpha-loop/learnings/` | Yes | Learning files, session manifests, and session summaries (shared with team) |
 | `.alpha-loop/evals/` | Yes | Eval cases (YAML) and score history (`scores.jsonl`) |
+| `.alpha-loop/triage-<timestamp>.json` | Yes | Versioned, repository-bound triage preview for deterministic `triage --apply` replay |
 | `.alpha-loop/traces/` | No (gitignored) | Meta-Harness style execution traces per session |
 | `.alpha-loop/sessions/` | No (gitignored) | Local session logs, results JSON, screenshots |
 | `.alpha-loop/sessions/<session>/session.json` | No (gitignored) | Durable resumable session state with issue, branch, worktree, PR, stage, status, prompts, transcripts, and logs |

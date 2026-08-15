@@ -962,19 +962,49 @@ describe('epic issue helpers', () => {
 });
 
 describe('closeIssue', () => {
-  test('closes issue without reason', () => {
-    closeIssue('owner/repo', 42);
+  beforeEach(() => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh issue view')) {
+        return { stdout: 'CLOSED\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+  });
 
+  test('closes issue without reason', () => {
+    const closed = closeIssue('owner/repo', 42);
+
+    expect(closed).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       'gh issue close 42 --repo "owner/repo"',
     );
+    expect(mockExec).toHaveBeenCalledWith(
+      'gh issue view 42 --repo "owner/repo" --json state --jq .state',
+    );
   });
 
-  test('closes issue with reason', () => {
+  test('closes issue with the completed CLI reason', () => {
+    closeIssue('owner/repo', 42, 'completed');
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'gh issue close 42 --repo "owner/repo" --reason "completed"',
+    );
+  });
+
+  test('maps the not_planned API reason to the not planned CLI reason', () => {
     closeIssue('owner/repo', 42, 'not_planned');
 
     expect(mockExec).toHaveBeenCalledWith(
-      expect.stringContaining('--reason "not_planned"'),
+      'gh issue close 42 --repo "owner/repo" --reason "not planned"',
+    );
+    expect(mockExec).not.toHaveBeenCalledWith(expect.stringContaining('not_planned'));
+  });
+
+  test('closes a duplicate with its canonical issue number', () => {
+    closeIssue('owner/repo', 42, 'duplicate', 17);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'gh issue close 42 --repo "owner/repo" --reason "duplicate" --duplicate-of 17',
     );
   });
 
@@ -982,8 +1012,35 @@ describe('closeIssue', () => {
     mockExec.mockReturnValue({ stdout: '', stderr: 'error', exitCode: 1 });
 
     const { log: mockLog } = require('../../src/lib/logger');
-    closeIssue('owner/repo', 42);
+    const closed = closeIssue('owner/repo', 42);
+
+    expect(closed).toBe(false);
     expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to close issue'));
+    expect(mockExec).toHaveBeenCalledTimes(1);
+  });
+
+  test('returns false when the close command succeeds but the issue remains open', () => {
+    mockExec
+      .mockReturnValueOnce({ stdout: '', stderr: '', exitCode: 0 })
+      .mockReturnValueOnce({ stdout: 'OPEN\n', stderr: '', exitCode: 0 });
+
+    const { log: mockLog } = require('../../src/lib/logger');
+    const closed = closeIssue('owner/repo', 42);
+
+    expect(closed).toBe(false);
+    expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('remains OPEN'));
+  });
+
+  test('returns false when the post-close state cannot be verified', () => {
+    mockExec
+      .mockReturnValueOnce({ stdout: '', stderr: '', exitCode: 0 })
+      .mockReturnValueOnce({ stdout: '', stderr: 'network error', exitCode: 1 });
+
+    const { log: mockLog } = require('../../src/lib/logger');
+    const closed = closeIssue('owner/repo', 42);
+
+    expect(closed).toBe(false);
+    expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to verify issue #42'));
   });
 });
 
