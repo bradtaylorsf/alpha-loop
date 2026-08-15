@@ -353,15 +353,19 @@ describe('aggregateRouting', () => {
     expect(agg.cells[0].median_wall_time_s).toBe(30);
   });
 
-  it('computes tool_error_rate from error/call ratio', () => {
+  it('computes measured zero-error and nonzero tool-error ratios from calls', () => {
     const items = [
       {
         session: 'S',
-        entries: [entry('implement', 'm', 0.1, 10, 100, 8)],
+        entries: [
+          entry('implement', 'errors', 0.1, 10, 100, 8),
+          entry('implement', 'no-errors', 0.1, 10, 25, 0),
+        ],
       },
     ];
     const agg = aggregateRouting(items, [manifest('S', 1)]);
-    expect(agg.cells[0].tool_error_rate).toBeCloseTo(0.08, 4);
+    expect(agg.cells.find((cell) => cell.model === 'errors')?.tool_error_rate).toBeCloseTo(0.08, 4);
+    expect(agg.cells.find((cell) => cell.model === 'no-errors')?.tool_error_rate).toBe(0);
   });
 
   it('reports a zero-tool-call error rate as unmeasured instead of changing units', () => {
@@ -371,7 +375,27 @@ describe('aggregateRouting', () => {
     );
 
     expect(agg.cells[0].tool_error_rate).toBeNull();
-    expect(formatRoutingReport(agg)).toContain('\tn/a\t');
+    expect(JSON.parse(formatRoutingReport(agg, { json: true })).cells[0].tool_error_rate).toBeNull();
+  });
+
+  it('reports a null tool-error delta when either comparison cell has no calls', () => {
+    const agg = aggregateRouting(
+      [{
+        session: 'S',
+        entries: [
+          entry('implement', 'baseline-unmeasured', 2, 10, 0, 1),
+          entry('implement', 'candidate-measured', 1, 10, 10, 1),
+          entry('review', 'baseline-measured', 2, 10, 10, 0),
+          entry('review', 'candidate-unmeasured', 1, 10, 0, 1),
+        ],
+      }],
+      [manifest('S', 1)],
+    );
+
+    const candidateMeasured = agg.cells.find((cell) => cell.model === 'candidate-measured');
+    const candidateUnmeasured = agg.cells.find((cell) => cell.model === 'candidate-unmeasured');
+    expect(candidateMeasured?.delta_tool_error_rate_vs_baseline).toBeNull();
+    expect(candidateUnmeasured?.delta_tool_error_rate_vs_baseline).toBeNull();
   });
 
   it('computes delta vs all-frontier baseline (highest-cost cell per stage)', () => {
@@ -492,6 +516,24 @@ describe('formatRoutingReport', () => {
     const agg = aggregateRouting([], []);
     const str = formatRoutingReport(agg);
     expect(str).toContain('No per-stage telemetry recorded yet');
+  });
+
+  it('labels tool-error units and renders an em dash when no calls were measured', () => {
+    const noToolCalls: StageTelemetry = {
+      stage: 'plan', model: 'm', endpoint: 'e',
+      tokens_in: 1, tokens_out: 1, token_source: 'reported',
+      cost_usd: 0.1, cost_source: 'reported', wall_time_s: 1,
+      tool_calls: 0, tool_errors: 2, stage_success: true,
+      started_at: '2026-04-23T00:00:00.000Z',
+    };
+    const agg = aggregateRouting(
+      [{ session: 'S', entries: [noToolCalls] }],
+      [{ name: 'S', results: [{ issueNum: 1, status: 'success', filesChanged: 1 }] }],
+    );
+
+    const report = formatRoutingReport(agg);
+    expect(report).toContain('tool_err/call');
+    expect(report).toContain('\t—\t');
   });
 
   it('renders unmeasured cost as n/a and partial token totals with a marker', () => {
