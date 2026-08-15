@@ -903,9 +903,15 @@ async function runIssueSession(
   const refreshContextInSession = contextNeedsRefresh(process.cwd());
 
   if (config.dryRun) {
-    log.dry('Would sync agent assets in the session worktree before run');
-    if (refreshContextInSession) {
-      log.dry('Would refresh project context and instructions in the session worktree');
+    if (config.autoMerge) {
+      log.dry('Would sync agent assets in the session worktree before run');
+      if (refreshContextInSession) {
+        log.dry('Would refresh project context and instructions in the session worktree');
+      }
+    } else if (refreshContextInSession) {
+      log.dry('Would stop because project context is stale and auto_merge is disabled');
+    } else {
+      log.dry('Would sync agent assets before run');
     }
   } else if (refreshContextInSession && !config.autoMerge) {
     throw new CommandExitError({
@@ -913,6 +919,8 @@ async function runIssueSession(
       message: 'Project context is stale, but auto_merge is disabled so Alpha Loop cannot carry the ' +
         'refresh on a reviewable session branch. Enable auto_merge or run "alpha-loop scan" on an issue branch.',
     });
+  } else if (!config.autoMerge) {
+    syncProjectAgentAssets(config);
   }
 
   if (target.type === 'issue') {
@@ -1019,6 +1027,13 @@ async function cleanupSessionWorktree(
     reason: cleanupResult.reason,
     at: new Date().toISOString(),
   });
+}
+
+function syncProjectAgentAssets(config: Config): void {
+  const syncResult = syncAgentAssets(resolveHarnesses(config.harnesses, config.agent));
+  if (syncResult.synced) {
+    log.success('Agent assets synced before run');
+  }
 }
 
 function generatedSessionPaths(config: Config): string[] {

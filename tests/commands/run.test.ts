@@ -442,6 +442,50 @@ describe('runCommand', () => {
     expect(mockSyncAgentAssets).toHaveBeenCalledWith([], { projectDir: '/tmp/fresh-session' });
   });
 
+  test('syncs agent assets in the base checkout when auto-merge is disabled and context is fresh', async () => {
+    const config = makeConfig({
+      autoMerge: false,
+      skipTests: true,
+      skipLearn: true,
+      skipVerify: true,
+      skipPostSessionReview: true,
+      harnesses: ['codex'],
+    }) as any;
+    const issue = { number: 408, title: 'Refresh context', body: 'Fix stale refresh', labels: ['ready'] };
+    mockContextNeedsRefresh.mockReturnValue(false);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 408,
+      title: issue.title,
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 1,
+      filesChanged: 0,
+    });
+
+    const result = await runSingleIssueExecution({ config, issueNumber: issue.number, issue });
+
+    expect(result.status).toBe('success');
+    expect(mockSyncAgentAssets).toHaveBeenCalledWith(['codex']);
+    expect(mockScanProject).not.toHaveBeenCalled();
+    expect(mockEnsureSessionWorktree).not.toHaveBeenCalled();
+  });
+
+  test('does not sync base-checkout assets before rejecting a stale non-auto-merge run', async () => {
+    const config = makeConfig({ autoMerge: false, skipTests: true }) as any;
+    const issue = { number: 408, title: 'Refresh context', body: 'Fix stale refresh', labels: ['ready'] };
+    mockContextNeedsRefresh.mockReturnValue(true);
+
+    await expect(runSingleIssueExecution({ config, issueNumber: issue.number, issue }))
+      .rejects.toThrow(/auto_merge is disabled/i);
+
+    expect(mockSyncAgentAssets).not.toHaveBeenCalled();
+    expect(mockScanProject).not.toHaveBeenCalled();
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockEnsureSessionWorktree).not.toHaveBeenCalled();
+  });
+
   test('records a durable failure when session worktree setup conflicts', async () => {
     const session = {
       name: 'session/epic-6-answer-engine',
@@ -1012,8 +1056,10 @@ describe('runCommand', () => {
     await runCommand({ dryRun: true, validate: true });
 
     expect(mockSyncAgentAssets).not.toHaveBeenCalled();
-    expect(mockLog.dry).toHaveBeenCalledWith('Would sync agent assets in the session worktree before run');
-    expect(mockLog.dry).toHaveBeenCalledWith('Would refresh project context and instructions in the session worktree');
+    expect(mockLog.dry).toHaveBeenCalledWith(
+      'Would stop because project context is stale and auto_merge is disabled',
+    );
+    expect(mockLog.dry).not.toHaveBeenCalledWith('Would sync agent assets before run');
     expect(mockWriteFileSync).not.toHaveBeenCalled();
   });
 
