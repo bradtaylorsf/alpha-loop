@@ -751,6 +751,21 @@ pipeline:
     expect(resolved.agent).toBe('codex');
     expect(resolved.model).toBe('gpt-4o');
   });
+
+  it('does not inherit a top-level model when only the pipeline agent changes', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+agent: claude
+model: claude-sonnet-4-6
+pipeline:
+  implement:
+    agent: codex
+`,
+    );
+    const resolved = resolveStepConfig(loadConfig(), 'implement');
+    expect(resolved).toEqual({ agent: 'codex', model: '' });
+  });
 });
 
 describe('estimateCost', () => {
@@ -764,9 +779,21 @@ describe('estimateCost', () => {
     expect(cost).toBe(90.0); // 15 + 75
   });
 
-  it('returns 0 for unknown model', () => {
+  it('returns null for unknown model and warns once per key', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const cost = estimateCost('unknown-model', 10000, 5000, pricing);
-    expect(cost).toBe(0);
+    const repeated = estimateCost('unknown-model', 10000, 5000, pricing);
+    expect(cost).toBeNull();
+    expect(repeated).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it('preserves an explicit free price', () => {
+    expect(estimateCost('local-free', 10000, 5000, {
+      ...pricing,
+      'local-free': { input: 0, output: 0 },
+    })).toBe(0);
   });
 
   it('handles zero tokens', () => {

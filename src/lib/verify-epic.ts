@@ -14,6 +14,7 @@
 import { spawnAgent } from './agent.js';
 import { log } from './logger.js';
 import { ghExec } from './rate-limit.js';
+import { buildStageTelemetry, writeStageTelemetry } from './telemetry.js';
 import type { Config } from './config.js';
 import type { Issue } from './github.js';
 
@@ -57,6 +58,10 @@ export type VerifyEpicResult = {
   verdict: EpicOverallVerdict;
   comment: string;
   parsed: EpicVerdict;
+};
+
+export type VerifyEpicTelemetryOptions = {
+  telemetryDir: string;
 };
 
 const DEFAULT_VERDICT: EpicVerdict = {
@@ -317,6 +322,7 @@ export async function verifyEpic(
   input: VerifyEpicInput,
   config: Config,
   logsDir: string,
+  telemetry?: VerifyEpicTelemetryOptions,
 ): Promise<VerifyEpicResult> {
   // Fetch implementation and verification evidence for every merged child.
   const evidenceByIssue = new Map<number, PullRequestEvidence>();
@@ -338,6 +344,7 @@ export async function verifyEpic(
 
   let parsed: EpicVerdict;
   try {
+    const startedAt = new Date().toISOString();
     const result = await spawnAgent({
       agent: config.agent,
       model,
@@ -347,6 +354,17 @@ export async function verifyEpic(
       verbose: config.verbose,
       timeout: config.agentTimeout * 1000,
     });
+    if (telemetry) {
+      try {
+        writeStageTelemetry(telemetry.telemetryDir, buildStageTelemetry(result, 'verify', config, {
+          issueNum: input.epic.number,
+          model,
+          startedAt,
+        }));
+      } catch {
+        // Telemetry is best-effort and must not change the verification verdict.
+      }
+    }
     parsed = parseVerdict(result.output);
   } catch (err) {
     log.warn(`Epic verification agent call failed: ${err instanceof Error ? err.message : err}`);

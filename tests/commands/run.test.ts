@@ -53,6 +53,7 @@ jest.mock('../../src/lib/agent', () => ({
 
 jest.mock('../../src/lib/session', () => ({
   createSession: jest.fn(),
+  createVerifySession: jest.fn(),
   ensureSessionWorktree: jest.fn(),
   finalizeSession: jest.fn(),
   recordSessionBackgroundTaskError: jest.fn(),
@@ -143,7 +144,7 @@ import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
 import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, readGateResult, type PipelineResult } from '../../src/lib/pipeline';
 import { cleanupWorktree, setupWorktree } from '../../src/lib/worktree';
-import { createSession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, recordSessionError, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
+import { createSession, createVerifySession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, recordSessionError, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
 import { extractLearnings, generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
@@ -152,6 +153,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { emitLifecycleEvent } from '../../src/lib/events';
 import { spawnAgent } from '../../src/lib/agent';
+import { verifyEpic } from '../../src/lib/verify-epic';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
@@ -171,6 +173,7 @@ const mockReadGateResult = readGateResult as jest.MockedFunction<typeof readGate
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
+const mockCreateVerifySession = createVerifySession as jest.MockedFunction<typeof createVerifySession>;
 const mockEnsureSessionWorktree = ensureSessionWorktree as jest.MockedFunction<typeof ensureSessionWorktree>;
 const mockReleaseSessionLock = releaseSessionLock as jest.MockedFunction<typeof releaseSessionLock>;
 const mockFinalizeSession = finalizeSession as jest.MockedFunction<typeof finalizeSession>;
@@ -190,6 +193,7 @@ const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
+const mockVerifyEpic = verifyEpic as jest.MockedFunction<typeof verifyEpic>;
 const mockSpawn = spawn as jest.MockedFunction<typeof spawn>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
@@ -265,6 +269,16 @@ beforeEach(() => {
     logsDir: '/tmp/sessions/logs',
     results: [],
     pendingBackgroundTasks: [],
+  });
+  mockCreateVerifySession.mockReturnValue({
+    name: 'verify-195-1786797296000',
+    branch: 'master',
+    resultsDir: '/tmp/sessions/verify-195-1786797296000',
+    logsDir: '/tmp/sessions/verify-195-1786797296000/logs',
+    manifestPath: '/tmp/sessions/verify-195-1786797296000/session.json',
+    results: [],
+    pendingBackgroundTasks: [],
+    epic: 195,
   });
   mockFinalizeSession.mockResolvedValue(null);
   mockEnsureSessionWorktree.mockImplementation(async (session) => {
@@ -1346,7 +1360,7 @@ describe('runCommand', () => {
     ]);
   });
 
-  test('--verify-only bypasses normal session creation and issue processing', async () => {
+  test('--verify-only creates and completes a dedicated verify session without normal issue processing', async () => {
     mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
       if (issueNum === 195) {
         return { number: 195, title: 'Parent Epic', body: '- [x] #201 Build child', labels: ['epic'] };
@@ -1361,9 +1375,55 @@ describe('runCommand', () => {
     await runCommand({ verifyOnly: 195 });
 
     expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockCreateVerifySession).toHaveBeenCalledWith(expect.objectContaining({ dryRun: false }), 195);
     expect(mockProcessIssue).not.toHaveBeenCalled();
     expect(mockFinalizeSession).not.toHaveBeenCalled();
     expect(mockGetEpicSubIssues).toHaveBeenCalledWith('owner/repo', 195);
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'verify-195-1786797296000' }),
+      'completed',
+      'completed',
+      {
+        verification: {
+          epicNumber: 195,
+          status: 'pass',
+          verdict: 'pass',
+          closedEpic: true,
+        },
+      },
+    );
+  });
+
+  test('--verify-only marks its manifest failed when verification throws', async () => {
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) return { number: 195, title: 'Parent Epic', body: '- [x] #201 Build child', labels: ['epic'] };
+      if (issueNum === 201) return { number: 201, title: 'Build child', body: 'Child body', labels: ['ready'] };
+      return null;
+    });
+    mockGetEpicSubIssues.mockReturnValue([{ number: 201, checked: true, lineIndex: 0 }]);
+    mockVerifyEpic.mockRejectedValueOnce(new Error('verification agent unavailable'));
+
+    await expect(runCommand({ verifyOnly: 195 })).rejects.toThrow('verification agent unavailable');
+
+    const verifySession = mockCreateVerifySession.mock.results[0]?.value;
+    expect(mockRecordSessionError).toHaveBeenCalledWith(verifySession, {
+      issueNum: 195,
+      stage: 'verify',
+      message: 'verification agent unavailable',
+    });
+    expect(mockTransitionSessionStatus).toHaveBeenCalledWith(
+      verifySession,
+      'failed',
+      'failed',
+      {
+        verification: {
+          epicNumber: 195,
+          status: 'failure',
+          verdict: null,
+          closedEpic: false,
+        },
+      },
+    );
   });
 
   test('--issue dry-run processes exactly the requested standalone issue', async () => {

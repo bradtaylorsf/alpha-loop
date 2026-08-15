@@ -13,7 +13,7 @@ import {
 } from '../lib/session.js';
 import { DEFAULT_SESSION_RETENTION, loadConfig, type SessionRetentionConfig } from '../lib/config.js';
 import { isWaitingFeedbackStatus } from '../lib/session-state.js';
-import { readStageTelemetry } from '../lib/telemetry.js';
+import { normalizeStageTelemetry, readStageTelemetry } from '../lib/telemetry.js';
 import type { StageTelemetry } from '../lib/telemetry.js';
 import { isRecoveredResult } from '../lib/pipeline.js';
 import type { PipelineResult } from '../lib/pipeline.js';
@@ -34,6 +34,11 @@ type QueueManifestRef = {
   name: string;
   timestamp: string;
   manifest: EpicQueueManifest;
+};
+
+type LegacyVerifyMetadata = {
+  status: 'completed';
+  verdict: 'pass' | 'partial' | 'fail';
 };
 
 function formatDuration(seconds: number | undefined): string {
@@ -70,11 +75,16 @@ function uniqueCrashMarkers(results: PipelineResult[], crashes: CrashMarker[]): 
   return crashes.filter((marker) => !resultIssues.has(marker.issueNum));
 }
 
-function statusLabel(status: SessionStatus | undefined, results: PipelineResult[], crashes: CrashMarker[]): string {
+function statusLabel(
+  status: SessionStatus | undefined,
+  results: PipelineResult[],
+  crashes: CrashMarker[],
+  inferredStatus?: string,
+): string {
   if (status) return status;
   const visibleCrashes = uniqueCrashMarkers(results, crashes);
   if (visibleCrashes.length > 0) return 'failed';
-  if (results.length === 0) return 'running';
+  if (results.length === 0) return inferredStatus ?? 'unknown';
   return results.some((result) => result.status === 'failure' && !isRecoveredResult(result))
     ? 'failed'
     : 'completed';
@@ -86,9 +96,63 @@ function sessionUpdatedAt(manifest: DurableSessionManifest | undefined, fallback
     ?? fallbackTimestamp;
 }
 
+function verifySessionTimestamp(name: string): string {
+  const epoch = name.match(/^verify-\d+-(\d{13})$/)?.[1];
+  if (!epoch) return name;
+  const date = new Date(Number(epoch));
+  if (Number.isNaN(date.getTime())) return name;
+  const compact = date.toISOString().replace(/\D/g, '').slice(0, 14);
+  return `${compact.slice(0, 8)}-${compact.slice(8)}`;
+}
+
+function inferLegacyVerifyMetadata(sessionDir: string, name: string): LegacyVerifyMetadata | undefined {
+  if (!/^verify-\d+-\d+$/.test(name)) return undefined;
+  const logsDir = path.join(sessionDir, 'logs');
+  if (!fs.existsSync(logsDir)) return undefined;
+
+  try {
+    const files = fs.readdirSync(logsDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => entry.name)
+      .sort();
+    for (const file of files) {
+      const content = fs.readFileSync(path.join(logsDir, file), 'utf-8');
+      const fencedBlocks = [...content.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+      for (const block of fencedBlocks.reverse()) {
+        try {
+          const parsed = JSON.parse(block[1]) as { verdict?: unknown };
+          const parsedVerdict = typeof parsed.verdict === 'string' ? parsed.verdict.toLowerCase() : '';
+          if (parsedVerdict === 'pass' || parsedVerdict === 'partial' || parsedVerdict === 'fail') {
+            return { status: 'completed', verdict: parsedVerdict };
+          }
+        } catch {
+          // Fall through to text inference for truncated or non-JSON logs.
+        }
+      }
+      const overall = content.match(/\*\*Overall:\*\*\s*(pass|partial|fail)/i)?.[1];
+      const json = content.match(/"verdict"\s*:\s*"(pass|partial|fail)"/i)?.[1];
+      const verdict = (overall ?? json)?.toLowerCase();
+      if (verdict === 'pass' || verdict === 'partial' || verdict === 'fail') {
+        return { status: 'completed', verdict };
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function formatSessionDate(timestamp: string): string {
+  if (/^\d{8}/.test(timestamp)) {
+    return `${timestamp.slice(0, 4)}-${timestamp.slice(4, 6)}-${timestamp.slice(6, 8)}`;
+  }
+  const parsed = new Date(timestamp);
+  return Number.isNaN(parsed.getTime()) ? timestamp : parsed.toISOString().slice(0, 10);
+}
+
 /**
  * Find all session directories under .alpha-loop/sessions/.
- * Handles nested structure: sessions/session/<timestamp>/
+ * Handles nested sessions/session/<timestamp>/ and flat verify-<epic>-<epoch>/ layouts.
  */
 function findSessionDirs(sessionsRoot: string): Array<{ dir: string; name: string; timestamp: string }> {
   if (!fs.existsSync(sessionsRoot)) return [];
@@ -98,6 +162,15 @@ function findSessionDirs(sessionsRoot: string): Array<{ dir: string; name: strin
   for (const group of fs.readdirSync(sessionsRoot, { withFileTypes: true })) {
     if (!group.isDirectory()) continue;
     const groupDir = path.join(sessionsRoot, group.name);
+
+    if (fs.existsSync(path.join(groupDir, 'session.json')) || fs.existsSync(path.join(groupDir, 'logs'))) {
+      sessions.push({
+        dir: groupDir,
+        name: group.name,
+        timestamp: verifySessionTimestamp(group.name),
+      });
+      continue;
+    }
 
     for (const entry of fs.readdirSync(groupDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
@@ -199,6 +272,7 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
     results: PipelineResult[];
     crashes: CrashMarker[];
     manifest?: DurableSessionManifest;
+    legacyVerification?: LegacyVerifyMetadata;
     source: 'local' | 'manifest';
   };
   const entries: SessionEntry[] = [];
@@ -212,6 +286,7 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
       results: loadResults(session.dir),
       crashes: loadCrashMarkers(session.dir),
       manifest: durableManifest,
+      legacyVerification: durableManifest ? undefined : inferLegacyVerifyMetadata(session.dir, session.name),
       source: 'local',
     });
   }
@@ -254,20 +329,17 @@ export function historyList(sessionsDir: string, projectDir?: string): void {
         .reduce((sum, r) => sum + r.duration, 0);
       const durStr = formatDuration(totalDuration);
 
-      // Parse date from timestamp (YYYYMMDD-HHMMSS)
-      const ts = entry.timestamp;
-      const date = ts.length >= 8
-        ? `${ts.slice(0, 4)}-${ts.slice(4, 6)}-${ts.slice(6, 8)}`
-        : ts;
+      const date = formatSessionDate(entry.timestamp);
 
       const issueWord = issueCount === 1 ? 'issue' : 'issues';
-      const status = statusLabel(entry.manifest?.status, entry.results, entry.crashes);
+      const status = statusLabel(entry.manifest?.status, entry.results, entry.crashes, entry.legacyVerification?.status);
+      const verdict = entry.manifest?.verification?.verdict ?? entry.legacyVerification?.verdict;
       let statusParts = '';
       if (successCount > 0) statusParts += `${successCount} \u2713`;
       if (failedCount > 0) statusParts += ` ${failedCount} \u2717`;
       if (recoveredCount > 0) statusParts += ` ${recoveredCount} recovered`;
       if (crashCount > 0) statusParts += ` ${crashCount} crashed`;
-      if (issueCount === 0) statusParts = '(empty)';
+      if (issueCount === 0) statusParts = verdict ? `verdict=${verdict}` : '(empty)';
       statusParts = `${status} ${statusParts}`.trim();
 
       console.log(
@@ -406,6 +478,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   let sessionDir: string | undefined;
   let manifest: LearningSessionManifest | undefined;
   let durableManifest: DurableSessionManifest | undefined;
+  let legacyVerification: LegacyVerifyMetadata | undefined;
   const root = projectDir ?? process.cwd();
   const manifests = loadManifests(root);
 
@@ -414,6 +487,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   if (fs.existsSync(localDir)) {
     sessionDir = localDir;
     durableManifest = loadSessionManifest(localDir) ?? undefined;
+    legacyVerification = durableManifest ? undefined : inferLegacyVerifyMetadata(localDir, sessionName);
     results = loadResults(localDir);
     crashMarkers = loadCrashMarkers(localDir);
   } else {
@@ -422,6 +496,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
     if (match) {
       sessionDir = match.dir;
       durableManifest = loadSessionManifest(match.dir) ?? undefined;
+      legacyVerification = durableManifest ? undefined : inferLegacyVerifyMetadata(match.dir, match.name);
       results = loadResults(match.dir);
       crashMarkers = loadCrashMarkers(match.dir);
     }
@@ -442,7 +517,7 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
 
   const visibleCrashes = uniqueCrashMarkers(results, crashMarkers);
 
-  if (!durableManifest && results.length === 0 && visibleCrashes.length === 0) {
+  if (!durableManifest && results.length === 0 && visibleCrashes.length === 0 && !sessionDir) {
     log.error(`Session not found: ${sessionName}`);
     process.exitCode = 1;
     return;
@@ -454,10 +529,12 @@ export function historyDetail(sessionsDir: string, sessionName: string, projectD
   const failureCount = naturalResults.filter((r) => r.status === 'failure').length;
   const recoveredCount = results.length - naturalResults.length;
   const issueCount = Math.max(durableManifest?.issueNumbers.length ?? 0, results.length + visibleCrashes.length);
-  const status = statusLabel(durableManifest?.status, results, crashMarkers);
+  const status = statusLabel(durableManifest?.status, results, crashMarkers, legacyVerification?.status);
+  const verdict = durableManifest?.verification?.verdict ?? legacyVerification?.verdict;
 
   console.log(`Session:  ${sessionName}`);
   console.log(`Status:   ${status}${durableManifest ? ` (${durableManifest.stage})` : ''}`);
+  if (verdict) console.log(`Verdict:  ${verdict}`);
   console.log(`Issues:   ${issueCount} (${successCount} succeeded, ${failureCount} failed, ${recoveredCount} recovered, ${visibleCrashes.length} crashed)`);
   console.log(`Duration: ${formatDuration(totalDuration)}`);
   if (durableManifest) {
@@ -641,7 +718,7 @@ function loadStageTelemetry(sessionName: string, projectDir?: string): StageTele
   }
   const manifests = loadManifests(projectDir);
   const manifest = manifests.get(sessionName);
-  return manifest?.stages ?? [];
+  return (manifest?.stages ?? []).map((entry) => normalizeStageTelemetry(entry));
 }
 
 function fmtNumber(n: number, digits = 0): string {
@@ -649,6 +726,12 @@ function fmtNumber(n: number, digits = 0): string {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
+}
+
+function fmtTelemetryTokens(entry: StageTelemetry, value: number): string {
+  if (entry.token_source === 'reported') return fmtNumber(value);
+  if (entry.token_source === 'estimated') return `~${fmtNumber(value)}`;
+  return 'n/a';
 }
 
 export function historyTelemetry(sessionName: string, projectDir?: string): void {
@@ -669,20 +752,28 @@ export function historyTelemetry(sessionName: string, projectDir?: string): void
   let totalTokensOut = 0;
   let totalWall = 0;
   let totalErrs = 0;
+  let measuredTokenRuns = 0;
+  let measuredCostRuns = 0;
 
   for (const e of entries) {
-    totalCost += e.cost_usd;
-    totalTokensIn += e.tokens_in;
-    totalTokensOut += e.tokens_out;
+    if (e.cost_usd != null && e.cost_source !== 'unmeasured') {
+      totalCost += e.cost_usd;
+      measuredCostRuns++;
+    }
+    if (e.token_source === 'reported') {
+      totalTokensIn += e.tokens_in;
+      totalTokensOut += e.tokens_out;
+      measuredTokenRuns++;
+    }
     totalWall += e.wall_time_s;
     totalErrs += e.tool_errors;
     console.log([
       e.stage,
       e.model,
       e.endpoint,
-      fmtNumber(e.tokens_in),
-      fmtNumber(e.tokens_out),
-      `$${e.cost_usd.toFixed(4)}`,
+      fmtTelemetryTokens(e, e.tokens_in),
+      fmtTelemetryTokens(e, e.tokens_out),
+      e.cost_usd == null ? 'n/a' : `$${e.cost_usd.toFixed(4)}`,
       e.wall_time_s.toFixed(2),
       String(e.tool_errors),
       e.stage_success ? 'ok' : 'fail',
@@ -690,7 +781,11 @@ export function historyTelemetry(sessionName: string, projectDir?: string): void
   }
 
   console.log('');
-  console.log(`Totals: ${entries.length} stage(s), ${fmtNumber(totalTokensIn)} in / ${fmtNumber(totalTokensOut)} out, $${totalCost.toFixed(4)}, ${totalWall.toFixed(1)}s wall, ${totalErrs} tool error(s)`);
+  const tokenTotals = measuredTokenRuns > 0
+    ? `${fmtNumber(totalTokensIn)} in / ${fmtNumber(totalTokensOut)} out${measuredTokenRuns < entries.length ? ' (measured only)' : ''}`
+    : 'tokens n/a';
+  const costTotal = measuredCostRuns === entries.length ? `$${totalCost.toFixed(4)}` : 'cost n/a';
+  console.log(`Totals: ${entries.length} stage(s), ${tokenTotals}, ${costTotal}, ${totalWall.toFixed(1)}s wall, ${totalErrs} tool error(s)`);
 }
 
 function manifestAgeMs(manifest: DurableSessionManifest, fallbackTimestamp: string): number {

@@ -1336,13 +1336,13 @@ export function evalEstimateCommand(options: EvalEstimateOptions): void {
   for (const step of estimate.steps) {
     const stepName = step.step.padEnd(14);
     const modelName = step.model.padEnd(24);
-    const cost = `$${step.costPerCase.toFixed(4)}`;
+    const cost = step.costPerCase == null ? 'n/a' : `$${step.costPerCase.toFixed(4)}`;
     console.log(`  ${stepName}  ${modelName}  ${cost}`);
   }
 
   console.log('');
-  console.log(`  Total per case:  $${estimate.totalPerCase.toFixed(4)}`);
-  console.log(`  Total for suite: $${estimate.totalForSuite.toFixed(2)} (${estimate.caseCount} cases)`);
+  console.log(`  Total per case:  ${estimate.totalPerCase == null ? 'n/a' : `$${estimate.totalPerCase.toFixed(4)}`}`);
+  console.log(`  Total for suite: ${estimate.totalForSuite == null ? 'n/a' : `$${estimate.totalForSuite.toFixed(2)}`} (${estimate.caseCount} cases)`);
 }
 
 export type EvalCompareConfigsOptions = {
@@ -1393,11 +1393,15 @@ export function evalCompareConfigsCommand(configAPath: string, configBPath: stri
     const estB = estimateRunCost(cases.length, configB);
     console.log('');
     console.log(`  Estimated cost (${cases.length} cases):`);
-    console.log(`    Config A: $${estA.totalForSuite.toFixed(2)}`);
-    console.log(`    Config B: $${estB.totalForSuite.toFixed(2)}`);
-    const diff = estB.totalForSuite - estA.totalForSuite;
-    const pct = estA.totalForSuite > 0 ? ((diff / estA.totalForSuite) * 100).toFixed(0) : '0';
-    console.log(`    Delta: ${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} (${diff >= 0 ? '+' : ''}${pct}%)`);
+    console.log(`    Config A: ${estA.totalForSuite == null ? 'n/a' : `$${estA.totalForSuite.toFixed(2)}`}`);
+    console.log(`    Config B: ${estB.totalForSuite == null ? 'n/a' : `$${estB.totalForSuite.toFixed(2)}`}`);
+    if (estA.totalForSuite != null && estB.totalForSuite != null) {
+      const diff = estB.totalForSuite - estA.totalForSuite;
+      const pct = estA.totalForSuite > 0 ? ((diff / estA.totalForSuite) * 100).toFixed(0) : '0';
+      console.log(`    Delta: ${diff >= 0 ? '+' : ''}$${diff.toFixed(2)} (${diff >= 0 ? '+' : ''}${pct}%)`);
+    } else {
+      console.log('    Delta: n/a (pricing coverage incomplete)');
+    }
   }
 }
 

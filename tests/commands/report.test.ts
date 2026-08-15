@@ -41,7 +41,9 @@ function entry(partial: Partial<StageTelemetry>): StageTelemetry {
     endpoint: 'default',
     tokens_in: 100,
     tokens_out: 50,
+    token_source: 'reported',
     cost_usd: 0.01,
+    cost_source: 'reported',
     wall_time_s: 1,
     tool_calls: 1,
     tool_errors: 0,
@@ -84,6 +86,23 @@ describe('reportRoutingCommand', () => {
     expect(output).toContain('sonnet');
   });
 
+  it('includes flat verify-only trace spend without requiring a learning manifest', () => {
+    const traceDir = join(tmp, '.alpha-loop', 'traces', 'verify-396-1786797296000');
+    mkdirSync(traceDir, { recursive: true });
+    writeFileSync(
+      join(traceDir, 'stages.jsonl'),
+      `${JSON.stringify(entry({ stage: 'verify', model: 'opus', cost_usd: 0.42 }))}\n`,
+    );
+
+    reportRoutingCommand({ projectDir: tmp });
+
+    const output = logs.join('\n');
+    expect(output).toContain('1 session(s)');
+    expect(output).toContain('verify');
+    expect(output).toContain('opus');
+    expect(output).toContain('$0.4200');
+  });
+
   it('emits valid JSON matching the documented schema when --json set', () => {
     seedSession(tmp, 'session/A', [
       entry({ stage: 'plan', model: 'opus', cost_usd: 0.2 }),
@@ -105,6 +124,22 @@ describe('reportRoutingCommand', () => {
     const implCell = parsed.cells.find((c: { stage: string }) => c.stage === 'implement');
     expect(implCell).toBeDefined();
     expect(implCell.cost_per_issue_shipped).toBeCloseTo(0.1, 4);
+  });
+
+  it('keeps zero-tool-call error rates null in JSON and renders an em dash in text', () => {
+    seedSession(tmp, 'session/A', [
+      entry({ stage: 'implement', model: 'codex', tool_calls: 0, tool_errors: 2 }),
+    ], { shipped: 1 });
+
+    reportRoutingCommand({ projectDir: tmp, json: true });
+    const parsed = JSON.parse(logs.join('\n'));
+    expect(parsed.cells[0].tool_error_rate).toBeNull();
+
+    logs = [];
+    reportRoutingCommand({ projectDir: tmp });
+    const output = logs.join('\n');
+    expect(output).toContain('tool_err/call');
+    expect(output).toContain('\t—\t');
   });
 
   it('filters by --profile', () => {

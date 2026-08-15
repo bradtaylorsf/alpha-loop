@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
   decisionAllowed,
   evaluateCommandPolicy,
+  evaluateCostPolicy,
   evaluateDiffPolicy,
   evaluateIssuePolicy,
   evaluateRuntimePolicy,
@@ -251,6 +252,20 @@ describe('automation policy', () => {
 
     expect(decision.status).toBe('blocked');
     expect(decision.reason).toContain('Maximum automation runtime');
+  });
+
+  it('blocks configured budgets when cost measurement is unavailable', () => {
+    const config = makeConfig({
+      automationPolicy: {
+        ...makeConfig().automationPolicy!,
+        maxIssueCostUsd: 10,
+      },
+    });
+    const decision = evaluateCostPolicy(config, { issueCostUsd: null, issueNum: 42 });
+
+    expect(decision.status).toBe('blocked');
+    expect(decision.reason).toContain('Cost measurement unavailable');
+    expect(decision.metadata?.issueCostUsd).toBeNull();
   });
 
   it('counts active and paused durable sessions for capacity limits', () => {

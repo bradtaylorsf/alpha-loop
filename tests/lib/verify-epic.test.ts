@@ -24,11 +24,18 @@ jest.mock('../../src/lib/logger.js', () => ({
   },
 }));
 
+jest.mock('../../src/lib/telemetry.js', () => ({
+  ...jest.requireActual('../../src/lib/telemetry.js'),
+  writeStageTelemetry: jest.fn(),
+}));
+
 import { spawnAgent } from '../../src/lib/agent.js';
 import { ghExec } from '../../src/lib/rate-limit.js';
+import { writeStageTelemetry } from '../../src/lib/telemetry.js';
 
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
 const mockGhExec = ghExec as jest.MockedFunction<typeof ghExec>;
+const mockWriteStageTelemetry = writeStageTelemetry as jest.MockedFunction<typeof writeStageTelemetry>;
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -331,6 +338,39 @@ Final fence (authoritative):
 
     expect(mockSpawnAgent).toHaveBeenCalledWith(
       expect.objectContaining({ model: 'haiku' }),
+    );
+  });
+
+  test('writes verify stage telemetry from the actual agent result', async () => {
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 0,
+      output: '```json\n{"verdict":"pass","summary":"ok","findings":[]}\n```',
+      duration: 2500,
+      model: 'claude-opus-4-1',
+      inputTokens: 1200,
+      outputTokens: 300,
+      costUsd: 0.42,
+      toolCalls: 4,
+      toolErrors: 1,
+    });
+
+    await verifyEpic(makeInput(), makeConfig(), STUB_LOGS_DIR, { telemetryDir: '/tmp/verify-trace' });
+
+    expect(mockWriteStageTelemetry).toHaveBeenCalledWith(
+      '/tmp/verify-trace',
+      expect.objectContaining({
+        stage: 'verify',
+        model: 'claude-opus-4-1',
+        issue_num: 165,
+        tokens_in: 1200,
+        tokens_out: 300,
+        token_source: 'reported',
+        cost_usd: 0.42,
+        cost_source: 'reported',
+        tool_calls: 4,
+        tool_errors: 1,
+        stage_success: true,
+      }),
     );
   });
 
