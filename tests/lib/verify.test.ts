@@ -44,6 +44,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     harnesses: [],
     setupCommand: '',
     autoMerge: false,
+    mergeGate: { requireChecks: true, timeoutSeconds: 900, onTimeout: 'block' },
     mergeTo: '',
     autoCleanup: true,
     runFull: false,

@@ -36,7 +36,7 @@ jest.mock('../../src/lib/github', () => ({
   commentIssue: jest.fn(),
   createPR: jest.fn(),
   createIssue: jest.fn(),
-  mergePR: jest.fn(() => true),
+  mergePR: jest.fn(async () => true),
   updateProjectStatus: jest.fn(() => true),
   getIssueComments: jest.fn(() => []),
 }));
@@ -243,6 +243,11 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipLearn: false,
     skipE2e: false,
     autoMerge: false,
+    mergeGate: {
+      requireChecks: true,
+      timeoutSeconds: 900,
+      onTimeout: 'block',
+    },
     mergeTo: '',
     autoCleanup: true,
     runFull: false,
@@ -311,7 +316,7 @@ beforeEach(() => {
   mockRunTests.mockReturnValue({ passed: true, output: 'All tests passed' });
   mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/1');
   mockCreateIssue.mockReturnValue(501);
-  mockMergePR.mockReturnValue(true);
+  mockMergePR.mockResolvedValue(true);
   mockExtractLearnings.mockResolvedValue(null);
   mockGetLearningContext.mockReturnValue('');
   mockGetPreviousResult.mockReturnValue(null);
@@ -1582,7 +1587,7 @@ describe('processIssue', () => {
   });
 
   test('preserves worktree when auto-merge fails', async () => {
-    mockMergePR.mockReturnValue(false);
+    mockMergePR.mockResolvedValue(false);
 
     const result = await processIssue(42, 'Test issue', 'Body', makeConfig({ autoMerge: true }), makeSession());
 
@@ -1978,7 +1983,7 @@ describe('processBatch', () => {
   });
 
   test('preserves worktree when auto-merge fails', async () => {
-    mockMergePR.mockReturnValue(false);
+    mockMergePR.mockResolvedValue(false);
 
     const results = await processBatch(batchIssues, makeConfig({ autoMerge: true, batch: true }), makeSession());
 
@@ -2153,7 +2158,12 @@ describe('finalizeQuickRun', () => {
     expect(prBody).toContain('- #42: First issue (closes #42)');
     expect(prBody).toContain('- #43: Second issue (closes #43)');
     expect(prBody).toContain('Part of epic #100');
-    expect(mockMergePR).toHaveBeenCalledWith('owner/repo', 'agent/issue-42');
+    expect(mockMergePR).toHaveBeenCalledWith(
+      'owner/repo',
+      'agent/issue-42',
+      'squash',
+      expect.objectContaining({ requireChecks: true, onTimeout: 'block' }),
+    );
     expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
       worktreePath: '/tmp/quick-worktree',
       preserveIfCommits: false,
@@ -2221,7 +2231,7 @@ describe('finalizeQuickRun', () => {
   });
 
   test('treats a missing PR at merge time as unshipped and preserves the worktree', async () => {
-    mockMergePR.mockReturnValue(false);
+    mockMergePR.mockResolvedValue(false);
 
     const result = await finalizeQuickRun({
       issues,

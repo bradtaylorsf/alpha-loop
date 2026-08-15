@@ -2847,7 +2847,7 @@ export async function processIssue(
       currentStep = 'merge';
       recordSessionStage(session, 'merge');
       try {
-        mergeSucceeded = mergePR(config.repo, worktreeBranch);
+        mergeSucceeded = await mergePR(config.repo, worktreeBranch, 'squash', config.mergeGate);
         if (mergeSucceeded) {
           await refreshSessionWorktree(session, config, projectDir);
         } else {
@@ -3818,7 +3818,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       log.step('Batch Step 10: Auto-merging PR');
       recordSessionStage(session, 'merge');
       try {
-        mergeSucceeded = mergePR(config.repo, worktreeBranch);
+        mergeSucceeded = await mergePR(config.repo, worktreeBranch, 'squash', config.mergeGate);
         if (mergeSucceeded) {
           await refreshSessionWorktree(session, config, projectDir);
         } else {
@@ -4115,7 +4115,7 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
     log.warn('Skipping quick PR merge: tests are not passing — PR left open for manual review');
   } else if (config.autoMerge) {
     try {
-      merged = mergePR(config.repo, worktreeBranch);
+      merged = await mergePR(config.repo, worktreeBranch, 'squash', config.mergeGate);
       if (merged) {
         await refreshSessionWorktree(session, config, projectDir);
       } else {
