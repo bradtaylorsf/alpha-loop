@@ -4,7 +4,7 @@
 ## Overview
 Alpha Loop is an agent-agnostic automated development loop implementing The Loop methodology: Plan (GitHub Issues) -> Build (AI Agent) -> Test -> Review -> Ship (PR). GitHub is the source of truth for issues, labels, workflow state, PRs, and CI; Issues act as the kanban and PRs as review artifacts. The project is published as `@bradtaylorsf/alpha-loop`.
 
-The CLI supports onboarding, project scanning, scope planning, issue creation and triage, roadmap organization, continuous or single-issue processing, ordered epic processing and verification, stranded-session recovery, session history inspection, browser authentication capture, and learning-driven improvement reviews. It supports configurable coding harnesses rather than coupling the loop to one agent vendor.
+The CLI supports onboarding, project scanning, scope planning, issue creation and triage, roadmap organization, continuous or single-issue processing, ordered epic processing and verification, stranded-session recovery, session history inspection, browser authentication capture, and learning-driven improvement reviews. It integrates with configurable CLI coding harnesses rather than coupling the loop to one agent vendor.
 
 ## Tech Stack
 - Language: TypeScript in strict mode
@@ -16,11 +16,16 @@ The CLI supports onboarding, project scanning, scope planning, issue creation an
 - GitHub integration: GitHub CLI (`gh`) through shared local helpers
 - Browser integration: Playwright-based authentication-state capture and optional browser verification
 - Configuration: YAML via `.alpha-loop.yaml`
-- Core tooling: `commander`, `yaml`, TypeScript, Jest, and ts-jest
+- Core dependencies and tooling: `commander`, `yaml`, TypeScript, Jest, and ts-jest
 
 ## Directory Structure
 - `src/cli.ts` - CLI entry point and Commander command registration
-- `src/commands/` - Handlers for `init`, `run`, `scan`, `plan`, `add`, `triage`, `roadmap`, `auth`, `resume`, `review`, `history`, and deprecated `vision`
+- `src/commands/` - Command handlers for onboarding, planning, execution, authentication, recovery, history, and learning review
+- `src/commands/run.ts` - Main loop command, including single-issue, dry-run, epic, and verification modes
+- `src/commands/init.ts`, `src/commands/scan.ts` - Project onboarding and context generation
+- `src/commands/auth.ts`, `src/commands/resume.ts`, `src/commands/history.ts` - Browser state, session recovery, and history inspection
+- `src/commands/review.ts` - Learning-driven improvement review
+- `src/commands/vision.ts` - Legacy vision command; project scope now belongs to `plan`
 - `src/engine/agents.ts` - Agent CLI mappings and argument construction
 - `src/engine/prerequisites.ts` - Engine-level system prerequisite checks
 - `src/lib/agent.ts` - Agent runner abstraction
@@ -33,7 +38,7 @@ The CLI supports onboarding, project scanning, scope planning, issue creation an
 - `src/lib/preflight.ts`, `src/lib/testing.ts`, `src/lib/prerequisites.ts` - Pre-run validation, configured test execution, and tool checks
 - `src/lib/prompts.ts` - Agent prompt generation
 - `src/lib/session.ts`, `src/lib/worktree.ts` - Session lifecycle and isolated worktree management
-- `tests/` - Jest suite mirroring command, library, and engine areas
+- `tests/` - Jest suite organized around command, library, and engine behavior
 - `templates/` - Distribution starter skills and agent prompts copied into user projects by `alpha-loop init`
 - `.alpha-loop/templates/` - This repository's managed instructions, skills, and agent definitions; source for harness synchronization
 - `.alpha-loop/learnings/` - Tracked, team-shared knowledge and proposed updates

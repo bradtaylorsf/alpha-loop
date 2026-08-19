@@ -1,22 +1,22 @@
 ## Architecture
-- `src/cli.ts` is the Commander.js entry point; it registers handlers from `src/commands/*.ts` for `init`, `run`, `scan`, `plan`, `resume`, `review`, `history`, and related commands.
-- `src/commands/run.ts` drives execution through `src/lib/pipeline.ts`; agent invocation, testing, sessions, GitHub state, prompts, and worktrees are separated into focused modules under `src/lib/`.
-- GitHub is the database: issues provide the kanban and work definitions, labels represent workflow state, pull requests hold reviews, and Actions provides CI. GitHub access is centralized in `src/lib/github.ts`.
-- `src/engine/` contains agent CLI selection, argument construction, and prerequisite checks; `templates/` contains files distributed to new projects.
-- `.alpha-loop/` stores this repository’s loop configuration, tracked learnings, source templates, and gitignored session artifacts.
+- `src/cli.ts` is the Commander.js entry point; it registers handlers from `src/commands/*.ts` for `init`, `run`, `resume`, `scan`, `plan`, `review`, `history`, and related workflows.
+- `src/commands/run.ts` drives execution through `src/lib/pipeline.ts`, which coordinates agents, worktrees, tests, GitHub state, sessions, prompts, and learning extraction.
+- GitHub is the database: Issues form the kanban, labels represent workflow state, PRs hold reviews, and Actions provide CI; access is centralized in `src/lib/github.ts`.
+- `src/lib/` contains shared workflow services, while `src/engine/` handles agent CLI selection and prerequisites; `tests/` mirrors source behavior.
+- Root `templates/` contains npm-distributed starter assets; `.alpha-loop/` contains this repository’s configuration, tracked learnings, and local session data.
 
 ## Conventions
-- Node.js, strict TypeScript, ESM, Commander.js, and pnpm; local imports include `.js` extensions and built-in modules use the `node:` prefix.
-- Code favors small functional modules rather than classes, with command orchestration in `src/commands/` and reusable behavior in `src/lib/`.
-- Jest tests live under `tests/`, mirror the source layout, and use `.test.ts`; run them with `pnpm test` and compile with `pnpm build`.
-- Tests must close servers and HTTP connections, use fake timers for polling or heartbeat behavior, and avoid real `setTimeout`/`setInterval`.
-- New CLI features must be implemented in `src/commands/`, registered in `src/cli.ts`, tested in the matching `tests/` area, and reflected in public command documentation.
+- Node.js with strict TypeScript and ESM; imports include `.js` extensions, built-ins use the `node:` prefix, and implementations favor functional patterns over classes.
+- Commander.js defines the CLI, YAML supplies configuration through `.alpha-loop.yaml` and `src/lib/config.ts`, and `pnpm` is the only supported package manager.
+- Jest tests use `.test.ts`, live under `tests/`, and run with `pnpm test`; builds run with `pnpm build`.
+- New commands require a handler in `src/commands/`, registration/help text in `src/cli.ts`, tests, and synchronized README/CLAUDE command documentation.
+- Agent behavior is defined through templates and synchronized into harness-specific directories for Codex and other supported coding agents.
 
 ## Critical Rules
-- Do not modify `AGENTS.md` unless explicitly requested; do not directly edit generated `.Codex/`, `.agents/`, or `.codex/` content.
-- `.alpha-loop/templates/` is this repository’s workflow source of truth and should be changed through `alpha-loop review --apply`, not edited directly.
-- Keep `templates/` and `.alpha-loop/templates/` distinct: the former ships to users, while the latter configures this repository.
-- Command flags/help, configuration options, public APIs, and directory changes must stay synchronized across implementation, tests, `README.md`, and `CLAUDE.md`.
+- Do not modify `AGENTS.md`; do not directly edit `.Codex/`, `.agents/`, `.codex/`, or `.alpha-loop/templates/`, which are protected or generated workflow assets.
+- Do not confuse root `templates/`—distributed to users—with `.alpha-loop/templates/`, which configures this repository’s own loop.
+- Keep CLI flags/help, command handlers, README, and CLAUDE.md synchronized whenever public commands or configuration change.
+- Tests must close servers and HTTP connections, use fake timers for polling or heartbeat behavior, and never leave open handles.
 - Never publish manually or edit the package version; merging conventional commits to `master` triggers the automated release workflow.
 
 ## Active State
