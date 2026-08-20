@@ -1,0 +1,30 @@
+{
+  "passed": true,
+  "summary": "Fixed three merge-gate integration defects; build, boot, and all 1,575 tests pass.",
+  "findings": [
+    {
+      "severity": "critical",
+      "description": "mergePR treated a zero-exit gh pr merge command as proof that the PR landed, but GitHub can instead enqueue a merge-queue PR; it now verifies state=MERGED and mergedAt before reporting success.",
+      "fixed": true,
+      "file": "src/lib/github.ts"
+    },
+    {
+      "severity": "warning",
+      "description": "The merge gate classified GitHub's neutral and skipped terminal conclusions as failures even though GitHub treats both as successful for merge requirements.",
+      "fixed": true,
+      "file": "src/lib/github.ts"
+    },
+    {
+      "severity": "warning",
+      "description": "Check polling used synchronous gh queries without command timeouts, so a stalled query could exceed the configured registration and overall merge-gate deadlines; each query is now bounded by the nearest remaining deadline.",
+      "fixed": true,
+      "file": "src/lib/github.ts"
+    },
+    {
+      "severity": "info",
+      "description": "pnpm audit reports eight pre-existing advisories in Jest-only transitive dependencies (brace-expansion and js-yaml); no production dependency or session-added package is affected.",
+      "fixed": false,
+      "file": "pnpm-lock.yaml"
+    }
+  ]
+}

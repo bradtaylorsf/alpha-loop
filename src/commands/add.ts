@@ -244,7 +244,10 @@ export async function addCommand(options: AddOptions): Promise<void> {
 
   // Add to project board if configured
   if (config.project && config.project > 0) {
-    addIssueToProject(config.repoOwner, config.project, config.repo, issueNum);
-    log.info('Added to project board');
+    if (addIssueToProject(config.repoOwner, config.project, config.repo, issueNum)) {
+      log.info('Added to project board');
+    } else {
+      log.warn(`Issue #${issueNum} was created but could not be added to the project board`);
+    }
   }
 }

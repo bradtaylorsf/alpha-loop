@@ -80,8 +80,8 @@ jest.mock('../../src/lib/github', () => ({
   listRoadmapEpics: jest.fn(() => []),
   listMilestones: jest.fn(() => []),
   createMilestone: jest.fn(() => 0),
-  setIssueMilestone: jest.fn(),
-  addIssueToProject: jest.fn(),
+  setIssueMilestone: jest.fn(() => true),
+  addIssueToProject: jest.fn(() => true),
 }));
 
 import { checkbox, confirm } from '@inquirer/prompts';
@@ -173,6 +173,8 @@ describe('roadmap command', () => {
       blockedEpics: [],
       command: null,
     });
+    mockSetIssueMilestone.mockReturnValue(true);
+    mockAddIssueToProject.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -344,6 +346,26 @@ describe('roadmap command', () => {
     expect(mockSetIssueMilestone).toHaveBeenCalledWith('owner/repo', 15, '002 - v1.1 Features');
 
     expect(log.success).toHaveBeenCalledWith(expect.stringContaining('milestone'));
+  });
+
+  it('counts only successful milestone assignments and reports failed mutations', async () => {
+    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListMilestones.mockReturnValue([]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(SAMPLE_AGENT_RESPONSE);
+    mockCreateMilestone.mockReturnValueOnce(1).mockReturnValueOnce(2);
+    mockSetIssueMilestone
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    mockCheckbox.mockResolvedValueOnce([3, 7, 15]);
+    mockConfirm.mockResolvedValueOnce(true);
+
+    await roadmapCommand({});
+
+    expect(log.warn).toHaveBeenCalledWith('Created 2 milestone(s), assigned 2 issue(s)');
+    expect(log.success).not.toHaveBeenCalledWith(expect.stringContaining('assigned 3 issue(s)'));
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('#7: failed to set milestone'));
   });
 
   it('assigns milestones to parent epic issues for epic-only roadmap output', async () => {
@@ -542,5 +564,31 @@ describe('roadmap command', () => {
     expect(mockAddIssueToProject).toHaveBeenCalledWith('owner', 42, 'owner/repo', 3);
     expect(mockAddIssueToProject).toHaveBeenCalledWith('owner', 42, 'owner/repo', 7);
     expect(mockAddIssueToProject).toHaveBeenCalledWith('owner', 42, 'owner/repo', 15);
+  });
+
+  it('reports project-board additions that return false', async () => {
+    const { loadConfig } = require('../../src/lib/config');
+    (loadConfig as jest.Mock).mockReturnValueOnce({
+      repo: 'owner/repo',
+      repoOwner: 'owner',
+      project: 42,
+      agent: 'claude' as const,
+      model: 'sonnet',
+      labelReady: 'ready',
+      dryRun: false,
+    });
+    mockListOpenIssues.mockReturnValue(SAMPLE_ISSUES);
+    mockListMilestones.mockReturnValue([]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(SAMPLE_AGENT_RESPONSE);
+    mockCreateMilestone.mockReturnValueOnce(1).mockReturnValueOnce(2);
+    mockAddIssueToProject.mockReturnValue(false);
+    mockCheckbox.mockResolvedValueOnce([3, 7, 15]);
+    mockConfirm.mockResolvedValueOnce(true);
+
+    await roadmapCommand({});
+
+    expect(log.warn).toHaveBeenCalledWith('Created 2 milestone(s), assigned 3 issue(s)');
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('failed to add issue to project board'));
   });
 });

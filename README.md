@@ -126,7 +126,9 @@ This lets you plan work in GitHub milestones and control exactly how much the lo
 
 ### Session Branches
 
-When `auto_merge` is enabled (default), Alpha Loop creates a session branch (e.g., `session/20260331-002240`) and merges each issue's PR into it. This keeps your main branch clean until you're ready to merge the whole session.
+When `auto_merge` is enabled (default), Alpha Loop creates a session branch (e.g., `session/20260331-002240`) and merges each issue's PR into it. Before each merge, it waits for GitHub checks to appear and finish. With the default gate, a failed check, an empty check rollup, or a timeout leaves the PR open and preserves its worktree. This keeps your main branch clean until you're ready to merge the whole session.
+
+The merge gate waits up to 30 seconds for checks to register, polls every 5 seconds, never attempts a merge before the PR is 10 seconds old, and uses `merge_gate.timeout_seconds` as the check-wait deadline. GitHub's `success`, `neutral`, and `skipped` conclusions count as successful terminal checks. Set `require_checks: false` only for a repository that intentionally has no CI. `on_timeout: warn` is an explicit fail-open escape hatch for inconclusive or still-pending checks; the minimum PR age still applies, terminal failures still block, and an empty rollup still blocks when checks are required. After the merge command, Alpha Loop verifies that GitHub reports both `state: MERGED` and a `mergedAt` timestamp; queueing or any other zero-exit non-merge leaves recovery state intact. Alpha Loop implements this wait itself instead of using `gh pr merge --auto`, because GitHub auto-merge depends on branch protection and required checks that may be unavailable for private repositories on some plans.
 
 ### Learnings
 
@@ -465,6 +467,10 @@ test_command: pnpm test
 # changed_test_command: pnpm jest --findRelatedTests --passWithNoTests {files}
 dev_command: pnpm dev
 auto_merge: true
+merge_gate:
+  require_checks: true      # Empty statusCheckRollup blocks the merge
+  timeout_seconds: 900      # Check-wait deadline before applying on_timeout
+  on_timeout: block         # block (default) or warn (explicit fail-open)
 
 # Optional browser QA profile for websites and web apps
 web_app:
@@ -561,6 +567,9 @@ eval_dir: .alpha-loop/evals
 | `max_issues` | `0` | Max issues to process per session (0 = unlimited) |
 | `max_session_duration` | `0` | Max session duration in seconds (0 = unlimited) |
 | `auto_merge` | `true` | Auto-merge issue PRs into the session branch |
+| `merge_gate.require_checks` | `true` | Require at least one GitHub check; an empty rollup blocks the merge |
+| `merge_gate.timeout_seconds` | `900` | Check-wait deadline (minimum 1 second) before applying `on_timeout`; the 10-second minimum PR age still applies |
+| `merge_gate.on_timeout` | `block` | `block` leaves an inconclusive PR open; `warn` explicitly permits merging after timeout |
 | `merge_to` | (none) | Use an existing branch instead of creating a session branch |
 | `skip_tests` | `false` | Skip test execution |
 | `skip_review` | `false` | Skip code review |

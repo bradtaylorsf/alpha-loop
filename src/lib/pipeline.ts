@@ -623,10 +623,12 @@ function statusForPauseRequest(request: PauseRequest): HumanFeedbackSessionStatu
   return 'human_input_requested';
 }
 
-function labelSessionState(config: Config, issueNum: number, status: HumanFeedbackSessionStatus): void {
+function labelSessionState(config: Config, issueNum: number, status: HumanFeedbackSessionStatus): boolean {
+  let updated = true;
   for (const change of githubLabelChangesForStatus(status, config.labelReady)) {
-    labelIssue(config.repo, issueNum, change.add, change.remove);
+    if (!labelIssue(config.repo, issueNum, change.add, change.remove)) updated = false;
   }
+  return updated;
 }
 
 function writeQaChecklistArtifact(args: {
@@ -747,7 +749,9 @@ async function pauseSessionForRequest(input: PauseSessionInput): Promise<Pipelin
   });
 
   if (!config.dryRun) {
-    labelSessionState(config, issueNum, waitingStatus);
+    if (!labelSessionState(config, issueNum, waitingStatus)) {
+      log.error(`Issue #${issueNum} was paused, but its GitHub labels could not be updated to ${waitingStatus}`);
+    }
     if (classification === 'new_scope') {
       commentIssue(config.repo, issueNum, formatNewScopeComment({
         summary: request.summary ?? request.reason,
@@ -915,8 +919,11 @@ async function pauseSessionForAutomationPolicy(input: {
   });
 
   if (!input.config.dryRun) {
-    labelIssue(input.config.repo, input.issueNum, 'needs-human-input', 'in-progress');
-    labelIssue(input.config.repo, input.issueNum, 'needs-human-input', input.config.labelReady);
+    const removedInProgress = labelIssue(input.config.repo, input.issueNum, 'needs-human-input', 'in-progress');
+    const removedReady = labelIssue(input.config.repo, input.issueNum, 'needs-human-input', input.config.labelReady);
+    if (!removedInProgress || !removedReady) {
+      log.error(`Issue #${input.issueNum} was paused by policy, but its needs-human-input labels could not be fully updated`);
+    }
     commentIssue(input.config.repo, input.issueNum, formatAutomationPolicyComment(input.decision));
   }
 
@@ -1400,9 +1407,17 @@ export async function processIssue(
   });
   log.step('Step 1: Updating issue status');
   if (!config.dryRun) {
-    updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In progress');
-    labelIssue(config.repo, issueNum, 'in-progress', config.labelReady);
-    assignIssue(config.repo, issueNum, '@me');
+    if (!updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In progress')) {
+      log.warn(`Could not update project status for issue #${issueNum} to In progress`);
+    }
+    if (!labelIssue(config.repo, issueNum, 'in-progress', config.labelReady)) {
+      log.error(`Could not move issue #${issueNum} to in-progress; aborting before implementation`);
+      recordSessionIssue(session, issueNum, { status: 'failure', stage: 'status', failureReason: 'permanent' });
+      return failureResult(issueNum, title, startTime, 'permanent');
+    }
+    if (!assignIssue(config.repo, issueNum, '@me')) {
+      log.warn(`Issue #${issueNum} moved to in-progress but could not be assigned`);
+    }
   } else {
     log.dry('Would update issue status to in-progress');
   }
@@ -1791,7 +1806,9 @@ export async function processIssue(
         return failureResult(issueNum, title, startTime, 'transient');
       }
       log.error(`Implementation failed for issue #${issueNum}`);
-      labelIssue(config.repo, issueNum, 'failed', 'in-progress');
+      if (!labelIssue(config.repo, issueNum, 'failed', 'in-progress')) {
+        log.error(`Implementation failed and issue #${issueNum} could not be labeled failed`);
+      }
       commentIssue(config.repo, issueNum, 'Agent loop failed during implementation. See logs for details.');
       writeRecoverableCrashMarker(new Error('Implementation failed after writing commits'), 'implement');
       if (!quickWorktree) {
@@ -2615,7 +2632,9 @@ export async function processIssue(
         stage: 'pr',
         message: err instanceof Error ? err.message : String(err),
       });
-      labelIssue(config.repo, issueNum, 'failed', 'in-progress');
+      if (!labelIssue(config.repo, issueNum, 'failed', 'in-progress')) {
+        log.error(`PR creation failed and issue #${issueNum} could not be labeled failed`);
+      }
       commentIssue(config.repo, issueNum, `Agent loop failed: could not create PR. Branch: ${worktreeBranch}`);
       writeRecoverableCrashMarker(err, 'pr');
       log.warn(`Worktree preserved at ${worktreePath} — use "alpha-loop resume --issue ${issueNum}" to retry`);
@@ -2760,6 +2779,7 @@ export async function processIssue(
   currentStep = 'status';
   recordSessionStage(session, 'status');
   log.step('Step 10: Updating issue status');
+  let workflowStatusSucceeded = true;
   if (config.dryRun) {
     log.dry('Would update issue status to in-review');
   } else if (quickWorktree) {
@@ -2771,8 +2791,13 @@ export async function processIssue(
     );
   } else {
     const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
-    updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In Review');
-    labelIssue(config.repo, issueNum, 'in-review', 'in-progress');
+    if (!updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'In Review')) {
+      log.warn(`Could not update project status for issue #${issueNum} to In Review`);
+    }
+    workflowStatusSucceeded = labelIssue(config.repo, issueNum, 'in-review', 'in-progress');
+    if (!workflowStatusSucceeded) {
+      log.error(`Could not move issue #${issueNum} to in-review`);
+    }
     commentIssue(config.repo, issueNum,
       `Automated implementation complete.\n\n**PR**: ${prUrl ?? 'N/A'}\n**Tests**: ${testsStatus}\n**Review**: Attached to PR body.\n\n---\n*Processed by alpha-loop in ${duration}s*`,
     );
@@ -2815,15 +2840,19 @@ export async function processIssue(
   if (config.autoMerge && !config.dryRun && prUrl) {
     if (!testsPassing) {
       log.warn('Skipping auto-merge: tests are not passing');
+    } else if (!workflowStatusSucceeded) {
+      log.warn('Skipping auto-merge: the issue workflow status could not be updated');
     } else {
       log.step('Step 11: Auto-merging PR');
       currentStep = 'merge';
       recordSessionStage(session, 'merge');
       try {
-        mergePR(config.repo, worktreeBranch);
-        mergeSucceeded = true;
-
-        await refreshSessionWorktree(session, config, projectDir);
+        mergeSucceeded = await mergePR(config.repo, worktreeBranch, 'squash', config.mergeGate);
+        if (mergeSucceeded) {
+          await refreshSessionWorktree(session, config, projectDir);
+        } else {
+          log.warn(`Auto-merge failed: no merge was completed for branch ${worktreeBranch}`);
+        }
       } catch (err) {
         log.warn(`Auto-merge failed: ${err}`);
       }
@@ -2870,10 +2899,12 @@ export async function processIssue(
     });
   }
 
+  const mergeExpectationMet = !config.autoMerge || config.dryRun || !prUrl || mergeSucceeded;
+  const pipelineSucceeded = testsPassing && workflowStatusSucceeded && mergeExpectationMet;
   const result: PipelineResult = {
     issueNum,
     title,
-    status: testsPassing ? 'success' : 'failure',
+    status: pipelineSucceeded ? 'success' : 'failure',
     prUrl,
     testsPassing,
     verifyPassing,
@@ -2898,7 +2929,11 @@ export async function processIssue(
     log.dry(`Would save session result for issue #${issueNum}`);
   }
 
-  log.success(`Issue #${issueNum} processed in ${duration}s`);
+  if (pipelineSucceeded) {
+    log.success(`Issue #${issueNum} processed in ${duration}s`);
+  } else {
+    log.warn(`Issue #${issueNum} finished with failures in ${duration}s`);
+  }
   if (prUrl) log.info(`PR: ${prUrl}`);
 
   return result;
@@ -2950,10 +2985,22 @@ export async function processBatch(
   recordSessionStage(session, 'status');
   log.step('Batch Step 1: Updating issue statuses');
   if (!config.dryRun) {
+    let workflowTransitionFailed = false;
     for (const issue of issues) {
-      updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'In progress');
-      labelIssue(config.repo, issue.number, 'in-progress', config.labelReady);
-      assignIssue(config.repo, issue.number, '@me');
+      if (!updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'In progress')) {
+        log.warn(`Could not update project status for issue #${issue.number} to In progress`);
+      }
+      if (!labelIssue(config.repo, issue.number, 'in-progress', config.labelReady)) {
+        log.error(`Could not move issue #${issue.number} to in-progress`);
+        workflowTransitionFailed = true;
+      }
+      if (!assignIssue(config.repo, issue.number, '@me')) {
+        log.warn(`Issue #${issue.number} could not be assigned`);
+      }
+    }
+    if (workflowTransitionFailed) {
+      log.error('Batch aborted before implementation because one or more issues could not move to in-progress');
+      return issues.map((issue) => failureResult(issue.number, issue.title, startTime, 'permanent'));
     }
   }
 
@@ -3198,7 +3245,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       }
       log.error('Batch implementation failed');
       for (const issue of issues) {
-        labelIssue(config.repo, issue.number, 'failed', 'in-progress');
+        if (!labelIssue(config.repo, issue.number, 'failed', 'in-progress')) {
+          log.error(`Batch implementation failed and issue #${issue.number} could not be labeled failed`);
+        }
         commentIssue(config.repo, issue.number, 'Agent loop failed during batch implementation. See logs.');
       }
       const cleanup = await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, preserveIfCommits: true });
@@ -3628,7 +3677,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         message: err instanceof Error ? err.message : String(err),
       });
       for (const issue of issues) {
-        labelIssue(config.repo, issue.number, 'failed', 'in-progress');
+        if (!labelIssue(config.repo, issue.number, 'failed', 'in-progress')) {
+          log.error(`Batch PR creation failed and issue #${issue.number} could not be labeled failed`);
+        }
         commentIssue(config.repo, issue.number, `Agent loop failed: could not create PR. Branch: ${worktreeBranch}`);
       }
       log.warn(`Worktree preserved at ${worktreePath} — use "alpha-loop resume" to retry`);
@@ -3642,10 +3693,16 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   const results: PipelineResult[] = [];
 
   for (const issue of issues) {
+    let workflowStatusSucceeded = true;
     if (!config.dryRun) {
       const testsStatus = testsPassing ? 'PASSING' : 'FAILING';
-      updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'In Review');
-      labelIssue(config.repo, issue.number, 'in-review', 'in-progress');
+      if (!updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'In Review')) {
+        log.warn(`Could not update project status for issue #${issue.number} to In Review`);
+      }
+      workflowStatusSucceeded = labelIssue(config.repo, issue.number, 'in-review', 'in-progress');
+      if (!workflowStatusSucceeded) {
+        log.error(`Could not move issue #${issue.number} to in-review`);
+      }
       commentIssue(config.repo, issue.number,
         `Automated batch implementation complete.\n\n**PR**: ${prUrl ?? 'N/A'}\n**Tests**: ${testsStatus}\n**Batch**: ${issues.length} issues processed together\n\n---\n*Processed by alpha-loop batch mode in ${duration}s total*`,
       );
@@ -3654,7 +3711,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     const result: PipelineResult = {
       issueNum: issue.number,
       title: issue.title,
-      status: testsPassing ? 'success' : 'failure',
+      status: testsPassing && workflowStatusSucceeded ? 'success' : 'failure',
       prUrl,
       testsPassing,
       verifyPassing: true,
@@ -3677,7 +3734,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       try {
         const issueScoreResult: PipelineResultForScores = {
           issueNum: issue.number,
-          status: testsPassing ? 'success' : 'failure',
+          status: result.status === 'success' ? 'success' : 'failure',
           testsPassing,
           verifyPassing: true,
           verifySkipped: true,
@@ -3690,7 +3747,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         writeTraceMetadata(session.name, issue.number, {
           issueNum: issue.number,
           title: issue.title,
-          status: testsPassing ? 'success' : 'failure',
+          status: result.status === 'success' ? 'success' : 'failure',
           duration: perIssueDuration,
           retries: 0,
           testsPassing,
@@ -3709,7 +3766,11 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       }
     }
 
-    log.success(`Issue #${issue.number} updated`);
+    if (workflowStatusSucceeded) {
+      log.success(`Issue #${issue.number} updated`);
+    } else {
+      log.warn(`Issue #${issue.number} was not fully updated`);
+    }
   }
 
   // Write aggregate scores and costs
@@ -3751,15 +3812,30 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   if (config.autoMerge && !config.dryRun && prUrl) {
     if (!testsPassing) {
       log.warn('Skipping auto-merge: tests are not passing');
+    } else if (results.some((result) => result.status !== 'success')) {
+      log.warn('Skipping auto-merge: one or more issue workflow statuses could not be updated');
     } else {
       log.step('Batch Step 10: Auto-merging PR');
       recordSessionStage(session, 'merge');
       try {
-        mergePR(config.repo, worktreeBranch);
-        mergeSucceeded = true;
-        await refreshSessionWorktree(session, config, projectDir);
+        mergeSucceeded = await mergePR(config.repo, worktreeBranch, 'squash', config.mergeGate);
+        if (mergeSucceeded) {
+          await refreshSessionWorktree(session, config, projectDir);
+        } else {
+          log.warn(`Auto-merge failed: no merge was completed for branch ${worktreeBranch}`);
+        }
       } catch (err) {
         log.warn(`Auto-merge failed: ${err}`);
+      }
+    }
+  }
+
+  if (config.autoMerge && !config.dryRun && prUrl && !mergeSucceeded) {
+    for (const result of results) {
+      if (result.status === 'success') {
+        result.status = 'failure';
+        result.failureReason = 'permanent';
+        saveResult(session, result);
       }
     }
   }
@@ -3798,7 +3874,12 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
   }
 
   const successCount = results.filter((r) => r.status === 'success').length;
-  log.success(`Batch complete: ${successCount}/${issues.length} issues succeeded in ${duration}s`);
+  const batchSummary = `Batch complete: ${successCount}/${issues.length} issues succeeded in ${duration}s`;
+  if (successCount === issues.length) {
+    log.success(batchSummary);
+  } else {
+    log.warn(batchSummary);
+  }
   if (prUrl) log.info(`PR: ${prUrl}`);
 
   return results;
@@ -3973,25 +4054,40 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
   // "deferred" note — the in-review transition happens here, gated on what
   // actually shipped. On failure the issues are labeled failed instead of
   // silently keeping stale claims.
-  const updateIssueOutcomes = (shipped: boolean): void => {
+  const updateIssueOutcomes = (shipped: boolean): boolean => {
+    let allUpdated = true;
     for (const issue of issues) {
       try {
         if (shipped) {
-          updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'In Review');
-          labelIssue(config.repo, issue.number, 'in-review', 'in-progress');
-          commentIssue(config.repo, issue.number,
-            `Quick-mode finalize pass complete.\n\n**PR**: ${prUrl}\n**Tests**: PASSING\n**Review**: covered by the post-session holistic review on the session PR.`,
-          );
+          if (!updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'In Review')) {
+            log.warn(`Quick finalize: project status for issue #${issue.number} was not updated to In Review`);
+          }
+          if (labelIssue(config.repo, issue.number, 'in-review', 'in-progress')) {
+            commentIssue(config.repo, issue.number,
+              `Quick-mode finalize pass complete.\n\n**PR**: ${prUrl}\n**Tests**: PASSING\n**Review**: covered by the post-session holistic review on the session PR.`,
+            );
+          } else {
+            allUpdated = false;
+            log.error(`Quick finalize: PR shipped, but issue #${issue.number} could not be moved to in-review`);
+            commentIssue(config.repo, issue.number,
+              `Quick-mode PR shipped, but Alpha Loop could not update this issue's workflow label.\n\n**PR**: ${prUrl}\n**Tests**: PASSING`,
+            );
+          }
         } else {
-          labelIssue(config.repo, issue.number, 'failed', 'in-progress');
+          if (!labelIssue(config.repo, issue.number, 'failed', 'in-progress')) {
+            allUpdated = false;
+            log.error(`Quick finalize: issue #${issue.number} did not ship and could not be labeled failed`);
+          }
           commentIssue(config.repo, issue.number,
             `Quick-mode finalize pass did not ship this issue.\n\n**Tests**: ${testsPassing ? 'PASSING' : 'FAILING'}\n**PR**: ${prUrl ?? 'not created'} (unmerged)\n\nThe implementation commits are preserved on \`${worktreeBranch}\` — recover with \`alpha-loop resume\` or re-run the epic.`,
           );
         }
       } catch (err) {
+        allUpdated = false;
         log.warn(`Quick finalize: could not update issue #${issue.number} status: ${err instanceof Error ? err.message : err}`);
       }
     }
+    return allUpdated;
   };
 
   try {
@@ -4008,7 +4104,9 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
   } catch (err) {
     log.error(`Failed to create quick-mode PR: ${err instanceof Error ? err.message : err}`);
     log.warn(`Worktree preserved at ${worktreePath} — branch ${worktreeBranch} holds all quick-mode commits`);
-    updateIssueOutcomes(false);
+    if (!updateIssueOutcomes(false)) {
+      log.error('Quick finalize: one or more failed issue outcomes could not be recorded');
+    }
     return { testsPassing, testOutput, merged: false };
   }
 
@@ -4017,9 +4115,12 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
     log.warn('Skipping quick PR merge: tests are not passing — PR left open for manual review');
   } else if (config.autoMerge) {
     try {
-      mergePR(config.repo, worktreeBranch);
-      merged = true;
-      await refreshSessionWorktree(session, config, projectDir);
+      merged = await mergePR(config.repo, worktreeBranch, 'squash', config.mergeGate);
+      if (merged) {
+        await refreshSessionWorktree(session, config, projectDir);
+      } else {
+        log.warn(`Quick PR auto-merge failed: no merge was completed for branch ${worktreeBranch}`);
+      }
     } catch (err) {
       log.warn(`Quick PR auto-merge failed: ${err instanceof Error ? err.message : err}`);
     }
@@ -4027,7 +4128,9 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
   // With auto-merge off, a passing PR to base IS the shipped state — the
   // human merges it. With auto-merge on, only an actual merge counts.
   const shipped = merged || (!config.autoMerge && testsPassing && prUrl !== undefined);
-  updateIssueOutcomes(shipped);
+  if (!updateIssueOutcomes(shipped)) {
+    log.error('Quick finalize: one or more issue outcomes could not be recorded');
+  }
 
   // Post-merge bookkeeping must never throw out of this function: the caller
   // treats a throw as "nothing shipped" and demotes results — wrong once the
@@ -4075,9 +4178,13 @@ function failureResult(issueNum: number, title: string, startTime: number, reaso
  */
 function requeueIssue(config: Config, issueNum: number): void {
   if (config.dryRun) return;
-  labelIssue(config.repo, issueNum, config.labelReady, 'in-progress');
-  updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'Todo');
-  log.info(`Issue #${issueNum} re-queued for next run`);
+  const labeled = labelIssue(config.repo, issueNum, config.labelReady, 'in-progress');
+  const projectUpdated = updateProjectStatus(config.repo, config.project, config.repoOwner, issueNum, 'Todo');
+  if (labeled && projectUpdated) {
+    log.info(`Issue #${issueNum} re-queued for next run`);
+  } else {
+    log.warn(`Issue #${issueNum} could not be fully re-queued for the next run`);
+  }
 }
 
 function loadFileIfExists(filePath: string): string | null {

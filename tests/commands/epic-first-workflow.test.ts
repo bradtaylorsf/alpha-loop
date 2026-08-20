@@ -126,10 +126,10 @@ jest.mock('../../src/lib/github', () => ({
   listRoadmapEpics: jest.fn(() => []),
   listMilestones: jest.fn(() => []),
   createMilestone: jest.fn(() => 0),
-  setIssueMilestone: jest.fn(),
-  addIssueToProject: jest.fn(),
+  setIssueMilestone: jest.fn(() => true),
+  addIssueToProject: jest.fn(() => true),
   createIssue: jest.fn(() => 0),
-  closeIssue: jest.fn(),
+  closeIssue: jest.fn(() => true),
   updateIssue: jest.fn(),
   commentIssue: jest.fn(),
   getIssueBody: jest.fn(() => ''),
@@ -141,8 +141,8 @@ jest.mock('../../src/lib/github', () => ({
   getEpicSubIssues: jest.fn(() => []),
   getIssueWithComments: jest.fn(),
   getMergedPRForIssue: jest.fn(() => null),
-  updateEpicChecklist: jest.fn(),
-  labelIssue: jest.fn(),
+  updateEpicChecklist: jest.fn(() => true),
+  labelIssue: jest.fn(() => true),
 }));
 
 jest.mock('../../src/lib/pipeline', () => ({

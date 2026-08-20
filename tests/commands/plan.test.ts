@@ -71,7 +71,7 @@ jest.mock('../../src/lib/github', () => ({
   createMilestone: jest.fn(() => 1),
   createIssue: jest.fn(() => 42),
   updateIssue: jest.fn(() => true),
-  addIssueToProject: jest.fn(),
+  addIssueToProject: jest.fn(() => true),
   listOpenIssues: jest.fn(() => []),
   listMilestones: jest.fn(() => []),
   listLabels: jest.fn(() => ['bug', 'enhancement', 'ready']),
@@ -158,6 +158,8 @@ describe('plan command', () => {
       labelReady: 'ready',
       dryRun: false,
     } as ReturnType<typeof loadConfig>);
+    mockAddIssueToProject.mockReturnValue(true);
+    mockUpdateIssue.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -409,6 +411,32 @@ describe('plan command', () => {
     expect(mockAddIssueToProject).toHaveBeenCalledTimes(2);
     expect(mockAddIssueToProject).toHaveBeenCalledWith('owner', 5, 'owner/repo', 42);
     expect(mockAddIssueToProject).toHaveBeenCalledWith('owner', 5, 'owner/repo', 43);
+  });
+
+  it('includes failed project-board additions in the operation summary', async () => {
+    mockLoadConfig.mockReturnValue({
+      repo: 'owner/repo',
+      repoOwner: 'owner',
+      project: 5,
+      agent: 'claude',
+      model: 'sonnet',
+      labelReady: 'ready',
+      dryRun: false,
+    } as ReturnType<typeof loadConfig>);
+    mockInput.mockResolvedValueOnce('Build an app');
+    mockCheckbox.mockResolvedValueOnce([]).mockResolvedValueOnce([1, 2]);
+    mockConfirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockExtractJson.mockReturnValue(VALID_PLAN_DRAFT);
+    mockCreateMilestone.mockReturnValue(1);
+    mockCreateIssue.mockReturnValueOnce(42).mockReturnValueOnce(43);
+    mockAddIssueToProject.mockReturnValue(false);
+
+    await planCommand({});
+
+    expect(log.warn).toHaveBeenCalledWith('2 operation(s) failed:');
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Add #42 to project'));
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Add #43 to project'));
   });
 
   it('auto-creates missing labels before creating issues', async () => {

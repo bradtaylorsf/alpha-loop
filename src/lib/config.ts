@@ -378,6 +378,21 @@ export function estimateCost(
   return (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
 }
 
+export type MergeGateConfig = {
+  /** Block an empty status check rollup instead of treating it as success. */
+  requireChecks: boolean;
+  /** Seconds to wait for checks before applying the timeout policy. */
+  timeoutSeconds: number;
+  /** Whether an inconclusive timeout blocks or permits the merge. */
+  onTimeout: 'block' | 'warn';
+};
+
+export const DEFAULT_MERGE_GATE_CONFIG: MergeGateConfig = {
+  requireChecks: true,
+  timeoutSeconds: 900,
+  onTimeout: 'block',
+};
+
 export type Config = {
   repo: string;
   repoOwner: string;
@@ -409,6 +424,8 @@ export type Config = {
   maxSessionDuration: number;
   milestone: string;
   autoMerge: boolean;
+  /** GitHub status-check policy applied before every automatic merge. */
+  mergeGate: MergeGateConfig;
   mergeTo: string;
   autoCleanup: boolean;
   runFull: boolean;
@@ -495,6 +512,7 @@ const DEFAULTS: Config = {
   maxSessionDuration: 0,
   milestone: '',
   autoMerge: true,
+  mergeGate: DEFAULT_MERGE_GATE_CONFIG,
   mergeTo: '',
   autoCleanup: true,
   runFull: false,
@@ -643,6 +661,63 @@ function parsePositiveDayValue(value: unknown, key: string): number | undefined 
     return undefined;
   }
   return Math.floor(value);
+}
+
+function parseMergeGate(raw: unknown): MergeGateConfig {
+  const gate = { ...DEFAULT_MERGE_GATE_CONFIG };
+  if (raw === undefined) return gate;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn('[config] merge_gate: expected an object; using defaults');
+    return gate;
+  }
+
+  const r = raw as Record<string, unknown>;
+  if (r.require_checks !== undefined) {
+    if (typeof r.require_checks === 'boolean') gate.requireChecks = r.require_checks;
+    else console.warn(`[config] merge_gate.require_checks: expected a boolean (got ${String(r.require_checks)}); using true`);
+  }
+  if (r.timeout_seconds !== undefined) {
+    if (typeof r.timeout_seconds === 'number' && Number.isFinite(r.timeout_seconds) && r.timeout_seconds >= 1) {
+      gate.timeoutSeconds = Math.floor(r.timeout_seconds);
+    } else {
+      console.warn(`[config] merge_gate.timeout_seconds: expected a number of at least 1 (got ${String(r.timeout_seconds)}); using 900`);
+    }
+  }
+  if (r.on_timeout !== undefined) {
+    if (r.on_timeout === 'block' || r.on_timeout === 'warn') gate.onTimeout = r.on_timeout;
+    else console.warn(`[config] merge_gate.on_timeout: expected block or warn (got ${String(r.on_timeout)}); using block`);
+  }
+  return gate;
+}
+
+function applyMergeGateOverride(
+  base: MergeGateConfig,
+  raw: unknown,
+): MergeGateConfig {
+  if (raw === undefined) return { ...base };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn('[config] mergeGate override: expected an object; ignoring');
+    return { ...base };
+  }
+
+  const r = raw as Record<string, unknown>;
+  const gate = { ...base };
+  if (r.requireChecks !== undefined) {
+    if (typeof r.requireChecks === 'boolean') gate.requireChecks = r.requireChecks;
+    else console.warn(`[config] mergeGate.requireChecks override: expected a boolean (got ${String(r.requireChecks)}); ignoring`);
+  }
+  if (r.timeoutSeconds !== undefined) {
+    if (typeof r.timeoutSeconds === 'number' && Number.isFinite(r.timeoutSeconds) && r.timeoutSeconds >= 1) {
+      gate.timeoutSeconds = Math.floor(r.timeoutSeconds);
+    } else {
+      console.warn(`[config] mergeGate.timeoutSeconds override: expected a number of at least 1 (got ${String(r.timeoutSeconds)}); ignoring`);
+    }
+  }
+  if (r.onTimeout !== undefined) {
+    if (r.onTimeout === 'block' || r.onTimeout === 'warn') gate.onTimeout = r.onTimeout;
+    else console.warn(`[config] mergeGate.onTimeout override: expected block or warn (got ${String(r.onTimeout)}); ignoring`);
+  }
+  return gate;
 }
 
 function parseSessionRetention(raw: unknown): Partial<SessionRetentionConfig> | undefined {
@@ -1294,6 +1369,11 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     }
   }
 
+  // Handle the status-check gate used before automatic merges.
+  if (parsed.merge_gate !== undefined) {
+    result.mergeGate = parseMergeGate(parsed.merge_gate);
+  }
+
   // Handle routing nested config (per-stage model + endpoint)
   if (parsed.routing !== undefined) {
     const routing = parseRoutingConfig(parsed.routing);
@@ -1412,6 +1492,10 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...overrides?.sessionRetention,
   };
   const events = overrides?.events ?? yamlConfig.events ?? DEFAULTS.events;
+  const mergeGate = applyMergeGateOverride({
+    ...DEFAULT_MERGE_GATE_CONFIG,
+    ...yamlConfig.mergeGate,
+  }, overrides?.mergeGate);
   const webApp = overrides?.webApp ?? yamlConfig.webApp;
   const automationPolicy = {
     ...DEFAULT_AUTOMATION_POLICY,
@@ -1437,6 +1521,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     ...overrides,
     pricing: mergedPricing,
     pipeline: mergedPipeline,
+    mergeGate,
     routing,
     sessionRetention,
     events,

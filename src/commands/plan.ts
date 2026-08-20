@@ -449,7 +449,9 @@ export async function planCommand(options: PlanOptions): Promise<void> {
         // Add to project board if configured
         if (config.project > 0) {
           try {
-            addIssueToProject(config.repoOwner, config.project, config.repo, issueNum);
+            if (!addIssueToProject(config.repoOwner, config.project, config.repo, issueNum)) {
+              failures.push(`Add #${issueNum} to project: operation returned false`);
+            }
           } catch (err) {
             failures.push(`Add #${issueNum} to project: ${(err as Error).message}`);
           }

@@ -31,13 +31,13 @@ jest.mock('../../src/lib/worktree', () => ({
 }));
 
 jest.mock('../../src/lib/github', () => ({
-  assignIssue: jest.fn(),
-  labelIssue: jest.fn(),
+  assignIssue: jest.fn(() => true),
+  labelIssue: jest.fn(() => true),
   commentIssue: jest.fn(),
   createPR: jest.fn(),
   createIssue: jest.fn(),
-  mergePR: jest.fn(),
-  updateProjectStatus: jest.fn(),
+  mergePR: jest.fn(async () => true),
+  updateProjectStatus: jest.fn(() => true),
   getIssueComments: jest.fn(() => []),
 }));
 
@@ -170,6 +170,7 @@ const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
 const mockWorktreeHasCommits = worktreeHasCommits as jest.MockedFunction<typeof worktreeHasCommits>;
+const mockLabelIssue = labelIssue as jest.MockedFunction<typeof labelIssue>;
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockCreateIssue = createIssue as jest.MockedFunction<typeof createIssue>;
 const mockMergePR = mergePR as jest.MockedFunction<typeof mergePR>;
@@ -242,6 +243,11 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipLearn: false,
     skipE2e: false,
     autoMerge: false,
+    mergeGate: {
+      requireChecks: true,
+      timeoutSeconds: 900,
+      onTimeout: 'block',
+    },
     mergeTo: '',
     autoCleanup: true,
     runFull: false,
@@ -310,7 +316,7 @@ beforeEach(() => {
   mockRunTests.mockReturnValue({ passed: true, output: 'All tests passed' });
   mockCreatePR.mockReturnValue('https://github.com/owner/repo/pull/1');
   mockCreateIssue.mockReturnValue(501);
-  mockMergePR.mockReturnValue(undefined as any);
+  mockMergePR.mockResolvedValue(true);
   mockExtractLearnings.mockResolvedValue(null);
   mockGetLearningContext.mockReturnValue('');
   mockGetPreviousResult.mockReturnValue(null);
@@ -380,6 +386,16 @@ describe('processIssue', () => {
     expect(mockExtractLearnings).toHaveBeenCalled();
     expect(mockSaveResult).toHaveBeenCalled();
     expect(mockCleanupWorktree).toHaveBeenCalled();
+  });
+
+  test('fails before implementation when the in-progress label transition fails', async () => {
+    mockLabelIssue.mockReturnValueOnce(false);
+
+    const result = await processIssue(42, 'Test issue', 'Issue body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('failure');
+    expect(mockSetupWorktree).not.toHaveBeenCalled();
+    expect(mockLog.success).not.toHaveBeenCalledWith(expect.stringContaining('Issue #42 processed'));
   });
 
   test('re-queues and stops before planning when worktree setup fails', async () => {
@@ -1571,14 +1587,16 @@ describe('processIssue', () => {
   });
 
   test('preserves worktree when auto-merge fails', async () => {
-    mockMergePR.mockImplementation(() => { throw new Error('merge conflict'); });
+    mockMergePR.mockResolvedValue(false);
 
-    await processIssue(42, 'Test issue', 'Body', makeConfig({ autoMerge: true }), makeSession());
+    const result = await processIssue(42, 'Test issue', 'Body', makeConfig({ autoMerge: true }), makeSession());
 
+    expect(result.status).toBe('failure');
     // Cleanup should be called with preserveIfCommits: true
     expect(mockCleanupWorktree).toHaveBeenCalledWith(
       expect.objectContaining({ preserveIfCommits: true }),
     );
+    expect(mockLog.success).not.toHaveBeenCalledWith(expect.stringContaining('Issue #42 processed'));
   });
 
   test('refreshes the session branch only inside its worktree after auto-merge', async () => {
@@ -1965,14 +1983,16 @@ describe('processBatch', () => {
   });
 
   test('preserves worktree when auto-merge fails', async () => {
-    mockMergePR.mockImplementation(() => { throw new Error('DIRTY merge state'); });
+    mockMergePR.mockResolvedValue(false);
 
-    await processBatch(batchIssues, makeConfig({ autoMerge: true, batch: true }), makeSession());
+    const results = await processBatch(batchIssues, makeConfig({ autoMerge: true, batch: true }), makeSession());
 
+    expect(results.every((result) => result.status === 'failure')).toBe(true);
     // Cleanup should preserve commits
     expect(mockCleanupWorktree).toHaveBeenCalledWith(
       expect.objectContaining({ preserveIfCommits: true }),
     );
+    expect(mockLog.success).not.toHaveBeenCalledWith(expect.stringContaining('Batch complete'));
   });
 
   test('cleans up worktree normally after successful merge', async () => {
@@ -2138,7 +2158,12 @@ describe('finalizeQuickRun', () => {
     expect(prBody).toContain('- #42: First issue (closes #42)');
     expect(prBody).toContain('- #43: Second issue (closes #43)');
     expect(prBody).toContain('Part of epic #100');
-    expect(mockMergePR).toHaveBeenCalledWith('owner/repo', 'agent/issue-42');
+    expect(mockMergePR).toHaveBeenCalledWith(
+      'owner/repo',
+      'agent/issue-42',
+      'squash',
+      expect.objectContaining({ requireChecks: true, onTimeout: 'block' }),
+    );
     expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
       worktreePath: '/tmp/quick-worktree',
       preserveIfCommits: false,
@@ -2203,6 +2228,29 @@ describe('finalizeQuickRun', () => {
     expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
       preserveIfCommits: true,
     }));
+  });
+
+  test('treats a missing PR at merge time as unshipped and preserves the worktree', async () => {
+    mockMergePR.mockResolvedValue(false);
+
+    const result = await finalizeQuickRun({
+      issues,
+      config: makeConfig({ autoMerge: true }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+    });
+
+    expect(result.merged).toBe(false);
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      worktreePath: '/tmp/quick-worktree',
+      preserveIfCommits: true,
+    }));
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'failed', 'in-progress');
+    expect(labelIssue).not.toHaveBeenCalledWith('owner/repo', 42, 'in-review', 'in-progress');
+    expect(commentIssue).toHaveBeenCalledWith(
+      'owner/repo', 42, expect.stringContaining('did not ship this issue'),
+    );
   });
 
   test('dry run skips everything', async () => {

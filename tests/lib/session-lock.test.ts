@@ -27,7 +27,7 @@ jest.mock('../../src/lib/logger', () => ({
 
 jest.mock('../../src/lib/github', () => ({
   createPR: jest.fn(),
-  updateProjectStatus: jest.fn(),
+  updateProjectStatus: jest.fn(() => true),
 }));
 
 jest.mock('../../src/lib/learning', () => ({

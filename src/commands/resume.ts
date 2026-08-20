@@ -472,11 +472,15 @@ This PR was recovered by \`alpha-loop resume\`. Resume creates the PR and runs b
   log.success(`PR created: ${prUrl}`);
 
   // Update issue labels: add in-review, remove in-progress
-  labelIssue(repo, issueNum, 'in-review', 'in-progress');
+  if (!labelIssue(repo, issueNum, 'in-review', 'in-progress')) {
+    log.warn(`PR created, but issue #${issueNum} could not be moved to in-review`);
+  }
 
   // Recovered PRs still need review and verification; do not mark them Done.
   if (config.project && config.project > 0) {
-    updateProjectStatus(repo, config.project, config.repoOwner, issueNum, 'In Review');
+    if (!updateProjectStatus(repo, config.project, config.repoOwner, issueNum, 'In Review')) {
+      log.warn(`PR created, but issue #${issueNum} project status could not be moved to In Review`);
+    }
   }
 
   // Comment on the issue with the PR link
@@ -861,10 +865,12 @@ function buildResumeFeedbackContext(
   };
 }
 
-function markResumeLabels(config: ReturnType<typeof loadConfig>, issueNum: number): void {
+function markResumeLabels(config: ReturnType<typeof loadConfig>, issueNum: number): boolean {
+  let updated = true;
   for (const change of githubLabelChangesForStatus('resuming', config.labelReady)) {
-    labelIssue(config.repo, issueNum, change.add, change.remove);
+    if (!labelIssue(config.repo, issueNum, change.add, change.remove)) updated = false;
   }
+  return updated;
 }
 
 function transitionManifestToResuming(ref: ResumableSessionRef, context: ResumeFeedbackContext): void {
@@ -1041,7 +1047,9 @@ export async function resumePausedIssueFromManifest(
       },
     });
     if (!config.dryRun) {
-      markResumeLabels(config, issueNum);
+      if (!markResumeLabels(config, issueNum)) {
+        log.error(`Could not update resume labels for issue #${issueNum}`);
+      }
     }
 
     const result = await processIssue(

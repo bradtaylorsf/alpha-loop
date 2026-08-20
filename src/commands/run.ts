@@ -339,7 +339,9 @@ async function pauseIssueForAutomationPolicy(args: {
   });
 
   if (!args.config.dryRun) {
-    labelIssue(args.config.repo, args.issue.number, 'needs-human-input', args.config.labelReady);
+    if (!labelIssue(args.config.repo, args.issue.number, 'needs-human-input', args.config.labelReady)) {
+      log.error(`Could not label issue #${args.issue.number} needs-human-input`);
+    }
     commentIssue(args.config.repo, args.issue.number, formatAutomationPolicyComment(args.decision));
   } else {
     log.dry(`Would label issue #${args.issue.number} needs-human-input and comment with automation policy reason`);
@@ -734,7 +736,22 @@ async function runEpicVerificationFlow(
 
   commentIssue(config.repo, epicNum, result.comment);
   if (result.verdict === 'pass') {
-    closeIssue(config.repo, epicNum, 'completed');
+    if (!closeIssue(config.repo, epicNum, 'completed')) {
+      const message = `Epic #${epicNum} passed verification but could not be closed`;
+      log.error(message);
+      return {
+        epicNumber: epicNum,
+        status: 'failure',
+        closedEpic: false,
+        verdict: result.verdict,
+        failure: {
+          code: 'epic-verification-failed',
+          message,
+          issueNum: epicNum,
+          exitCode: 1,
+        },
+      };
+    }
     log.success(`Epic #${epicNum} verified and closed`);
     return {
       epicNumber: epicNum,
@@ -743,7 +760,9 @@ async function runEpicVerificationFlow(
       verdict: result.verdict,
     };
   } else {
-    labelIssue(config.repo, epicNum, 'needs-human-input');
+    if (!labelIssue(config.repo, epicNum, 'needs-human-input')) {
+      log.error(`Epic #${epicNum} needs human review but could not be labeled needs-human-input`);
+    }
     log.warn(`Epic #${epicNum} needs human review: verdict=${result.verdict}`);
     return {
       epicNumber: epicNum,
@@ -1503,7 +1522,9 @@ async function executeSessionRun(
             for (const r of results) {
               if (r.status !== 'success' || isRecoveredRunResult(r)) continue;
               try {
-                updateEpicChecklist(config.repo, activeEpic, r.issueNum, true);
+                if (!updateEpicChecklist(config.repo, activeEpic, r.issueNum, true)) {
+                  throw new Error('GitHub rejected the epic body update');
+                }
                 markEpicChecklistItem(epicChecklist, epicPromptContext, r.issueNum, true);
               } catch (err) {
                 const message = `Epic #${activeEpic} checklist update failed for sub-issue #${r.issueNum}: ${err instanceof Error ? err.message : err}`;
@@ -1617,7 +1638,9 @@ async function executeSessionRun(
           // which would otherwise mutate the live epic body.
           if (activeEpic !== undefined && result.status === 'success' && !isRecoveredRunResult(result) && !config.dryRun) {
             try {
-              updateEpicChecklist(config.repo, activeEpic, issue.number, true);
+              if (!updateEpicChecklist(config.repo, activeEpic, issue.number, true)) {
+                throw new Error('GitHub rejected the epic body update');
+              }
               markEpicChecklistItem(epicChecklist, epicPromptContext, issue.number, true);
             } catch (err) {
               const message = `Epic #${activeEpic} checklist update failed for sub-issue #${issue.number}: ${err instanceof Error ? err.message : err}`;
@@ -1668,7 +1691,9 @@ async function executeSessionRun(
           if (activeEpic !== undefined && !config.dryRun) {
             for (const q of quickProcessed) {
               try {
-                updateEpicChecklist(config.repo, activeEpic, q.number, false);
+                if (!updateEpicChecklist(config.repo, activeEpic, q.number, false)) {
+                  throw new Error('GitHub rejected the epic body update');
+                }
                 markEpicChecklistItem(epicChecklist, epicPromptContext, q.number, false);
               } catch (err) {
                 log.warn(`Could not un-flip epic #${activeEpic} checklist for #${q.number}: ${err instanceof Error ? err.message : err}`);

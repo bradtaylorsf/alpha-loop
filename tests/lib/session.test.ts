@@ -26,7 +26,7 @@ jest.mock('../../src/lib/logger', () => ({
 
 jest.mock('../../src/lib/github', () => ({
   createPR: jest.fn(),
-  updateProjectStatus: jest.fn(),
+  updateProjectStatus: jest.fn(() => true),
 }));
 
 jest.mock('../../src/lib/learning', () => ({
@@ -89,6 +89,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     skipLearn: false,
     skipE2e: false,
     autoMerge: false,
+    mergeGate: { requireChecks: true, timeoutSeconds: 900, onTimeout: 'block' },
     mergeTo: '',
     autoCleanup: true,
     runFull: false,

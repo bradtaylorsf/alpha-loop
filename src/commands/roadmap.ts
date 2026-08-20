@@ -249,8 +249,11 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
     }
 
     try {
-      setIssueMilestone(config.repo, assignment.issueNum, assignment.milestone);
-      assigned++;
+      if (setIssueMilestone(config.repo, assignment.issueNum, assignment.milestone)) {
+        assigned++;
+      } else {
+        failures.push(`#${assignment.issueNum}: failed to set milestone "${assignment.milestone}"`);
+      }
     } catch (err) {
       failures.push(`#${assignment.issueNum}: ${(err as Error).message}`);
     }
@@ -261,16 +264,23 @@ export async function roadmapCommand(options: RoadmapOptions): Promise<void> {
     for (const assignment of assignments) {
       if (!selectedNums.includes(assignment.issueNum)) continue;
       try {
-        addIssueToProject(config.repoOwner, config.project, config.repo, assignment.issueNum);
-      } catch {
-        // Project board add is best-effort
+        if (!addIssueToProject(config.repoOwner, config.project, config.repo, assignment.issueNum)) {
+          failures.push(`#${assignment.issueNum}: failed to add issue to project board`);
+        }
+      } catch (err) {
+        failures.push(`#${assignment.issueNum}: failed to add issue to project board: ${(err as Error).message}`);
       }
     }
   }
 
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log('');
-  log.success(`Created ${milestonesCreated} milestone(s), assigned ${assigned} issue(s)`);
+  const summary = `Created ${milestonesCreated} milestone(s), assigned ${assigned} issue(s)`;
+  if (failures.length === 0) {
+    log.success(summary);
+  } else {
+    log.warn(summary);
+  }
 
   if (failures.length > 0) {
     console.log('');

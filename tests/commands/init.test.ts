@@ -740,6 +740,7 @@ describe('init wizard', () => {
     // Defaults retained (lines may have trailing comments)
     expect(content).toMatch(/^agent: claude\b/m);
     expect(content).toMatch(/^auto_merge: true\b/m);
+    expect(content).toContain('merge_gate:\n  require_checks: true\n  timeout_seconds: 900\n  on_timeout: block');
     expect(content).toMatch(/^max_issues: 20\b/m);
   });
 
@@ -818,6 +819,10 @@ describe('init merge logic for existing config', () => {
       'base_branch: main',
       'label: ready',
       'auto_merge: true',
+      'merge_gate:',
+      '  require_checks: true',
+      '  timeout_seconds: 900',
+      '  on_timeout: block',
       'test_command: pnpm test',
       'dev_command: pnpm dev',
       'max_issues: 20',

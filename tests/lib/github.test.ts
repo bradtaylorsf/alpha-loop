@@ -1,11 +1,14 @@
 import {
-  pollIssues, labelIssue, commentIssue, createPR, mergePR,
+  pollIssues, labelIssue, commentIssue, assignIssue, createPR, mergePR,
   createIssue, updateIssue, closeIssue, createMilestone,
   setIssueMilestone, listOpenIssues, addIssueToProject,
   getIssueBody, updateEpicIssueBody, commentChildEpicBacklink,
-  listRoadmapEpics, listEpics, getEpicSubIssues, updateProjectStatus,
+  listRoadmapEpics, listEpics, getEpicSubIssues, updateEpicChecklist, updateProjectStatus,
   getMergedPRForIssue,
 } from '../../src/lib/github';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import ts from 'typescript';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
@@ -32,7 +35,9 @@ jest.mock('../../src/lib/rate-limit', () => {
   const projectKey = (owner: string, projectNum: number) => `${owner}/${projectNum}`;
 
   return {
-    ghExec: jest.fn((cmd: string) => shell.exec(cmd)),
+    ghExec: jest.fn((cmd: string, options?: { cwd?: string; timeout?: number }) => (
+      options ? shell.exec(cmd, options) : shell.exec(cmd)
+    )),
     getProjectCache: jest.fn(
       (owner: string, projectNum: number) => projectCache.get(projectKey(owner, projectNum)) ?? null,
     ),
@@ -149,8 +154,9 @@ describe('pollIssues', () => {
 
 describe('labelIssue', () => {
   test('adds label via gh issue edit', () => {
-    labelIssue('owner/repo', 42, 'in-progress');
+    const updated = labelIssue('owner/repo', 42, 'in-progress');
 
+    expect(updated).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       expect.stringContaining('gh issue edit 42 --repo "owner/repo" --add-label "in-progress"'),
     );
@@ -162,6 +168,24 @@ describe('labelIssue', () => {
     expect(mockExec).toHaveBeenCalledWith(
       expect.stringContaining('--remove-label "ready"'),
     );
+  });
+
+  test('returns false when the label command fails', () => {
+    mockExec.mockReturnValue({ stdout: '', stderr: 'not found', exitCode: 1 });
+
+    expect(labelIssue('owner/repo', 42, 'in-progress')).toBe(false);
+  });
+});
+
+describe('assignIssue', () => {
+  test('returns true when assignment succeeds', () => {
+    expect(assignIssue('owner/repo', 42, '@me')).toBe(true);
+  });
+
+  test('returns false when assignment fails', () => {
+    mockExec.mockReturnValue({ stdout: '', stderr: 'not found', exitCode: 1 });
+
+    expect(assignIssue('owner/repo', 42, '@me')).toBe(false);
   });
 });
 
@@ -243,6 +267,23 @@ describe('createPR', () => {
     );
     expect(editCalls).toHaveLength(1);
     expect(createCalls).toHaveLength(0);
+  });
+
+  test('throws when updating an existing PR fails', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('git push')) return { stdout: '', stderr: '', exitCode: 0 };
+      if (cmd.includes('gh pr list')) {
+        return {
+          stdout: JSON.stringify([{ number: 5, url: 'https://github.com/owner/repo/pull/5' }]),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (cmd.includes('gh pr edit')) return { stdout: '', stderr: 'permission denied', exitCode: 1 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    expect(() => createPR(baseOptions)).toThrow('Failed to update PR #5: permission denied');
   });
 
   test('truncates body at 30k chars', () => {
@@ -535,46 +576,394 @@ describe('createPR', () => {
 });
 
 describe('mergePR', () => {
-  test('merges with squash by default', () => {
+  const blockGate = {
+    requireChecks: true,
+    timeoutSeconds: 60,
+    onTimeout: 'block' as const,
+  };
+  const now = new Date('2026-08-15T19:00:00.000Z');
+
+  function metadata(
+    statusCheckRollup: Array<Record<string, unknown>>,
+    createdAt = now.toISOString(),
+  ): string {
+    return JSON.stringify({ createdAt, statusCheckRollup });
+  }
+
+  function mergedMetadata(): string {
+    return JSON.stringify({ state: 'MERGED', mergedAt: now.toISOString() });
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(now);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('waits for delayed checks to appear and pass before merging', async () => {
+    let viewCount = 0;
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        const checks = viewCount === 0
+          ? []
+          : viewCount < 7
+            ? [{ name: 'CI', status: 'IN_PROGRESS', conclusion: null }]
+            : [{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }];
+        viewCount += 1;
+        return { stdout: metadata(checks), stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+
+    await jest.advanceTimersByTimeAsync(5_000);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+
+    await jest.advanceTimersByTimeAsync(30_000);
+    await expect(mergePromise).resolves.toBe(true);
+    const mergeCall = mockExec.mock.calls.find(([cmd]) => String(cmd).includes('gh pr merge'));
+    expect(mergeCall?.[0]).toContain('--squash');
+    expect(mergeCall?.[0]).toContain('--delete-branch');
+  });
+
+  test('never merges a loop-authored PR in single-digit seconds', async () => {
+    let mergeAgeMs = -1;
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
         return {
-          stdout: JSON.stringify([{ number: 5 }]),
+          stdout: metadata([{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }]),
           stderr: '',
           exitCode: 0,
         };
       }
       if (cmd.includes('gh pr merge')) {
-        return { stdout: '', stderr: '', exitCode: 0 };
+        mergeAgeMs = Date.now() - now.getTime();
       }
       return { stdout: '', stderr: '', exitCode: 0 };
     });
 
-    mergePR('owner/repo', 'agent/issue-42');
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate);
+    await jest.advanceTimersByTimeAsync(9_999);
+    expect(mergeAgeMs).toBe(-1);
+    await jest.advanceTimersByTimeAsync(1);
 
-    const mergeCall = mockExec.mock.calls.find(
-      (call) => typeof call[0] === 'string' && call[0].includes('gh pr merge'),
-    );
-    expect(mergeCall?.[0]).toContain('--squash');
-    expect(mergeCall?.[0]).toContain('--delete-branch');
+    await expect(mergePromise).resolves.toBe(true);
+    expect(mergeAgeMs).toBeGreaterThanOrEqual(10_000);
   });
 
-  test('warns when no PR found', () => {
+  test('blocks immediately when an observed check fails', async () => {
+    let viewCount = 0;
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        const checks = viewCount++ === 0
+          ? [{ name: 'CI', status: 'IN_PROGRESS', conclusion: null }]
+          : [
+            { name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' },
+            { name: 'Tests', status: 'COMPLETED', conclusion: 'FAILURE' },
+          ];
+        return { stdout: metadata(checks), stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate);
+    await jest.advanceTimersByTimeAsync(5_000);
+
+    await expect(mergePromise).resolves.toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+  });
+
+  test.each(['CANCELLED', 'TIMED_OUT'])('blocks on a %s check conclusion', async (conclusion) => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'CI', status: 'COMPLETED', conclusion }]),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate)).resolves.toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+  });
+
+  test.each(['NEUTRAL', 'SKIPPED'])('treats a %s conclusion as a successful terminal check', async (conclusion) => {
+    const oldCreatedAt = new Date(now.getTime() - 20_000).toISOString();
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'Optional job', status: 'COMPLETED', conclusion }], oldCreatedAt),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate)).resolves.toBe(true);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(true);
+  });
+
+  test('blocks after the registration window when no checks appear and checks are required', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return { stdout: metadata([]), stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate);
+    await jest.advanceTimersByTimeAsync(30_000);
+
+    await expect(mergePromise).resolves.toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+  });
+
+  test('permits an empty rollup only when requireChecks is explicitly false', async () => {
+    const oldCreatedAt = new Date(now.getTime() - 20_000).toISOString();
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return { stdout: metadata([], oldCreatedAt), stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', {
+      ...blockGate,
+      requireChecks: false,
+    })).resolves.toBe(true);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(true);
+  });
+
+  test.each([
+    { onTimeout: 'block' as const, expected: false },
+    { onTimeout: 'warn' as const, expected: true },
+  ])('$onTimeout policy returns $expected when checks remain pending at timeout', async ({ onTimeout, expected }) => {
+    const oldCreatedAt = new Date(now.getTime() - 20_000).toISOString();
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'CI', status: 'IN_PROGRESS', conclusion: null }], oldCreatedAt),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', {
+      requireChecks: true,
+      timeoutSeconds: 12,
+      onTimeout,
+    });
+    await jest.advanceTimersByTimeAsync(12_000);
+
+    await expect(mergePromise).resolves.toBe(expected);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(expected);
+  });
+
+  test('on_timeout warn cannot recreate a single-digit merge', async () => {
+    let mergeAgeMs = -1;
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return { stdout: mergedMetadata(), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'CI', status: 'IN_PROGRESS', conclusion: null }]),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (cmd.includes('gh pr merge')) {
+        mergeAgeMs = Date.now() - now.getTime();
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', {
+      requireChecks: true,
+      timeoutSeconds: 1,
+      onTimeout: 'warn',
+    });
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(mergeAgeMs).toBe(-1);
+
+    await jest.advanceTimersByTimeAsync(8_999);
+    expect(mergeAgeMs).toBe(-1);
+    await jest.advanceTimersByTimeAsync(1);
+
+    await expect(mergePromise).resolves.toBe(true);
+    expect(mergeAgeMs).toBeGreaterThanOrEqual(10_000);
+  });
+
+  test('blocks query and parse uncertainty on timeout by default', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return { stdout: 'not-json', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', {
+      ...blockGate,
+      timeoutSeconds: 10,
+    });
+    await jest.advanceTimersByTimeAsync(10_000);
+
+    await expect(mergePromise).resolves.toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('gh pr merge'))).toBe(false);
+  });
+
+  test('bounds each check query by the remaining merge-gate deadline', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return { stdout: metadata([]), stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    const mergePromise = mergePR('owner/repo', 'agent/issue-42', 'squash', {
+      ...blockGate,
+      timeoutSeconds: 10,
+    });
+    const checkQuery = mockExec.mock.calls.find(([cmd]) => String(cmd).includes('statusCheckRollup'));
+
+    expect(checkQuery?.[1]).toEqual({ timeout: 10_000 });
+    await jest.advanceTimersByTimeAsync(10_000);
+    await expect(mergePromise).resolves.toBe(false);
+  });
+
+  test('returns false when no PR is found', async () => {
     mockExec.mockReturnValue({ stdout: '[]', stderr: '', exitCode: 0 });
 
     const { log: mockLog } = require('../../src/lib/logger');
-    mergePR('owner/repo', 'agent/issue-42');
+    const merged = await mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate);
 
+    expect(merged).toBe(false);
     expect(mockLog.warn).toHaveBeenCalledWith(
       expect.stringContaining('No PR found'),
     );
+  });
+
+  test.each([
+    { stdout: '', stderr: 'lookup failed', exitCode: 1 },
+    { stdout: 'not-json', stderr: '', exitCode: 0 },
+    { stdout: '[{}]', stderr: '', exitCode: 0 },
+  ])('returns false when PR lookup cannot identify a PR', async (lookupResult) => {
+    mockExec.mockReturnValue(lookupResult);
+
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate)).resolves.toBe(false);
+  });
+
+  test('returns false when the merge command fails after checks pass', async () => {
+    const oldCreatedAt = new Date(now.getTime() - 20_000).toISOString();
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }], oldCreatedAt),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (cmd.includes('gh pr merge')) {
+        return { stdout: '', stderr: 'merge rejected', exitCode: 1 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate)).resolves.toBe(false);
+  });
+
+  test('returns false when the merge command exits zero but the PR remains open', async () => {
+    const oldCreatedAt = new Date(now.getTime() - 20_000).toISOString();
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh pr list')) {
+        return { stdout: JSON.stringify([{ number: 5 }]), stderr: '', exitCode: 0 };
+      }
+      if (cmd.includes('--json state,mergedAt')) {
+        return {
+          stdout: JSON.stringify({ state: 'OPEN', mergedAt: null }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (cmd.includes('gh pr view')) {
+        return {
+          stdout: metadata([{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }], oldCreatedAt),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(mergePR('owner/repo', 'agent/issue-42', 'squash', blockGate)).resolves.toBe(false);
   });
 });
 
 describe('updateProjectStatus', () => {
   test('returns without gh calls when project number is not configured', () => {
-    updateProjectStatus('owner/repo', 0, 'owner', 42, 'In progress');
-    updateProjectStatus('owner/repo', -1, 'owner', 42, 'In Review');
+    expect(updateProjectStatus('owner/repo', 0, 'owner', 42, 'In progress')).toBe(true);
+    expect(updateProjectStatus('owner/repo', -1, 'owner', 42, 'In Review')).toBe(true);
 
     expect(mockExec).not.toHaveBeenCalled();
   });
@@ -641,7 +1030,7 @@ describe('updateProjectStatus', () => {
       return { stdout: '', stderr: '', exitCode: 1 };
     });
 
-    updateProjectStatus('owner/repo', 2, 'owner', 42, 'In progress');
+    const updated = updateProjectStatus('owner/repo', 2, 'owner', 42, 'In progress');
 
     const commands = mockExec.mock.calls.map(([cmd]) => cmd as string);
     const { log: mockLog } = require('../../src/lib/logger');
@@ -657,6 +1046,14 @@ describe('updateProjectStatus', () => {
     );
     expect(mockLog.warn).not.toHaveBeenCalled();
     expect(mockLog.info).toHaveBeenCalledWith('Project board: #42 -> In progress');
+    expect(updated).toBe(true);
+  });
+
+  test('returns false when project metadata cannot be resolved', () => {
+    mockExec.mockReturnValue({ stdout: '', stderr: 'missing project scope', exitCode: 1 });
+
+    expect(updateProjectStatus('owner/repo', 2, 'owner', 42, 'In progress')).toBe(false);
+    expect(updateProjectStatus('owner/repo', 2, 'owner', 43, 'In Review')).toBe(false);
   });
 });
 
@@ -959,31 +1356,84 @@ describe('epic issue helpers', () => {
       expect.stringContaining('gh issue comment 12 --repo "owner/repo"'),
     );
   });
+
+  test('updateEpicChecklist returns false when the delegated body update fails', () => {
+    mockExec
+      .mockReturnValueOnce({
+        stdout: JSON.stringify({
+          number: 99,
+          title: 'Existing epic',
+          body: '- [ ] #12 Child issue',
+          labels: [{ name: 'epic' }],
+          comments: [],
+        }),
+        stderr: '',
+        exitCode: 0,
+      })
+      .mockReturnValueOnce({ stdout: '', stderr: 'permission denied', exitCode: 1 });
+
+    expect(updateEpicChecklist('owner/repo', 99, 12, true)).toBe(false);
+  });
+
+  test('updateEpicChecklist returns true when the item is already in the requested state', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify({
+        number: 99,
+        title: 'Existing epic',
+        body: '- [x] #12 Child issue',
+        labels: [{ name: 'epic' }],
+        comments: [],
+      }),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    expect(updateEpicChecklist('owner/repo', 99, 12, true)).toBe(true);
+    expect(mockExec).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('closeIssue', () => {
-  test('closes issue without reason', () => {
-    closeIssue('owner/repo', 42);
+  beforeEach(() => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('gh issue view')) {
+        return { stdout: 'CLOSED\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+  });
 
+  test('closes issue without reason', () => {
+    const closed = closeIssue('owner/repo', 42);
+
+    expect(closed).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       'gh issue close 42 --repo "owner/repo"',
     );
   });
 
-  test('closes issue with reason', () => {
-    closeIssue('owner/repo', 42, 'not_planned');
+  test('maps not_planned to the supported CLI reason', () => {
+    expect(closeIssue('owner/repo', 42, 'not_planned')).toBe(true);
 
     expect(mockExec).toHaveBeenCalledWith(
-      expect.stringContaining('--reason "not_planned"'),
+      expect.stringContaining('--reason "not planned"'),
     );
   });
 
-  test('warns on failure', () => {
+  test('returns false when the close command fails', () => {
     mockExec.mockReturnValue({ stdout: '', stderr: 'error', exitCode: 1 });
 
     const { log: mockLog } = require('../../src/lib/logger');
-    closeIssue('owner/repo', 42);
+    expect(closeIssue('owner/repo', 42)).toBe(false);
     expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to close issue'));
+  });
+
+  test('returns false when the issue remains open after the command succeeds', () => {
+    mockExec
+      .mockReturnValueOnce({ stdout: '', stderr: '', exitCode: 0 })
+      .mockReturnValueOnce({ stdout: 'OPEN\n', stderr: '', exitCode: 0 });
+
+    expect(closeIssue('owner/repo', 42)).toBe(false);
   });
 });
 
@@ -1034,18 +1484,19 @@ describe('createMilestone', () => {
 
 describe('setIssueMilestone', () => {
   test('sets milestone via CLI', () => {
-    setIssueMilestone('owner/repo', 42, 'v1.0 Core');
+    const updated = setIssueMilestone('owner/repo', 42, 'v1.0 Core');
 
+    expect(updated).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       'gh issue edit 42 --repo "owner/repo" --milestone "v1.0 Core"',
     );
   });
 
-  test('warns on failure', () => {
+  test('returns false on failure', () => {
     mockExec.mockReturnValue({ stdout: '', stderr: 'error', exitCode: 1 });
 
     const { log: mockLog } = require('../../src/lib/logger');
-    setIssueMilestone('owner/repo', 42, 'v1.0 Core');
+    expect(setIssueMilestone('owner/repo', 42, 'v1.0 Core')).toBe(false);
     expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to set milestone'));
   });
 });
@@ -1126,19 +1577,98 @@ describe('listOpenIssues', () => {
 
 describe('addIssueToProject', () => {
   test('adds issue to project with correct URL', () => {
-    addIssueToProject('owner', 7, 'owner/repo', 42);
+    const added = addIssueToProject('owner', 7, 'owner/repo', 42);
 
+    expect(added).toBe(true);
     expect(mockExec).toHaveBeenCalledWith(
       'gh project item-add 7 --owner "owner" --url "https://github.com/owner/repo/issues/42"',
     );
   });
 
-  test('warns on failure', () => {
+  test('returns false on failure', () => {
     mockExec.mockReturnValue({ stdout: '', stderr: 'error', exitCode: 1 });
 
     const { log: mockLog } = require('../../src/lib/logger');
-    addIssueToProject('owner', 7, 'owner/repo', 42);
+    expect(addIssueToProject('owner', 7, 'owner/repo', 42)).toBe(false);
     expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to add issue'));
+  });
+});
+
+describe('mutation wrapper contracts', () => {
+  function voidGhExecWrappers(sourceText: string, fileName = 'github.ts'): string[] {
+    const sourceFile = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true);
+    const offenders: string[] = [];
+
+    const containsGhExec = (node: ts.Node): boolean => {
+      let found = false;
+      const visit = (child: ts.Node): void => {
+        if (found) return;
+        if (
+          ts.isCallExpression(child)
+          && ts.isIdentifier(child.expression)
+          && child.expression.text === 'ghExec'
+        ) {
+          found = true;
+          return;
+        }
+        ts.forEachChild(child, visit);
+      };
+      ts.forEachChild(node, visit);
+      return found;
+    };
+
+    const containsVoid = (type: ts.TypeNode | undefined): boolean => {
+      if (!type) return true;
+      let found = false;
+      const visit = (node: ts.Node): void => {
+        if (node.kind === ts.SyntaxKind.VoidKeyword || node.kind === ts.SyntaxKind.UndefinedKeyword) {
+          found = true;
+          return;
+        }
+        if (!found) ts.forEachChild(node, visit);
+      };
+      visit(type);
+      return found;
+    };
+
+    const isExported = (node: ts.Node & { modifiers?: ts.NodeArray<ts.ModifierLike> }): boolean => (
+      Boolean(node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword))
+    );
+
+    for (const statement of sourceFile.statements) {
+      if (ts.isFunctionDeclaration(statement) && statement.name && statement.body && isExported(statement)) {
+        if (containsGhExec(statement.body) && containsVoid(statement.type)) {
+          offenders.push(statement.name.text);
+        }
+        continue;
+      }
+
+      if (!ts.isVariableStatement(statement) || !isExported(statement)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+        if (!ts.isArrowFunction(declaration.initializer) && !ts.isFunctionExpression(declaration.initializer)) continue;
+        if (containsGhExec(declaration.initializer.body) && containsVoid(declaration.initializer.type)) {
+          offenders.push(declaration.name.text);
+        }
+      }
+    }
+
+    return offenders;
+  }
+
+  test('exported ghExec wrappers declare a non-void result', () => {
+    const fileName = resolve(process.cwd(), 'src/lib/github.ts');
+    expect(voidGhExecWrappers(readFileSync(fileName, 'utf-8'), fileName)).toEqual([]);
+  });
+
+  test.each([
+    ['function declaration', 'export function mutate(): void { ghExec("gh issue edit 1"); }'],
+    ['async function', 'export async function mutate(): Promise<void> { ghExec("gh issue edit 1", undefined, true); }'],
+    ['void union', 'export function mutate(): boolean | void { ghExec("gh issue edit 1", undefined, true); }'],
+    ['arrow function', 'export const mutate = (): void => { ghExec("gh issue edit 1", undefined, true); };'],
+    ['inferred result', 'export const mutate = () => { ghExec("gh issue edit 1", undefined, true); };'],
+  ])('rejects a void ghExec wrapper expressed as a %s', (_shape, sourceText) => {
+    expect(voidGhExecWrappers(sourceText)).toEqual(['mutate']);
   });
 });
 

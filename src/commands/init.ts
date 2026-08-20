@@ -243,6 +243,11 @@ agent: ${answers.agent}
 base_branch: ${answers.baseBranch}
 label: ready                  # Issues with this label are queued for the loop
 auto_merge: ${answers.autoMerge}            # Auto-merge PRs to session branch when checks pass
+# GitHub check gate for issue PRs. Empty rollups block by default.
+merge_gate:
+  require_checks: true
+  timeout_seconds: 900
+  on_timeout: block
 # merge_to: ""                # Reuse an existing session branch instead of creating one
 # auto_cleanup: true          # Delete worktrees and branches after success
 # prefer_epics: false         # Auto-pick a single open epic instead of prompting

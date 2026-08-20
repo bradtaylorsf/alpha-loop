@@ -8,6 +8,7 @@ import { exec, shellQuote } from './shell.js';
 import { ghExec, getProjectCache, setProjectCache } from './rate-limit.js';
 import { log } from './logger.js';
 import { labelName } from './labels.js';
+import { DEFAULT_MERGE_GATE_CONFIG, type MergeGateConfig } from './config.js';
 import {
   findUnparsedSubIssueChecklistLines,
   flipChecklistItem,
@@ -17,6 +18,10 @@ import {
 
 /** Max PR body length. GitHub supports 65536 but we leave room for metadata. */
 const MAX_PR_BODY_CHARS = 60_000;
+const CHECK_POLL_INTERVAL_MS = 5_000;
+const CHECK_REGISTRATION_TIMEOUT_MS = 30_000;
+const MIN_PR_AGE_BEFORE_MERGE_MS = 10_000;
+const MERGE_CONFIRM_TIMEOUT_MS = 15_000;
 
 export type Comment = {
   author: string;
@@ -223,7 +228,7 @@ function pollIssuesByLabel(repo: string, label: string, limit: number, milestone
 /**
  * Add/remove labels on an issue.
  */
-export function labelIssue(repo: string, issueNum: number, addLabel: string, removeLabel?: string): void {
+export function labelIssue(repo: string, issueNum: number, addLabel: string, removeLabel?: string): boolean {
   const args = [`gh issue edit ${issueNum} --repo "${repo}" --add-label "${addLabel}"`];
   if (removeLabel) {
     args[0] += ` --remove-label "${removeLabel}"`;
@@ -231,7 +236,9 @@ export function labelIssue(repo: string, issueNum: number, addLabel: string, rem
   const result = ghExec(args[0], undefined, true);
   if (result.exitCode !== 0) {
     log.warn(`Failed to update labels on issue #${issueNum}: ${result.stderr}`);
+    return false;
   }
+  return true;
 }
 
 /**
@@ -262,14 +269,16 @@ export function commentIssue(repo: string, issueNum: number, body: string): bool
 /**
  * Assign an issue to a user.
  */
-export function assignIssue(repo: string, issueNum: number, assignee: string): void {
+export function assignIssue(repo: string, issueNum: number, assignee: string): boolean {
   const result = ghExec(
     `gh issue edit ${issueNum} --repo "${repo}" --add-assignee "${assignee}"`,
     undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to assign issue #${issueNum} to ${assignee}: ${result.stderr}`);
+    return false;
   }
+  return true;
 }
 
 export type CreatePROptions = {
@@ -398,16 +407,24 @@ export function createPR(options: CreatePROptions): string {
       `gh pr list --repo ${shellQuote(repo)} --head ${quotedHead} --json number,url --limit 1`,
     );
     if (existingResult.exitCode === 0 && existingResult.stdout) {
+      let existing: Array<{ number: number; url: string }> = [];
       try {
-        const existing = JSON.parse(existingResult.stdout) as Array<{ number: number; url: string }>;
-        if (existing.length > 0) {
-          const prUrl = existing[0].url;
-          log.info(`PR already exists: ${prUrl}, updating...`);
-          ghExec(`gh pr edit ${existing[0].number} --repo ${shellQuote(repo)} --base ${shellQuote(base)} --title ${shellQuote(title)} --body-file ${shellQuote(bodyFile)}`, undefined, true);
-          return prUrl;
-        }
+        existing = JSON.parse(existingResult.stdout) as Array<{ number: number; url: string }>;
       } catch {
         // Fall through to create
+      }
+      if (existing.length > 0) {
+        const prUrl = existing[0].url;
+        log.info(`PR already exists: ${prUrl}, updating...`);
+        const editResult = ghExec(
+          `gh pr edit ${existing[0].number} --repo ${shellQuote(repo)} --base ${shellQuote(base)} --title ${shellQuote(title)} --body-file ${shellQuote(bodyFile)}`,
+          undefined,
+          true,
+        );
+        if (editResult.exitCode !== 0) {
+          throw new Error(`Failed to update PR #${existing[0].number}: ${editResult.stderr}`);
+        }
+        return prUrl;
       }
     }
 
@@ -426,17 +443,254 @@ export function createPR(options: CreatePROptions): string {
   }
 }
 
+type StatusCheck = {
+  name?: string;
+  context?: string;
+  status?: string | null;
+  conclusion?: string | null;
+  state?: string | null;
+};
+
+type PRCheckSnapshot = {
+  createdAt: number;
+  checks: StatusCheck[];
+};
+
+type CheckState = 'success' | 'pending' | 'failure';
+
+// GitHub treats neutral and skipped checks as successful terminal results for
+// merge requirements. Blocking them would strand PRs whose CI intentionally
+// skips an optional job.
+const SUCCESS_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
+const PENDING_STATES = new Set(['EXPECTED', 'PENDING', 'QUEUED', 'IN_PROGRESS', 'REQUESTED', 'WAITING']);
+const FAILURE_STATES = new Set([
+  'ACTION_REQUIRED',
+  'CANCELLED',
+  'ERROR',
+  'FAILURE',
+  'STALE',
+  'STARTUP_FAILURE',
+  'TIMED_OUT',
+]);
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function checkName(check: StatusCheck): string {
+  return check.name || check.context || 'unnamed check';
+}
+
+function normalizeCheckState(check: StatusCheck): CheckState {
+  const conclusion = check.conclusion?.toUpperCase();
+  if (conclusion) {
+    if (SUCCESS_STATES.has(conclusion)) return 'success';
+    if (FAILURE_STATES.has(conclusion)) return 'failure';
+    return 'pending';
+  }
+
+  const state = check.state?.toUpperCase();
+  if (state) {
+    if (SUCCESS_STATES.has(state)) return 'success';
+    if (FAILURE_STATES.has(state)) return 'failure';
+    if (PENDING_STATES.has(state)) return 'pending';
+  }
+
+  // CheckRun.status becomes COMPLETED before GitHub consistently exposes its
+  // conclusion. A bare COMPLETED value is therefore inconclusive, not green.
+  const status = check.status?.toUpperCase();
+  if (status && FAILURE_STATES.has(status)) return 'failure';
+  return 'pending';
+}
+
+function fetchPRCheckSnapshot(repo: string, prNum: number, timeoutMs: number): PRCheckSnapshot | null {
+  const result = ghExec(
+    `gh pr view ${prNum} --repo ${shellQuote(repo)} --json createdAt,statusCheckRollup`,
+    { timeout: timeoutMs },
+  );
+  if (result.exitCode !== 0 || !result.stdout) {
+    const detail = result.stderr.trim();
+    log.warn(`Could not read checks for PR #${prNum}${detail ? `: ${detail}` : ''}`);
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(result.stdout) as {
+      createdAt?: string;
+      statusCheckRollup?: unknown;
+    };
+    const createdAt = Date.parse(parsed.createdAt ?? '');
+    if (!Number.isFinite(createdAt) || !Array.isArray(parsed.statusCheckRollup)) {
+      log.warn(`Could not parse check status for PR #${prNum}`);
+      return null;
+    }
+    return {
+      createdAt,
+      checks: parsed.statusCheckRollup.filter(
+        (check): check is StatusCheck => Boolean(check) && typeof check === 'object',
+      ),
+    };
+  } catch {
+    log.warn(`Could not parse check status for PR #${prNum}`);
+    return null;
+  }
+}
+
+async function waitForMergeGate(
+  repo: string,
+  prNum: number,
+  gate: MergeGateConfig,
+): Promise<boolean> {
+  const startedAt = Date.now();
+  const deadline = startedAt + gate.timeoutSeconds * 1_000;
+  const registrationDeadline = Math.min(deadline, startedAt + CHECK_REGISTRATION_TIMEOUT_MS);
+  let sawChecks = false;
+  let loggedWaiting = false;
+  let loggedTimeoutAgeDelay = false;
+
+  while (true) {
+    // A synchronous gh call without a timeout could exceed both the initial
+    // registration window and the overall gate deadline. Bound it by the
+    // closest applicable deadline so network stalls fail closed.
+    const queryDeadline = !sawChecks && gate.requireChecks
+      ? Math.min(deadline, registrationDeadline)
+      : deadline;
+    const snapshot = fetchPRCheckSnapshot(
+      repo,
+      prNum,
+      Math.max(1, queryDeadline - Date.now()),
+    );
+    const now = Date.now();
+
+    if (snapshot) {
+      if (snapshot.checks.length === 0) {
+        if (!gate.requireChecks) {
+          const ageMs = now - snapshot.createdAt;
+          if (ageMs >= MIN_PR_AGE_BEFORE_MERGE_MS) {
+            log.warn(`PR #${prNum} has no checks; merging because merge_gate.require_checks is false`);
+            return true;
+          }
+        } else if (now >= registrationDeadline) {
+          log.error(
+            `Blocking merge for PR #${prNum}: no checks appeared within ${Math.ceil((registrationDeadline - startedAt) / 1_000)}s and merge_gate.require_checks is true`,
+          );
+          return false;
+        }
+      } else {
+        if (!sawChecks) {
+          log.info(`Merge gate found ${snapshot.checks.length} check(s) for PR #${prNum}; waiting for completion`);
+          sawChecks = true;
+        }
+        const states = snapshot.checks.map((check) => ({ check, state: normalizeCheckState(check) }));
+        const failed = states.filter(({ state }) => state === 'failure');
+        if (failed.length > 0) {
+          const detail = failed.map(({ check }) => {
+            const result = check.conclusion || check.state || check.status || 'UNKNOWN';
+            return `${checkName(check)}=${result}`;
+          }).join(', ');
+          log.error(`Blocking merge for PR #${prNum}: checks did not pass (${detail})`);
+          return false;
+        }
+
+        if (states.every(({ state }) => state === 'success')) {
+          const ageMs = now - snapshot.createdAt;
+          if (ageMs >= MIN_PR_AGE_BEFORE_MERGE_MS) {
+            log.info(`All ${states.length} check(s) passed for PR #${prNum}`);
+            return true;
+          }
+        }
+      }
+    }
+
+    if (now >= deadline) {
+      if (gate.onTimeout === 'warn') {
+        // Even the explicit fail-open policy must not recreate the observable
+        // single-digit merge signature. Continue polling during this short
+        // delay so a terminal failure can still block the merge.
+        const ageReference = Math.min(snapshot?.createdAt ?? startedAt, startedAt);
+        const earliestMergeAt = ageReference + MIN_PR_AGE_BEFORE_MERGE_MS;
+        if (now < earliestMergeAt) {
+          if (!loggedTimeoutAgeDelay) {
+            log.warn(
+              `Merge gate timed out after ${gate.timeoutSeconds}s for PR #${prNum}; delaying the fail-open merge until the PR is at least ${MIN_PR_AGE_BEFORE_MERGE_MS / 1_000}s old`,
+            );
+            loggedTimeoutAgeDelay = true;
+          }
+          await sleep(Math.max(1, Math.min(CHECK_POLL_INTERVAL_MS, earliestMergeAt - now)));
+          continue;
+        }
+        log.warn(
+          `Merge gate timed out after ${gate.timeoutSeconds}s for PR #${prNum}; proceeding because merge_gate.on_timeout is warn`,
+        );
+        return true;
+      }
+      log.error(
+        `Blocking merge for PR #${prNum}: checks did not conclude within ${gate.timeoutSeconds}s`,
+      );
+      return false;
+    }
+
+    if (!loggedWaiting) {
+      log.info(`Waiting up to ${gate.timeoutSeconds}s for checks on PR #${prNum}`);
+      loggedWaiting = true;
+    }
+    let nextBoundary = deadline;
+    if (snapshot?.checks.length === 0 && gate.requireChecks) {
+      nextBoundary = Math.min(nextBoundary, registrationDeadline);
+    }
+    if (snapshot && (
+      snapshot.checks.length === 0 && !gate.requireChecks
+      || snapshot.checks.length > 0 && snapshot.checks.every((check) => normalizeCheckState(check) === 'success')
+    )) {
+      nextBoundary = Math.min(nextBoundary, snapshot.createdAt + MIN_PR_AGE_BEFORE_MERGE_MS);
+    }
+    await sleep(Math.max(1, Math.min(CHECK_POLL_INTERVAL_MS, nextBoundary - now)));
+  }
+}
+
+function confirmPRMerged(repo: string, prNum: number): boolean {
+  const result = ghExec(
+    `gh pr view ${prNum} --repo ${shellQuote(repo)} --json state,mergedAt`,
+    { timeout: MERGE_CONFIRM_TIMEOUT_MS },
+  );
+  if (result.exitCode !== 0 || !result.stdout) {
+    const detail = result.stderr.trim();
+    log.error(`Could not verify that PR #${prNum} merged${detail ? `: ${detail}` : ''}`);
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(result.stdout) as { state?: string; mergedAt?: string | null };
+    if (parsed.state?.toUpperCase() === 'MERGED' && parsed.mergedAt) {
+      return true;
+    }
+  } catch {
+    // Fall through to the fail-closed diagnostic below.
+  }
+
+  log.error(
+    `Merge command completed for PR #${prNum}, but GitHub does not report it as merged; leaving recovery state intact`,
+  );
+  return false;
+}
+
 /**
- * Merge a PR by branch name.
+ * Wait for GitHub checks, then merge a PR by branch name when the gate permits.
  */
-export function mergePR(repo: string, head: string, method: 'squash' | 'merge' = 'squash'): void {
+export async function mergePR(
+  repo: string,
+  head: string,
+  method: 'squash' | 'merge' = 'squash',
+  gate: MergeGateConfig = DEFAULT_MERGE_GATE_CONFIG,
+): Promise<boolean> {
   // Find the PR number by branch
   const listResult = ghExec(
-    `gh pr list --repo "${repo}" --head "${head}" --json number --limit 1`,
+    `gh pr list --repo ${shellQuote(repo)} --head ${shellQuote(head)} --json number --limit 1`,
   );
   if (listResult.exitCode !== 0 || !listResult.stdout) {
-    log.warn(`No PR found to merge for branch ${head}`);
-    return;
+    const detail = listResult.stderr.trim();
+    log.warn(`No PR found to merge for branch ${head}${detail ? `: ${detail}` : ''}`);
+    return false;
   }
 
   let prNum: number;
@@ -444,23 +698,36 @@ export function mergePR(repo: string, head: string, method: 'squash' | 'merge' =
     const prs = JSON.parse(listResult.stdout) as Array<{ number: number }>;
     if (prs.length === 0) {
       log.warn(`No PR found to merge for branch ${head}`);
-      return;
+      return false;
+    }
+    if (!Number.isInteger(prs[0]?.number)) {
+      log.warn('Failed to parse PR list');
+      return false;
     }
     prNum = prs[0].number;
   } catch {
     log.warn('Failed to parse PR list');
-    return;
+    return false;
+  }
+
+  if (!await waitForMergeGate(repo, prNum, gate)) {
+    return false;
   }
 
   const mergeFlag = method === 'squash' ? '--squash' : '--merge';
   const result = ghExec(
-    `gh pr merge ${prNum} --repo "${repo}" ${mergeFlag} --delete-branch`,
+    `gh pr merge ${prNum} --repo ${shellQuote(repo)} ${mergeFlag} --delete-branch`,
     undefined, true,
   );
   if (result.exitCode !== 0) {
-    throw new Error(`Failed to merge PR #${prNum}: ${result.stderr}`);
+    log.warn(`Failed to merge PR #${prNum}: ${result.stderr}`);
+    return false;
+  }
+  if (!confirmPRMerged(repo, prNum)) {
+    return false;
   }
   log.info(`PR #${prNum} merged`);
+  return true;
 }
 
 function projectFailureReason(message: string, detail?: string): string {
@@ -488,15 +755,15 @@ export function updateProjectStatus(
   owner: string,
   issueNum: number,
   status: string,
-): void {
+): boolean {
   if (!projectNum || projectNum <= 0) {
-    return;
+    return true;
   }
 
   // ── Resolve project metadata (cached on success, disabled on failure) ─
   let cache = getProjectCache(owner, projectNum);
   if (cache?.disabled) {
-    return;
+    return false;
   }
 
   if (!cache) {
@@ -510,7 +777,7 @@ export function updateProjectStatus(
         projectNum,
         projectFailureReason('Could not list project fields', fieldResult.stderr),
       );
-      return;
+      return false;
     }
 
     let fieldId: string | undefined;
@@ -532,12 +799,12 @@ export function updateProjectStatus(
       }
     } catch {
       disableProjectStatus(owner, projectNum, 'Failed to parse project fields');
-      return;
+      return false;
     }
 
     if (!fieldId || optionMap.size === 0) {
       disableProjectStatus(owner, projectNum, 'Could not resolve project Status field');
-      return;
+      return false;
     }
 
     // Fetch project ID
@@ -550,7 +817,7 @@ export function updateProjectStatus(
         projectNum,
         projectFailureReason('Could not view project', projectResult.stderr),
       );
-      return;
+      return false;
     }
 
     let projectId: string | undefined;
@@ -559,12 +826,12 @@ export function updateProjectStatus(
       projectId = data.id;
     } catch {
       disableProjectStatus(owner, projectNum, 'Failed to parse project data');
-      return;
+      return false;
     }
 
     if (!projectId) {
       disableProjectStatus(owner, projectNum, 'Could not get project ID');
-      return;
+      return false;
     }
 
     cache = { projectId, fieldId, optionMap };
@@ -573,14 +840,14 @@ export function updateProjectStatus(
   }
 
   if (cache.disabled) {
-    return;
+    return false;
   }
 
   // ── Resolve option ID for the requested status ──────────────────────
   const optionId = cache.optionMap.get(status);
   if (!optionId) {
     disableProjectStatus(owner, projectNum, `Could not resolve project option for status '${status}'`);
-    return;
+    return false;
   }
 
   // ── Find the item ID for this issue ─────────────────────────────────
@@ -598,7 +865,7 @@ export function updateProjectStatus(
       projectNum,
       projectFailureReason(`Could not resolve project item for #${issueNum}`, itemResult.stderr),
     );
-    return;
+    return false;
   }
 
   let itemId: string | undefined;
@@ -607,12 +874,12 @@ export function updateProjectStatus(
     itemId = data.id;
   } catch {
     disableProjectStatus(owner, projectNum, 'Failed to parse project item response');
-    return;
+    return false;
   }
 
   if (!itemId) {
     disableProjectStatus(owner, projectNum, `Could not find project item for issue #${issueNum}`);
-    return;
+    return false;
   }
 
   // ── Update the item ─────────────────────────────────────────────────
@@ -626,10 +893,11 @@ export function updateProjectStatus(
       projectNum,
       projectFailureReason(`Failed to update project status for #${issueNum}`, editResult.stderr),
     );
-    return;
+    return false;
   }
 
   log.info(`Project board: #${issueNum} -> ${status}`);
+  return true;
 }
 
 /**
@@ -687,18 +955,47 @@ export function updateIssue(repo: string, issueNum: number, updates: { title?: s
   }
 }
 
+const CLI_REASON = {
+  completed: 'completed',
+  not_planned: 'not planned',
+  duplicate: 'duplicate',
+} as const;
+
 /**
- * Close an issue with an optional reason.
+ * Close an issue with an optional reason and verify that it is closed.
  */
-export function closeIssue(repo: string, issueNum: number, reason?: 'completed' | 'not_planned'): void {
-  const reasonFlag = reason ? ` --reason "${reason}"` : '';
+export function closeIssue(
+  repo: string,
+  issueNum: number,
+  reason?: keyof typeof CLI_REASON,
+  duplicateOf?: number,
+): boolean {
+  const reasonFlag = reason ? ` --reason "${CLI_REASON[reason]}"` : '';
+  const duplicateFlag = duplicateOf != null ? ` --duplicate-of ${duplicateOf}` : '';
   const result = ghExec(
-    `gh issue close ${issueNum} --repo "${repo}"${reasonFlag}`,
+    `gh issue close ${issueNum} --repo "${repo}"${reasonFlag}${duplicateFlag}`,
     undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to close issue #${issueNum}: ${result.stderr}`);
+    return false;
   }
+
+  const stateResult = ghExec(
+    `gh issue view ${issueNum} --repo "${repo}" --json state --jq .state`,
+  );
+  if (stateResult.exitCode !== 0) {
+    log.warn(`Failed to verify issue #${issueNum} state after close: ${stateResult.stderr}`);
+    return false;
+  }
+
+  const state = stateResult.stdout.trim().toUpperCase();
+  if (state !== 'CLOSED') {
+    log.warn(`Issue #${issueNum} remains ${state || 'in an unknown state'} after close command`);
+    return false;
+  }
+
+  return true;
 }
 
 /**
@@ -762,14 +1059,16 @@ export function createMilestone(repo: string, title: string, description: string
 /**
  * Assign an issue to a milestone by title.
  */
-export function setIssueMilestone(repo: string, issueNum: number, milestoneTitle: string): void {
+export function setIssueMilestone(repo: string, issueNum: number, milestoneTitle: string): boolean {
   const result = ghExec(
     `gh issue edit ${issueNum} --repo "${repo}" --milestone ${JSON.stringify(milestoneTitle)}`,
     undefined, true,
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to set milestone on issue #${issueNum}: ${result.stderr}`);
+    return false;
   }
+  return true;
 }
 
 /**
@@ -1031,7 +1330,7 @@ export function commentChildEpicBacklink(repo: string, childIssueNum: number, ep
 /**
  * Add an issue to a GitHub Project v2.
  */
-export function addIssueToProject(owner: string, projectNum: number, repo: string, issueNum: number): void {
+export function addIssueToProject(owner: string, projectNum: number, repo: string, issueNum: number): boolean {
   const issueUrl = `https://github.com/${repo}/issues/${issueNum}`;
   const result = ghExec(
     `gh project item-add ${projectNum} --owner "${owner}" --url "${issueUrl}"`,
@@ -1039,7 +1338,9 @@ export function addIssueToProject(owner: string, projectNum: number, repo: strin
   );
   if (result.exitCode !== 0) {
     log.warn(`Failed to add issue #${issueNum} to project: ${result.stderr}`);
+    return false;
   }
+  return true;
 }
 
 /**
@@ -1102,7 +1403,7 @@ export function getEpicSubIssues(repo: string, epicNum: number): SubIssueRef[] {
  * either external mutation since this session started or a bug — either way,
  * loud failure, not silent drift.
  */
-export function updateEpicChecklist(repo: string, epicNum: number, subIssueNum: number, checked: boolean): void {
+export function updateEpicChecklist(repo: string, epicNum: number, subIssueNum: number, checked: boolean): boolean {
   const epic = getIssueWithComments(repo, epicNum);
   if (!epic) {
     throw new Error(`updateEpicChecklist: could not fetch epic #${epicNum}`);
@@ -1116,9 +1417,9 @@ export function updateEpicChecklist(repo: string, epicNum: number, subIssueNum: 
   const newBody = flipChecklistItem(epic.body, subIssueNum, checked);
   if (newBody === epic.body) {
     // Already in the requested state — no-op.
-    return;
+    return true;
   }
-  updateIssue(repo, epicNum, { body: newBody });
+  return updateIssue(repo, epicNum, { body: newBody });
 }
 
 type ClosingPullRequest = {
