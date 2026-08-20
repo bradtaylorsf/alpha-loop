@@ -58,6 +58,7 @@ import {
   type FeedbackClassification,
 } from '../lib/session-state.js';
 import { emitLifecycleEvent } from '../lib/events.js';
+import { conventionalTitle } from '../lib/conventional-commits.js';
 
 export type ResumeOptions = {
   issue?: string;
@@ -309,18 +310,24 @@ function prExists(repo: string, branch: string): boolean {
 }
 
 /**
- * Fetch the issue title from GitHub.
+ * Fetch the issue title and labels from GitHub for release-safe PR naming.
  */
-function getIssueTitle(repo: string, issueNum: number): string {
+function getIssueMetadata(repo: string, issueNum: number): { title: string; labels: string[] } {
   const result = ghExec(
-    `gh issue view ${issueNum} --repo ${shellQuote(repo)} --json title`,
+    `gh issue view ${issueNum} --repo ${shellQuote(repo)} --json title,labels`,
   );
-  if (result.exitCode !== 0) return `Issue #${issueNum}`;
+  if (result.exitCode !== 0) return { title: `Issue #${issueNum}`, labels: [] };
   try {
-    const data = JSON.parse(result.stdout) as { title: string };
-    return data.title;
+    const data = JSON.parse(result.stdout) as {
+      title: string;
+      labels?: Array<string | { name?: string }>;
+    };
+    const labels = (data.labels ?? [])
+      .map((label) => typeof label === 'string' ? label : label.name)
+      .filter((label): label is string => typeof label === 'string');
+    return { title: data.title, labels };
   } catch {
-    return `Issue #${issueNum}`;
+    return { title: `Issue #${issueNum}`, labels: [] };
   }
 }
 
@@ -372,7 +379,8 @@ async function resumeBranch(
   const repo = config.repo;
   const baseBranch = config.baseBranch;
 
-  const title = getIssueTitle(repo, issueNum);
+  const issue = getIssueMetadata(repo, issueNum);
+  const { title } = issue;
   log.step(`Resuming issue #${issueNum}: ${title}`);
 
   const branchWorktree = checkoutBranchForResume(branch);
@@ -460,7 +468,7 @@ This PR was recovered by \`alpha-loop resume\`. Resume creates the PR and runs b
       repo,
       base: baseBranch,
       head: branch,
-      title: `feat: ${title} (closes #${issueNum})`,
+      title: conventionalTitle(issue, `(closes #${issueNum})`),
       body: prBody,
       cwd: branchWorktree,
     });
@@ -1051,6 +1059,7 @@ export async function resumePausedIssueFromManifest(
       config,
       session,
       {
+        issueLabels: issue.labels,
         resumeContext: context.contextText,
         resumeStage: context.resumeStage,
         existingPrUrl: context.existingPrUrl,

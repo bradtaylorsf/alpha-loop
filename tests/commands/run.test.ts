@@ -893,7 +893,7 @@ describe('runCommand', () => {
       'Body',
       expect.any(Object),
       expect.any(Object),
-      expect.any(Object),
+      expect.objectContaining({ issueLabels: expect.any(Array) }),
     );
   });
 
@@ -1397,7 +1397,7 @@ describe('runCommand', () => {
       'Target body',
       expect.objectContaining({ dryRun: true }),
       expect.any(Object),
-      expect.any(Object),
+      expect.objectContaining({ issueLabels: ['ready'] }),
     );
     expect(mockCreateSession).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
       epicNum: undefined,
@@ -1937,8 +1937,8 @@ Coordinate hosted work.
     expect(mockFinalizeQuickRun).toHaveBeenCalledTimes(1);
     expect(mockFinalizeQuickRun).toHaveBeenCalledWith(expect.objectContaining({
       issues: [
-        { number: 42, title: 'First issue' },
-        { number: 43, title: 'Second issue' },
+        { number: 42, title: 'First issue', labels: ['ready'] },
+        { number: 43, title: 'Second issue', labels: ['ready'] },
       ],
       worktreePath: '/tmp/quick-shared',
       worktreeBranch: 'agent/issue-42',

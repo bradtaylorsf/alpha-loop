@@ -458,7 +458,7 @@ describe('processIssue', () => {
     );
     expect(mockExec).toHaveBeenCalledWith("git add -A -- ':(exclude)alpha-loop-pause-request.json' ':(exclude,glob)**/alpha-loop-pause-request.json' .", { cwd: '/tmp/worktree' });
     expect(mockExec).toHaveBeenCalledWith(
-      "git commit -m 'feat: implement issue #42 - Test issue'",
+      "git commit -m 'chore: Test issue (closes #42)'",
       { cwd: '/tmp/worktree' },
     );
     expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
@@ -872,7 +872,7 @@ describe('processIssue', () => {
     await processIssue(42, "Danger $(touch /tmp/pwned) 'quote'", 'Issue body', makeConfig(), makeSession());
 
     expect(mockExec).toHaveBeenCalledWith(
-      "git commit -m 'feat: implement issue #42 - Danger $(touch /tmp/pwned) '\\''quote'\\'''",
+      "git commit -m 'chore: Danger $(touch /tmp/pwned) '\\''quote'\\'' (closes #42)'",
       { cwd: '/tmp/worktree' },
     );
   });
@@ -1522,6 +1522,35 @@ describe('processIssue', () => {
     }));
   });
 
+  test('uses one preserved fix prefix for prompts, fallback commits, and the PR', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd === 'git status --porcelain') {
+        return { stdout: ' M src/lib/pipeline.ts\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await processIssue(
+      410,
+      'fix: Correct release classification',
+      'Body',
+      makeConfig(),
+      makeSession(),
+      { issueLabels: ['bug'] },
+    );
+
+    expect(mockBuildImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      labels: ['bug'],
+    }));
+    expect(mockExec).toHaveBeenCalledWith(
+      "git commit -m 'fix: Correct release classification (closes #410)'",
+      { cwd: '/tmp/worktree' },
+    );
+    expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'fix: Correct release classification (closes #410)',
+    }));
+  });
+
   test('review gate loops back to implementer when review fails', async () => {
     const { existsSync, readFileSync } = require('node:fs');
     const mockExistsSync = existsSync as jest.MockedFunction<typeof import('node:fs').existsSync>;
@@ -1895,6 +1924,25 @@ describe('processBatch', () => {
     }));
   });
 
+  test('derives batch prompt metadata and PR type from member issues', async () => {
+    const issues = [
+      { number: 10, title: 'Correct it', body: 'Body', labels: ['bug'] },
+      { number: 11, title: 'docs: Explain it', body: 'Body', labels: ['documentation'] },
+    ];
+
+    await processBatch(issues, makeConfig({ batch: true }), makeSession());
+
+    expect(mockBuildBatchImplementPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      issues: expect.arrayContaining([
+        expect.objectContaining({ issueNum: 10, labels: ['bug'] }),
+        expect.objectContaining({ issueNum: 11, labels: ['documentation'] }),
+      ]),
+    }));
+    expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'fix: batch implementation (#10, #11)',
+    }));
+  });
+
   test('dry run mode does not save batch results or traces', async () => {
     await processBatch(batchIssues, makeConfig({ batch: true, dryRun: true }), makeSession());
 
@@ -2132,7 +2180,7 @@ describe('finalizeQuickRun', () => {
     expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
       base: 'session/20260330-143000',
       head: 'agent/issue-42',
-      title: 'feat: quick session for epic #100 (#42, #43)',
+      title: 'chore: quick session for epic #100 (#42, #43)',
     }));
     const prBody = mockCreatePR.mock.calls[0][0].body;
     expect(prBody).toContain('- #42: First issue (closes #42)');
@@ -2157,9 +2205,26 @@ describe('finalizeQuickRun', () => {
     expect(result.merged).toBe(false);
     expect(mockCreatePR).toHaveBeenCalledWith(expect.objectContaining({
       base: 'master',
-      title: 'feat: quick session (#42, #43)',
+      title: 'chore: quick session (#42, #43)',
     }));
     expect(mockMergePR).not.toHaveBeenCalled();
+  });
+
+  test('uses fix for a bug-only quick session so the release remains a patch', async () => {
+    await finalizeQuickRun({
+      issues: [
+        { number: 42, title: 'Correct one', labels: ['bug'] },
+        { number: 43, title: 'fix: Correct two', labels: ['bug'] },
+      ],
+      config: makeConfig({ autoMerge: false }),
+      session: makeSession(),
+      worktreePath: '/tmp/quick-worktree',
+      worktreeBranch: 'agent/issue-42',
+    });
+
+    const title = mockCreatePR.mock.calls[0][0].title;
+    expect(title).toBe('fix: quick session (#42, #43)');
+    expect(/^feat(\([^)]+\))?:/m.test(title)).toBe(false);
   });
 
   test('invokes the fix agent when tests fail, then retries', async () => {
@@ -2283,7 +2348,7 @@ describe('auto-commit before pause (sandboxed agents that cannot commit)', () =>
       { cwd: '/tmp/worktree' },
     );
     expect(mockExec).toHaveBeenCalledWith(
-      "git commit -m 'feat: implement issue #42 - Test issue'",
+      "git commit -m 'chore: Test issue (closes #42)'",
       { cwd: '/tmp/worktree' },
     );
   });
@@ -2301,7 +2366,7 @@ describe('auto-commit before pause (sandboxed agents that cannot commit)', () =>
     // Only the control-plane file was dirty — nothing to commit.
     expect(result.autoCommittedByPipeline).toBeUndefined();
     expect(mockExec).not.toHaveBeenCalledWith(
-      expect.stringContaining('git commit -m \'feat: implement issue #42'),
+      expect.stringContaining("git commit -m 'chore: Test issue (closes #42)'"),
       expect.anything(),
     );
   });

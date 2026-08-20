@@ -4,11 +4,14 @@
  */
 
 import type { RoadmapEpicContext } from './github.js';
+import { conventionalTitle } from './conventional-commits.js';
+import { shellQuote } from './shell.js';
 
 export type ImplementPromptOptions = {
   issueNum: number;
   title: string;
   body: string;
+  labels?: string[];
   comments?: Array<{ author: string; body: string; createdAt: string }>;
   planContent?: string;
   epicContext?: EpicPromptContext;
@@ -46,6 +49,7 @@ export type BatchIssue = {
   issueNum: number;
   title: string;
   body: string;
+  labels?: string[];
   comments?: Array<{ author: string; body: string; createdAt: string }>;
 };
 
@@ -209,7 +213,9 @@ export function buildIssuePlanPrompt(options: IssuePlanPromptOptions): string {
  * Build the implementation prompt for an AI agent.
  */
 export function buildImplementPrompt(options: ImplementPromptOptions): string {
-  const { issueNum, title, body, comments, planContent, epicContext, visionContext, projectContext, previousResult, learningContext, resumeContext } = options;
+  const { issueNum, title, body, labels, comments, planContent, epicContext, visionContext, projectContext, previousResult, learningContext, resumeContext } = options;
+  const commitTitle = conventionalTitle({ title, labels }, `(closes #${issueNum})`);
+  const commitCommand = `git commit -m ${shellQuote(commitTitle)}`;
 
   const sections: string[] = [
     `Implement GitHub issue #${issueNum}: ${title}`,
@@ -283,7 +289,7 @@ export function buildImplementPrompt(options: ImplementPromptOptions): string {
     '## After Implementing',
     '1. Write tests for your changes',
     '2. Run the test command to verify',
-    `3. Commit with: git commit -m "feat: ${title} (closes #${issueNum})"`,
+    `3. Commit with: ${commitCommand}`,
   );
 
   return sections.join('\n');
@@ -373,7 +379,9 @@ export function buildBatchImplementPrompt(options: BatchImplementPromptOptions):
     return entry;
   }).join('\n\n');
 
-  const closesRefs = issues.map((i) => `closes #${i.issueNum}`).join(', ');
+  const commitCommands = issues.map((issue) =>
+    `- Issue #${issue.issueNum}: \`git commit -m ${shellQuote(conventionalTitle(issue, `(closes #${issue.issueNum})`))}\``,
+  );
 
   const sections: string[] = [
     `Implement the following ${issues.length} GitHub issues. Work through them in order, committing after each one.`,
@@ -419,12 +427,12 @@ export function buildBatchImplementPrompt(options: BatchImplementPromptOptions):
     '   a. Implement the changes',
     '   b. Write tests for those changes',
     '   c. Run the test command to verify',
-    '   d. Commit with: `git commit -m "feat: <title> (closes #<issueNum>)"`',
+    '   d. Commit with the exact issue-specific title listed below',
     '4. After all issues are done, run the full test suite one final time',
     '',
     '## Commit Convention',
     'Make ONE commit per issue. Each commit message must include `closes #<issueNum>` for the specific issue.',
-    `Example: git commit -m "feat: add user auth (closes #42)"`,
+    ...commitCommands,
   );
 
   return sections.join('\n');
