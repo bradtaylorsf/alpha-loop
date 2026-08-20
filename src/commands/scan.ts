@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { exec } from '../lib/shell.js';
 import { log } from '../lib/logger.js';
 import { assertSafeShellArg, loadConfig } from '../lib/config.js';
+import type { Config } from '../lib/config.js';
 import { buildOneShotCommand } from '../lib/agent.js';
 import {
   excerptForLog,
@@ -99,15 +100,16 @@ IMPORTANT: Do NOT add testing procedures, git workflow, code review checklists, 
 const AGENT_TIMEOUT = 5 * 60 * 1000;
 
 function runPromptFile(projectDir: string, agentCmd: string, prompt: string, prefix: string) {
-  const promptFile = path.join(tmpdir(), `alpha-loop-${prefix}-${Date.now()}.txt`);
-  fs.writeFileSync(promptFile, prompt, 'utf-8');
+  const promptDir = fs.mkdtempSync(path.join(tmpdir(), `alpha-loop-${prefix}-`));
+  const promptFile = path.join(promptDir, 'prompt.txt');
   try {
+    fs.writeFileSync(promptFile, prompt, 'utf-8');
     return exec(
       `${agentCmd} < "${promptFile}" 2>/dev/null`,
       { cwd: projectDir, timeout: AGENT_TIMEOUT },
     );
   } finally {
-    try { fs.unlinkSync(promptFile); } catch { /* cleanup best-effort */ }
+    try { fs.rmSync(promptDir, { recursive: true, force: true }); } catch { /* cleanup best-effort */ }
   }
 }
 
@@ -116,11 +118,22 @@ function logInvalidOutput(kind: string, reason: string | undefined, stdout: stri
   log.warn(`Agent stdout excerpt: ${excerptForLog(stdout)}`);
 }
 
-export function scanCommand(): void {
-  const projectDir = process.cwd();
+export type ScanProjectResult = {
+  contextWritten: boolean;
+  instructionsWritten: boolean;
+};
+
+/**
+ * Generate project context and managed instructions in an explicit checkout.
+ * The CLI wrapper uses process.cwd(); session runs pass their isolated worktree.
+ */
+export function scanProject(
+  projectDir: string,
+  config: Pick<Config, 'agent' | 'model'>,
+): ScanProjectResult {
   const contextDir = path.join(projectDir, '.alpha-loop');
   const contextFile = path.join(contextDir, 'context.md');
-  const config = loadConfig();
+  let contextWritten = false;
 
   fs.mkdirSync(contextDir, { recursive: true });
 
@@ -135,6 +148,7 @@ export function scanCommand(): void {
   const contextValidation = validateProjectContextMarkdown(contextOutput);
   if (contextValidation.valid) {
     fs.writeFileSync(contextFile, contextOutput + '\n');
+    contextWritten = true;
     if (result.exitCode !== 0) {
       log.warn('Agent exited with errors but produced valid project context output');
     }
@@ -146,14 +160,20 @@ export function scanCommand(): void {
   }
 
   // --- Generate instructions file ---
-  generateInstructions(projectDir, config.agent, safeModel);
+  const instructionsWritten = generateInstructions(projectDir, config.agent, safeModel);
+  return { contextWritten, instructionsWritten };
+}
+
+/** No-argument CLI wrapper retained for `alpha-loop scan`. */
+export function scanCommand(): void {
+  scanProject(process.cwd(), loadConfig());
 }
 
 /**
  * Generate or update the instructions file at .alpha-loop/templates/instructions.md.
  * If no existing file, generates from scratch. If existing, merges with fresh scan.
  */
-export function generateInstructions(projectDir: string, agent: 'claude' | 'codex' | 'opencode' | 'lmstudio' | 'ollama', model: string): void {
+export function generateInstructions(projectDir: string, agent: 'claude' | 'codex' | 'opencode' | 'lmstudio' | 'ollama', model: string): boolean {
   const templatesDir = path.join(projectDir, '.alpha-loop', 'templates');
   fs.mkdirSync(templatesDir, { recursive: true });
 
@@ -182,6 +202,7 @@ export function generateInstructions(projectDir: string, agent: 'claude' | 'code
         log.warn('Agent exited with errors but produced valid instructions output');
       }
       log.success('Instructions file updated (backup at instructions.md.bak)');
+      return true;
     } else if (output) {
       logInvalidOutput('Instructions merge', validation.reason, mergeResult.stdout);
       log.warn('Instructions merge failed validation, keeping existing file');
@@ -202,6 +223,7 @@ export function generateInstructions(projectDir: string, agent: 'claude' | 'code
         log.warn('Agent exited with errors but produced valid instructions output');
       }
       log.success(`Instructions file generated: ${instructionsFile}`);
+      return true;
     } else if (output) {
       logInvalidOutput('Instructions generation', validation.reason, genResult.stdout);
       log.warn('Instructions generation failed validation — will retry on next scan');
@@ -209,4 +231,6 @@ export function generateInstructions(projectDir: string, agent: 'claude' | 'code
       log.warn('Instructions generation failed — will retry on next scan');
     }
   }
+
+  return false;
 }

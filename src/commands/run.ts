@@ -44,7 +44,7 @@ import {
 import { hasVision } from '../lib/vision.js';
 import { contextNeedsRefresh } from '../lib/context.js';
 import { runPreflight } from '../lib/preflight.js';
-import { syncAgentAssets, resolveHarnesses } from './sync.js';
+import { HARNESS_REGISTRY, syncAgentAssets, resolveHarnesses } from './sync.js';
 import { saveCapturedCase, detectFailureStep } from '../lib/eval.js';
 import { readGateResult, formatGateFindings } from '../lib/pipeline.js';
 import { spawnAgent } from '../lib/agent.js';
@@ -900,6 +900,28 @@ async function runIssueSession(
       : undefined;
   const queueContext = target.type === 'epic' ? target.queue : undefined;
   const activeMilestone = target.type === 'flat' ? target.activeMilestone : '';
+  const refreshContextInSession = contextNeedsRefresh(process.cwd());
+
+  if (config.dryRun) {
+    if (config.autoMerge) {
+      log.dry('Would sync agent assets in the session worktree before run');
+      if (refreshContextInSession) {
+        log.dry('Would refresh project context and instructions in the session worktree');
+      }
+    } else if (refreshContextInSession) {
+      log.dry('Would stop because project context is stale and auto_merge is disabled');
+    } else {
+      log.dry('Would sync agent assets before run');
+    }
+  } else if (refreshContextInSession && !config.autoMerge) {
+    throw new CommandExitError({
+      code: 'project-context-refresh-required',
+      message: 'Project context is stale, but auto_merge is disabled so Alpha Loop cannot carry the ' +
+        'refresh on a reviewable session branch. Enable auto_merge or run "alpha-loop scan" on an issue branch.',
+    });
+  } else if (!config.autoMerge) {
+    syncProjectAgentAssets(config);
+  }
 
   if (target.type === 'issue') {
     log.info(`Processing targeted issue #${target.issue.number}: ${target.issue.title}`);
@@ -944,7 +966,13 @@ async function runIssueSession(
   try {
     if (config.autoMerge) {
       try {
-        await ensureSessionWorktree(session, config);
+        await ensureSessionWorktree(session, config, {
+          prepare: (worktreePath) => prepareSessionProjectFiles(
+            config,
+            worktreePath,
+            refreshContextInSession,
+          ),
+        });
       } catch (err) {
         const message = `Failed to set up session worktree: ${err instanceof Error ? err.message : err}`;
         log.error(message);
@@ -1002,45 +1030,73 @@ async function cleanupSessionWorktree(
 }
 
 function syncProjectAgentAssets(config: Config): void {
-  if (config.dryRun) {
-    log.dry('Would sync agent assets before run');
-    return;
-  }
-
   const syncResult = syncAgentAssets(resolveHarnesses(config.harnesses, config.agent));
   if (syncResult.synced) {
     log.success('Agent assets synced before run');
   }
 }
 
-async function refreshProjectContext(config: Config): Promise<void> {
-  if (!contextNeedsRefresh()) {
-    log.info('Project context is fresh');
-    return;
+function generatedSessionPaths(config: Config): string[] {
+  const paths = new Set<string>([
+    '.alpha-loop/context.md',
+    '.alpha-loop/templates/instructions.md',
+  ]);
+  for (const harness of resolveHarnesses(config.harnesses, config.agent)) {
+    const harnessConfig = HARNESS_REGISTRY[harness];
+    if (!harnessConfig) continue;
+    paths.add(harnessConfig.skillsDir);
+    if (harnessConfig.agentsDir) paths.add(harnessConfig.agentsDir);
+    if (harnessConfig.instructionsFile) paths.add(harnessConfig.instructionsFile);
   }
+  return Array.from(paths);
+}
 
-  if (config.dryRun) {
-    log.dry('Would refresh project context and instructions');
-    return;
-  }
-
-  log.info('Project context is stale or missing. Generating...');
-  const { scanCommand } = await import('./scan.js');
-  scanCommand();
-
-  const statusResult = exec('git status --porcelain .alpha-loop/ AGENTS.md CLAUDE.md');
-  if (!statusResult.stdout.trim()) {
-    if (contextNeedsRefresh()) {
+async function prepareSessionProjectFiles(
+  config: Config,
+  worktreePath: string,
+  refreshContext: boolean,
+): Promise<{ commitMessage: string; paths: string[] } | undefined> {
+  if (refreshContext) {
+    log.info('Project context is stale or missing. Generating in the session worktree...');
+    const { scanProject } = await import('./scan.js');
+    const scanResult = scanProject(worktreePath, config);
+    const backupPath = join(worktreePath, '.alpha-loop', 'templates', 'instructions.md.bak');
+    if (existsSync(backupPath)) unlinkSync(backupPath);
+    if (!scanResult.contextWritten || !scanResult.instructionsWritten) {
+      const missingOutputs = [
+        !scanResult.contextWritten ? 'project context' : '',
+        !scanResult.instructionsWritten ? 'managed instructions' : '',
+      ].filter(Boolean).join(' or ');
       throw new CommandExitError({
         code: 'project-context-refresh-required',
-        message: 'Project context refresh did not produce a fresh context file. ' +
-          'Run "alpha-loop scan", review the output, and commit it through a pull request before retrying.',
+        message: `Project context refresh did not produce fresh ${missingOutputs}. ` +
+          'Review the scan output and retry; no session branch or pull request was published.',
       });
     }
-    return;
+  } else {
+    log.info('Project context is fresh');
   }
 
-  const validation = validateGeneratedMarkdownForCommit(process.cwd(), statusResult.stdout);
+  const syncResult = syncAgentAssets(
+    resolveHarnesses(config.harnesses, config.agent),
+    { projectDir: worktreePath },
+  );
+  if (syncResult.synced) {
+    log.success('Agent assets synced in the session worktree before run');
+  }
+
+  const generatedPaths = generatedSessionPaths(config);
+  const pathspecs = generatedPaths.map((generatedPath) => shellQuote(generatedPath)).join(' ');
+  const statusResult = exec(`git status --porcelain -- ${pathspecs}`, { cwd: worktreePath });
+  if (statusResult.exitCode !== 0) {
+    throw new CommandExitError({
+      code: 'project-context-refresh-required',
+      message: `Could not inspect generated session files: ${statusResult.stderr || statusResult.stdout}`,
+    });
+  }
+  if (!statusResult.stdout.trim()) return undefined;
+
+  const validation = validateGeneratedMarkdownForCommit(worktreePath, statusResult.stdout);
   if (!validation.valid) {
     log.warn('Generated context/instructions failed validation:');
     for (const error of validation.errors) {
@@ -1048,17 +1104,23 @@ async function refreshProjectContext(config: Config): Promise<void> {
     }
     throw new CommandExitError({
       code: 'project-context-refresh-required',
-      message: 'Project context refresh failed validation. Fix the generated files on an issue branch ' +
-        'and commit them through a pull request before retrying.',
+      message: 'Generated project context or instructions failed validation. ' +
+        'No session branch or pull request was published; review the scan output and retry.',
     });
   }
 
-  throw new CommandExitError({
-    code: 'project-context-refresh-required',
-    message: 'Project context was refreshed and left uncommitted. Review the generated files, ' +
-      'commit them on an issue branch, and merge them through a pull request before retrying. ' +
-      `Alpha Loop will not push directly to ${config.baseBranch}.`,
-  });
+  const addResult = exec(`git add -A -- ${pathspecs}`, { cwd: worktreePath });
+  if (addResult.exitCode !== 0) {
+    throw new CommandExitError({
+      code: 'project-context-refresh-required',
+      message: `Could not stage validated generated session files: ${addResult.stderr || addResult.stdout}`,
+    });
+  }
+
+  return {
+    commitMessage: 'chore: refresh project context and agent assets',
+    paths: generatedPaths,
+  };
 }
 
 async function executeSessionRun(
@@ -1204,14 +1266,6 @@ async function executeSessionRun(
   process.on('SIGINT', handleSigint);
   process.on('SIGTERM', handleSigterm);
 
-  // Parallel queue workers share a coordinator checkout. The coordinator performs
-  // generated-file preparation once before spawning them so workers only mutate
-  // their session worktrees.
-  const isParallelQueueWorker = options.queueContext !== undefined;
-  if (!isParallelQueueWorker) {
-    syncProjectAgentAssets(config);
-  }
-
   // Pre-flight test validation
   log.step('Running pre-flight test validation...');
   if (!config.skipPreflight && !config.skipTests) {
@@ -1279,12 +1333,6 @@ async function executeSessionRun(
       const { visionCommand } = await import('./vision.js');
       await visionCommand();
     }
-  }
-
-  // Refresh project metadata before queue discovery. If generated content changes,
-  // stop so it can be reviewed and merged through a normal branch/PR first.
-  if (!isParallelQueueWorker) {
-    await refreshProjectContext(config);
   }
 
   // --- Fetch issue queue ---
@@ -3018,13 +3066,6 @@ async function runEpicQueue(config: Config, options: RunOptions): Promise<void> 
   if (config.dryRun) {
     printDryRunEpicQueue(validation.entries, parallelLimit);
     return;
-  }
-
-  if (parallelLimit !== undefined) {
-    // Shared generated assets and context live in the coordinator checkout.
-    // Prepare them once before children begin worktree-only execution.
-    syncProjectAgentAssets(config);
-    await refreshProjectContext(config);
   }
 
   const scheduledWaves = parallelLimit !== undefined

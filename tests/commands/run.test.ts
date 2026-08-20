@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
-import { formatEpicPickerMeta, formatMilestonePickerMeta, runCommand, runSingleEpicExecution } from '../../src/commands/run';
+import { formatEpicPickerMeta, formatMilestonePickerMeta, runCommand, runSingleEpicExecution, runSingleIssueExecution } from '../../src/commands/run';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
@@ -114,12 +114,20 @@ jest.mock('../../src/lib/eval', () => ({
 }));
 
 jest.mock('../../src/commands/sync', () => ({
+  HARNESS_REGISTRY: {
+    codex: { skillsDir: '.agents/skills', agentsDir: '.codex/agents', instructionsFile: 'AGENTS.md' },
+  },
   syncAgentAssets: jest.fn().mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] }),
   resolveHarnesses: jest.fn((harnesses: string[], _agent: string) => harnesses),
 }));
 
 jest.mock('../../src/commands/scan', () => ({
   scanCommand: jest.fn(),
+  scanProject: jest.fn(),
+}));
+
+jest.mock('../../src/lib/scan-validation', () => ({
+  validateGeneratedMarkdownForCommit: jest.fn().mockReturnValue({ valid: true, errors: [] }),
 }));
 
 jest.mock('node:fs', () => ({
@@ -148,10 +156,12 @@ import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock
 import { extractLearnings, generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { contextNeedsRefresh } from '../../src/lib/context';
 import { syncAgentAssets } from '../../src/commands/sync';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { emitLifecycleEvent } from '../../src/lib/events';
 import { spawnAgent } from '../../src/lib/agent';
+import { scanProject } from '../../src/commands/scan';
+import { validateGeneratedMarkdownForCommit } from '../../src/lib/scan-validation';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
@@ -188,8 +198,11 @@ const mockSyncAgentAssets = syncAgentAssets as jest.MockedFunction<typeof syncAg
 const mockWriteFileSync = writeFileSync as jest.MockedFunction<typeof writeFileSync>;
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
+const mockUnlinkSync = unlinkSync as jest.MockedFunction<typeof unlinkSync>;
 const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
+const mockScanProject = scanProject as jest.MockedFunction<typeof scanProject>;
+const mockValidateGeneratedMarkdownForCommit = validateGeneratedMarkdownForCommit as jest.MockedFunction<typeof validateGeneratedMarkdownForCommit>;
 const mockSpawn = spawn as jest.MockedFunction<typeof spawn>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
@@ -256,7 +269,11 @@ beforeEach(() => {
 
   mockExistsSync.mockReturnValue(false);
   mockReadFileSync.mockReturnValue('');
-  mockExec.mockReturnValue({ stdout: '/usr/bin/tool', stderr: '', exitCode: 0 });
+  mockExec.mockImplementation((cmd: string) => (
+    cmd.startsWith('git status --porcelain --')
+      ? { stdout: '', stderr: '', exitCode: 0 }
+      : { stdout: '/usr/bin/tool', stderr: '', exitCode: 0 }
+  ));
   mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig(overrides) as any);
   mockCreateSession.mockReturnValue({
     name: 'session/20260330-143000',
@@ -267,8 +284,10 @@ beforeEach(() => {
     pendingBackgroundTasks: [],
   });
   mockFinalizeSession.mockResolvedValue(null);
-  mockEnsureSessionWorktree.mockImplementation(async (session) => {
+  mockEnsureSessionWorktree.mockImplementation(async (session, config, options) => {
+    if (config.dryRun) return null;
     session.worktreePath = `/tmp/${String(session.name).replace(/\//g, '-')}`;
+    await options?.prepare?.(session.worktreePath);
     return session.worktreePath;
   });
   mockCleanupWorktree.mockResolvedValue({ status: 'removed', path: '/tmp/session-worktree' });
@@ -282,6 +301,8 @@ beforeEach(() => {
   mockReadGateResult.mockReturnValue({ passed: true, summary: 'Review passed', findings: [] });
   mockContextNeedsRefresh.mockReturnValue(false);
   mockSyncAgentAssets.mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] });
+  mockScanProject.mockReturnValue({ contextWritten: true, instructionsWritten: true });
+  mockValidateGeneratedMarkdownForCommit.mockReturnValue({ valid: true, errors: [] });
 });
 
 afterEach(() => {
@@ -292,6 +313,200 @@ afterEach(() => {
 });
 
 describe('runCommand', () => {
+  test('refreshes stale context inside the session worktree and continues the direct issue path used by daemon runs', async () => {
+    const sessionWorktree = '/tmp/session-20260330-143000';
+    const config = makeConfig({
+      autoMerge: true,
+      skipTests: true,
+      skipLearn: true,
+      skipVerify: true,
+      skipPostSessionReview: true,
+      harnesses: ['codex'],
+    }) as any;
+    const issue = { number: 408, title: 'Refresh context', body: 'Fix stale refresh', labels: ['ready'] };
+    mockContextNeedsRefresh.mockReturnValue(true);
+    mockExistsSync.mockImplementation((filePath) => String(filePath).endsWith('instructions.md.bak'));
+    mockExec.mockImplementation((cmd: string, options?: { cwd?: string }) => {
+      if (cmd.startsWith('git status --porcelain --')) {
+        return options?.cwd === sessionWorktree
+          ? { stdout: ' M .alpha-loop/context.md\n M AGENTS.md', stderr: '', exitCode: 0 }
+          : { stdout: '', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '/usr/bin/tool', stderr: '', exitCode: 0 };
+    });
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 408,
+      title: issue.title,
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 1,
+      filesChanged: 1,
+    });
+
+    const result = await runSingleIssueExecution({ config, issueNumber: issue.number, issue });
+
+    expect(result.status).toBe('success');
+    expect(mockScanProject).toHaveBeenCalledWith(sessionWorktree, config);
+    expect(mockSyncAgentAssets).toHaveBeenCalledWith(['codex'], { projectDir: sessionWorktree });
+    expect(mockValidateGeneratedMarkdownForCommit).toHaveBeenCalledWith(
+      sessionWorktree,
+      ' M .alpha-loop/context.md\n M AGENTS.md',
+    );
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringMatching(/^git add -A -- /),
+      { cwd: sessionWorktree },
+    );
+    expect(mockUnlinkSync).toHaveBeenCalledWith(
+      '/tmp/session-20260330-143000/.alpha-loop/templates/instructions.md.bak',
+    );
+    const generatedStatusCalls = mockExec.mock.calls.filter(([cmd]) => String(cmd).startsWith('git status --porcelain --'));
+    expect(generatedStatusCalls.every(([, options]) => options?.cwd === sessionWorktree)).toBe(true);
+  });
+
+  test('fails closed before issue processing when a stale scan does not write fresh context', async () => {
+    const config = makeConfig({
+      autoMerge: true,
+      skipTests: true,
+      skipPostSessionReview: true,
+    }) as unknown as ReturnType<typeof loadConfig>;
+    const issue = { number: 408, title: 'Refresh context', body: 'Fix stale refresh', labels: ['ready'] };
+    mockContextNeedsRefresh.mockReturnValue(true);
+    mockScanProject.mockReturnValue({ contextWritten: false, instructionsWritten: true });
+
+    await expect(runSingleIssueExecution({ config, issueNumber: issue.number, issue }))
+      .rejects.toThrow(/did not produce fresh project context/i);
+
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+  });
+
+  test('fails closed before issue processing when a stale scan does not write fresh instructions', async () => {
+    const config = makeConfig({
+      autoMerge: true,
+      skipTests: true,
+      skipPostSessionReview: true,
+    }) as unknown as ReturnType<typeof loadConfig>;
+    const issue = { number: 408, title: 'Refresh context', body: 'Fix stale refresh', labels: ['ready'] };
+    mockContextNeedsRefresh.mockReturnValue(true);
+    mockScanProject.mockReturnValue({ contextWritten: true, instructionsWritten: false });
+
+    await expect(runSingleIssueExecution({ config, issueNumber: issue.number, issue }))
+      .rejects.toThrow(/did not produce fresh managed instructions/i);
+
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+  });
+
+  test('keeps dry-run and fresh-context paths free of scan writes', async () => {
+    const issue = { number: 408, title: 'Refresh context', body: 'Fix stale refresh', labels: ['ready'] };
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 408,
+      title: issue.title,
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 1,
+      filesChanged: 0,
+    });
+
+    await runSingleIssueExecution({
+      config: makeConfig({ autoMerge: true, dryRun: true, skipTests: true }) as any,
+      issueNumber: issue.number,
+      issue,
+    });
+    expect(mockScanProject).not.toHaveBeenCalled();
+    expect(mockLog.dry).toHaveBeenCalledWith('Would sync agent assets in the session worktree before run');
+
+    jest.clearAllMocks();
+    mockContextNeedsRefresh.mockReturnValue(false);
+    mockEnsureSessionWorktree.mockImplementation(async (session, _config, options) => {
+      session.worktreePath = '/tmp/fresh-session';
+      await options?.prepare?.(session.worktreePath);
+      return session.worktreePath;
+    });
+    mockCreateSession.mockReturnValue({
+      name: 'session/fresh',
+      branch: 'session/fresh',
+      resultsDir: '/tmp/sessions',
+      logsDir: '/tmp/sessions/logs',
+      results: [],
+      pendingBackgroundTasks: [],
+    });
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 408,
+      title: issue.title,
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 1,
+      filesChanged: 0,
+    });
+    mockFinalizeSession.mockResolvedValue(null);
+    mockSyncAgentAssets.mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] });
+    mockExec.mockImplementation((cmd: string) => (
+      cmd.startsWith('git status --porcelain --')
+        ? { stdout: '', stderr: '', exitCode: 0 }
+        : { stdout: '/usr/bin/tool', stderr: '', exitCode: 0 }
+    ));
+
+    await runSingleIssueExecution({
+      config: makeConfig({ autoMerge: true, skipTests: true, skipLearn: true, skipVerify: true, skipPostSessionReview: true }) as any,
+      issueNumber: issue.number,
+      issue,
+    });
+
+    expect(mockScanProject).not.toHaveBeenCalled();
+    expect(mockSyncAgentAssets).toHaveBeenCalledWith([], { projectDir: '/tmp/fresh-session' });
+  });
+
+  test('syncs agent assets in the base checkout when auto-merge is disabled and context is fresh', async () => {
+    const config = makeConfig({
+      autoMerge: false,
+      skipTests: true,
+      skipLearn: true,
+      skipVerify: true,
+      skipPostSessionReview: true,
+      harnesses: ['codex'],
+    }) as any;
+    const issue = { number: 408, title: 'Refresh context', body: 'Fix stale refresh', labels: ['ready'] };
+    mockContextNeedsRefresh.mockReturnValue(false);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 408,
+      title: issue.title,
+      status: 'success',
+      testsPassing: true,
+      verifyPassing: true,
+      verifySkipped: false,
+      duration: 1,
+      filesChanged: 0,
+    });
+
+    const result = await runSingleIssueExecution({ config, issueNumber: issue.number, issue });
+
+    expect(result.status).toBe('success');
+    expect(mockSyncAgentAssets).toHaveBeenCalledWith(['codex']);
+    expect(mockScanProject).not.toHaveBeenCalled();
+    expect(mockEnsureSessionWorktree).not.toHaveBeenCalled();
+  });
+
+  test('does not sync base-checkout assets before rejecting a stale non-auto-merge run', async () => {
+    const config = makeConfig({ autoMerge: false, skipTests: true }) as any;
+    const issue = { number: 408, title: 'Refresh context', body: 'Fix stale refresh', labels: ['ready'] };
+    mockContextNeedsRefresh.mockReturnValue(true);
+
+    await expect(runSingleIssueExecution({ config, issueNumber: issue.number, issue }))
+      .rejects.toThrow(/auto_merge is disabled/i);
+
+    expect(mockSyncAgentAssets).not.toHaveBeenCalled();
+    expect(mockScanProject).not.toHaveBeenCalled();
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockEnsureSessionWorktree).not.toHaveBeenCalled();
+  });
+
   test('records a durable failure when session worktree setup conflicts', async () => {
     const session = {
       name: 'session/epic-6-answer-engine',
@@ -525,30 +740,28 @@ describe('runCommand', () => {
     expect(mockExit).not.toHaveBeenCalled();
   });
 
-  test('stops without git mutation when refreshed context fails validation', async () => {
+  test('stops before issue processing or publication when refreshed context fails validation', async () => {
     mockContextNeedsRefresh.mockReturnValue(true);
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      autoMerge: true,
       skipPostSessionReview: true,
       ...overrides,
     }) as any);
-    mockExec.mockImplementation((cmd: string) => {
-      if (cmd === 'git status --porcelain .alpha-loop/ AGENTS.md CLAUDE.md') {
+    mockExec.mockImplementation((cmd: string, options?: { cwd?: string }) => {
+      if (cmd.startsWith('git status --porcelain --') && options?.cwd === '/tmp/session-20260330-143000') {
         return { stdout: ' M .alpha-loop/context.md\n', stderr: '', exitCode: 0 };
       }
       return { stdout: '/usr/bin/tool', stderr: '', exitCode: 0 };
     });
-    mockExistsSync.mockImplementation((filePath: any) => String(filePath).endsWith('.alpha-loop/context.md'));
-    mockReadFileSync.mockImplementation((filePath: any) => {
-      if (String(filePath).endsWith('.alpha-loop/context.md')) {
-        return 'Wrote `PROJECT_CONTEXT.md` summarizing the current codebase.';
-      }
-      return '';
+    mockValidateGeneratedMarkdownForCommit.mockReturnValue({
+      valid: false,
+      errors: ['.alpha-loop/context.md: missing required heading'],
     });
 
     await runCommand({});
 
     expect(mockLog.warn).toHaveBeenCalledWith('Generated context/instructions failed validation:');
-    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('commit them through a pull request'));
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('No session branch or pull request was published'));
     expect(process.exitCode).toBe(1);
     expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git add '))).toBe(false);
     expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git commit '))).toBe(false);
@@ -556,44 +769,32 @@ describe('runCommand', () => {
     expect(mockProcessIssue).not.toHaveBeenCalled();
   });
 
-  test('stops valid context refresh without pushing the configured base branch', async () => {
-    const validContext = [
-      '## Architecture',
-      '- TypeScript CLI',
-      '## Conventions',
-      '- Jest tests',
-      '## Critical Rules',
-      '- PRs only',
-      '## Active State',
-      '- Context refreshed',
-    ].join('\n');
+  test('continues after a valid context refresh without mutating the configured base checkout', async () => {
     mockContextNeedsRefresh.mockReturnValue(true);
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      autoMerge: true,
       baseBranch: 'protected-main',
       skipPostSessionReview: true,
       ...overrides,
     }) as any);
-    mockExec.mockImplementation((cmd: string) => {
-      if (cmd === 'git status --porcelain .alpha-loop/ AGENTS.md CLAUDE.md') {
+    mockExec.mockImplementation((cmd: string, options?: { cwd?: string }) => {
+      if (cmd.startsWith('git status --porcelain --') && options?.cwd === '/tmp/session-20260330-143000') {
         return { stdout: ' M .alpha-loop/context.md\n', stderr: '', exitCode: 0 };
       }
-      return { stdout: validContext, stderr: '', exitCode: 0 };
-    });
-    mockExistsSync.mockImplementation((filePath: any) => String(filePath).endsWith('.alpha-loop/context.md'));
-    mockReadFileSync.mockImplementation((filePath: any) => {
-      if (String(filePath).endsWith('.alpha-loop/context.md')) return validContext;
-      return '';
+      return { stdout: '/usr/bin/tool', stderr: '', exitCode: 0 };
     });
 
     await runCommand({});
 
-    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining(
-      'Alpha Loop will not push directly to protected-main',
-    ));
-    expect(process.exitCode).toBe(1);
-    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git add '))).toBe(false);
+    expect(mockScanProject).toHaveBeenCalledWith('/tmp/session-20260330-143000', expect.objectContaining({
+      baseBranch: 'protected-main',
+    }));
+    expect(process.exitCode).toBeUndefined();
+    expect(mockExec).toHaveBeenCalledWith(expect.stringMatching(/^git add -A -- /), {
+      cwd: '/tmp/session-20260330-143000',
+    });
     expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git commit '))).toBe(false);
-    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).startsWith('git push '))).toBe(false);
+    expect(mockExec.mock.calls.some(([cmd]) => String(cmd).includes('git push') && String(cmd).includes('protected-main'))).toBe(false);
     expect(mockProcessIssue).not.toHaveBeenCalled();
   });
 
@@ -717,8 +918,8 @@ describe('runCommand', () => {
     expect(manifest.epics[2].dependencyFailure.failedEpicIds).toEqual([10]);
     expect(manifest.epics[4].dependencyFailure.failedEpicIds).toEqual([10, 30]);
     expect(manifest.epics[1].logPath).toContain('epic-20.log');
-    expect(mockSyncAgentAssets).toHaveBeenCalledTimes(1);
-    expect(mockContextNeedsRefresh).toHaveBeenCalledTimes(1);
+    expect(mockSyncAgentAssets).not.toHaveBeenCalled();
+    expect(mockContextNeedsRefresh).not.toHaveBeenCalled();
   });
 
   test('internal queue workers persist a structured result artifact before exiting', async () => {
@@ -766,10 +967,17 @@ describe('runCommand', () => {
     expect(process.exitCode).toBe(1);
   });
 
-  test('internal queue workers leave shared project preparation to the coordinator', async () => {
+  test('internal queue workers prepare generated files only in their own session worktree', async () => {
     const queueDir = join(process.cwd(), '.alpha-loop', 'sessions', 'queue-test');
     const contextPath = join(queueDir, 'epic-77-context.json');
     const resultPath = join(queueDir, 'epic-77-result.json');
+    mockContextNeedsRefresh.mockReturnValue(true);
+    mockExec.mockImplementation((cmd: string, options?: { cwd?: string }) => {
+      if (cmd.startsWith('git status --porcelain --') && options?.cwd === '/tmp/session-20260330-143000') {
+        return { stdout: ' M .alpha-loop/context.md\n', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '/usr/bin/tool', stderr: '', exitCode: 0 };
+    });
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
       ...overrides,
       mergeTo: 'shared-integration-branch',
@@ -821,8 +1029,14 @@ describe('runCommand', () => {
       skipLearn: true,
     });
 
-    expect(mockSyncAgentAssets).not.toHaveBeenCalled();
-    expect(mockContextNeedsRefresh).not.toHaveBeenCalled();
+    expect(mockSyncAgentAssets).toHaveBeenCalledWith([], {
+      projectDir: '/tmp/session-20260330-143000',
+    });
+    expect(mockContextNeedsRefresh).toHaveBeenCalledTimes(1);
+    expect(mockScanProject).toHaveBeenCalledWith(
+      '/tmp/session-20260330-143000',
+      expect.objectContaining({ autoMerge: true, mergeTo: '' }),
+    );
     expect(mockCreateSession).toHaveBeenCalledWith(
       expect.objectContaining({ autoMerge: true, mergeTo: '' }),
       expect.objectContaining({ epicNum: 77 }),
@@ -863,8 +1077,10 @@ describe('runCommand', () => {
     await runCommand({ dryRun: true, validate: true });
 
     expect(mockSyncAgentAssets).not.toHaveBeenCalled();
-    expect(mockLog.dry).toHaveBeenCalledWith('Would sync agent assets before run');
-    expect(mockLog.dry).toHaveBeenCalledWith('Would refresh project context and instructions');
+    expect(mockLog.dry).toHaveBeenCalledWith(
+      'Would stop because project context is stale and auto_merge is disabled',
+    );
+    expect(mockLog.dry).not.toHaveBeenCalledWith('Would sync agent assets before run');
     expect(mockWriteFileSync).not.toHaveBeenCalled();
   });
 
