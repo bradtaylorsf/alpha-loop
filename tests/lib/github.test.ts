@@ -4,7 +4,7 @@ import {
   setIssueMilestone, listOpenIssues, addIssueToProject,
   getIssueBody, updateEpicIssueBody, commentChildEpicBacklink,
   listRoadmapEpics, listEpics, getEpicSubIssues, updateProjectStatus,
-  getMergedPRForIssue,
+  getMergedPRForIssue, getMergedPRMetadata, resolveCommitSha,
 } from '../../src/lib/github';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -1241,5 +1241,60 @@ describe('getMergedPRForIssue', () => {
 
     expect(getMergedPRForIssue('owner/repo', 7)).toBe('https://github.com/owner/repo/pull/13');
     expect(mockExec).toHaveBeenLastCalledWith(expect.stringContaining('--limit 100'));
+  });
+});
+
+describe('epic verification git metadata', () => {
+  test('resolves a branch name to an immutable commit SHA', () => {
+    const sha = '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2';
+    mockExec.mockReturnValue({ stdout: `${sha}\n`, stderr: '', exitCode: 0 });
+
+    expect(resolveCommitSha('owner/repo', 'session/epic-397')).toBe(sha);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.stringContaining('repos/owner/repo/commits/session%2Fepic-397'),
+    );
+  });
+
+  test.each([
+    [{ stdout: '', stderr: 'not found', exitCode: 1 }],
+    [{ stdout: 'not-a-sha', stderr: '', exitCode: 0 }],
+  ])('returns null when a verification ref cannot be resolved', (response) => {
+    mockExec.mockReturnValue(response);
+
+    expect(resolveCommitSha('owner/repo', 'missing-branch')).toBeNull();
+  });
+
+  test('returns the resulting merge commit for a squash-merged PR', () => {
+    const squashSha = '34670c1f3ac86c916a0f4f5d4dc6f7150d15b5c2';
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify({
+        url: 'https://github.com/owner/repo/pull/201',
+        mergedAt: '2026-08-12T12:00:00Z',
+        mergeCommit: { oid: squashSha },
+      }),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    expect(getMergedPRMetadata('owner/repo', 'https://github.com/owner/repo/pull/201')).toEqual({
+      url: 'https://github.com/owner/repo/pull/201',
+      mergedAt: '2026-08-12T12:00:00Z',
+      mergeCommitSha: squashSha,
+    });
+    expect(mockExec).toHaveBeenCalledWith(expect.stringContaining('--json url,mergedAt,mergeCommit'));
+  });
+
+  test('returns null when a merged PR has no resolvable resulting commit', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify({
+        url: 'https://github.com/owner/repo/pull/201',
+        mergedAt: '2026-08-12T12:00:00Z',
+        mergeCommit: null,
+      }),
+      stderr: '',
+      exitCode: 0,
+    });
+
+    expect(getMergedPRMetadata('owner/repo', 'https://github.com/owner/repo/pull/201')).toBeNull();
   });
 });

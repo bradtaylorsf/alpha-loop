@@ -168,6 +168,28 @@ export type SessionWebAppArtifacts = {
   updatedAt: string;
 };
 
+export type EpicVerificationAudit = {
+  epicNumber: number;
+  pinnedRef: string;
+  /** Null only when the requested ref could not be resolved. */
+  pinnedSha: string | null;
+  /** SHA reported by the verifier; null when no agent verdict was produced. */
+  inspectedRef: string | null;
+  resolvedAt: string;
+  mergedPRs: Array<{
+    issueNum: number;
+    url: string;
+    mergeCommitSha: string;
+  }>;
+  verdict: 'pass' | 'partial' | 'fail' | 'unavailable';
+  verifiedAt: string;
+  agent: {
+    resume: false;
+    memoryMode: 'fresh';
+  };
+  error?: string;
+};
+
 export type DurableSessionManifest = {
   version: 1;
   sessionId: string;
@@ -225,6 +247,8 @@ export type DurableSessionManifest = {
     timestamp: string;
   }>;
   cleanup?: SessionCleanupManifest;
+  /** Immutable snapshot and agent-session metadata for the latest epic gate. */
+  epicVerification?: EpicVerificationAudit;
   epic?: number;
   queue?: QueueSessionContext;
 };
@@ -322,6 +346,19 @@ function writeManifestFile(filePath: string, manifest: DurableSessionManifest): 
   renameSync(tmpPath, filePath);
 }
 
+/** Write the audit used by a standalone `--verify-only` session. */
+export function writeEpicVerificationAuditArtifact(
+  sessionDir: string,
+  audit: EpicVerificationAudit,
+): string {
+  const filePath = join(sessionDir, 'epic-verification.json');
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(audit, null, 2) + '\n');
+  renameSync(tmpPath, filePath);
+  return filePath;
+}
+
 export function hashPromptText(prompt: string): string {
   return createHash('sha256').update(prompt).digest('hex');
 }
@@ -398,6 +435,14 @@ export function updateSessionManifest(
   };
   writeManifestFile(filePath, next);
   return next;
+}
+
+/** Persist the latest epic verification snapshot in a durable session manifest. */
+export function recordEpicVerificationAudit(
+  session: Pick<SessionContext, 'resultsDir' | 'manifestPath'>,
+  audit: EpicVerificationAudit,
+): DurableSessionManifest | null {
+  return updateSessionManifest(session, { epicVerification: audit });
 }
 
 function upsertIssue(

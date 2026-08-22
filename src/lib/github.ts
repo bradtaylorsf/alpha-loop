@@ -35,6 +35,53 @@ export type Issue = {
   stateReason?: string | null;
 };
 
+export type MergedPullRequestMetadata = {
+  url: string;
+  /** GitHub's resulting commit on the base branch, including squash merges. */
+  mergeCommitSha: string;
+  mergedAt: string;
+};
+
+const FULL_COMMIT_SHA = /^[0-9a-f]{40}$/i;
+
+/** Resolve a GitHub branch, tag, or SHA to the immutable commit it names. */
+export function resolveCommitSha(repo: string, ref: string): string | null {
+  const endpoint = `repos/${repo}/commits/${encodeURIComponent(ref)}`;
+  const result = ghExec(`gh api ${JSON.stringify(endpoint)} --jq .sha`);
+  if (result.exitCode !== 0) return null;
+  const sha = result.stdout.trim();
+  return FULL_COMMIT_SHA.test(sha) ? sha.toLowerCase() : null;
+}
+
+/**
+ * Fetch the commit GitHub placed on the PR's base branch. For squash merges,
+ * `mergeCommit.oid` is the squash commit rather than the deleted head branch.
+ */
+export function getMergedPRMetadata(repo: string, prUrl: string): MergedPullRequestMetadata | null {
+  const match = prUrl.match(/\/pull\/(\d+)(?:\D|$)/);
+  if (!match) return null;
+  const result = ghExec(
+    `gh pr view ${Number(match[1])} --repo "${repo}" --json url,mergedAt,mergeCommit`,
+  );
+  if (result.exitCode !== 0) return null;
+  try {
+    const parsed = JSON.parse(result.stdout) as {
+      url?: string;
+      mergedAt?: string | null;
+      mergeCommit?: { oid?: string | null } | null;
+    };
+    const mergeCommitSha = parsed.mergeCommit?.oid?.trim() ?? '';
+    if (!FULL_COMMIT_SHA.test(mergeCommitSha)) return null;
+    return {
+      url: parsed.url || prUrl,
+      mergeCommitSha: mergeCommitSha.toLowerCase(),
+      mergedAt: parsed.mergedAt ?? '',
+    };
+  } catch {
+    return null;
+  }
+}
+
 export type RoadmapEpicChildContext = {
   issueNum: number;
   title: string;

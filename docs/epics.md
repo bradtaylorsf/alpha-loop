@@ -259,10 +259,13 @@ The checklist updater throws loudly if it cannot find the expected `- [ ] #N` li
 
 When every sub-issue in the task-list is either merged or skipped, the loop runs a **verification pass**:
 
-1. The review model (see `pipeline.review.model` in `.alpha-loop.yaml`) reads each sub-issue's Acceptance Criteria checklist.
-2. For each sub-issue, it inspects the merged PR's diff and judges whether each AC item is satisfied.
-3. It aggregates into an overall verdict: `pass`, `partial`, or `fail`.
-4. It posts a structured comment on the epic with the per-sub-issue breakdown.
+1. Alpha Loop resolves the active session branch to an immutable commit SHA. A standalone `--verify-only` run resolves the configured base branch instead.
+2. The review model (see `pipeline.review.model` in `.alpha-loop.yaml`) starts a fresh agent session with that pinned SHA and each merged PR's resulting commit, including squash-merge commits.
+3. For each sub-issue, it evaluates the Acceptance Criteria against the supplied evidence and SHA-qualified repository inspection. Ambient `HEAD`, branch inference, and resumed agent memory are not authoritative evidence.
+4. It returns the exact inspected SHA with an overall verdict: `pass`, `partial`, or `fail`. A missing or mismatched inspected SHA cannot pass.
+5. Alpha Loop posts a structured comment on the epic with the pinned ref, SHA, and per-sub-issue breakdown.
+
+The latest audit is stored under `epicVerification` in the active session's `.alpha-loop/sessions/<session>/session.json`. Standalone runs write `.alpha-loop/sessions/verify-<epic>-<timestamp>/epic-verification.json`. These records include the pinned and reported SHA, resolution time, child PR merge commits, verdict, timestamp, and the fresh-agent memory/resume mode.
 
 Verdict outcomes:
 
@@ -278,7 +281,7 @@ Verdict outcomes:
 alpha-loop run --verify-only 165
 ```
 
-Re-runs just the verification pass on epic `#165`. This is **permissive**: it works even if some sub-issues are not yet merged. When any sub-issue is still open, the overall verdict caps at `partial` — a `pass` is only possible when every sub-issue has shipped.
+Re-runs just the verification pass on epic `#165` against one pinned snapshot of the configured base branch. This is **permissive**: it works even if some sub-issues are not yet merged. When any sub-issue is still open, the overall verdict caps at `partial` — a `pass` is only possible when every sub-issue has shipped. If the base branch or a merged PR's resulting commit cannot be resolved, verification fails before the agent runs.
 
 Use this when you have edited a sub-issue PR, re-tuned the AC, or want to re-judge after a manual fix.
 
