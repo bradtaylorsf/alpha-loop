@@ -82,6 +82,8 @@ Milestones answer "when should this epic ship?" The epic checklist answers "what
 
 Alpha Loop implements a 12-step pipeline for each issue:
 
+Before creating a session, every non-dry run checks the configured agent binary and sends a short, text-only liveness prompt. Authentication, spawn, or timeout failures exit with a clear diagnostic before any session directory, branch, worktree, issue label change, or session PR is created. If authentication is lost during an active run, the affected issue or batch is restored to `ready`/Todo and the remaining queue stops; an empty `0/N succeeded` session PR is never opened.
+
 1. **Status Update** — Labels issue `in-progress`, assigns to you, updates project board
 2. **Worktree** — Creates an isolated git worktree so work doesn't conflict with other issues
 3. **Plan** — Agent analyzes the issue and enriches it with implementation details

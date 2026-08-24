@@ -49,6 +49,8 @@ pnpm test               # Run all tests
 pnpm build              # Build TypeScript to dist/
 ```
 
+Every non-dry `alpha-loop run` checks the selected agent CLI with a short, text-only liveness prompt before session creation. Agent authentication failure exits before session/git/GitHub mutation; authentication loss during processing requeues affected work and stops the remaining queue without an empty session PR.
+
 ## Directory Structure
 
 ```

@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "summary": "Preflight and mid-session agent authentication failures now stop safely without burning the remaining queue or opening an empty session PR.",
+  "findings": [
+    {
+      "severity": "critical",
+      "description": "Authentication loss during test repair, code review, review repair, live verification, verification repair, or batch review was still treated as an ordinary issue failure, allowing later queued issues to run.",
+      "fixed": true,
+      "file": "src/lib/pipeline.ts"
+    }
+  ]
+}
