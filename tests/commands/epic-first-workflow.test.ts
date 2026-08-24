@@ -71,10 +71,15 @@ jest.mock('../../src/lib/config', () => ({
     ...overrides,
   })),
   assertSafeShellArg: jest.fn((val: string) => val),
+  resolveStepConfig: jest.fn((config: any) => ({ agent: config.agent, model: config.model })),
+  resolveRoutingStage: jest.fn(),
 }));
 
 jest.mock('../../src/lib/agent', () => ({
   buildOneShotCommand: jest.fn(() => 'claude -p --output-format text'),
+  agentCliCommand: jest.fn((agent: string) => agent),
+  buildEndpointEnv: jest.fn(() => ({})),
+  probeAgentLiveness: jest.fn().mockResolvedValue({ ok: true, duration: 1 }),
   spawnAgent: jest.fn(),
 }));
 

@@ -2,6 +2,7 @@
  * Agent Runner — spawn AI agents with real-time output streaming.
  */
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createWriteStream, type WriteStream } from 'node:fs';
 import { resolve, relative, isAbsolute } from 'node:path';
 import { log } from './logger.js';
@@ -36,6 +37,27 @@ export type AgentResult = {
   resultSubtype?: string;
   /** Whether the Claude stream-json result reported an error. */
   resultIsError?: boolean;
+  /** Sanitized classification for non-zero CLI exits. */
+  failure?: AgentFailure;
+};
+
+export type AgentFailureKind = 'authentication' | 'spawn' | 'timeout' | 'execution';
+
+/**
+ * Safe-to-log agent failure metadata. The fingerprint is deterministic but
+ * never contains raw CLI output, which can include account or endpoint data.
+ */
+export type AgentFailure = {
+  kind: AgentFailureKind;
+  fingerprint: string;
+  diagnostic: string;
+  durationMs: number;
+};
+
+export type AgentProbeResult = {
+  ok: boolean;
+  duration: number;
+  failure?: AgentFailure;
 };
 
 /**
@@ -127,7 +149,25 @@ export type AgentOptions = {
    * frontier stage does not inherit a local-endpoint env from a prior stage.
    */
   env?: Record<string, string>;
+  /** Restrict the invocation to a stdout-only/read-only liveness check. */
+  textOnly?: boolean;
 };
+
+/** Resolve aliases to the CLI binary actually spawned. */
+export function agentCliCommand(agent: AgentType): string {
+  switch (agent) {
+    case 'claude':
+    case 'lmstudio':
+      return 'claude';
+    case 'codex':
+    case 'ollama':
+      return 'codex';
+    case 'opencode':
+      return 'opencode';
+    default:
+      throw new Error(`Unknown agent type: ${agent}`);
+  }
+}
 
 /**
  * Extra sandbox config the codex CLI needs when running inside a linked git
@@ -177,6 +217,10 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
       if (options.resume) args.push('--continue');
       args.push('-p');
       if (options.model) args.push('--model', options.model);
+      if (options.textOnly) {
+        args.push('--allowedTools', '', '--output-format', 'text');
+        return { command: agentCliCommand(options.agent), args };
+      }
       args.push(
         '--dangerously-skip-permissions',
         '--verbose',
@@ -185,7 +229,7 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
       if (options.maxTurns) {
         args.push('--max-turns', String(options.maxTurns));
       }
-      return { command: 'claude', args };
+      return { command: agentCliCommand(options.agent), args };
     }
     case 'codex':
     case 'ollama': {
@@ -196,18 +240,102 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
         args.push('exec');
       }
       if (options.model) args.push('--model', options.model);
+      if (options.textOnly) {
+        args.push('--sandbox', 'read-only');
+        return { command: agentCliCommand(options.agent), args };
+      }
       args.push('--full-auto');
       args.push(...codexSandboxArgs(options.cwd));
-      return { command: 'codex', args };
+      return { command: agentCliCommand(options.agent), args };
     }
     case 'opencode': {
       const args = ['run'];
       if (options.model) args.push('--model', options.model);
-      return { command: 'opencode', args };
+      if (options.textOnly) args.push('--agent', 'plan');
+      return { command: agentCliCommand(options.agent), args };
     }
     default:
       throw new Error(`Unknown agent type: ${options.agent}`);
   }
+}
+
+const AUTH_FAILURES: Array<{
+  pattern: RegExp;
+  fingerprint: string;
+  diagnostic: string;
+}> = [
+  {
+    pattern: /oauth session expired(?:.|\n)*could not be refreshed/i,
+    fingerprint: 'authentication:oauth-session-expired',
+    diagnostic: 'OAuth session expired and could not be refreshed',
+  },
+  {
+    pattern: /failed to authenticate/i,
+    fingerprint: 'authentication:failed',
+    diagnostic: 'Agent CLI authentication failed',
+  },
+  {
+    pattern: /(?:not logged in|please (?:run )?(?:the )?login|authentication required|unauthorized|invalid api key|api key (?:is )?(?:invalid|missing))/i,
+    fingerprint: 'authentication:credentials-required',
+    diagnostic: 'Agent CLI credentials are missing or invalid',
+  },
+];
+
+/**
+ * Normalize a non-zero agent exit into structured metadata without copying
+ * raw diagnostics (which may contain usernames, tokens, or endpoint URLs).
+ */
+export function classifyAgentFailure(
+  exitCode: number,
+  output: string,
+  durationMs: number,
+): AgentFailure | undefined {
+  if (exitCode === 0) return undefined;
+
+  const tail = output.slice(-4000);
+  for (const authFailure of AUTH_FAILURES) {
+    if (authFailure.pattern.test(tail)) {
+      return {
+        kind: 'authentication',
+        fingerprint: authFailure.fingerprint,
+        diagnostic: authFailure.diagnostic,
+        durationMs,
+      };
+    }
+  }
+
+  if (/failed to spawn\b/i.test(tail)) {
+    return {
+      kind: 'spawn',
+      fingerprint: 'spawn:failed',
+      diagnostic: 'Agent CLI could not be started',
+      durationMs,
+    };
+  }
+
+  if (tail.includes('[TIMEOUT]')) {
+    return {
+      kind: 'timeout',
+      fingerprint: 'timeout:agent',
+      diagnostic: 'Agent CLI did not respond before the timeout',
+      durationMs,
+    };
+  }
+
+  const normalized = tail
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, '<url>')
+    .replace(/[\w.+-]+@[\w.-]+/g, '<email>')
+    .replace(/\b\d+\b/g, '<n>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const digest = createHash('sha256').update(normalized || `exit:${exitCode}`).digest('hex').slice(0, 12);
+  return {
+    kind: 'execution',
+    fingerprint: `execution:${digest}`,
+    diagnostic: `Agent CLI exited with code ${exitCode}`,
+    durationMs,
+  };
 }
 
 /**
@@ -555,6 +683,8 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
         toolCalls: toolUseCount,
         toolErrors: toolErrorsFinal,
       };
+      const failure = classifyAgentFailure(exitCode, finalOutput, duration);
+      if (failure) result.failure = failure;
       if (parsedResultSubtype !== undefined) result.resultSubtype = parsedResultSubtype;
       if (parsedResultIsError) result.resultIsError = true;
       if (logStream) {
@@ -588,4 +718,29 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       finish(1, `Failed to spawn ${command}: ${err.message}`);
     });
   });
+}
+
+/**
+ * Run a short, text-only prompt before session creation to prove the selected
+ * CLI can authenticate and answer without gaining write-capable tools.
+ */
+export async function probeAgentLiveness(
+  options: Pick<AgentOptions, 'agent' | 'model' | 'cwd' | 'env'> & { timeout?: number },
+): Promise<AgentProbeResult> {
+  const result = await spawnAgent({
+    ...options,
+    prompt: 'Reply with exactly: ping. Do not use tools.',
+    textOnly: true,
+    timeout: options.timeout ?? 10_000,
+  });
+
+  if (result.exitCode === 0) {
+    return { ok: true, duration: result.duration };
+  }
+
+  return {
+    ok: false,
+    duration: result.duration,
+    failure: result.failure ?? classifyAgentFailure(result.exitCode, result.output, result.duration),
+  };
 }

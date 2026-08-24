@@ -6,10 +6,11 @@ import { spawn } from 'node:child_process';
 import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
 import { exec, shellQuote } from '../lib/shell.js';
-import { loadConfig, assertSafeShellArg, resolveStepConfig, type Config } from '../lib/config.js';
+import { loadConfig, assertSafeShellArg, resolveRoutingStage, resolveStepConfig, type Config } from '../lib/config.js';
 import {
   pollIssues, listMilestones, listEpics, getEpicSubIssues, getIssueWithComments,
   getMergedPRForIssue, updateEpicChecklist, commentIssue, closeIssue, labelIssue,
+  updateProjectStatus,
   type Milestone, type Issue,
 } from '../lib/github.js';
 import { buildEpicSummary, parseSubIssues } from '../lib/epics.js';
@@ -47,7 +48,14 @@ import { runPreflight } from '../lib/preflight.js';
 import { syncAgentAssets, resolveHarnesses } from './sync.js';
 import { saveCapturedCase, detectFailureStep } from '../lib/eval.js';
 import { readGateResult, formatGateFindings } from '../lib/pipeline.js';
-import { spawnAgent } from '../lib/agent.js';
+import {
+  agentCliCommand,
+  buildEndpointEnv,
+  probeAgentLiveness,
+  spawnAgent,
+  type AgentFailure,
+  type AgentType,
+} from '../lib/agent.js';
 import { buildSessionReviewPrompt, type EpicPromptContext } from '../lib/prompts.js';
 import { writeTraceToSubdir } from '../lib/traces.js';
 import { validateGeneratedMarkdownForCommit } from '../lib/scan-validation.js';
@@ -141,7 +149,8 @@ export type EpicExecutionFailureCode =
   | 'epic-run-error'
   | 'session-test-failed'
   | 'session-review-failed'
-  | 'quick-finalize-failed';
+  | 'quick-finalize-failed'
+  | 'agent-unavailable';
 
 export type EpicExecutionFailure = {
   code: EpicExecutionFailureCode;
@@ -388,17 +397,18 @@ async function pauseIssueForAutomationPolicy(args: {
  * Check that required CLI tools are installed.
  * Also warns about optional tools (playwright-cli) that improve the pipeline.
  */
-function checkPrerequisites(config: Config): void {
+function checkPrerequisites(config: Config, selectedAgent: string = config.agent): void {
   const AGENT_INSTALL_URLS: Record<string, string> = {
     claude: 'https://claude.ai/code',
     codex: 'https://developers.openai.com/codex/cli/reference',
     opencode: 'https://github.com/sst/opencode',
   };
 
-  const agentUrl = AGENT_INSTALL_URLS[config.agent] ?? '';
-  const agentMsg = `${config.agent} CLI not found.${agentUrl ? ` Install: ${agentUrl}` : ''}`;
+  const agentUrl = AGENT_INSTALL_URLS[selectedAgent] ?? '';
+  const agentMsg = `${selectedAgent} CLI not found.${agentUrl ? ` Install: ${agentUrl}` : ''}`;
 
-  const safeAgent = assertSafeShellArg(config.agent, 'agent');
+  const cliCommand = agentCliCommand(selectedAgent as AgentType);
+  const safeAgent = assertSafeShellArg(cliCommand, 'agent');
 
   const tools = [
     { name: 'gh', message: 'GitHub CLI not found. Install: https://cli.github.com/' },
@@ -428,6 +438,34 @@ function checkPrerequisites(config: Config): void {
       log.warn('  Then run: playwright-cli install --skills');
     }
   }
+}
+
+async function assertAgentAvailable(config: Config): Promise<void> {
+  const implementStep = resolveStepConfig(config, 'implement');
+  checkPrerequisites(config, implementStep.agent);
+  const routedBuild = resolveRoutingStage(config, 'build');
+  const model = routedBuild?.model ?? implementStep.model;
+  const env = routedBuild?.endpoint
+    ? buildEndpointEnv(routedBuild.endpoint, model)
+    : undefined;
+
+  log.step(`Checking ${implementStep.agent} agent authentication`);
+  const probe = await probeAgentLiveness({
+    agent: implementStep.agent as AgentType,
+    model,
+    cwd: process.cwd(),
+    env,
+  });
+  if (probe.ok) return;
+
+  const diagnostic = probe.failure?.diagnostic ?? 'Agent CLI did not complete the liveness probe';
+  const message = `Agent liveness probe failed for ${implementStep.agent} (${model || 'default model'}): ${diagnostic}. ` +
+    'Re-authenticate or repair the configured agent CLI, then retry.';
+  throw new CommandExitError({
+    code: 'agent-unavailable',
+    message,
+    exitCode: 1,
+  });
 }
 
 /**
@@ -912,6 +950,15 @@ async function runIssueSession(
     log.info(`Filtering issues by milestone: ${activeMilestone}`);
   }
 
+  // This boundary must remain before createSession: a dead or unauthenticated
+  // CLI must not create session directories, branches, worktrees, or PR state.
+  if (!config.dryRun) {
+    await assertAgentAvailable(config);
+  } else {
+    const implementStep = resolveStepConfig(config, 'implement');
+    checkPrerequisites(config, implementStep.agent);
+  }
+
   // Create session (named after epic or milestone if selected). Session names
   // are deterministic per epic/milestone, so createSession locks the session
   // directory — a concurrently started run of the same target fails fast here
@@ -1117,9 +1164,6 @@ async function executeSessionRun(
       waiting: true,
     };
   }
-
-  // Check prerequisites
-  checkPrerequisites(config);
 
   // Track active worktree for cleanup on signal
   let activeIssueNum: number | null = null;
@@ -1351,6 +1395,7 @@ async function executeSessionRun(
   // must not add a second entry for each of them.
   const demotedQuickIssueNums = new Set<number>();
   let epicVerificationSummary: string | null = null;
+  let agentUnavailableFailure: AgentFailure | undefined;
 
   if (issues.length === 0) {
     log.info('No issues found. Nothing to do.');
@@ -1495,6 +1540,17 @@ async function executeSessionRun(
           if (runAbortController.signal.aborted) break;
           session.results.push(...results);
 
+          const unavailableResult = results.find((result) => (
+            result.failureReason === 'agent-unavailable'
+            && result.agentFailure !== undefined
+            && !isRecoveredRunResult(result)
+          ));
+          if (unavailableResult?.agentFailure) {
+            agentUnavailableFailure = unavailableResult.agentFailure;
+            log.error(`Agent unavailable — stopping session: ${agentUnavailableFailure.diagnostic}`);
+            break;
+          }
+
           // Flip epic checklist for each successful sub-issue.
           // Skipped in dry-run: `processIssue` returns status='success' when tests are
           // stubbed in dry-run, which would otherwise mutate the live epic body.
@@ -1608,6 +1664,15 @@ async function executeSessionRun(
           );
           if (runAbortController.signal.aborted) break;
           session.results.push(result);
+          if (
+            result.failureReason === 'agent-unavailable'
+            && result.agentFailure
+            && !isRecoveredRunResult(result)
+          ) {
+            agentUnavailableFailure = result.agentFailure;
+            log.error(`Agent unavailable — stopping session: ${agentUnavailableFailure.diagnostic}`);
+            break;
+          }
           if (quickWorktree && result.status === 'success' && !isRecoveredRunResult(result)) {
             quickProcessed.push({ number: issue.number, title: issue.title });
           }
@@ -1655,13 +1720,17 @@ async function executeSessionRun(
         // claim shipped work whose code never reached the session branch —
         // and the session PR would say "Closes #N" for unmerged issues.
         // Demote everything this pass failed to ship.
-        const demoteQuickResults = (): void => {
+        const demoteQuickResults = (
+          failureReason: PipelineResult['failureReason'] = 'permanent',
+          failure?: AgentFailure,
+        ): void => {
           for (const result of session.results) {
             if (!quickProcessed.some((q) => q.number === result.issueNum)) continue;
             if (result.status !== 'success' || isRecoveredRunResult(result)) continue;
             result.status = 'failure';
             result.testsPassing = false;
-            result.failureReason = 'permanent';
+            result.failureReason = failureReason;
+            if (failure) result.agentFailure = failure;
             demotedQuickIssueNums.add(result.issueNum);
             if (!config.dryRun) saveResult(session, result);
           }
@@ -1676,42 +1745,76 @@ async function executeSessionRun(
             }
           }
         };
-        try {
-          const quickResult = await finalizeQuickRun({
-            issues: quickProcessed,
-            config,
-            session,
-            worktreePath: quickWorktree.path,
-            worktreeBranch: quickWorktree.branch,
-            epicNum: activeEpic,
-          });
-          quickFinalizeTestOutput = quickResult.testOutput;
-          // Attach the shared PR to each quick result so summaries and the
-          // session PR body reference it.
-          if (quickResult.prUrl) {
-            for (const result of session.results) {
-              if (!result.prUrl && quickProcessed.some((q) => q.number === result.issueNum)) {
-                result.prUrl = quickResult.prUrl;
-              }
+
+        if (agentUnavailableFailure) {
+          // Quick-mode successes are only plan+build results until the deferred
+          // test/PR pass merges them. Once the agent is unavailable, none of
+          // that work is shipped, so restore its queue state and preserve the
+          // shared branch instead of invoking the dead agent again.
+          demoteQuickResults('agent-unavailable', agentUnavailableFailure);
+          for (const issue of quickProcessed) {
+            try {
+              labelIssue(config.repo, issue.number, config.labelReady, 'in-progress');
+              updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'Todo');
+            } catch (err) {
+              log.warn(`Could not fully re-queue quick issue #${issue.number} after agent failure: ${err instanceof Error ? err.message : err}`);
             }
           }
-          if (!quickResult.testsPassing) {
-            const message = `Quick mode: deferred test pass failed after ${config.maxTestRetries} attempts — PR ${quickResult.prUrl ?? '(not created)'} left unmerged`;
-            failures.push({ code: 'quick-finalize-failed', message });
-            demoteQuickResults();
-            epicAbort = true; // skip epic verification on a known-broken state
-          } else if (config.autoMerge && !quickResult.merged) {
-            const message = `Quick mode: PR ${quickResult.prUrl ?? '(not created)'} could not be merged into ${session.branch}`;
+          try {
+            const cleanup = await cleanupWorktree({
+              issueNum: quickProcessed[0]?.number ?? 0,
+              projectDir: process.cwd(),
+              autoCleanup: config.autoCleanup,
+              preserveIfCommits: true,
+              worktreePath: quickWorktree.path,
+            });
+            recordSessionCleanup(session, {
+              status: cleanup.status,
+              worktreePath: cleanup.path,
+              reason: cleanup.reason,
+              at: new Date().toISOString(),
+            });
+          } catch (err) {
+            log.warn(`Could not preserve quick worktree after agent failure: ${err instanceof Error ? err.message : err}`);
+          }
+        } else {
+          try {
+            const quickResult = await finalizeQuickRun({
+              issues: quickProcessed,
+              config,
+              session,
+              worktreePath: quickWorktree.path,
+              worktreeBranch: quickWorktree.branch,
+              epicNum: activeEpic,
+            });
+            quickFinalizeTestOutput = quickResult.testOutput;
+            // Attach the shared PR to each quick result so summaries and the
+            // session PR body reference it.
+            if (quickResult.prUrl) {
+              for (const result of session.results) {
+                if (!result.prUrl && quickProcessed.some((q) => q.number === result.issueNum)) {
+                  result.prUrl = quickResult.prUrl;
+                }
+              }
+            }
+            if (!quickResult.testsPassing) {
+              const message = `Quick mode: deferred test pass failed after ${config.maxTestRetries} attempts — PR ${quickResult.prUrl ?? '(not created)'} left unmerged`;
+              failures.push({ code: 'quick-finalize-failed', message });
+              demoteQuickResults();
+              epicAbort = true; // skip epic verification on a known-broken state
+            } else if (config.autoMerge && !quickResult.merged) {
+              const message = `Quick mode: PR ${quickResult.prUrl ?? '(not created)'} could not be merged into ${session.branch}`;
+              failures.push({ code: 'quick-finalize-failed', message });
+              demoteQuickResults();
+              epicAbort = true;
+            }
+          } catch (err) {
+            const message = `Quick mode finalize failed: ${err instanceof Error ? err.message : err}`;
+            log.error(message);
             failures.push({ code: 'quick-finalize-failed', message });
             demoteQuickResults();
             epicAbort = true;
           }
-        } catch (err) {
-          const message = `Quick mode finalize failed: ${err instanceof Error ? err.message : err}`;
-          log.error(message);
-          failures.push({ code: 'quick-finalize-failed', message });
-          demoteQuickResults();
-          epicAbort = true;
         }
       } else if (quickWorktree && quickProcessed.length === 0 && !config.dryRun) {
         // Nothing succeeded — release the shared worktree (preserved if it
@@ -1755,6 +1858,97 @@ async function executeSessionRun(
       failures,
       verificationClosedEpic,
       waiting: true,
+    };
+  }
+
+  if (agentUnavailableFailure) {
+    const affectedResult = session.results.find((result) => (
+      result.failureReason === 'agent-unavailable'
+      && !demotedQuickIssueNums.has(result.issueNum)
+      && !isRecoveredRunResult(result)
+    ));
+    const message = `Agent became unavailable during the session: ${agentUnavailableFailure.diagnostic}`;
+    failures.push({
+      code: 'agent-unavailable',
+      message,
+      issueNum: affectedResult?.issueNum,
+      exitCode: 1,
+    });
+    epicAbort = true;
+
+    const successfulResults = session.results.filter((result) => (
+      result.status === 'success' && !isRecoveredRunResult(result)
+    ));
+    if (successfulResults.length === 0) {
+      recordSessionError(session, {
+        issueNum: affectedResult?.issueNum,
+        stage: 'failed',
+        message,
+      });
+      transitionSessionStatus(session, 'failed', 'failed');
+      await emitLifecycleEvent({
+        config,
+        type: 'session.failed',
+        session,
+        context: {
+          error: message,
+          metadata: {
+            failure: {
+              kind: agentUnavailableFailure.kind,
+              fingerprint: agentUnavailableFailure.fingerprint,
+            },
+            successCount: 0,
+            issueCount: session.results.length,
+          },
+        },
+      });
+      log.error('Session stopped before any issue succeeded; skipping empty-session finalization');
+      process.off('SIGINT', handleSigint);
+      process.off('SIGTERM', handleSigterm);
+      return {
+        session,
+        sessionPrUrl: null,
+        failures,
+        verificationClosedEpic,
+        waiting: false,
+      };
+    }
+
+    // Preserve already-shipped work, but do not invoke any more agent-backed
+    // review, repair, learning, or verification stages after liveness is lost.
+    await drainSessionBackgroundTasks(session);
+    const finalizedPrUrl = await finalizeSession(session, config);
+    const sessionPrUrl = finalizedPrUrl ?? session.sessionPrUrl ?? null;
+    transitionSessionStatus(session, 'failed', 'failed', {
+      prUrl: sessionPrUrl,
+      sessionPrUrl,
+    });
+    await emitLifecycleEvent({
+      config,
+      type: 'session.failed',
+      session,
+      context: {
+        prUrl: sessionPrUrl,
+        error: message,
+        metadata: {
+          failure: {
+            kind: agentUnavailableFailure.kind,
+            fingerprint: agentUnavailableFailure.fingerprint,
+          },
+          successCount: successfulResults.length,
+          issueCount: session.results.length,
+        },
+      },
+    });
+    log.error(`Session stopped after ${successfulResults.length} issue(s) succeeded; remaining work was not attempted`);
+    process.off('SIGINT', handleSigint);
+    process.off('SIGTERM', handleSigterm);
+    return {
+      session,
+      sessionPrUrl,
+      failures,
+      verificationClosedEpic,
+      waiting: false,
     };
   }
 
@@ -1832,6 +2026,7 @@ async function executeSessionRun(
     // quick-finalize-failed entry — a per-issue duplicate is manifest noise.
     if (demotedQuickIssueNums.has(result.issueNum)) continue;
     if (result.status === 'failure' && !isRecoveredRunResult(result)) {
+      if (result.failureReason === 'agent-unavailable') continue;
       const transient = result.failureReason === 'transient';
       failures.push({
         code: transient ? 'transient-stop' : 'pipeline-failure',

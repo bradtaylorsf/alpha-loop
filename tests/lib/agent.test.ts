@@ -2,7 +2,9 @@ import {
   buildAgentArgs,
   buildEndpointEnv,
   buildOneShotCommand,
+  classifyAgentFailure,
   codexSandboxArgs,
+  probeAgentLiveness,
   spawnAgent,
   DEFAULT_LMSTUDIO_BASE_URL,
   DEFAULT_OLLAMA_BASE_URL,
@@ -52,6 +54,41 @@ beforeEach(() => {
 });
 
 describe('buildAgentArgs', () => {
+  test('constructs text-only probe args without write permissions', () => {
+    expect(buildAgentArgs({
+      agent: 'claude',
+      model: 'opus',
+      prompt: 'ping',
+      cwd: '/tmp',
+      textOnly: true,
+    })).toEqual({
+      command: 'claude',
+      args: ['-p', '--model', 'opus', '--allowedTools', '', '--output-format', 'text'],
+    });
+
+    expect(buildAgentArgs({
+      agent: 'ollama',
+      model: 'llama3.1:70b',
+      prompt: 'ping',
+      cwd: '/tmp',
+      textOnly: true,
+    })).toEqual({
+      command: 'codex',
+      args: ['exec', '--model', 'llama3.1:70b', '--sandbox', 'read-only'],
+    });
+
+    expect(buildAgentArgs({
+      agent: 'opencode',
+      model: 'openai/gpt-5',
+      prompt: 'ping',
+      cwd: '/tmp',
+      textOnly: true,
+    })).toEqual({
+      command: 'opencode',
+      args: ['run', '--model', 'openai/gpt-5', '--agent', 'plan'],
+    });
+  });
+
   test('constructs correct args for claude agent', () => {
     const result = buildAgentArgs({
       agent: 'claude',
@@ -177,6 +214,132 @@ describe('buildAgentArgs', () => {
 
     expect(result.args).not.toContain('--continue');
     expect(result.args[0]).toBe('-p');
+  });
+});
+
+describe('classifyAgentFailure', () => {
+  test('normalizes Claude expired OAuth diagnostics without retaining raw output', () => {
+    const failure = classifyAgentFailure(
+      1,
+      'Failed to authenticate: OAuth session expired and could not be refreshed\naccount: brad@example.com',
+      412,
+    );
+
+    expect(failure).toEqual({
+      kind: 'authentication',
+      fingerprint: 'authentication:oauth-session-expired',
+      diagnostic: 'OAuth session expired and could not be refreshed',
+      durationMs: 412,
+    });
+    expect(JSON.stringify(failure)).not.toContain('brad@example.com');
+  });
+
+  test('classifies spawn and timeout failures separately', () => {
+    expect(classifyAgentFailure(1, 'Failed to spawn claude: command not found', 5)).toEqual(
+      expect.objectContaining({ kind: 'spawn', fingerprint: 'spawn:failed' }),
+    );
+    expect(classifyAgentFailure(1, '[TIMEOUT] Agent killed after exceeding time limit.', 10_000)).toEqual(
+      expect.objectContaining({ kind: 'timeout', fingerprint: 'timeout:agent' }),
+    );
+  });
+});
+
+describe('probeAgentLiveness', () => {
+  test('uses a text-only invocation and reports success', async () => {
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'close') queueMicrotask(() => cb(0));
+    });
+
+    const result = await probeAgentLiveness({
+      agent: 'claude',
+      model: 'opus',
+      cwd: '/project',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(spawn).toHaveBeenCalledWith(
+      'claude',
+      ['-p', '--model', 'opus', '--allowedTools', '', '--output-format', 'text'],
+      expect.objectContaining({ cwd: '/project' }),
+    );
+    expect(mockStdin.write).toHaveBeenCalledWith(expect.stringContaining('ping'));
+  });
+
+  test('returns a structured authentication failure', async () => {
+    let stderrHandler!: (data: Buffer) => void;
+    mockStderr.on.mockImplementation((event: string, cb: (data: Buffer) => void) => {
+      if (event === 'data') stderrHandler = cb;
+    });
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'close') {
+        queueMicrotask(() => {
+          stderrHandler(Buffer.from('Failed to authenticate: OAuth session expired and could not be refreshed'));
+          cb(1);
+        });
+      }
+    });
+
+    const result = await probeAgentLiveness({
+      agent: 'claude',
+      model: 'opus',
+      cwd: '/project',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      failure: expect.objectContaining({
+        kind: 'authentication',
+        fingerprint: 'authentication:oauth-session-expired',
+      }),
+    }));
+  });
+
+  test('reports spawn failures from the probe', async () => {
+    mockChild.on.mockImplementation((event: string, cb: Function) => {
+      if (event === 'error') queueMicrotask(() => cb(new Error('command not found')));
+    });
+
+    const result = await probeAgentLiveness({
+      agent: 'claude',
+      model: 'opus',
+      cwd: '/project',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: false,
+      failure: expect.objectContaining({ kind: 'spawn', fingerprint: 'spawn:failed' }),
+    }));
+  });
+
+  test('times out a probe without a real delay', async () => {
+    jest.useFakeTimers();
+    try {
+      let closeHandler!: (code: number | null) => void;
+      mockChild.on.mockImplementation((event: string, cb: (code: number | null) => void) => {
+        if (event === 'close') closeHandler = cb;
+      });
+      mockChild.kill.mockImplementation(() => {
+        queueMicrotask(() => closeHandler(null));
+        return true;
+      });
+
+      const resultPromise = probeAgentLiveness({
+        agent: 'claude',
+        model: 'opus',
+        cwd: '/project',
+        timeout: 100,
+      });
+      await jest.advanceTimersByTimeAsync(100);
+      const result = await resultPromise;
+
+      expect(mockChild.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(result).toEqual(expect.objectContaining({
+        ok: false,
+        failure: expect.objectContaining({ kind: 'timeout', fingerprint: 'timeout:agent' }),
+      }));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

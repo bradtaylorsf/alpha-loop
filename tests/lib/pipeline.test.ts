@@ -22,6 +22,7 @@ jest.mock('../../src/lib/logger', () => ({
 jest.mock('../../src/lib/agent', () => ({
   spawnAgent: jest.fn(),
   buildEndpointEnv: jest.fn().mockReturnValue({}),
+  classifyAgentFailure: jest.requireActual('../../src/lib/agent').classifyAgentFailure,
 }));
 
 jest.mock('../../src/lib/worktree', () => ({
@@ -1351,6 +1352,139 @@ describe('processIssue', () => {
     expect(mockCleanupWorktree).toHaveBeenCalled();
   });
 
+  test('re-queues without comments or WIP commits when authentication is lost during implementation', async () => {
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'implement prompt') {
+        return {
+          exitCode: 1,
+          output: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+          duration: 350,
+        };
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
+
+    expect(result.status).toBe('failure');
+    expect(result.failureReason).toBe('agent-unavailable');
+    expect(result.agentFailure).toEqual(expect.objectContaining({
+      kind: 'authentication',
+      fingerprint: 'authentication:oauth-session-expired',
+    }));
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
+    expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'Todo');
+    expect(commentIssue).not.toHaveBeenCalledWith('owner/repo', 42, expect.stringContaining('failed during implementation'));
+    expect(mockExec.mock.calls.some(([command]) => String(command).includes('wip: partial implementation'))).toBe(false);
+  });
+
+  test('stops before implementation when authentication is lost during planning', async () => {
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt?.includes('structured implementation plan')) {
+        return {
+          exitCode: 1,
+          output: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+          duration: 300,
+        };
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
+
+    expect(result.failureReason).toBe('agent-unavailable');
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
+    expect(commentIssue).not.toHaveBeenCalled();
+  });
+
+  test('re-queues and suppresses the issue PR when authentication is lost during review', async () => {
+    mockCleanupWorktree.mockRejectedValueOnce(new Error('git worktree cleanup failed'));
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'review prompt') {
+        return {
+          exitCode: 1,
+          output: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+          duration: 300,
+        };
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
+
+    expect(result.failureReason).toBe('agent-unavailable');
+    expect(result.agentFailure).toEqual(expect.objectContaining({
+      kind: 'authentication',
+      fingerprint: 'authentication:oauth-session-expired',
+    }));
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
+    expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 42, 'Todo');
+    expect(mockCreatePR).not.toHaveBeenCalled();
+    expect(commentIssue).not.toHaveBeenCalled();
+  });
+
+  test('re-queues and suppresses the issue PR when authentication is lost during live verification', async () => {
+    const { existsSync, readFileSync } = require('node:fs');
+    (existsSync as jest.Mock).mockImplementation((path: unknown) => (
+      String(path).includes('plan-issue-42.json') || String(path).includes('review-issue-42.json')
+    ));
+    (readFileSync as jest.Mock).mockImplementation((path: unknown) => {
+      if (String(path).includes('plan-issue-42.json')) {
+        return JSON.stringify({
+          summary: 'Plan with live verification',
+          files: [],
+          implementation: 'Implement it',
+          testing: { needed: false, reason: 'Verified live' },
+          verification: { needed: true, method: 'playwright', reason: 'Runtime behavior' },
+        });
+      }
+      if (String(path).includes('review-issue-42.json')) {
+        return JSON.stringify({ passed: true, summary: 'Review passed', findings: [] });
+      }
+      return '';
+    });
+    mockRunVerify.mockResolvedValue({
+      passed: false,
+      skipped: false,
+      output: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+    });
+
+    const result = await processIssue(
+      42,
+      'Test issue',
+      'Body',
+      makeConfig({ skipVerify: false }),
+      makeSession(),
+    );
+
+    expect(mockRunVerify).toHaveBeenCalledTimes(1);
+    expect(result.failureReason).toBe('agent-unavailable');
+    expect(result.agentFailure?.kind).toBe('authentication');
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
+    expect(mockCreatePR).not.toHaveBeenCalled();
+  });
+
+  test('promotes matching instant plan and implementation exits to agent unavailable', async () => {
+    mockSpawnAgent.mockResolvedValue({
+      exitCode: 1,
+      output: 'CLI transport failed with invariant alpha',
+      duration: 250,
+    });
+
+    const result = await processIssue(42, 'Test issue', 'Body', makeConfig(), makeSession());
+
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
+    expect(result.failureReason).toBe('agent-unavailable');
+    expect(result.agentFailure).toEqual(expect.objectContaining({
+      kind: 'execution',
+      fingerprint: expect.stringMatching(/^execution:/),
+    }));
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
+    expect(commentIssue).not.toHaveBeenCalled();
+    expect(mockExec.mock.calls.some(([command]) => String(command).includes('wip: partial implementation'))).toBe(false);
+  });
+
   test('re-queues issue on transient error (usage limit) during implementation', async () => {
     mockSpawnAgent.mockImplementation(async (options) => {
       if (options.prompt === 'implement prompt') {
@@ -1824,6 +1958,54 @@ describe('processBatch', () => {
     { number: 10, title: 'Issue 10', body: 'Body 10' },
     { number: 11, title: 'Issue 11', body: 'Body 11' },
   ];
+
+  test('re-queues the entire batch without comments or WIP commits when authentication is lost', async () => {
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'batch implement prompt') {
+        return {
+          exitCode: 1,
+          output: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+          duration: 400,
+        };
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+
+    const results = await processBatch(batchIssues, makeConfig({ batch: true }), makeSession());
+
+    expect(results).toHaveLength(2);
+    expect(results.every((result) => result.failureReason === 'agent-unavailable')).toBe(true);
+    expect(results.every((result) => result.agentFailure?.kind === 'authentication')).toBe(true);
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 10, 'ready', 'in-progress');
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 11, 'ready', 'in-progress');
+    expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 10, 'Todo');
+    expect(updateProjectStatus).toHaveBeenCalledWith('owner/repo', 1, 'owner', 11, 'Todo');
+    expect(commentIssue).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.stringContaining('failed during batch'));
+    expect(mockExec.mock.calls.some(([command]) => String(command).includes('wip: partial batch implementation'))).toBe(false);
+  });
+
+  test('re-queues the entire batch and suppresses its PR when authentication is lost during review', async () => {
+    mockSpawnAgent.mockImplementation(async (options) => {
+      if (options.prompt === 'batch review prompt') {
+        return {
+          exitCode: 1,
+          output: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+          duration: 400,
+        };
+      }
+      return { exitCode: 0, output: 'OK', duration: 1000 };
+    });
+
+    const results = await processBatch(batchIssues, makeConfig({ batch: true }), makeSession());
+
+    expect(results).toHaveLength(2);
+    expect(results.every((result) => result.failureReason === 'agent-unavailable')).toBe(true);
+    expect(results.every((result) => result.agentFailure?.kind === 'authentication')).toBe(true);
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 10, 'ready', 'in-progress');
+    expect(labelIssue).toHaveBeenCalledWith('owner/repo', 11, 'ready', 'in-progress');
+    expect(mockCreatePR).not.toHaveBeenCalled();
+    expect(commentIssue).not.toHaveBeenCalled();
+  });
 
   test('blocks batch auto-merge when the review gate artifact is missing', async () => {
     const { existsSync } = require('node:fs');

@@ -38,7 +38,7 @@ export type TraceMetadata = {
   title: string;
   status: 'success' | 'failure';
   recoveryMode?: PipelineRecoveryMode;
-  failureReason?: 'transient' | 'permanent';
+  failureReason?: 'transient' | 'permanent' | 'agent-unavailable';
   duration: number;
   retries: number;
   testsPassing: boolean;
