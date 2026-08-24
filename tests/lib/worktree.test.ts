@@ -1,4 +1,4 @@
-import { setupWorktree, cleanupWorktree } from '../../src/lib/worktree';
+import { WorktreePreconditionError, setupWorktree, cleanupWorktree } from '../../src/lib/worktree';
 
 // Mock dependencies
 jest.mock('../../src/lib/shell', () => ({
@@ -41,9 +41,13 @@ const mockWriteFile = writeFileSync as jest.MockedFunction<typeof writeFileSync>
 
 beforeEach(() => {
   jest.clearAllMocks();
-  // Default: commands succeed, paths don't exist
+  // Default: commands succeed and the synthetic worktree is a Node project.
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
-  mockExists.mockReturnValue(false);
+  mockExists.mockImplementation((path) => (
+    typeof path === 'string'
+    && path.includes('/.worktrees/')
+    && path.endsWith('/package.json')
+  ));
 });
 
 describe('setupWorktree', () => {
@@ -325,7 +329,7 @@ describe('setupWorktree', () => {
     );
   });
 
-  test('runs pnpm install unless skipInstall is true', async () => {
+  test('runs pnpm install when package.json exists at the worktree root', async () => {
     await setupWorktree(baseOptions);
 
     expect(mockExec).toHaveBeenCalledWith(
@@ -334,7 +338,35 @@ describe('setupWorktree', () => {
     );
   });
 
-  test('fails when both dependency installation attempts fail', async () => {
+  test('runs pnpm install when a recognized lockfile exists without package.json', async () => {
+    mockExists.mockImplementation((path) => (
+      typeof path === 'string'
+      && path.endsWith('/pnpm-lock.yaml')
+    ));
+
+    await setupWorktree(baseOptions);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      'pnpm install --frozen-lockfile',
+      expect.anything(),
+    );
+  });
+
+  test('skips pnpm install when no package metadata exists at the worktree root', async () => {
+    mockExists.mockReturnValue(false);
+
+    await setupWorktree(baseOptions);
+
+    const installCalls = mockExec.mock.calls.filter(
+      ([command]) => typeof command === 'string' && command.includes('pnpm install'),
+    );
+    expect(installCalls).toHaveLength(0);
+    expect(log.info).toHaveBeenCalledWith(
+      'Skipping dependency installation: no package.json or recognized lockfile found at worktree root',
+    );
+  });
+
+  test('exposes a typed precondition error when both dependency installation attempts fail', async () => {
     mockExec.mockImplementation((cmd: string) => {
       if (cmd.includes('pnpm install')) {
         return { stdout: '', stderr: 'dependency error', exitCode: 1 };
@@ -342,13 +374,34 @@ describe('setupWorktree', () => {
       return { stdout: '', stderr: '', exitCode: 0 };
     });
 
-    await expect(setupWorktree(baseOptions))
-      .rejects.toThrow('Dependency installation failed (exit 1)');
+    const error = await setupWorktree(baseOptions).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(WorktreePreconditionError);
+    expect(error).toMatchObject({
+      name: 'WorktreePreconditionError',
+      phase: 'dependency-install',
+      command: 'pnpm install',
+      exitCode: 1,
+      stderr: 'dependency error',
+    });
+    expect((error as Error).message).toContain('Fix the dependency metadata or install command');
   });
 
   test('runs setup command after dependency install', async () => {
     await setupWorktree({ ...baseOptions, setupCommand: 'python -m venv .venv' });
 
+    expect(mockExec).toHaveBeenCalledWith(
+      'python -m venv .venv',
+      expect.objectContaining({ cwd: expect.stringContaining('issue-42') }),
+    );
+  });
+
+  test('runs setup command after automatically skipping dependency installation', async () => {
+    mockExists.mockReturnValue(false);
+
+    await setupWorktree({ ...baseOptions, setupCommand: 'python -m venv .venv' });
+
+    expect(mockExec).not.toHaveBeenCalledWith('pnpm install --frozen-lockfile', expect.anything());
     expect(mockExec).toHaveBeenCalledWith(
       'python -m venv .venv',
       expect.objectContaining({ cwd: expect.stringContaining('issue-42') }),
