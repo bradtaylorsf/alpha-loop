@@ -4,7 +4,9 @@
 import { existsSync, mkdirSync, symlinkSync, readlinkSync, unlinkSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join, resolve, basename, relative, isAbsolute } from 'node:path';
 import { exec, shellQuote } from './shell.js';
+import type { ExecResult } from './shell.js';
 import { log } from './logger.js';
+import { detectPackageManager } from './init-scan.js';
 import { isWaitingFeedbackStatus } from './session-state.js';
 import type { SessionStatus } from './session.js';
 
@@ -50,6 +52,41 @@ export type CleanupWorktreeResult = {
   path: string;
   reason?: string;
 };
+
+export type WorktreePreconditionPhase = 'dependency-install';
+
+export type WorktreeCommandFailure = ExecResult & {
+  command: string;
+};
+
+/** A setup prerequisite failed before the worktree could enter the build stage. */
+export class WorktreePreconditionError extends Error {
+  readonly phase: WorktreePreconditionPhase = 'dependency-install';
+  readonly command: string;
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly attempts: readonly WorktreeCommandFailure[];
+
+  constructor(attempts: WorktreeCommandFailure[]) {
+    const failure = attempts.at(-1);
+    if (!failure) {
+      throw new Error('WorktreePreconditionError requires at least one failed command');
+    }
+    const detail = failure.stderr || failure.stdout || 'no command output';
+    super(
+      `Dependency installation pre-condition failed at "${failure.command}" `
+      + `(exit ${failure.exitCode}): ${detail}. `
+      + 'Fix the dependency metadata or install command, or set skip_install: true when installation is intentionally unnecessary.',
+    );
+    this.name = 'WorktreePreconditionError';
+    this.command = failure.command;
+    this.exitCode = failure.exitCode;
+    this.stdout = failure.stdout;
+    this.stderr = failure.stderr;
+    this.attempts = attempts;
+  }
+}
 
 const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.local'];
 
@@ -237,17 +274,25 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
   // Set COMPOSE_PROJECT_NAME so Docker doesn't use "issue-N" as project name
   ensureComposeProjectName(worktreePath, projectDir);
 
-  // Install dependencies unless skipped
-  if (!skipInstall) {
+  // Install dependencies only for projects with recognized package metadata.
+  const hasPackageMetadata = detectPackageManager(worktreePath) !== 'unknown';
+  if (!skipInstall && hasPackageMetadata) {
     log.info('Installing dependencies in worktree...');
-    const installResult = exec('pnpm install --frozen-lockfile', { cwd: worktreePath });
+    const frozenCommand = 'pnpm install --frozen-lockfile';
+    const installResult = exec(frozenCommand, { cwd: worktreePath });
     if (installResult.exitCode !== 0) {
       // Fall back to regular install
-      const fallback = exec('pnpm install', { cwd: worktreePath });
+      const fallbackCommand = 'pnpm install';
+      const fallback = exec(fallbackCommand, { cwd: worktreePath });
       if (fallback.exitCode !== 0) {
-        throw new Error(`Dependency installation failed (exit ${fallback.exitCode})`);
+        throw new WorktreePreconditionError([
+          { command: frozenCommand, ...installResult },
+          { command: fallbackCommand, ...fallback },
+        ]);
       }
     }
+  } else if (!skipInstall) {
+    log.info('Skipping dependency installation: no package.json or recognized lockfile found at worktree root');
   }
 
   // Run custom setup command (e.g., Python venv, Ruby bundler, Go modules)
