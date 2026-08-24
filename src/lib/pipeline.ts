@@ -1601,6 +1601,47 @@ export async function processIssue(
     });
   };
 
+  const stopForAgentUnavailable = async (
+    failure: AgentFailure,
+    stage: 'plan' | 'implement' | 'test' | 'review' | 'verify',
+  ): Promise<PipelineResult> => {
+    log.error(`Agent unavailable during ${stage} for #${issueNum}: ${failure.diagnostic}`);
+    try {
+      requeueIssue(config, issueNum);
+    } catch (err) {
+      log.warn(`Could not fully re-queue issue #${issueNum} after agent failure: ${err instanceof Error ? err.message : err}`);
+    }
+    if (!quickWorktree) {
+      try {
+        const cleanup = await cleanupWorktree({
+          issueNum,
+          projectDir,
+          autoCleanup: config.autoCleanup,
+          preserveIfCommits: true,
+          worktreePath,
+        });
+        recordSessionCleanup(session, {
+          status: cleanup.status,
+          worktreePath: cleanup.path,
+          reason: cleanup.reason,
+          at: new Date().toISOString(),
+        });
+      } catch (err) {
+        log.warn(`Could not clean up issue #${issueNum} after agent failure: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    try {
+      recordSessionIssue(session, issueNum, {
+        status: 'failure',
+        stage,
+        failureReason: 'agent-unavailable',
+      });
+    } catch (err) {
+      log.warn(`Could not record agent failure for issue #${issueNum}: ${err instanceof Error ? err.message : err}`);
+    }
+    return failureResult(issueNum, title, startTime, 'agent-unavailable', failure);
+  };
+
   try {
   // --- Step 3: Plan (structured JSON — controls test/verify steps) ---
   currentStep = 'plan';
@@ -1660,19 +1701,7 @@ export async function processIssue(
 
       const planAgentFailure = unavailableAgentFailure(planResult);
       if (planAgentFailure) {
-        log.error(`Agent unavailable during planning for #${issueNum}: ${planAgentFailure.diagnostic}`);
-        requeueIssue(config, issueNum);
-        if (!quickWorktree) {
-          const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, worktreePath });
-          recordSessionCleanup(session, {
-            status: cleanup.status,
-            worktreePath: cleanup.path,
-            reason: cleanup.reason,
-            at: new Date().toISOString(),
-          });
-        }
-        recordSessionIssue(session, issueNum, { status: 'failure', stage: 'plan', failureReason: 'agent-unavailable' });
-        return failureResult(issueNum, title, startTime, 'agent-unavailable', planAgentFailure);
+        return stopForAgentUnavailable(planAgentFailure, 'plan');
       }
 
       // Detect transient errors (usage limits) during planning
@@ -1830,19 +1859,7 @@ export async function processIssue(
 
     if (implResult.exitCode !== 0) {
       if (implementationAgentFailure) {
-        log.error(`Agent unavailable during implementation for #${issueNum}: ${implementationAgentFailure.diagnostic}`);
-        requeueIssue(config, issueNum);
-        if (!quickWorktree) {
-          const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, worktreePath });
-          recordSessionCleanup(session, {
-            status: cleanup.status,
-            worktreePath: cleanup.path,
-            reason: cleanup.reason,
-            at: new Date().toISOString(),
-          });
-        }
-        recordSessionIssue(session, issueNum, { status: 'failure', stage: 'implement', failureReason: 'agent-unavailable' });
-        return failureResult(issueNum, title, startTime, 'agent-unavailable', implementationAgentFailure);
+        return stopForAgentUnavailable(implementationAgentFailure, 'implement');
       }
       if (isTransientError(implResult.output)) {
         log.warn(`Agent hit a transient error during implementation for #${issueNum} — re-queuing`);
@@ -1995,6 +2012,10 @@ export async function processIssue(
         traceOutput(session, issueNum, `fix-${attempt}`, fixResult.output);
         stepCosts.push(buildStepCost('test_fix', issueNum, fixResult, config));
         recordStageTelemetry(session, issueNum, 'test_fix', fixResult, config, fixCtx);
+        const fixAgentFailure = unavailableAgentFailure(fixResult);
+        if (fixAgentFailure) {
+          return stopForAgentUnavailable(fixAgentFailure, 'test');
+        }
         stepsCompleted.push(`fix-${attempt}`);
 
         // Auto-commit fixes before the pause check so sandboxed agents that
@@ -2126,6 +2147,11 @@ export async function processIssue(
         stepCosts.push(buildStepCost('review', issueNum, reviewResult, config));
         recordStageTelemetry(session, issueNum, 'review', reviewResult, config, reviewCtx);
 
+        const reviewAgentFailure = unavailableAgentFailure(reviewResult);
+        if (reviewAgentFailure) {
+          return stopForAgentUnavailable(reviewAgentFailure, 'review');
+        }
+
         reviewOutput = reviewResult.output;
       } catch (err) {
         throwIfPipelineAborted(pipelineOptions.signal);
@@ -2180,6 +2206,11 @@ export async function processIssue(
         traceOutput(session, issueNum, `review-fix-${attempt}`, reviewFixResult.output);
         stepCosts.push(buildStepCost('review', issueNum, reviewFixResult, config));
         recordStageTelemetry(session, issueNum, 'review_fix', reviewFixResult, config, reviewFixCtx);
+
+        const reviewFixAgentFailure = unavailableAgentFailure(reviewFixResult);
+        if (reviewFixAgentFailure) {
+          return stopForAgentUnavailable(reviewFixAgentFailure, 'review');
+        }
 
         // Auto-commit before the pause check so sandboxed agents that cannot
         // commit never strand review fixes uncommitted.
@@ -2295,6 +2326,12 @@ export async function processIssue(
         ...epicOption,
       });
       verifyOutput = verifyResult.output;
+      const verifyAgentFailure = !verifyResult.passed && !verifyResult.skipped
+        ? classifyAgentFailure(1, verifyResult.output, 0)
+        : undefined;
+      if (verifyAgentFailure?.kind === 'authentication') {
+        return stopForAgentUnavailable(verifyAgentFailure, 'verify');
+      }
       if (verifyResult.webApp) {
         webAppSummary = verifyResult.webApp;
         recordSessionWebAppArtifacts(session, {
@@ -2373,6 +2410,11 @@ export async function processIssue(
           traceOutput(session, issueNum, `verify-fix-${attempt}`, verifyFixResult.output);
           stepCosts.push(buildStepCost('verify', issueNum, verifyFixResult, config));
           recordStageTelemetry(session, issueNum, 'verify_fix', verifyFixResult, config, verifyFixCtx);
+
+          const verifyFixAgentFailure = unavailableAgentFailure(verifyFixResult);
+          if (verifyFixAgentFailure) {
+            return stopForAgentUnavailable(verifyFixAgentFailure, 'verify');
+          }
 
           // Auto-commit before the pause check so sandboxed agents that
           // cannot commit never strand verification fixes uncommitted.
@@ -3107,6 +3149,51 @@ export async function processBatch(
     ? resolveIssueBaseCommit(worktreePath, batchBaseRef)
     : '';
 
+  const stopBatchForAgentUnavailable = async (
+    failure: AgentFailure,
+    stage: 'plan' | 'implement' | 'test' | 'review',
+  ): Promise<PipelineResult[]> => {
+    log.error(`Agent unavailable during batch ${stage}: ${failure.diagnostic}`);
+    for (const issue of issues) {
+      try {
+        requeueIssue(config, issue.number);
+      } catch (err) {
+        log.warn(`Could not fully re-queue issue #${issue.number} after agent failure: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    try {
+      const cleanup = await cleanupWorktree({
+        issueNum: issues[0].number,
+        projectDir,
+        autoCleanup: config.autoCleanup,
+        preserveIfCommits: true,
+        worktreePath,
+      });
+      recordSessionCleanup(session, {
+        status: cleanup.status,
+        worktreePath: cleanup.path,
+        reason: cleanup.reason,
+        at: new Date().toISOString(),
+      });
+    } catch (err) {
+      log.warn(`Could not clean up batch worktree after agent failure: ${err instanceof Error ? err.message : err}`);
+    }
+    for (const issue of issues) {
+      try {
+        recordSessionIssue(session, issue.number, {
+          status: 'failure',
+          stage,
+          failureReason: 'agent-unavailable',
+        });
+      } catch (err) {
+        log.warn(`Could not record agent failure for issue #${issue.number}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    return issues.map((issue) => (
+      failureResult(issue.number, issue.title, startTime, 'agent-unavailable', failure)
+    ));
+  };
+
   // --- Step 3: Fetch comments for all issues ---
   const issueComments = new Map<number, Comment[]>();
   if (!config.dryRun) {
@@ -3168,19 +3255,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
       const planAgentFailure = unavailableAgentFailure(planResult);
       if (planAgentFailure) {
-        log.error(`Agent unavailable during batch planning: ${planAgentFailure.diagnostic}`);
-        for (const issue of issues) requeueIssue(config, issue.number);
-        const cleanup = await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, worktreePath });
-        recordSessionCleanup(session, {
-          status: cleanup.status,
-          worktreePath: cleanup.path,
-          reason: cleanup.reason,
-          at: new Date().toISOString(),
-        });
-        for (const issue of issues) {
-          recordSessionIssue(session, issue.number, { status: 'failure', stage: 'plan', failureReason: 'agent-unavailable' });
-        }
-        return issues.map((i) => failureResult(i.number, i.title, startTime, 'agent-unavailable', planAgentFailure));
+        return stopBatchForAgentUnavailable(planAgentFailure, 'plan');
       }
 
       if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
@@ -3267,19 +3342,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       const implementationAgentFailure = unavailableAgentFailure(implResult)
         ?? matchingInstantAgentFailure(priorInstantAgentFailure, classifiedImplementationFailure);
       if (implementationAgentFailure) {
-        log.error(`Agent unavailable during batch implementation: ${implementationAgentFailure.diagnostic}`);
-        for (const issue of issues) requeueIssue(config, issue.number);
-        const cleanup = await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, worktreePath });
-        recordSessionCleanup(session, {
-          status: cleanup.status,
-          worktreePath: cleanup.path,
-          reason: cleanup.reason,
-          at: new Date().toISOString(),
-        });
-        for (const issue of issues) {
-          recordSessionIssue(session, issue.number, { status: 'failure', stage: 'implement', failureReason: 'agent-unavailable' });
-        }
-        return issues.map((i) => failureResult(i.number, i.title, startTime, 'agent-unavailable', implementationAgentFailure));
+        return stopBatchForAgentUnavailable(implementationAgentFailure, 'implement');
       }
       // Auto-commit any uncommitted work before deciding on cleanup
       const dirtyCheck = exec('git status --porcelain', { cwd: worktreePath });
@@ -3459,6 +3522,11 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           profile: selectRoutingProfile(config, issues[0].number),
         });
 
+        const fixAgentFailure = unavailableAgentFailure(fixResult);
+        if (fixAgentFailure) {
+          return stopBatchForAgentUnavailable(fixAgentFailure, 'test');
+        }
+
         const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
         if (fixStatus.stdout.trim()) {
           exec('git add -A', { cwd: worktreePath });
@@ -3511,6 +3579,10 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         recordStageTelemetry(session, issues[0].number, 'batch-review', reviewResult, config, {
           profile: selectRoutingProfile(config, issues[0].number),
         });
+        const reviewAgentFailure = unavailableAgentFailure(reviewResult);
+        if (reviewAgentFailure) {
+          return stopBatchForAgentUnavailable(reviewAgentFailure, 'review');
+        }
         reviewOutput = reviewResult.output;
       } catch (err) {
         throwIfPipelineAborted(options.signal);
@@ -3557,6 +3629,11 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         recordStageTelemetry(session, issues[0].number, 'batch-review_fix', reviewFixResult, config, {
           profile: selectRoutingProfile(config, issues[0].number),
         });
+
+        const reviewFixAgentFailure = unavailableAgentFailure(reviewFixResult);
+        if (reviewFixAgentFailure) {
+          return stopBatchForAgentUnavailable(reviewFixAgentFailure, 'review');
+        }
 
         const fixStatus = exec('git status --porcelain', { cwd: worktreePath });
         if (fixStatus.stdout.trim()) {
