@@ -40,6 +40,7 @@ jest.mock('../../src/lib/github', () => ({
   commentIssue: jest.fn(),
   closeIssue: jest.fn(),
   labelIssue: jest.fn(),
+  updateProjectStatus: jest.fn(),
 }));
 
 jest.mock('../../src/lib/pipeline', () => ({
@@ -2482,9 +2483,12 @@ Coordinate hosted work.
     );
   });
 
-  test('dry runs do not invoke the agent liveness probe', async () => {
+  test('dry runs validate required binaries without invoking the agent liveness probe', async () => {
     await runCommand({ skipEpic: true, dryRun: true });
 
+    expect(mockExec).toHaveBeenCalledWith('command -v "gh"');
+    expect(mockExec).toHaveBeenCalledWith('command -v "git"');
+    expect(mockExec).toHaveBeenCalledWith('command -v "claude"');
     expect(mockProbeAgentLiveness).not.toHaveBeenCalled();
   });
 
@@ -2640,6 +2644,72 @@ Coordinate hosted work.
         prUrl: 'https://github.com/owner/repo/pull/500',
         metadata: expect.objectContaining({ successCount: 1, issueCount: 2 }),
       }),
+    }));
+    expect(process.exitCode).toBe(1);
+  });
+
+  test('quick mode re-queues unshipped builds and skips deferred finalization after auth loss', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      ...overrides,
+      quick: true,
+      autoMerge: true,
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'Built but unshipped', body: 'Body', labels: ['ready'] },
+      { number: 43, title: 'Auth failure', body: 'Body', labels: ['ready'] },
+      { number: 44, title: 'Unattempted issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockSetupWorktree.mockResolvedValue({
+      path: '/tmp/quick-shared',
+      branch: 'agent/issue-42',
+      resumed: false,
+    });
+    mockProcessIssue
+      .mockResolvedValueOnce({
+        issueNum: 42,
+        title: 'Built but unshipped',
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: false,
+        verifySkipped: true,
+        duration: 30,
+        filesChanged: 2,
+      })
+      .mockResolvedValueOnce({
+        issueNum: 43,
+        title: 'Auth failure',
+        status: 'failure',
+        failureReason: 'agent-unavailable',
+        agentFailure: {
+          kind: 'authentication',
+          fingerprint: 'authentication:oauth-session-expired',
+          diagnostic: 'OAuth session expired and could not be refreshed',
+          durationMs: 300,
+        },
+        testsPassing: false,
+        verifyPassing: false,
+        verifySkipped: false,
+        duration: 0,
+        filesChanged: 0,
+      });
+
+    await runCommand({ skipEpic: true });
+
+    expect(mockProcessIssue).toHaveBeenCalledTimes(2);
+    expect(mockFinalizeQuickRun).not.toHaveBeenCalled();
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+    expect(mockLabelIssue).toHaveBeenCalledWith('owner/repo', 42, 'ready', 'in-progress');
+    expect(mockSaveResult).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      issueNum: 42,
+      status: 'failure',
+      failureReason: 'agent-unavailable',
+    }));
+    expect(mockCleanupWorktree).toHaveBeenCalledWith(expect.objectContaining({
+      worktreePath: '/tmp/quick-shared',
+      preserveIfCommits: true,
+    }));
+    expect(mockRecordSessionError).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+      issueNum: 43,
     }));
     expect(process.exitCode).toBe(1);
   });

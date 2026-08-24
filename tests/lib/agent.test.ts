@@ -76,6 +76,17 @@ describe('buildAgentArgs', () => {
       command: 'codex',
       args: ['exec', '--model', 'llama3.1:70b', '--sandbox', 'read-only'],
     });
+
+    expect(buildAgentArgs({
+      agent: 'opencode',
+      model: 'openai/gpt-5',
+      prompt: 'ping',
+      cwd: '/tmp',
+      textOnly: true,
+    })).toEqual({
+      command: 'opencode',
+      args: ['run', '--model', 'openai/gpt-5', '--agent', 'plan'],
+    });
   });
 
   test('constructs correct args for claude agent', () => {

@@ -1,0 +1,30 @@
+{
+  "passed": true,
+  "summary": "Holistic review fixed quick-mode auth-loss finalization, restored dry-run prerequisite checks, and restricted OpenCode liveness probes; all session requirements now pass.",
+  "findings": [
+    {
+      "severity": "critical",
+      "description": "Quick mode detected an agent authentication failure but still entered the deferred test/PR finalizer, which could invoke the unavailable agent again and claim earlier build-only results as shipped.",
+      "fixed": true,
+      "file": "src/commands/run.ts"
+    },
+    {
+      "severity": "warning",
+      "description": "Moving prerequisite checks into the non-dry liveness path caused dry-runs to stop validating required gh, git, and agent binaries.",
+      "fixed": true,
+      "file": "src/commands/run.ts"
+    },
+    {
+      "severity": "warning",
+      "description": "The text-only liveness option did not restrict OpenCode, whose default Build agent permits tools; probes now select OpenCode's restricted Plan agent.",
+      "fixed": true,
+      "file": "src/lib/agent.ts"
+    },
+    {
+      "severity": "info",
+      "description": "pnpm audit reports eight pre-existing vulnerabilities in Jest's development-only transitive dependencies; pnpm audit --prod reports no known production vulnerabilities.",
+      "fixed": false,
+      "file": "pnpm-lock.yaml"
+    }
+  ]
+}

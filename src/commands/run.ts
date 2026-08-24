@@ -10,6 +10,7 @@ import { loadConfig, assertSafeShellArg, resolveRoutingStage, resolveStepConfig,
 import {
   pollIssues, listMilestones, listEpics, getEpicSubIssues, getIssueWithComments,
   getMergedPRForIssue, updateEpicChecklist, commentIssue, closeIssue, labelIssue,
+  updateProjectStatus,
   type Milestone, type Issue,
 } from '../lib/github.js';
 import { buildEpicSummary, parseSubIssues } from '../lib/epics.js';
@@ -953,6 +954,9 @@ async function runIssueSession(
   // CLI must not create session directories, branches, worktrees, or PR state.
   if (!config.dryRun) {
     await assertAgentAvailable(config);
+  } else {
+    const implementStep = resolveStepConfig(config, 'implement');
+    checkPrerequisites(config, implementStep.agent);
   }
 
   // Create session (named after epic or milestone if selected). Session names
@@ -1716,13 +1720,17 @@ async function executeSessionRun(
         // claim shipped work whose code never reached the session branch —
         // and the session PR would say "Closes #N" for unmerged issues.
         // Demote everything this pass failed to ship.
-        const demoteQuickResults = (): void => {
+        const demoteQuickResults = (
+          failureReason: PipelineResult['failureReason'] = 'permanent',
+          failure?: AgentFailure,
+        ): void => {
           for (const result of session.results) {
             if (!quickProcessed.some((q) => q.number === result.issueNum)) continue;
             if (result.status !== 'success' || isRecoveredRunResult(result)) continue;
             result.status = 'failure';
             result.testsPassing = false;
-            result.failureReason = 'permanent';
+            result.failureReason = failureReason;
+            if (failure) result.agentFailure = failure;
             demotedQuickIssueNums.add(result.issueNum);
             if (!config.dryRun) saveResult(session, result);
           }
@@ -1737,42 +1745,76 @@ async function executeSessionRun(
             }
           }
         };
-        try {
-          const quickResult = await finalizeQuickRun({
-            issues: quickProcessed,
-            config,
-            session,
-            worktreePath: quickWorktree.path,
-            worktreeBranch: quickWorktree.branch,
-            epicNum: activeEpic,
-          });
-          quickFinalizeTestOutput = quickResult.testOutput;
-          // Attach the shared PR to each quick result so summaries and the
-          // session PR body reference it.
-          if (quickResult.prUrl) {
-            for (const result of session.results) {
-              if (!result.prUrl && quickProcessed.some((q) => q.number === result.issueNum)) {
-                result.prUrl = quickResult.prUrl;
-              }
+
+        if (agentUnavailableFailure) {
+          // Quick-mode successes are only plan+build results until the deferred
+          // test/PR pass merges them. Once the agent is unavailable, none of
+          // that work is shipped, so restore its queue state and preserve the
+          // shared branch instead of invoking the dead agent again.
+          demoteQuickResults('agent-unavailable', agentUnavailableFailure);
+          for (const issue of quickProcessed) {
+            try {
+              labelIssue(config.repo, issue.number, config.labelReady, 'in-progress');
+              updateProjectStatus(config.repo, config.project, config.repoOwner, issue.number, 'Todo');
+            } catch (err) {
+              log.warn(`Could not fully re-queue quick issue #${issue.number} after agent failure: ${err instanceof Error ? err.message : err}`);
             }
           }
-          if (!quickResult.testsPassing) {
-            const message = `Quick mode: deferred test pass failed after ${config.maxTestRetries} attempts — PR ${quickResult.prUrl ?? '(not created)'} left unmerged`;
-            failures.push({ code: 'quick-finalize-failed', message });
-            demoteQuickResults();
-            epicAbort = true; // skip epic verification on a known-broken state
-          } else if (config.autoMerge && !quickResult.merged) {
-            const message = `Quick mode: PR ${quickResult.prUrl ?? '(not created)'} could not be merged into ${session.branch}`;
+          try {
+            const cleanup = await cleanupWorktree({
+              issueNum: quickProcessed[0]?.number ?? 0,
+              projectDir: process.cwd(),
+              autoCleanup: config.autoCleanup,
+              preserveIfCommits: true,
+              worktreePath: quickWorktree.path,
+            });
+            recordSessionCleanup(session, {
+              status: cleanup.status,
+              worktreePath: cleanup.path,
+              reason: cleanup.reason,
+              at: new Date().toISOString(),
+            });
+          } catch (err) {
+            log.warn(`Could not preserve quick worktree after agent failure: ${err instanceof Error ? err.message : err}`);
+          }
+        } else {
+          try {
+            const quickResult = await finalizeQuickRun({
+              issues: quickProcessed,
+              config,
+              session,
+              worktreePath: quickWorktree.path,
+              worktreeBranch: quickWorktree.branch,
+              epicNum: activeEpic,
+            });
+            quickFinalizeTestOutput = quickResult.testOutput;
+            // Attach the shared PR to each quick result so summaries and the
+            // session PR body reference it.
+            if (quickResult.prUrl) {
+              for (const result of session.results) {
+                if (!result.prUrl && quickProcessed.some((q) => q.number === result.issueNum)) {
+                  result.prUrl = quickResult.prUrl;
+                }
+              }
+            }
+            if (!quickResult.testsPassing) {
+              const message = `Quick mode: deferred test pass failed after ${config.maxTestRetries} attempts — PR ${quickResult.prUrl ?? '(not created)'} left unmerged`;
+              failures.push({ code: 'quick-finalize-failed', message });
+              demoteQuickResults();
+              epicAbort = true; // skip epic verification on a known-broken state
+            } else if (config.autoMerge && !quickResult.merged) {
+              const message = `Quick mode: PR ${quickResult.prUrl ?? '(not created)'} could not be merged into ${session.branch}`;
+              failures.push({ code: 'quick-finalize-failed', message });
+              demoteQuickResults();
+              epicAbort = true;
+            }
+          } catch (err) {
+            const message = `Quick mode finalize failed: ${err instanceof Error ? err.message : err}`;
+            log.error(message);
             failures.push({ code: 'quick-finalize-failed', message });
             demoteQuickResults();
             epicAbort = true;
           }
-        } catch (err) {
-          const message = `Quick mode finalize failed: ${err instanceof Error ? err.message : err}`;
-          log.error(message);
-          failures.push({ code: 'quick-finalize-failed', message });
-          demoteQuickResults();
-          epicAbort = true;
         }
       } else if (quickWorktree && quickProcessed.length === 0 && !config.dryRun) {
         // Nothing succeeded — release the shared worktree (preserved if it
@@ -1821,7 +1863,9 @@ async function executeSessionRun(
 
   if (agentUnavailableFailure) {
     const affectedResult = session.results.find((result) => (
-      result.failureReason === 'agent-unavailable' && !isRecoveredRunResult(result)
+      result.failureReason === 'agent-unavailable'
+      && !demotedQuickIssueNums.has(result.issueNum)
+      && !isRecoveredRunResult(result)
     ));
     const message = `Agent became unavailable during the session: ${agentUnavailableFailure.diagnostic}`;
     failures.push({

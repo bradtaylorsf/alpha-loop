@@ -251,6 +251,7 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
     case 'opencode': {
       const args = ['run'];
       if (options.model) args.push('--model', options.model);
+      if (options.textOnly) args.push('--agent', 'plan');
       return { command: agentCliCommand(options.agent), args };
     }
     default:
