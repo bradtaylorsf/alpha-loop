@@ -22,7 +22,11 @@ jest.mock('../../src/lib/logger', () => ({
 jest.mock('../../src/lib/config', () => ({
   loadConfig: jest.fn(),
   assertSafeShellArg: jest.fn((value: string) => value),
-  resolveStepConfig: jest.fn((config: any) => ({ agent: config.agent, model: config.model })),
+  resolveStepConfig: jest.fn((config: any, step: string) => ({
+    agent: config.pipeline?.[step]?.agent ?? config.agent,
+    model: config.pipeline?.[step]?.model ?? config.model,
+  })),
+  resolveRoutingStage: jest.fn(),
 }));
 
 jest.mock('../../src/lib/github', () => ({
@@ -49,6 +53,9 @@ jest.mock('../../src/lib/pipeline', () => ({
 
 jest.mock('../../src/lib/agent', () => ({
   spawnAgent: jest.fn(),
+  buildEndpointEnv: jest.fn(() => ({})),
+  agentCliCommand: jest.fn((agent: string) => agent === 'lmstudio' ? 'claude' : agent === 'ollama' ? 'codex' : agent),
+  probeAgentLiveness: jest.fn(),
 }));
 
 jest.mock('../../src/lib/session', () => ({
@@ -151,7 +158,7 @@ import { syncAgentAssets } from '../../src/commands/sync';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { emitLifecycleEvent } from '../../src/lib/events';
-import { spawnAgent } from '../../src/lib/agent';
+import { probeAgentLiveness, spawnAgent } from '../../src/lib/agent';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
@@ -190,6 +197,7 @@ const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockReadFileSync = readFileSync as jest.MockedFunction<typeof readFileSync>;
 const mockEmitLifecycleEvent = emitLifecycleEvent as jest.MockedFunction<typeof emitLifecycleEvent>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
+const mockProbeAgentLiveness = probeAgentLiveness as jest.MockedFunction<typeof probeAgentLiveness>;
 const mockSpawn = spawn as jest.MockedFunction<typeof spawn>;
 
 function makeConfig(overrides: Record<string, unknown> = {}) {
@@ -273,6 +281,7 @@ beforeEach(() => {
   });
   mockCleanupWorktree.mockResolvedValue({ status: 'removed', path: '/tmp/session-worktree' });
   mockSpawnAgent.mockResolvedValue({ exitCode: 0, output: 'Review passed', duration: 1 });
+  mockProbeAgentLiveness.mockResolvedValue({ ok: true, duration: 1 });
   mockPollIssues.mockReturnValue([]);
   mockListEpics.mockReturnValue([]);
   mockGetEpicSubIssues.mockReturnValue([]);
@@ -2445,6 +2454,194 @@ Coordinate hosted work.
     expect(mockExec).toHaveBeenCalledWith('command -v "gh"');
     expect(mockExec).toHaveBeenCalledWith('command -v "git"');
     expect(mockExec).toHaveBeenCalledWith('command -v "claude"');
+  });
+
+  test('aborts on expired agent OAuth before creating any session state', async () => {
+    mockProbeAgentLiveness.mockResolvedValue({
+      ok: false,
+      duration: 250,
+      failure: {
+        kind: 'authentication',
+        fingerprint: 'authentication:oauth-session-expired',
+        diagnostic: 'OAuth session expired and could not be refreshed',
+        durationMs: 250,
+      },
+    });
+
+    await runCommand({ skipEpic: true });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('OAuth session expired'));
+    expect(mockCreateSession).not.toHaveBeenCalled();
+    expect(mockEnsureSessionWorktree).not.toHaveBeenCalled();
+    expect(mockPollIssues).not.toHaveBeenCalled();
+    expect(mockProcessIssue).not.toHaveBeenCalled();
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+    expect(mockExec.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      mockProbeAgentLiveness.mock.invocationCallOrder[0],
+    );
+  });
+
+  test('dry runs do not invoke the agent liveness probe', async () => {
+    await runCommand({ skipEpic: true, dryRun: true });
+
+    expect(mockProbeAgentLiveness).not.toHaveBeenCalled();
+  });
+
+  test('checks the backing CLI for local-agent aliases', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      agent: 'lmstudio',
+      model: 'local-model',
+      ...overrides,
+    }) as any);
+
+    await runCommand({ skipEpic: true });
+
+    expect(mockExec).toHaveBeenCalledWith('command -v "claude"');
+    expect(mockExec).not.toHaveBeenCalledWith('command -v "lmstudio"');
+    expect(mockProbeAgentLiveness).toHaveBeenCalledWith(expect.objectContaining({
+      agent: 'lmstudio',
+      model: 'local-model',
+    }));
+  });
+
+  test('checks and probes the effective implementation agent override', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      agent: 'claude',
+      model: 'opus',
+      pipeline: { implement: { agent: 'codex', model: 'gpt-5.4' } },
+      ...overrides,
+    }) as any);
+
+    await runCommand({ skipEpic: true });
+
+    expect(mockExec).toHaveBeenCalledWith('command -v "codex"');
+    expect(mockExec).not.toHaveBeenCalledWith('command -v "claude"');
+    expect(mockProbeAgentLiveness).toHaveBeenCalledWith(expect.objectContaining({
+      agent: 'codex',
+      model: 'gpt-5.4',
+    }));
+  });
+
+  test('stops the sequential queue and suppresses a zero-success session PR when auth is lost', async () => {
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'First issue', body: 'Body', labels: ['ready'] },
+      { number: 43, title: 'Second issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue.mockResolvedValue({
+      issueNum: 42,
+      title: 'First issue',
+      status: 'failure',
+      failureReason: 'agent-unavailable',
+      agentFailure: {
+        kind: 'authentication',
+        fingerprint: 'authentication:oauth-session-expired',
+        diagnostic: 'OAuth session expired and could not be refreshed',
+        durationMs: 300,
+      },
+      testsPassing: false,
+      verifyPassing: false,
+      verifySkipped: false,
+      duration: 0,
+      filesChanged: 0,
+    });
+
+    await runCommand({ skipEpic: true });
+
+    expect(mockProcessIssue).toHaveBeenCalledTimes(1);
+    expect(mockProcessIssue).toHaveBeenCalledWith(42, expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything());
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+    expect(mockRecordSessionError).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      issueNum: 42,
+      message: expect.stringContaining('OAuth session expired'),
+    }));
+    expect(process.exitCode).toBe(1);
+  });
+
+  test('stops the batch queue and suppresses empty-session finalization when auth is lost', async () => {
+    mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+      batch: true,
+      batchSize: 1,
+      ...overrides,
+    }) as any);
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'First issue', body: 'Body', labels: ['ready'] },
+      { number: 43, title: 'Second issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessBatch.mockResolvedValue([{
+      issueNum: 42,
+      title: 'First issue',
+      status: 'failure',
+      failureReason: 'agent-unavailable',
+      agentFailure: {
+        kind: 'authentication',
+        fingerprint: 'authentication:oauth-session-expired',
+        diagnostic: 'OAuth session expired and could not be refreshed',
+        durationMs: 300,
+      },
+      testsPassing: false,
+      verifyPassing: false,
+      verifySkipped: false,
+      duration: 0,
+      filesChanged: 0,
+    }]);
+
+    await runCommand({ skipEpic: true, batch: true, batchSize: 1 });
+
+    expect(mockProcessBatch).toHaveBeenCalledTimes(1);
+    expect(mockFinalizeSession).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  test('finalizes prior successes without invoking more agents when auth is lost mid-session', async () => {
+    mockPollIssues.mockReturnValue([
+      { number: 42, title: 'First issue', body: 'Body', labels: ['ready'] },
+      { number: 43, title: 'Second issue', body: 'Body', labels: ['ready'] },
+      { number: 44, title: 'Unattempted issue', body: 'Body', labels: ['ready'] },
+    ]);
+    mockProcessIssue
+      .mockResolvedValueOnce({
+        issueNum: 42,
+        title: 'First issue',
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        duration: 60,
+        filesChanged: 2,
+      })
+      .mockResolvedValueOnce({
+        issueNum: 43,
+        title: 'Second issue',
+        status: 'failure',
+        failureReason: 'agent-unavailable',
+        agentFailure: {
+          kind: 'authentication',
+          fingerprint: 'authentication:oauth-session-expired',
+          diagnostic: 'OAuth session expired and could not be refreshed',
+          durationMs: 300,
+        },
+        testsPassing: false,
+        verifyPassing: false,
+        verifySkipped: false,
+        duration: 0,
+        filesChanged: 0,
+      });
+    mockFinalizeSession.mockResolvedValue('https://github.com/owner/repo/pull/500');
+
+    await runCommand({ skipEpic: true });
+
+    expect(mockProcessIssue).toHaveBeenCalledTimes(2);
+    expect(mockFinalizeSession).toHaveBeenCalledTimes(1);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+    expect(mockEmitLifecycleEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'session.failed',
+      context: expect.objectContaining({
+        prUrl: 'https://github.com/owner/repo/pull/500',
+        metadata: expect.objectContaining({ successCount: 1, issueCount: 2 }),
+      }),
+    }));
+    expect(process.exitCode).toBe(1);
   });
 
   test('passes compact parent epic context to sub-issue processing for --epic runs', async () => {

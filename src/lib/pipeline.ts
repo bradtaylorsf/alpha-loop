@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from '
 import { basename, join, relative } from 'node:path';
 import { log } from './logger.js';
 import { exec, shellQuote } from './shell.js';
-import { spawnAgent, buildEndpointEnv } from './agent.js';
+import { spawnAgent, buildEndpointEnv, classifyAgentFailure } from './agent.js';
 import type { AgentOptions } from './agent.js';
 import {
   classifyToolError,
@@ -91,7 +91,7 @@ import {
 import type { StepCost, PipelineResultForScores } from './traces.js';
 import { estimateCost, getFallbackPolicy, resolveRoutingStage, resolveStepConfig, selectRoutingProfile } from './config.js';
 import type { Config, PipelineStepName, RoutingStageName, RoutingEndpointType } from './config.js';
-import type { AgentResult } from './agent.js';
+import type { AgentFailure, AgentResult } from './agent.js';
 import type { SessionContext } from './session.js';
 import { buildStageTelemetry, writeStageTelemetry } from './telemetry.js';
 import { emitLifecycleEvent } from './events.js';
@@ -469,8 +469,10 @@ export type PipelineResult = {
   consoleErrors?: string[];
   /** Failed network requests captured during web/app verification. */
   networkErrors?: string[];
-  /** Why the issue failed — 'transient' means re-queue (e.g. usage limit), 'permanent' means label failed. */
-  failureReason?: 'transient' | 'permanent';
+  /** Why the issue failed; unavailable agents are re-queued and stop the owning session. */
+  failureReason?: 'transient' | 'permanent' | 'agent-unavailable';
+  /** Sanitized CLI failure metadata used by the owning session's fatal-error guard. */
+  agentFailure?: AgentFailure;
   prUrl?: string;
   testsPassing: boolean;
   verifyPassing: boolean;
@@ -520,6 +522,33 @@ function throwIfPipelineAborted(signal?: AbortSignal): void {
   const error = new Error('Pipeline aborted by the owning session');
   error.name = 'AbortError';
   throw error;
+}
+
+function unavailableAgentFailure(result: AgentResult): AgentFailure | undefined {
+  if (result.exitCode === 0) return undefined;
+  const failure = agentFailureForResult(result);
+  return failure?.kind === 'authentication' || failure?.kind === 'spawn'
+    ? failure
+    : undefined;
+}
+
+const INSTANT_AGENT_FAILURE_MS = 5_000;
+
+function agentFailureForResult(result: AgentResult): AgentFailure | undefined {
+  return result.exitCode === 0
+    ? undefined
+    : result.failure ?? classifyAgentFailure(result.exitCode, result.output, result.duration);
+}
+
+function matchingInstantAgentFailure(
+  previous: AgentFailure | undefined,
+  current: AgentFailure | undefined,
+): AgentFailure | undefined {
+  if (!previous || !current) return undefined;
+  if (previous.durationMs >= INSTANT_AGENT_FAILURE_MS || current.durationMs >= INSTANT_AGENT_FAILURE_MS) {
+    return undefined;
+  }
+  return previous.fingerprint === current.fingerprint ? current : undefined;
 }
 
 const PAUSE_REQUEST_FILE = 'alpha-loop-pause-request.json';
@@ -1577,6 +1606,7 @@ export async function processIssue(
   currentStep = 'plan';
   recordSessionStage(session, 'plan');
   log.step('Step 3: Planning');
+  let priorInstantAgentFailure: AgentFailure | undefined;
   let plan: IssuePlan = resumeVerificationOnly
     ? {
         ...DEFAULT_PLAN,
@@ -1628,6 +1658,23 @@ export async function processIssue(
       stepCosts.push(buildStepCost('plan', issueNum, planResult, config));
       recordStageTelemetry(session, issueNum, 'plan', planResult, config, planCtx);
 
+      const planAgentFailure = unavailableAgentFailure(planResult);
+      if (planAgentFailure) {
+        log.error(`Agent unavailable during planning for #${issueNum}: ${planAgentFailure.diagnostic}`);
+        requeueIssue(config, issueNum);
+        if (!quickWorktree) {
+          const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, worktreePath });
+          recordSessionCleanup(session, {
+            status: cleanup.status,
+            worktreePath: cleanup.path,
+            reason: cleanup.reason,
+            at: new Date().toISOString(),
+          });
+        }
+        recordSessionIssue(session, issueNum, { status: 'failure', stage: 'plan', failureReason: 'agent-unavailable' });
+        return failureResult(issueNum, title, startTime, 'agent-unavailable', planAgentFailure);
+      }
+
       // Detect transient errors (usage limits) during planning
       if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
         log.warn(`Agent hit a transient error during planning for #${issueNum} — re-queuing`);
@@ -1643,6 +1690,9 @@ export async function processIssue(
         }
         recordSessionIssue(session, issueNum, { status: 'failure', stage: 'plan', failureReason: 'transient' });
         return failureResult(issueNum, title, startTime, 'transient');
+      }
+      if (planResult.exitCode !== 0) {
+        priorInstantAgentFailure = agentFailureForResult(planResult);
       }
 
       const pauseResult = await pauseIfRequested('plan');
@@ -1750,6 +1800,10 @@ export async function processIssue(
     stepCosts.push(buildStepCost('implement', issueNum, implResult, config));
     recordStageTelemetry(session, issueNum, 'implement', implResult, config, implCtx);
 
+    const classifiedImplementationFailure = agentFailureForResult(implResult);
+    const implementationAgentFailure = unavailableAgentFailure(implResult)
+      ?? matchingInstantAgentFailure(priorInstantAgentFailure, classifiedImplementationFailure);
+
     // Commit any work the agent left uncommitted BEFORE honoring pause
     // requests or failure handling. A sandboxed agent that cannot write the
     // parent repo's git metadata (linked worktrees keep their index under the
@@ -1760,7 +1814,7 @@ export async function processIssue(
         worktreePath,
         `feat: implement issue #${issueNum} - ${title}`,
       );
-    } else if (!isTransientError(implResult.output)) {
+    } else if (!implementationAgentFailure && !isTransientError(implResult.output)) {
       // Permanent failures keep a wip commit so the worktree is preserved for
       // recovery. Transient failures (rate limits) are re-queued for a fresh
       // retry — a wip commit here would pin the worktree via preserveIfCommits
@@ -1775,6 +1829,21 @@ export async function processIssue(
     if (pauseResult) return pauseResult;
 
     if (implResult.exitCode !== 0) {
+      if (implementationAgentFailure) {
+        log.error(`Agent unavailable during implementation for #${issueNum}: ${implementationAgentFailure.diagnostic}`);
+        requeueIssue(config, issueNum);
+        if (!quickWorktree) {
+          const cleanup = await cleanupWorktree({ issueNum, projectDir, autoCleanup: config.autoCleanup, worktreePath });
+          recordSessionCleanup(session, {
+            status: cleanup.status,
+            worktreePath: cleanup.path,
+            reason: cleanup.reason,
+            at: new Date().toISOString(),
+          });
+        }
+        recordSessionIssue(session, issueNum, { status: 'failure', stage: 'implement', failureReason: 'agent-unavailable' });
+        return failureResult(issueNum, title, startTime, 'agent-unavailable', implementationAgentFailure);
+      }
       if (isTransientError(implResult.output)) {
         log.warn(`Agent hit a transient error during implementation for #${issueNum} — re-queuing`);
         requeueIssue(config, issueNum);
@@ -1804,7 +1873,7 @@ export async function processIssue(
         });
       }
       recordSessionIssue(session, issueNum, { status: 'failure', stage: 'implement', failureReason: 'permanent' });
-      return failureResult(issueNum, title, startTime, 'permanent');
+      return failureResult(issueNum, title, startTime, 'permanent', classifiedImplementationFailure);
     }
 
     stepsCompleted.push('implement');
@@ -3066,6 +3135,7 @@ export async function processBatch(
   recordSessionStage(session, 'plan');
   log.step('Batch Step 3: Planning all issues');
   const plans = new Map<number, IssuePlan>();
+  let priorInstantAgentFailure: AgentFailure | undefined;
 
   // Build resume context if worktree was recovered from a previous session
   const resumeNote = worktreeResumed
@@ -3096,6 +3166,23 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
         profile: selectRoutingProfile(config, issues[0].number),
       });
 
+      const planAgentFailure = unavailableAgentFailure(planResult);
+      if (planAgentFailure) {
+        log.error(`Agent unavailable during batch planning: ${planAgentFailure.diagnostic}`);
+        for (const issue of issues) requeueIssue(config, issue.number);
+        const cleanup = await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, worktreePath });
+        recordSessionCleanup(session, {
+          status: cleanup.status,
+          worktreePath: cleanup.path,
+          reason: cleanup.reason,
+          at: new Date().toISOString(),
+        });
+        for (const issue of issues) {
+          recordSessionIssue(session, issue.number, { status: 'failure', stage: 'plan', failureReason: 'agent-unavailable' });
+        }
+        return issues.map((i) => failureResult(i.number, i.title, startTime, 'agent-unavailable', planAgentFailure));
+      }
+
       if (planResult.exitCode !== 0 && isTransientError(planResult.output)) {
         log.warn('Agent hit a transient error during batch planning — re-queuing all issues');
         for (const issue of issues) requeueIssue(config, issue.number);
@@ -3110,6 +3197,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
           recordSessionIssue(session, issue.number, { status: 'failure', stage: 'plan', failureReason: 'transient' });
         }
         return issues.map((i) => failureResult(i.number, i.title, startTime, 'transient'));
+      }
+      if (planResult.exitCode !== 0) {
+        priorInstantAgentFailure = agentFailureForResult(planResult);
       }
 
       // Read plan files for each issue
@@ -3173,6 +3263,24 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
     });
 
     if (implResult.exitCode !== 0) {
+      const classifiedImplementationFailure = agentFailureForResult(implResult);
+      const implementationAgentFailure = unavailableAgentFailure(implResult)
+        ?? matchingInstantAgentFailure(priorInstantAgentFailure, classifiedImplementationFailure);
+      if (implementationAgentFailure) {
+        log.error(`Agent unavailable during batch implementation: ${implementationAgentFailure.diagnostic}`);
+        for (const issue of issues) requeueIssue(config, issue.number);
+        const cleanup = await cleanupWorktree({ issueNum: issues[0].number, projectDir, autoCleanup: config.autoCleanup, worktreePath });
+        recordSessionCleanup(session, {
+          status: cleanup.status,
+          worktreePath: cleanup.path,
+          reason: cleanup.reason,
+          at: new Date().toISOString(),
+        });
+        for (const issue of issues) {
+          recordSessionIssue(session, issue.number, { status: 'failure', stage: 'implement', failureReason: 'agent-unavailable' });
+        }
+        return issues.map((i) => failureResult(i.number, i.title, startTime, 'agent-unavailable', implementationAgentFailure));
+      }
       // Auto-commit any uncommitted work before deciding on cleanup
       const dirtyCheck = exec('git status --porcelain', { cwd: worktreePath });
       if (dirtyCheck.stdout.trim()) {
@@ -3211,7 +3319,7 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       for (const issue of issues) {
         recordSessionIssue(session, issue.number, { status: 'failure', stage: 'implement', failureReason: 'permanent' });
       }
-      return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent'));
+      return issues.map((i) => failureResult(i.number, i.title, startTime, 'permanent', classifiedImplementationFailure));
     }
 
     // Auto-commit if agent didn't
@@ -4055,12 +4163,19 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
   return { testsPassing, testOutput, prUrl, merged };
 }
 
-function failureResult(issueNum: number, title: string, startTime: number, reason?: 'transient' | 'permanent'): PipelineResult {
+function failureResult(
+  issueNum: number,
+  title: string,
+  startTime: number,
+  reason?: PipelineResult['failureReason'],
+  agentFailure?: AgentFailure,
+): PipelineResult {
   return {
     issueNum,
     title,
     status: 'failure',
     failureReason: reason,
+    agentFailure,
     testsPassing: false,
     verifyPassing: false,
     verifySkipped: false,
