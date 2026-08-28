@@ -160,6 +160,14 @@ jest.mock('../../src/lib/session', () => ({
     logsDir: '/tmp/session/logs',
     results: [],
   })),
+  createVerifySession: jest.fn(() => ({
+    name: 'verify-195-1786797296000',
+    branch: 'master',
+    resultsDir: '/tmp/verify-195-1786797296000',
+    logsDir: '/tmp/verify-195-1786797296000/logs',
+    results: [],
+    epic: 195,
+  })),
   finalizeSession: jest.fn(),
   recordSessionCleanup: jest.fn(),
   transitionSessionStatus: jest.fn(),
@@ -200,6 +208,7 @@ jest.mock('../../src/lib/eval', () => ({
 }));
 
 jest.mock('../../src/lib/traces', () => ({
+  runDir: jest.fn((name: string) => `/tmp/traces/${name.replace(/\//g, '-')}`),
   writeTraceToSubdir: jest.fn(),
 }));
 
@@ -456,6 +465,7 @@ describe('epic-first planning workflow', () => {
       }),
       expect.any(Object),
       '/tmp/session/logs',
+      { telemetryDir: '/tmp/traces/session-epic-first' },
     );
     expect(mockCommentIssue).toHaveBeenCalledWith('owner/repo', 195, 'Epic verified');
     expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 195, 'completed');
@@ -483,7 +493,8 @@ describe('epic-first planning workflow', () => {
         subIssues: [expect.objectContaining({ number: 201 })],
       }),
       expect.any(Object),
-      expect.stringContaining('.alpha-loop'),
+      '/tmp/verify-195-1786797296000/logs',
+      { telemetryDir: '/tmp/traces/verify-195-1786797296000' },
     );
     expect(mockCommentIssue).toHaveBeenCalledWith('owner/repo', 195, 'Epic verified');
     expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 195, 'completed');

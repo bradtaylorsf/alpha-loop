@@ -830,10 +830,10 @@ export type CostEstimate = {
     model: string;
     inputTokens: number;
     outputTokens: number;
-    costPerCase: number;
+    costPerCase: number | null;
   }>;
-  totalPerCase: number;
-  totalForSuite: number;
+  totalPerCase: number | null;
+  totalForSuite: number | null;
   caseCount: number;
 };
 
@@ -863,12 +863,15 @@ export function estimateRunCost(
     });
   }
 
-  const totalPerCase = steps.reduce((sum, s) => sum + s.costPerCase, 0);
+  const complete = steps.every((step) => step.costPerCase != null);
+  const totalPerCase = complete
+    ? steps.reduce((sum, step) => sum + (step.costPerCase ?? 0), 0)
+    : null;
 
   return {
     steps,
     totalPerCase,
-    totalForSuite: totalPerCase * caseCount,
+    totalForSuite: totalPerCase == null ? null : totalPerCase * caseCount,
     caseCount,
   };
 }

@@ -46,8 +46,11 @@ to point you at the hybrid/local routing docs automatically.
 | Gemma 4 31B                  | Utility (Summary, Triage, Learn) | Fast, good at structured-text extraction; cheap to keep co-resident |
 | GLM-4.6                      | Aspirational coder     | Larger | Strong reasoning, but tight on 128GB if a second model is loaded — treat as experimental |
 
-Pricing for these three models is zero in the default pricing table — cost
-telemetry reports `$0` when they're used.
+Pricing for these three models is explicitly `0/0` in the default pricing
+table, so measured token usage is reported as a genuine `$0` model-API cost.
+An unrecognized local model or adapter that does not emit usage is shown as
+`n/a`, not silently treated as free. Hardware and electricity costs are not
+included.
 
 ## Install LM Studio or Ollama
 

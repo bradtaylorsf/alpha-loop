@@ -160,13 +160,17 @@ plus deltas against the highest-cost cell for each stage (the implicit
 routing` reads when it proposes promotions:
 
 ```text
-stage       model                  runs  success  cost/issue  Δcost    tool_err
-plan        claude-opus-4-7          42    0.93    $0.12       —        0.001
-plan        claude-haiku-4-5         18    0.89    $0.01      -$0.11    0.003
-build       claude-sonnet-4-6        42    0.95    $0.18       —        0.004
-build       qwen3-coder-30b-a3b      38    0.91    $0.00      -$0.18    0.017
-review      claude-sonnet-4-6        60    0.97    $0.27       —        0.002
+stage  model                  runs  tok_in  tok_out  cost_usd  cost/issue  wall_s  tool_err/call  Δcost/issue
+plan   claude-opus-4-7          42  524288    90123    $5.0400      $0.1200    41.00          0.0010            —
+plan   claude-haiku-4-5         18  110000    24000    $0.1800      $0.0100    18.00          0.0030      -$0.1100
+build  claude-sonnet-4-6        42  800000   160000    $7.5600      $0.1800    72.00          0.0040            —
+build  qwen3-coder-30b-a3b      38  700000   140000    $0.0000      $0.0000    88.00          0.0170      -$0.1800
 ```
+
+`tool_err/call` is always errors per measured tool call. It renders `—` (and
+serializes as `null` in JSON) when a cell has no measured calls, and such a
+cell is not eligible for automatic promotion. It does not describe stage
+failures; stage outcomes are recorded separately as `stage_success`.
 
 A stage is eligible for promotion to its local candidate when, over ≥30
 runs: cost-per-issue savings ≥ 40%, pipeline-success delta ≥ −3%, and

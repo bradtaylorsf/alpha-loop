@@ -101,6 +101,15 @@ const DEFAULT_RESULT_GRACE_MS = 60 * 1000;
 /** Time to wait for SIGTERM before forcing a stuck child down. */
 const FORCE_KILL_GRACE_MS = 5 * 1000;
 
+/** Codex exec JSONL item types that represent actual agent tool activity. */
+const CODEX_TOOL_ITEM_TYPES = new Set([
+  'command_execution',
+  'file_change',
+  'mcp_tool_call',
+  'collab_tool_call',
+  'web_search',
+]);
+
 export type AgentOptions = {
   agent: AgentType;
   model: string;
@@ -198,11 +207,13 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
       if (options.model) args.push('--model', options.model);
       args.push('--full-auto');
       args.push(...codexSandboxArgs(options.cwd));
+      args.push('--json');
       return { command: 'codex', args };
     }
     case 'opencode': {
       const args = ['run'];
       if (options.model) args.push('--model', options.model);
+      args.push('--format', 'json');
       return { command: 'opencode', args };
     }
     default:
@@ -316,12 +327,16 @@ function defaultLocalEnv(agent: AgentType, model: string): Record<string, string
  * Spawn an AI agent with a prompt.
  * Streams output to terminal in real-time while capturing it.
  *
- * For Claude, uses stream-json format and parses it into readable log lines.
- * For other agents, captures raw stdout/stderr directly.
+ * Requests each CLI's JSONL format and normalizes usage, cost, model, final
+ * text, and tool telemetry. Malformed or unsupported output falls back to the
+ * captured raw stream.
  */
 export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
   const { command, args } = buildAgentArgs(options);
   const useStreamJson = command === 'claude' && args.includes('stream-json');
+  const useStructuredJson = useStreamJson
+    || args.includes('--json')
+    || (args.includes('--format') && args.includes('json'));
 
   log.info(`Agent: ${options.agent} | Model: ${options.model} | CWD: ${options.cwd}`);
 
@@ -358,6 +373,7 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
     let parsedCostUsd: number | undefined;
     let parsedInputTokens: number | undefined;
     let parsedOutputTokens: number | undefined;
+    let parsedModel: string | undefined;
     let parsedResultSubtype: string | undefined;
     let parsedResultIsError = false;
     let sawStreamResult = false;
@@ -366,9 +382,13 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
     let forceKillTimer: NodeJS.Timeout | undefined;
     let pendingTerminationExitCode: number | undefined;
     let pendingTerminationOutput: string | undefined;
-    // Tool-use telemetry (per-stage metrics aggregation).
-    let toolUseCount = 0;
-    let toolErrorCount = 0;
+    // Tool IDs make item.started/item.completed pairs count as one call.
+    const toolUseIds = new Set<string>();
+    const toolErrorIds = new Set<string>();
+    const finalTextIds = new Set<string>();
+    let syntheticToolId = 0;
+    let syntheticTextId = 0;
+    let sawStructuredEvent = false;
 
     // Pipe prompt via stdin (like: echo "$prompt" | claude -p)
     child.stdin.write(options.prompt);
@@ -439,53 +459,144 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       }, resultGraceMs);
     }
 
-    function processStreamJsonLine(stream: typeof child.stdout, line: string) {
+    function asRecord(value: unknown): Record<string, unknown> | undefined {
+      return value != null && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined;
+    }
+
+    function numeric(value: unknown): number | undefined {
+      return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+    }
+
+    function addUsage(usage: Record<string, unknown> | undefined): void {
+      if (!usage) return;
+      const input = numeric(usage.input_tokens ?? usage.input);
+      const output = numeric(usage.output_tokens ?? usage.output);
+      if (input !== undefined) parsedInputTokens = (parsedInputTokens ?? 0) + input;
+      if (output !== undefined) parsedOutputTokens = (parsedOutputTokens ?? 0) + output;
+    }
+
+    function appendFinalText(text: unknown, id?: unknown): void {
+      if (typeof text !== 'string' || !text.trim()) return;
+      const key = typeof id === 'string' && id ? id : `text-${syntheticTextId++}`;
+      if (finalTextIds.has(key)) return;
+      finalTextIds.add(key);
+      finalResultText = [finalResultText, text.trim()].filter(Boolean).join('\n');
+    }
+
+    function recordTool(id: unknown, failed = false): void {
+      const key = typeof id === 'string' && id ? id : `tool-${syntheticToolId++}`;
+      toolUseIds.add(key);
+      if (failed) toolErrorIds.add(key);
+    }
+
+    function emittedModel(obj: Record<string, unknown>, nested?: Record<string, unknown>): string | undefined {
+      const modelValue = obj.model ?? obj.model_id ?? obj.modelID ?? nested?.model ?? nested?.model_id ?? nested?.modelID;
+      if (typeof modelValue === 'string' && modelValue.trim()) return modelValue;
+      const modelObj = asRecord(modelValue);
+      const nestedId = modelObj?.modelID ?? modelObj?.model_id ?? modelObj?.id;
+      return typeof nestedId === 'string' && nestedId.trim() ? nestedId : undefined;
+    }
+
+    function processStructuredJsonLine(stream: typeof child.stdout, line: string) {
       if (!line) return;
 
-      // Extract the final result text and cost/token data for the return value
+      let logLine: string | null = null;
       try {
         const obj = JSON.parse(line) as Record<string, unknown>;
-        if (obj.type === 'result') {
-          sawStreamResult = true;
-          finalResultText = typeof obj.result === 'string' ? obj.result : '';
-          parsedResultSubtype = typeof obj.subtype === 'string' ? obj.subtype : undefined;
-          parsedResultIsError = obj.is_error === true || parsedResultSubtype?.startsWith('error') === true;
-          // Capture structured error info so transient/permanent classification
-          // still has something useful when Claude reports an empty error result.
-          if (parsedResultIsError) {
-            finalResultText = finalResultText || JSON.stringify(obj);
+        sawStructuredEvent = true;
+
+        if (options.agent === 'claude' || options.agent === 'lmstudio') {
+          if (obj.type === 'result') {
+            sawStreamResult = true;
+            finalResultText = typeof obj.result === 'string' ? obj.result : '';
+            parsedResultSubtype = typeof obj.subtype === 'string' ? obj.subtype : undefined;
+            parsedResultIsError = obj.is_error === true || parsedResultSubtype?.startsWith('error') === true;
+            // Capture structured error info so transient/permanent classification
+            // still has something useful when Claude reports an empty error result.
+            if (parsedResultIsError) {
+              finalResultText = finalResultText || JSON.stringify(obj);
+            }
+            if (typeof obj.total_cost_usd === 'number') {
+              parsedCostUsd = obj.total_cost_usd;
+            }
+            const usage = obj.usage as Record<string, unknown> | undefined;
+            if (usage) {
+              if (typeof usage.input_tokens === 'number') parsedInputTokens = usage.input_tokens;
+              if (typeof usage.output_tokens === 'number') parsedOutputTokens = usage.output_tokens;
+            }
+            startResultGraceTimer();
+          } else if (obj.type === 'assistant') {
+            const msg = obj.message as Record<string, unknown> | undefined;
+            const content = (msg?.content ?? []) as Array<Record<string, unknown>>;
+            for (const block of content) {
+              if (block.type === 'tool_use') recordTool(block.id);
+            }
+          } else if (obj.type === 'user') {
+            const msg = obj.message as Record<string, unknown> | undefined;
+            const content = (msg?.content ?? []) as Array<Record<string, unknown>>;
+            for (const block of content) {
+              if (block.type === 'tool_result' && block.is_error === true) {
+                recordTool(block.tool_use_id, true);
+              }
+            }
           }
-          // Parse cost from result block
-          if (typeof obj.total_cost_usd === 'number') {
-            parsedCostUsd = obj.total_cost_usd;
+          logLine = formatStreamJsonLine(line);
+        } else if (options.agent === 'codex' || options.agent === 'ollama') {
+          const item = asRecord(obj.item);
+          const isToolItem = typeof item?.type === 'string' && CODEX_TOOL_ITEM_TYPES.has(item.type);
+          parsedModel = emittedModel(obj, item) ?? parsedModel;
+          if (obj.type === 'turn.completed') {
+            addUsage(asRecord(obj.usage));
+            const totalCost = numeric(obj.total_cost_usd);
+            const incrementalCost = numeric(obj.cost_usd ?? obj.cost);
+            if (totalCost !== undefined) parsedCostUsd = totalCost;
+            else if (incrementalCost !== undefined) parsedCostUsd = (parsedCostUsd ?? 0) + incrementalCost;
           }
-          // Parse token usage from result block
-          const usage = obj.usage as Record<string, unknown> | undefined;
-          if (usage) {
-            if (typeof usage.input_tokens === 'number') parsedInputTokens = usage.input_tokens;
-            if (typeof usage.output_tokens === 'number') parsedOutputTokens = usage.output_tokens;
+          if (item?.type === 'agent_message') {
+            appendFinalText(item.text, item.id);
+            logLine = typeof item.text === 'string' ? item.text : null;
+          } else if (isToolItem && item && obj.type === 'item.started') {
+            recordTool(item.id);
+          } else if (isToolItem && item && obj.type === 'item.completed') {
+            const exitCode = numeric(item.exit_code);
+            const failed = item.status === 'failed'
+              || item.status === 'declined'
+              || item.error != null
+              || (exitCode != null && exitCode !== 0);
+            recordTool(item.id, failed);
           }
-          startResultGraceTimer();
-        } else if (obj.type === 'assistant') {
-          const msg = obj.message as Record<string, unknown> | undefined;
-          const content = (msg?.content ?? []) as Array<Record<string, unknown>>;
-          for (const block of content) {
-            if (block.type === 'tool_use') toolUseCount++;
+        } else if (options.agent === 'opencode') {
+          const part = asRecord(obj.part);
+          parsedModel = emittedModel(obj, part) ?? parsedModel;
+          if (part?.type === 'text' || obj.type === 'text') {
+            appendFinalText(part?.text ?? obj.text, part?.id ?? obj.id);
+            const text = part?.text ?? obj.text;
+            logLine = typeof text === 'string' ? text : null;
           }
-        } else if (obj.type === 'user') {
-          const msg = obj.message as Record<string, unknown> | undefined;
-          const content = (msg?.content ?? []) as Array<Record<string, unknown>>;
-          for (const block of content) {
-            if (block.type === 'tool_result' && block.is_error === true) toolErrorCount++;
+          if (part?.type === 'tool' || obj.type === 'tool_use') {
+            const state = asRecord(part?.state);
+            const metadata = asRecord(state?.metadata);
+            const exitCode = numeric(metadata?.exit ?? metadata?.exitCode ?? metadata?.exit_code);
+            const failed = state?.status === 'error'
+              || state?.status === 'failed'
+              || state?.error != null
+              || (exitCode != null && exitCode !== 0);
+            recordTool(part?.callID ?? part?.id ?? obj.id, failed);
+          }
+          if (part?.type === 'step-finish' || obj.type === 'step_finish') {
+            addUsage(asRecord(part?.tokens ?? obj.tokens));
+            const cost = numeric(part?.cost ?? obj.cost);
+            if (cost !== undefined) parsedCostUsd = (parsedCostUsd ?? 0) + cost;
           }
         }
       } catch { /* not valid JSON, ignore */ }
 
-      const formatted = formatStreamJsonLine(line);
-      if (formatted) {
-        const logLine = formatted + '\n';
-        if (options.verbose) process.stderr.write(logLine);
-        writeToLog(stream, logLine);
+      if (logLine) {
+        const formattedLine = logLine + '\n';
+        if (options.verbose) process.stderr.write(formattedLine);
+        writeToLog(stream, formattedLine);
       }
     }
 
@@ -501,11 +612,11 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       while ((newlineIdx = lineBuffer.indexOf('\n')) !== -1) {
         const line = lineBuffer.slice(0, newlineIdx).trim();
         lineBuffer = lineBuffer.slice(newlineIdx + 1);
-        processStreamJsonLine(stream, line);
+        processStructuredJsonLine(stream, line);
       }
     };
 
-    if (useStreamJson) {
+    if (useStructuredJson) {
       child.stdout.on('data', handleStreamJson(child.stdout));
       // stderr from Claude in stream-json mode is typically empty, but capture it
       child.stderr.on('data', handleRawData(child.stderr));
@@ -519,7 +630,7 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
     child.stderr.on('error', () => {});
 
     function getOutput() {
-      if (useStreamJson) {
+      if (useStructuredJson) {
         // Return the parsed result text, not raw JSON
         return finalResultText || Buffer.concat(chunks).toString();
       }
@@ -533,26 +644,26 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       if (resultGraceTimer) clearTimeout(resultGraceTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       options.signal?.removeEventListener('abort', handleAbort);
-      if (useStreamJson && !sawStreamResult && lineBuffer.trim()) {
-        processStreamJsonLine(child.stdout, lineBuffer.trim());
+      if (useStructuredJson && lineBuffer.trim()) {
+        processStructuredJsonLine(child.stdout, lineBuffer.trim());
         lineBuffer = '';
       }
       const finalOutput = output ?? getOutput();
       const duration = Date.now() - startTime;
       // Fall back to output-string classification when we didn't see structured
       // tool_result error blocks (e.g. non-stream-json agents like codex).
-      const toolErrorsFinal = toolErrorCount > 0
-        ? toolErrorCount
+      const toolErrorsFinal = sawStructuredEvent
+        ? toolErrorIds.size
         : classifyToolErrors(finalOutput).length;
       const result: AgentResult = {
         exitCode,
         output: finalOutput,
         duration,
-        model: options.model || undefined,
+        model: parsedModel || options.model || undefined,
         costUsd: parsedCostUsd,
         inputTokens: parsedInputTokens,
         outputTokens: parsedOutputTokens,
-        toolCalls: toolUseCount,
+        toolCalls: toolUseIds.size,
         toolErrors: toolErrorsFinal,
       };
       if (parsedResultSubtype !== undefined) result.resultSubtype = parsedResultSubtype;

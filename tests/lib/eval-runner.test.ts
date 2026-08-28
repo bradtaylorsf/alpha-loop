@@ -81,7 +81,7 @@ describe('estimateRunCost', () => {
     expect(estimate.caseCount).toBe(5);
     expect(estimate.steps).toHaveLength(6); // plan, implement, test_fix, review, verify, learn
     expect(estimate.totalPerCase).toBeGreaterThan(0);
-    expect(estimate.totalForSuite).toBe(estimate.totalPerCase * 5);
+    expect(estimate.totalForSuite).toBe((estimate.totalPerCase ?? 0) * 5);
   });
 
   it('uses pipeline overrides for model selection', () => {
@@ -118,13 +118,16 @@ describe('estimateRunCost', () => {
     const sonnetEst = estimateRunCost(1, sonnetConfig);
     const haikuEst = estimateRunCost(1, haiku);
 
-    expect(haikuEst.totalPerCase).toBeLessThan(sonnetEst.totalPerCase);
+    expect(haikuEst.totalPerCase).not.toBeNull();
+    expect(sonnetEst.totalPerCase).not.toBeNull();
+    expect(haikuEst.totalPerCase!).toBeLessThan(sonnetEst.totalPerCase!);
   });
 
-  it('returns 0 cost for unknown models', () => {
+  it('returns null cost for unknown models', () => {
     const config = makeConfig({ model: 'unknown-model', pricing: {} });
     const estimate = estimateRunCost(1, config);
-    expect(estimate.totalPerCase).toBe(0);
+    expect(estimate.totalPerCase).toBeNull();
+    expect(estimate.totalForSuite).toBeNull();
   });
 });
 

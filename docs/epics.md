@@ -280,6 +280,10 @@ alpha-loop run --verify-only 165
 
 Re-runs just the verification pass on epic `#165`. This is **permissive**: it works even if some sub-issues are not yet merged. When any sub-issue is still open, the overall verdict caps at `partial` — a `pass` is only possible when every sub-issue has shipped.
 
+Each non-dry verify-only invocation creates `.alpha-loop/sessions/verify-<epic>-<epoch>/session.json`. The manifest records the final verdict, whether the epic closed, and an explicit completed or failed session status. `alpha-loop history` also recognizes older flat verify directories and infers terminal verdicts from their logs when possible.
+
+The verification agent emits a `verify` entry to `.alpha-loop/traces/verify-<epic>-<epoch>/stages.jsonl`, so `alpha-loop history <verify-session> --telemetry` and `alpha-loop report routing` include its measured cost or report the invocation as unmeasured.
+
 Use this when you have edited a sub-issue PR, re-tuned the AC, or want to re-judge after a manual fix.
 
 ## Config: `prefer_epics`

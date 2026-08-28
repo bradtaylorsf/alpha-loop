@@ -195,8 +195,8 @@ describe('writeCosts', () => {
     const costs: CostsJson = {
       total_cost_usd: 2.0,
       by_step: {
-        implement: { model: 'opus', input_tokens: 10000, output_tokens: 5000, cost_usd: 1.5 },
-        review: { model: 'haiku', input_tokens: 5000, output_tokens: 2000, cost_usd: 0.5 },
+        implement: { model: 'opus', input_tokens: 10000, output_tokens: 5000, token_measurement_entries: 1, entries: 1, cost_usd: 1.5 },
+        review: { model: 'haiku', input_tokens: 5000, output_tokens: 2000, token_measurement_entries: 1, entries: 1, cost_usd: 0.5 },
       },
       by_issue: {
         '42': { cost_usd: 2.0 },
@@ -342,6 +342,21 @@ describe('computeCosts', () => {
     expect(costs.total_cost_usd).toBe(0);
     expect(Object.keys(costs.by_step)).toHaveLength(0);
     expect(Object.keys(costs.by_issue)).toHaveLength(0);
+  });
+
+  it('propagates unmeasured step cost instead of folding it into a zero total', () => {
+    const costs = computeCosts([
+      { step: 'plan', issueNum: 42, model: 'opus', input_tokens: 10, output_tokens: 5, cost_usd: 0.1 },
+      { step: 'implement', issueNum: 42, model: 'unknown', input_tokens: 100, output_tokens: 50, cost_usd: null, token_source: 'estimated', cost_source: 'unmeasured' },
+    ]);
+
+    expect(costs.total_cost_usd).toBeNull();
+    expect(costs.by_step.plan.cost_usd).toBe(0.1);
+    expect(costs.by_step.implement.cost_usd).toBeNull();
+    expect(costs.by_step.implement.input_tokens).toBeNull();
+    expect(costs.by_step.implement.output_tokens).toBeNull();
+    expect(costs.by_step.implement.token_measurement_entries).toBe(0);
+    expect(costs.by_issue['42'].cost_usd).toBeNull();
   });
 });
 

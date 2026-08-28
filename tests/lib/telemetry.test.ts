@@ -100,6 +100,8 @@ describe('buildStageTelemetry', () => {
     expect(entry.tokens_in).toBe(10_000);
     expect(entry.tokens_out).toBe(2_000);
     expect(entry.cost_usd).toBe(0.0598);
+    expect(entry.cost_source).toBe('reported');
+    expect(entry.token_source).toBe('reported');
     expect(entry.wall_time_s).toBe(1.234);
     expect(entry.tool_calls).toBe(5);
     expect(entry.tool_errors).toBe(1);
@@ -108,13 +110,13 @@ describe('buildStageTelemetry', () => {
     expect(entry.issue_num).toBe(42);
   });
 
-  it('zeroes cost for anthropic_compat (local LM Studio) endpoints', () => {
+  it('preserves a cost explicitly reported by a local adapter', () => {
     const cfg = baseConfig();
     const res: AgentResult = {
       exitCode: 0,
       output: 'ok',
       duration: 5_000,
-      costUsd: 0.12, // Agent reported a cost — should be ignored for local.
+      costUsd: 0.12,
       inputTokens: 10_000,
       outputTokens: 2_000,
       model: 'qwen3-coder-30b-a3b',
@@ -123,27 +125,31 @@ describe('buildStageTelemetry', () => {
       endpoint: 'lmstudio',
       endpointType: 'anthropic_compat',
     });
-    expect(entry.cost_usd).toBe(0);
+    expect(entry.cost_usd).toBe(0.12);
+    expect(entry.cost_source).toBe('reported');
     expect(entry.tokens_in).toBe(10_000);
     expect(entry.tokens_out).toBe(2_000);
   });
 
-  it('zeroes cost for openai_compat (Ollama) endpoints', () => {
+  it('uses an explicit free price for measured local tokens', () => {
     const cfg = baseConfig();
     const res: AgentResult = {
       exitCode: 0,
       output: 'ok',
       duration: 5_000,
       model: 'qwen3-coder-30b-a3b',
+      inputTokens: 10_000,
+      outputTokens: 2_000,
     };
     const entry = buildStageTelemetry(res, 'implement', cfg, {
       endpoint: 'ollama',
       endpointType: 'openai_compat',
     });
     expect(entry.cost_usd).toBe(0);
+    expect(entry.cost_source).toBe('priced');
   });
 
-  it('falls back to estimated tokens from output length when agent lacks cost data', () => {
+  it('marks output-length token estimates and leaves cost unmeasured', () => {
     const cfg = baseConfig();
     const res: AgentResult = {
       exitCode: 1,
@@ -157,8 +163,28 @@ describe('buildStageTelemetry', () => {
     });
     expect(entry.tokens_out).toBeGreaterThan(0);
     expect(entry.tokens_in).toBeGreaterThan(0);
-    expect(entry.cost_usd).toBeGreaterThan(0);
+    expect(entry.token_source).toBe('estimated');
+    expect(entry.cost_usd).toBeNull();
+    expect(entry.cost_source).toBe('unmeasured');
     expect(entry.stage_success).toBe(false);
+  });
+
+  it('records unknown model and null cost when measured usage cannot be priced', () => {
+    const cfg = baseConfig();
+    const res: AgentResult = {
+      exitCode: 0,
+      output: 'ok',
+      duration: 100,
+      inputTokens: 100,
+      outputTokens: 50,
+    };
+    const entry = buildStageTelemetry(res, 'implement', cfg, {});
+    expect(entry.model).toBe('unknown');
+    expect(entry.tokens_in).toBe(100);
+    expect(entry.tokens_out).toBe(50);
+    expect(entry.token_source).toBe('reported');
+    expect(entry.cost_usd).toBeNull();
+    expect(entry.cost_source).toBe('unmeasured');
   });
 
   it('defaults tool counts to 0 when agent result lacks them', () => {
@@ -185,6 +211,7 @@ describe('writeStageTelemetry / readStageTelemetry', () => {
     const entry1: StageTelemetry = {
       stage: 'plan', model: 'a', endpoint: 'x',
       tokens_in: 1, tokens_out: 2, cost_usd: 0.1,
+      token_source: 'reported', cost_source: 'reported',
       wall_time_s: 1, tool_calls: 0, tool_errors: 0,
       stage_success: true, started_at: '2026-04-23T00:00:00.000Z',
     };
@@ -207,6 +234,22 @@ describe('writeStageTelemetry / readStageTelemetry', () => {
     const entries = readStageTelemetry(tmp);
     expect(entries).toHaveLength(1);
     expect(entries[0].stage).toBe('ok');
+    expect(entries[0].model).toBe('m');
+    expect(entries[0].token_source).toBe('unmeasured');
+    expect(entries[0].cost_source).toBe('unmeasured');
+    expect(entries[0].cost_usd).toBeNull();
+  });
+
+  it('normalizes explicitly unmeasured historical zero cost to null', () => {
+    mkdirSync(tmp, { recursive: true });
+    writeFileSync(join(tmp, 'stages.jsonl'), JSON.stringify({
+      stage: 'implement', model: 'unknown', endpoint: 'default',
+      tokens_in: 100, tokens_out: 50, token_source: 'estimated',
+      cost_usd: 0, cost_source: 'unmeasured', wall_time_s: 1,
+      tool_calls: 0, tool_errors: 0, stage_success: true, started_at: 'x',
+    }) + '\n');
+
+    expect(readStageTelemetry(tmp)[0].cost_usd).toBeNull();
   });
 });
 
@@ -214,7 +257,7 @@ describe('aggregateRouting', () => {
   function entry(
     stage: string,
     model: string,
-    cost: number,
+    cost: number | null,
     wall: number,
     toolCalls: number,
     toolErrors: number,
@@ -224,6 +267,7 @@ describe('aggregateRouting', () => {
     return {
       stage, model, endpoint: 'e',
       tokens_in: 100, tokens_out: 50, cost_usd: cost,
+      token_source: 'reported', cost_source: cost == null ? 'unmeasured' : 'reported',
       wall_time_s: wall, tool_calls: toolCalls, tool_errors: toolErrors,
       stage_success: true,
       started_at: started ?? '2026-04-23T00:00:00.000Z',
@@ -272,6 +316,28 @@ describe('aggregateRouting', () => {
     expect(implementCell.cost_per_issue_shipped).toBeCloseTo(0.25, 4);
   });
 
+  it('propagates incomplete cost coverage and excludes unmeasured tokens from totals', () => {
+    const measured = entry('implement', 'codex', 0.2, 10, 2, 0);
+    const unmeasured = {
+      ...entry('implement', 'codex', null, 12, 1, 0),
+      tokens_in: 9000,
+      tokens_out: 4000,
+      token_source: 'estimated' as const,
+    };
+    const agg = aggregateRouting(
+      [{ session: 'S', entries: [measured, unmeasured] }],
+      [manifest('S', 1)],
+    );
+    const cell = agg.cells[0];
+    expect(cell.tokens_in).toBe(100);
+    expect(cell.tokens_out).toBe(50);
+    expect(cell.token_measurement_runs).toBe(1);
+    expect(cell.total_cost_usd).toBeNull();
+    expect(cell.cost_per_issue_shipped).toBeNull();
+    expect(cell.cost_measurement_runs).toBe(1);
+    expect(agg.total_cost_usd).toBeNull();
+  });
+
   it('computes median wall time across invocations', () => {
     const items = [
       {
@@ -287,15 +353,49 @@ describe('aggregateRouting', () => {
     expect(agg.cells[0].median_wall_time_s).toBe(30);
   });
 
-  it('computes tool_error_rate from error/call ratio', () => {
+  it('computes measured zero-error and nonzero tool-error ratios from calls', () => {
     const items = [
       {
         session: 'S',
-        entries: [entry('implement', 'm', 0.1, 10, 100, 8)],
+        entries: [
+          entry('implement', 'errors', 0.1, 10, 100, 8),
+          entry('implement', 'no-errors', 0.1, 10, 25, 0),
+        ],
       },
     ];
     const agg = aggregateRouting(items, [manifest('S', 1)]);
-    expect(agg.cells[0].tool_error_rate).toBeCloseTo(0.08, 4);
+    expect(agg.cells.find((cell) => cell.model === 'errors')?.tool_error_rate).toBeCloseTo(0.08, 4);
+    expect(agg.cells.find((cell) => cell.model === 'no-errors')?.tool_error_rate).toBe(0);
+  });
+
+  it('reports a zero-tool-call error rate as unmeasured instead of changing units', () => {
+    const agg = aggregateRouting(
+      [{ session: 'S', entries: [entry('implement', 'm', 0.1, 10, 0, 2)] }],
+      [manifest('S', 1)],
+    );
+
+    expect(agg.cells[0].tool_error_rate).toBeNull();
+    expect(JSON.parse(formatRoutingReport(agg, { json: true })).cells[0].tool_error_rate).toBeNull();
+  });
+
+  it('reports a null tool-error delta when either comparison cell has no calls', () => {
+    const agg = aggregateRouting(
+      [{
+        session: 'S',
+        entries: [
+          entry('implement', 'baseline-unmeasured', 2, 10, 0, 1),
+          entry('implement', 'candidate-measured', 1, 10, 10, 1),
+          entry('review', 'baseline-measured', 2, 10, 10, 0),
+          entry('review', 'candidate-unmeasured', 1, 10, 0, 1),
+        ],
+      }],
+      [manifest('S', 1)],
+    );
+
+    const candidateMeasured = agg.cells.find((cell) => cell.model === 'candidate-measured');
+    const candidateUnmeasured = agg.cells.find((cell) => cell.model === 'candidate-unmeasured');
+    expect(candidateMeasured?.delta_tool_error_rate_vs_baseline).toBeNull();
+    expect(candidateUnmeasured?.delta_tool_error_rate_vs_baseline).toBeNull();
   });
 
   it('computes delta vs all-frontier baseline (highest-cost cell per stage)', () => {
@@ -403,7 +503,7 @@ describe('parseDuration', () => {
 describe('formatRoutingReport', () => {
   it('returns JSON when json option set', () => {
     const agg = aggregateRouting(
-      [{ session: 'S', entries: [{ stage: 'plan', model: 'm', endpoint: 'e', tokens_in: 1, tokens_out: 1, cost_usd: 0.1, wall_time_s: 1, tool_calls: 1, tool_errors: 0, stage_success: true, started_at: '2026-04-23T00:00:00.000Z' }] }],
+      [{ session: 'S', entries: [{ stage: 'plan', model: 'm', endpoint: 'e', tokens_in: 1, tokens_out: 1, token_source: 'reported', cost_usd: 0.1, cost_source: 'reported', wall_time_s: 1, tool_calls: 1, tool_errors: 0, stage_success: true, started_at: '2026-04-23T00:00:00.000Z' }] }],
       [{ name: 'session/S', results: [{ issueNum: 1, status: 'success', filesChanged: 3 }] }],
     );
     const str = formatRoutingReport(agg, { json: true });
@@ -416,6 +516,50 @@ describe('formatRoutingReport', () => {
     const agg = aggregateRouting([], []);
     const str = formatRoutingReport(agg);
     expect(str).toContain('No per-stage telemetry recorded yet');
+  });
+
+  it('labels tool-error units and renders an em dash when no calls were measured', () => {
+    const noToolCalls: StageTelemetry = {
+      stage: 'plan', model: 'm', endpoint: 'e',
+      tokens_in: 1, tokens_out: 1, token_source: 'reported',
+      cost_usd: 0.1, cost_source: 'reported', wall_time_s: 1,
+      tool_calls: 0, tool_errors: 2, stage_success: true,
+      started_at: '2026-04-23T00:00:00.000Z',
+    };
+    const agg = aggregateRouting(
+      [{ session: 'S', entries: [noToolCalls] }],
+      [{ name: 'S', results: [{ issueNum: 1, status: 'success', filesChanged: 1 }] }],
+    );
+
+    const report = formatRoutingReport(agg);
+    expect(report).toContain('tool_err/call');
+    expect(report).toContain('\t—\t');
+  });
+
+  it('renders unmeasured cost as n/a and partial token totals with a marker', () => {
+    const measured: StageTelemetry = {
+      stage: 'implement', model: 'codex', endpoint: 'default',
+      tokens_in: 100, tokens_out: 50, token_source: 'reported',
+      cost_usd: 0.2, cost_source: 'reported', wall_time_s: 10,
+      tool_calls: 2, tool_errors: 0, stage_success: true,
+      started_at: '2026-04-23T00:00:00.000Z',
+    };
+    const estimated = {
+      ...measured,
+      cost_usd: null,
+      cost_source: 'unmeasured' as const,
+      token_source: 'estimated' as const,
+      wall_time_s: 12,
+      tool_calls: 1,
+    };
+    const report = formatRoutingReport(aggregateRouting(
+      [{ session: 'S', entries: [measured, estimated] }],
+      [{ name: 'S', results: [{ issueNum: 1, status: 'success', filesChanged: 1 }] }],
+    ));
+    expect(report).toContain('\tn/a\tn/a\t');
+    expect(report).toContain('100*\t50*');
+    expect(report).not.toContain('$0.0000');
+    expect(report).toContain('measured runs only');
   });
 });
 

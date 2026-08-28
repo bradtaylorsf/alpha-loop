@@ -132,7 +132,8 @@ const MAX_DIFF_CHARS = 10_000;
 
 /**
  * Build a StepCost entry from an AgentResult.
- * Uses parsed cost/tokens if available, otherwise estimates from output length.
+ * Uses parsed cost/tokens if available. Output-length token estimates remain
+ * explicitly estimated and are never priced as though they were measured.
  */
 function buildStepCost(
   step: string,
@@ -140,29 +141,45 @@ function buildStepCost(
   agentResult: AgentResult,
   config: Config,
 ): StepCost {
-  const model = agentResult.model || config.model;
-  if (agentResult.costUsd != null && agentResult.inputTokens != null && agentResult.outputTokens != null) {
+  const model = agentResult.model || 'unknown';
+  if (agentResult.inputTokens != null && agentResult.outputTokens != null) {
+    const estimatedCost = agentResult.costUsd ?? estimateCost(
+      model,
+      agentResult.inputTokens,
+      agentResult.outputTokens,
+      config.pricing,
+    );
     return {
       step,
       issueNum,
       model,
       input_tokens: agentResult.inputTokens,
       output_tokens: agentResult.outputTokens,
-      cost_usd: agentResult.costUsd,
+      cost_usd: estimatedCost,
+      token_source: 'reported',
+      cost_source: agentResult.costUsd != null
+        ? 'reported'
+        : (estimatedCost == null ? 'unmeasured' : 'priced'),
     };
   }
   // Fallback: estimate tokens from output length (chars / 4 ≈ tokens)
   const estimatedOutputTokens = Math.round(agentResult.output.length / 4);
   const estimatedInputTokens = Math.round(estimatedOutputTokens * 1.3);
-  const costUsd = estimateCost(model, estimatedInputTokens, estimatedOutputTokens, config.pricing);
   return {
     step,
     issueNum,
     model,
     input_tokens: estimatedInputTokens,
     output_tokens: estimatedOutputTokens,
-    cost_usd: costUsd,
+    cost_usd: agentResult.costUsd ?? null,
+    token_source: 'estimated',
+    cost_source: agentResult.costUsd != null ? 'reported' : 'unmeasured',
   };
+}
+
+function sumStepCosts(stepCosts: StepCost[]): number | null {
+  if (stepCosts.some((step) => step.cost_usd == null)) return null;
+  return stepCosts.reduce((sum, step) => sum + (step.cost_usd ?? 0), 0);
 }
 
 function agentForStep(config: Config, step: PipelineStepName): Pick<AgentOptions, 'agent' | 'model'> {
@@ -1528,7 +1545,7 @@ export async function processIssue(
   // agent from burning through every remaining stage before the cap is noticed.
   const pauseIfOverBudget = async (partial: PauseSessionPartial = {}): Promise<PipelineResult | null> => {
     if (config.dryRun) return null;
-    const issueCostUsd = stepCosts.reduce((sum, step) => sum + step.cost_usd, 0);
+    const issueCostUsd = sumStepCosts(stepCosts);
     const costDecision = evaluateCostPolicy(config, { issueNum, title, issueCostUsd, sessionCostUsd: issueCostUsd });
     const runtimeDecision = evaluateRuntimePolicy(config, Date.now() - startTime);
     const blocked = !decisionAllowed(costDecision)
@@ -2431,7 +2448,7 @@ export async function processIssue(
   }
 
   const duration = Math.round((Date.now() - startTime) / 1000);
-  const issueCostUsd = stepCosts.reduce((sum, step) => sum + step.cost_usd, 0);
+  const issueCostUsd = sumStepCosts(stepCosts);
   const costDecision = evaluateCostPolicy(config, {
     issueNum,
     title,
@@ -3475,11 +3492,13 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
 
   const duration = Math.round((Date.now() - startTime) / 1000);
   const perIssueDuration = Math.round(duration / issues.length);
-  const batchCostUsd = stepCosts.reduce((sum, step) => sum + step.cost_usd, 0);
+  const batchCostUsd = sumStepCosts(stepCosts);
   const costDecision = evaluateCostPolicy(config, {
     issueNum: issues[0]?.number,
     title: issues[0]?.title,
-    issueCostUsd: issues.length > 0 ? batchCostUsd / issues.length : batchCostUsd,
+    issueCostUsd: batchCostUsd == null
+      ? null
+      : (issues.length > 0 ? batchCostUsd / issues.length : batchCostUsd),
     sessionCostUsd: batchCostUsd,
   });
   if (!decisionAllowed(costDecision)) {
@@ -3488,7 +3507,9 @@ Do NOT redo work that is already committed. Build on top of existing progress.\n
       const issueDecision = evaluateCostPolicy(config, {
         issueNum: issue.number,
         title: issue.title,
-        issueCostUsd: issues.length > 0 ? batchCostUsd / issues.length : batchCostUsd,
+        issueCostUsd: batchCostUsd == null
+          ? null
+          : (issues.length > 0 ? batchCostUsd / issues.length : batchCostUsd),
         sessionCostUsd: batchCostUsd,
       });
       results.push(await pauseSessionForAutomationPolicy({

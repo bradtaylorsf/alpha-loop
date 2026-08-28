@@ -73,7 +73,7 @@ Valid comparisons hold all-but-one constant:
 
 - Different harnesses with different default models (the usual vendor-blog mistake).
 - Any cell where the escalation/fallback is live, because the "model under test" can be silently swapped mid-run (§7, §9).
-- Local-endpoint cost vs. cloud-endpoint cost (local records \$0 in telemetry; see §8).
+- Local-endpoint cost vs. cloud-endpoint cost (only explicit `0/0` prices record \$0; unmeasured cost is `null`; see §8).
 
 The `eval-matrix` runner already computes per-cell metrics and deltas against a baseline profile — the design above is mostly a discipline layered on top of machinery that exists, plus the isolation fixes in §7.
 
@@ -195,7 +195,7 @@ Every item below is grounded in Alpha Loop's actual behavior. These are the thin
 | 5 | **Test retries** — `max_test_retries: 3`. | Inflates success and hides flakiness; different cells may retry different amounts. | Hold retries constant across cells and *report* retry count as a metric. The oracle's pass/fail is taken at a fixed attempt budget. |
 | 6 | **Timeouts** — `agent_timeout` (30 min default) and a 5-min test timeout; timeout is classified as permanent failure. | Different budgets advantage slower/faster models unfairly. | Fix an identical wall-clock + turn budget across every cell; record budget in the config snapshot. |
 | 7 | **Model nondeterminism** — temperature, server-side variation, no pinned version. | Irreducible run-to-run variance. | temp=0 where supported; pin model by dated version; absorb the rest with N≥5 + CIs (don't pretend it's zero). |
-| 8 | **Cost estimation fallback** — when tokens aren't returned, cost is estimated as `chars/4`; local endpoints record \$0. | Cost metric is noisy and non-comparable local-vs-cloud. | Prefer provider-reported tokens; flag estimated costs; never compare local \$0 against cloud on the same axis (§8). |
+| 8 | **Cost measurement coverage** — provider usage is captured when available; length-derived token estimates are marked and unmeasured cost is `null`. | Missing measurements reduce comparison coverage. | Require complete cost coverage for cost baselines and keep local operating cost separate from model-API price (§8). |
 | 9 | **Flaky fixture oracle** | Misattributed to the model. | The §4.3 task-validity gate (golden passes 100/100, empty fails 100/100) rejects flaky tasks before they enter the set. |
 
 The pattern: **isolate (1,2,4), fix-as-constant (5,6), disable-or-make-explicit (3), absorb statistically (7), and gate out (9).**
@@ -210,7 +210,7 @@ A benchmark earns trust partly by being honest about its blind spots. Alpha-Loop
 - **Subjective code quality / maintainability / idiomaticity.** The oracle checks behavior and wiring. "Is this code *good*" is a weak proxy at best (LLM-judge), and the judge is itself biased. Don't claim to measure it; measure the false-positive rate instead, which is objective.
 - **Transfer to *your* codebase.** A high score predicts performance *on the benchmark*. Generalization to a specific production repo is an assumption, not a measurement.
 - **Cross-harness fairness in an absolute sense.** Harnesses expose different capabilities (subagents, memory, browser tools). Holding the model fixed and swapping harness is partly apples-to-oranges; publish a **capability matrix** so readers see what each harness was allowed to do rather than pretending the comparison is clean.
-- **Local vs. cloud cost on one axis.** Local endpoints record \$0; that is not "free," it's unmeasured. Cost comparisons are valid only within the same endpoint class.
+- **Local vs. cloud cost on one axis.** Explicit `0/0` pricing means zero model-API price, not zero operating cost; missing measurements remain `null`. Cost comparisons are valid only with complete coverage and the same cost boundary.
 - **Genuinely ambiguous / human-in-the-loop tasks.** Tasks that legitimately need human judgment (`needs-human-input` outcomes) have no automatable oracle and must be excluded from the scored set, even though they're common in real work.
 - **The Loop's non-model stages.** PR creation, label management, GitHub orchestration depend on external services and network, not model skill. Exclude them from the scored construct (they belong in an SRE/reliability dashboard, not the model leaderboard).
 - **Correctness in the strong sense.** Tests sample behavior; passing tests cannot prove the absence of bugs. The benchmark measures *demonstrated* correctness against a finite oracle, nothing more.

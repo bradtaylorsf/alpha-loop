@@ -116,19 +116,24 @@ export type StepCost = {
   model: string;
   input_tokens: number;
   output_tokens: number;
-  cost_usd: number;
+  cost_usd: number | null;
+  token_source?: 'reported' | 'estimated';
+  cost_source?: 'reported' | 'priced' | 'unmeasured';
 };
 
 /** Run-level costs.json format. */
 export type CostsJson = {
-  total_cost_usd: number;
+  total_cost_usd: number | null;
   by_step: Record<string, {
     model: string;
-    input_tokens: number;
-    output_tokens: number;
-    cost_usd: number;
+    /** Sum of measured token counts only; null when none were measured. */
+    input_tokens: number | null;
+    output_tokens: number | null;
+    token_measurement_entries: number;
+    entries: number;
+    cost_usd: number | null;
   }>;
-  by_issue: Record<string, { cost_usd: number }>;
+  by_issue: Record<string, { cost_usd: number | null }>;
 };
 
 /** Pipeline result used to compute scores. */
@@ -384,6 +389,7 @@ export function computeCosts(stepCosts: StepCost[]): CostsJson {
   const byStep: CostsJson['by_step'] = {};
   const byIssue: CostsJson['by_issue'] = {};
   let totalCost = 0;
+  let completeTotal = true;
 
   for (const sc of stepCosts) {
     // Aggregate by step name
@@ -392,33 +398,55 @@ export function computeCosts(stepCosts: StepCost[]): CostsJson {
         model: sc.model,
         input_tokens: 0,
         output_tokens: 0,
+        token_measurement_entries: 0,
+        entries: 0,
         cost_usd: 0,
       };
     }
-    byStep[sc.step].input_tokens += sc.input_tokens;
-    byStep[sc.step].output_tokens += sc.output_tokens;
-    byStep[sc.step].cost_usd += sc.cost_usd;
+    const stepTotals = byStep[sc.step];
+    stepTotals.entries++;
+    // Legacy sidecars predate provenance but were written from agent usage;
+    // only newly explicit `estimated` entries are excluded.
+    if (sc.token_source !== 'estimated') {
+      stepTotals.input_tokens = (stepTotals.input_tokens ?? 0) + sc.input_tokens;
+      stepTotals.output_tokens = (stepTotals.output_tokens ?? 0) + sc.output_tokens;
+      stepTotals.token_measurement_entries++;
+    }
+    if (sc.cost_usd == null) {
+      stepTotals.cost_usd = null;
+      completeTotal = false;
+    } else if (stepTotals.cost_usd != null) {
+      stepTotals.cost_usd += sc.cost_usd;
+    }
 
     // Aggregate by issue
     const issueKey = String(sc.issueNum);
     if (!byIssue[issueKey]) {
       byIssue[issueKey] = { cost_usd: 0 };
     }
-    byIssue[issueKey].cost_usd += sc.cost_usd;
+    if (sc.cost_usd == null) {
+      byIssue[issueKey].cost_usd = null;
+    } else if (byIssue[issueKey].cost_usd != null) {
+      byIssue[issueKey].cost_usd += sc.cost_usd;
+    }
 
-    totalCost += sc.cost_usd;
+    if (sc.cost_usd != null) totalCost += sc.cost_usd;
   }
 
   // Round all cost values
   for (const step of Object.values(byStep)) {
-    step.cost_usd = Math.round(step.cost_usd * 10000) / 10000;
+    if (step.token_measurement_entries === 0) {
+      step.input_tokens = null;
+      step.output_tokens = null;
+    }
+    if (step.cost_usd != null) step.cost_usd = Math.round(step.cost_usd * 10000) / 10000;
   }
   for (const issue of Object.values(byIssue)) {
-    issue.cost_usd = Math.round(issue.cost_usd * 10000) / 10000;
+    if (issue.cost_usd != null) issue.cost_usd = Math.round(issue.cost_usd * 10000) / 10000;
   }
 
   return {
-    total_cost_usd: Math.round(totalCost * 10000) / 10000,
+    total_cost_usd: completeTotal ? Math.round(totalCost * 10000) / 10000 : null,
     by_step: byStep,
     by_issue: byIssue,
   };

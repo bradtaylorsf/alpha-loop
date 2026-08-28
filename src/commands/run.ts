@@ -18,6 +18,7 @@ import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate } from '
 import { isChangedTestScopeEnabled } from '../lib/testing.js';
 import {
   createSession,
+  createVerifySession,
   ensureSessionWorktree,
   finalizeSession,
   recordSessionBackgroundTaskError,
@@ -49,7 +50,7 @@ import { saveCapturedCase, detectFailureStep } from '../lib/eval.js';
 import { readGateResult, formatGateFindings } from '../lib/pipeline.js';
 import { spawnAgent } from '../lib/agent.js';
 import { buildSessionReviewPrompt, type EpicPromptContext } from '../lib/prompts.js';
-import { writeTraceToSubdir } from '../lib/traces.js';
+import { runDir, writeTraceToSubdir } from '../lib/traces.js';
 import { validateGeneratedMarkdownForCommit } from '../lib/scan-validation.js';
 import { closeSync, openSync, readFileSync, existsSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { validateIssueQueue, printValidationReport, commentOnIncompleteIssues, parseDependencies, type ValidationReport } from '../lib/validation.js';
@@ -719,7 +720,12 @@ async function runEpicVerificationFlow(
     mkdirSync(logsDir, { recursive: true });
   }
 
-  const result = await verifyEpic({ epic, subIssues, mergedPRUrls }, config, logsDir);
+  const result = await verifyEpic(
+    { epic, subIssues, mergedPRUrls },
+    config,
+    logsDir,
+    session ? { telemetryDir: runDir(session.name) } : undefined,
+  );
 
   if (config.dryRun) {
     log.dry(`[verify-only] Would post comment on #${epicNum} (verdict=${result.verdict})`);
@@ -3226,7 +3232,41 @@ export async function runCommand(options: RunOptions): Promise<void> {
         });
       }
       log.step(`Running verify-only pass for epic #${options.verifyOnly}`);
-      const verification = await runEpicVerificationFlow(options.verifyOnly, config, null);
+      const verifySession = config.dryRun ? null : createVerifySession(config, options.verifyOnly);
+      let verification: EpicVerificationFlowResult;
+      try {
+        verification = await runEpicVerificationFlow(options.verifyOnly, config, verifySession);
+      } catch (err) {
+        if (verifySession) {
+          recordSessionError(verifySession, {
+            issueNum: options.verifyOnly,
+            stage: 'verify',
+            message: err instanceof Error ? err.message : String(err),
+          });
+          transitionSessionStatus(verifySession, 'failed', 'failed', {
+            verification: {
+              epicNumber: options.verifyOnly,
+              status: 'failure',
+              verdict: null,
+              closedEpic: false,
+            },
+          });
+        }
+        throw err;
+      }
+      if (verifySession) {
+        const terminalStatus = verification.status === 'failure' ? 'failed' : 'completed';
+        transitionSessionStatus(verifySession, terminalStatus, terminalStatus, {
+          verification: {
+            epicNumber: options.verifyOnly,
+            status: verification.status,
+            verdict: verification.verdict === 'pass' || verification.verdict === 'partial' || verification.verdict === 'fail'
+              ? verification.verdict
+              : null,
+            closedEpic: verification.closedEpic,
+          },
+        });
+      }
       if (verification.failure?.exitCode !== undefined) {
         throw new CommandExitError({
           code: verification.failure.code,
