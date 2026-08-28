@@ -52,7 +52,7 @@ This keeps epic detection explicit. You opt in by labeling.
 
 Alpha Loop's recommended planning flow is epic-first:
 
-1. `alpha-loop triage` groups related open issues into parent epics. It can create a new parent epic or update an existing open issue labeled `epic`, then comments on child issues with a backlink to the parent.
+1. `alpha-loop triage --dry-run` groups related open issues into parent epics and saves the displayed analysis to `.alpha-loop/triage-<timestamp>.json`. Review that file, then use `alpha-loop triage --apply <file>` to replay it without another AI call. Add `--yes` to apply only its entries marked `selected` without prompts. Applying a proposal can create a new parent epic or update an existing open issue labeled `epic`, then comments on child issues with a backlink to the parent.
 2. `alpha-loop roadmap` schedules the parent epic issue into a milestone. It uses the ordered child checklist as planning context, but does not assign those child issues separately as standalone roadmap items.
 3. `alpha-loop run --epic <N>` ships the child issues from the epic checklist in order. You can also run `alpha-loop run --milestone "<name>"`; when that milestone has exactly one open parent epic, the loop processes that epic.
 4. The verification pass evaluates the completed child issues against the parent epic's acceptance criteria.

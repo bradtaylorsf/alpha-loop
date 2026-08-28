@@ -17,6 +17,8 @@ import {
   formatTriageFindings,
   formatEpicGroupProposals,
   parseTriageAnalysisResponse,
+  saveTriagePlan,
+  loadTriagePlan,
   buildPlanningContext,
   type TriageFinding,
   type TriageAction,
@@ -37,6 +39,7 @@ import {
 export type TriageOptions = {
   dryRun?: boolean;
   yes?: boolean;
+  apply?: string;
 };
 
 /** Truncate issue bodies to stay within agent context limits. */
@@ -136,79 +139,102 @@ function applyEpicProposal(repo: string, group: ProposedEpicGroup, failures: str
 }
 
 export async function triageCommand(options: TriageOptions): Promise<void> {
+  if (options.dryRun && options.apply) {
+    log.error('--dry-run cannot be combined with --apply. Generate a plan first, then replay it separately.');
+    return;
+  }
+
   const config = loadConfig({ dryRun: options.dryRun });
-
-  // ── Fetch open issues with comments (single API call) ──────────────────────
-  log.step('Fetching open issues with comments...');
-  const issues = listOpenIssuesWithComments(config.repo);
-
-  if (issues.length === 0) {
-    log.info('No open issues found. Nothing to triage.');
-    return;
-  }
-
-  log.info(`Found ${issues.length} open issue(s)`);
-
-  // Truncate issue bodies for context
-  const truncatedIssues = issues.map((issue) => ({
-    ...issue,
-    body: issue.body.length > MAX_BODY_CHARS
-      ? issue.body.slice(0, MAX_BODY_CHARS) + '...'
-      : issue.body,
-    comments: (issue.comments ?? []).slice(0, 5),
-  }));
-
-  // ── Build context ──────────────────────────────────────────────────────────
-  const ctx = buildPlanningContext(config);
-
-  // ── AI analysis ────────────────────────────────────────────────────────────
-  log.step('Analyzing issues via AI agent...');
-  const triagePrompt = buildTriagePrompt({
-    issues: truncatedIssues,
-    projectContext: ctx.projectContext,
-    visionContext: ctx.visionContext,
-  });
-
-  const safeModel = assertSafeShellArg(config.model, 'model');
-  const agentCmd = buildOneShotCommand(config.agent, safeModel);
-  const promptFile = join(tmpdir(), `alpha-loop-prompt-${Date.now()}`);
-  writeFileSync(promptFile, triagePrompt, 'utf-8');
-  let result;
-  try {
-    result = exec(
-      `${agentCmd} < "${promptFile}" 2>/dev/null`,
-      { cwd: process.cwd(), timeout: 10 * 60 * 1000 },
-    );
-  } finally {
-    try { unlinkSync(promptFile); } catch { /* cleanup best-effort */ }
-  }
-
-  if (result.exitCode !== 0 || !result.stdout.trim()) {
-    log.error('Agent failed to analyze issues. Check agent configuration and try again.');
-    if (result.stderr) log.error(result.stderr.slice(0, 500));
-    return;
-  }
-
+  let issues: ReturnType<typeof listOpenIssuesWithComments>;
   let analysis: TriageAnalysis;
-  try {
-    analysis = parseTriageAnalysisResponse(result.stdout);
-  } catch (err) {
-    log.error(`Failed to parse triage JSON: ${(err as Error).message}`);
-    log.error(`Agent response (first 500 chars): ${result.stdout.slice(0, 500)}`);
-    return;
+  let filteredInvalidEpicGroups = false;
+
+  if (options.apply) {
+    try {
+      const artifact = loadTriagePlan(options.apply, config.repo);
+      analysis = artifact.analysis;
+      log.success(`Loaded triage plan from ${options.apply} (created ${artifact.createdAt})`);
+    } catch (err) {
+      log.error(`Cannot apply triage plan: ${(err as Error).message}`);
+      return;
+    }
+
+    // Execution may need current issue bodies, but replay never regenerates or
+    // re-filters the reviewed analysis.
+    log.step('Fetching current open issues for plan execution...');
+    issues = listOpenIssuesWithComments(config.repo);
+    log.info(`Found ${issues.length} current open issue(s)`);
+  } else {
+    // ── Fetch open issues with comments (single API call) ────────────────────
+    log.step('Fetching open issues with comments...');
+    issues = listOpenIssuesWithComments(config.repo);
+
+    if (issues.length === 0) {
+      log.info('No open issues found. Nothing to triage.');
+      return;
+    }
+
+    log.info(`Found ${issues.length} open issue(s)`);
+
+    // Truncate issue bodies for context
+    const truncatedIssues = issues.map((issue) => ({
+      ...issue,
+      body: issue.body.length > MAX_BODY_CHARS
+        ? issue.body.slice(0, MAX_BODY_CHARS) + '...'
+        : issue.body,
+      comments: (issue.comments ?? []).slice(0, 5),
+    }));
+
+    // ── Build context ────────────────────────────────────────────────────────
+    const ctx = buildPlanningContext(config);
+
+    // ── AI analysis ──────────────────────────────────────────────────────────
+    log.step('Analyzing issues via AI agent...');
+    const triagePrompt = buildTriagePrompt({
+      issues: truncatedIssues,
+      projectContext: ctx.projectContext,
+      visionContext: ctx.visionContext,
+    });
+
+    const safeModel = assertSafeShellArg(config.model, 'model');
+    const agentCmd = buildOneShotCommand(config.agent, safeModel);
+    const promptFile = join(tmpdir(), `alpha-loop-prompt-${Date.now()}`);
+    writeFileSync(promptFile, triagePrompt, 'utf-8');
+    let result;
+    try {
+      result = exec(
+        `${agentCmd} < "${promptFile}" 2>/dev/null`,
+        { cwd: process.cwd(), timeout: 10 * 60 * 1000 },
+      );
+    } finally {
+      try { unlinkSync(promptFile); } catch { /* cleanup best-effort */ }
+    }
+
+    if (result.exitCode !== 0 || !result.stdout.trim()) {
+      log.error('Agent failed to analyze issues. Check agent configuration and try again.');
+      if (result.stderr) log.error(result.stderr.slice(0, 500));
+      return;
+    }
+
+    let generatedAnalysis: TriageAnalysis;
+    try {
+      generatedAnalysis = parseTriageAnalysisResponse(result.stdout);
+    } catch (err) {
+      log.error(`Failed to parse triage JSON: ${(err as Error).message}`);
+      log.error(`Agent response (first 500 chars): ${result.stdout.slice(0, 500)}`);
+      return;
+    }
+
+    const validEpicGroups = filterValidEpicGroups(generatedAnalysis.epicGroups, issues);
+    filteredInvalidEpicGroups = generatedAnalysis.epicGroups.length > validEpicGroups.length;
+    analysis = {
+      findings: generatedAnalysis.findings,
+      epicGroups: validEpicGroups,
+    };
   }
 
   const findings = analysis.findings;
-  const epicGroups = filterValidEpicGroups(analysis.epicGroups, issues);
-
-  if (findings.length === 0 && epicGroups.length === 0) {
-    if (analysis.epicGroups.length > 0) {
-      log.info('No valid epic proposals after filtering invalid or nested groups.');
-      return;
-    }
-    log.success('All issues look good — no triage actions needed.');
-    return;
-  }
+  const epicGroups = analysis.epicGroups;
 
   // ── Display findings and proposed epic groups ─────────────────────────────
   if (findings.length > 0) {
@@ -225,11 +251,30 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
     log.info(`Found ${epicGroups.length} proposed epic group(s)`);
   }
 
+  if (findings.length === 0 && epicGroups.length === 0) {
+    if (filteredInvalidEpicGroups) {
+      log.info('No valid epic proposals after filtering invalid or nested groups.');
+    } else {
+      log.success('All issues look good — no triage actions needed.');
+    }
+  }
+
   // ── Dry run exit ───────────────────────────────────────────────────────────
   if (options.dryRun) {
+    let artifactPath: string;
+    try {
+      artifactPath = saveTriagePlan(config.repo, analysis, process.cwd());
+    } catch (err) {
+      log.error(`Failed to save triage plan: ${(err as Error).message}`);
+      return;
+    }
     log.dry('Dry run — no changes will be made.');
+    log.success(`Saved triage plan to ${artifactPath}`);
+    log.info(`Replay exactly this plan with: alpha-loop triage --apply ${JSON.stringify(artifactPath)} --yes`);
     return;
   }
+
+  if (findings.length === 0 && epicGroups.length === 0) return;
 
   // ── Interactive review ─────────────────────────────────────────────────────
   let selectedNums: number[];
@@ -303,21 +348,26 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
   // ── Execute actions ────────────────────────────────────────────────────────
   const failures: string[] = [];
+  let attempted = 0;
   let applied = 0;
   let appliedEpics = 0;
   const appliedEpicNums: number[] = [];
 
   for (const finding of findings) {
     if (!selectedNums.includes(finding.issueNum)) continue;
+    attempted++;
 
     try {
       switch (finding.category) {
         case 'stale': {
           commentIssue(config.repo, finding.issueNum,
             `Closing as stale: ${finding.reason}\n\n_Triaged by alpha-loop._`);
-          closeIssue(config.repo, finding.issueNum, 'not_planned');
-          log.success(`Closed stale issue #${finding.issueNum}`);
-          applied++;
+          if (closeIssue(config.repo, finding.issueNum, 'not_planned')) {
+            log.success(`Closed stale issue #${finding.issueNum}`);
+            applied++;
+          } else {
+            failures.push(`#${finding.issueNum}: failed to close stale issue`);
+          }
           break;
         }
 
@@ -328,10 +378,13 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
             const preserved = original
               ? `<details><summary>Original description</summary>\n\n${original}\n\n</details>\n\n`
               : '';
-            updateIssue(config.repo, finding.issueNum, { body: preserved + finding.rewrittenBody });
-            commentIssue(config.repo, finding.issueNum, '_Issue rewritten by alpha-loop triage. Original description preserved above._');
-            log.success(`Rewrote body for #${finding.issueNum}`);
-            applied++;
+            if (updateIssue(config.repo, finding.issueNum, { body: preserved + finding.rewrittenBody })) {
+              commentIssue(config.repo, finding.issueNum, '_Issue rewritten by alpha-loop triage. Original description preserved above._');
+              log.success(`Rewrote body for #${finding.issueNum}`);
+              applied++;
+            } else {
+              failures.push(`#${finding.issueNum}: failed to rewrite issue body`);
+            }
           } else {
             log.warn(`No rewritten body for #${finding.issueNum}, skipping`);
           }
@@ -354,9 +407,12 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
               const links = createdNums.map((n) => `- #${n}`).join('\n');
               commentIssue(config.repo, finding.issueNum,
                 `Split into smaller issues:\n${links}\n\n_Triaged by alpha-loop._`);
-              closeIssue(config.repo, finding.issueNum, 'completed');
-              log.success(`Closed #${finding.issueNum} after splitting`);
-              applied++;
+              if (closeIssue(config.repo, finding.issueNum, 'completed')) {
+                log.success(`Closed #${finding.issueNum} after splitting`);
+                applied++;
+              } else {
+                failures.push(`#${finding.issueNum}: failed to close issue after splitting`);
+              }
             }
           } else {
             log.warn(`No split suggestions for #${finding.issueNum}, skipping`);
@@ -368,9 +424,12 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
           if (finding.duplicateOf != null) {
             commentIssue(config.repo, finding.issueNum,
               `Closing as duplicate of #${finding.duplicateOf}.\n\n_Triaged by alpha-loop._`);
-            closeIssue(config.repo, finding.issueNum, 'not_planned');
-            log.success(`Closed duplicate #${finding.issueNum} (duplicate of #${finding.duplicateOf})`);
-            applied++;
+            if (closeIssue(config.repo, finding.issueNum, 'duplicate', finding.duplicateOf)) {
+              log.success(`Closed duplicate #${finding.issueNum} (duplicate of #${finding.duplicateOf})`);
+              applied++;
+            } else {
+              failures.push(`#${finding.issueNum}: failed to close as duplicate of #${finding.duplicateOf}`);
+            }
           } else {
             log.warn(`No duplicate reference for #${finding.issueNum}, skipping`);
           }
@@ -379,10 +438,13 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
         case 'enrich': {
           if (finding.enrichedBody) {
-            updateIssue(config.repo, finding.issueNum, { body: finding.enrichedBody });
-            commentIssue(config.repo, finding.issueNum, '_Issue enriched by alpha-loop triage. Original description preserved in collapsed block above._');
-            log.success(`Enriched #${finding.issueNum}`);
-            applied++;
+            if (updateIssue(config.repo, finding.issueNum, { body: finding.enrichedBody })) {
+              commentIssue(config.repo, finding.issueNum, '_Issue enriched by alpha-loop triage. Original description preserved in collapsed block above._');
+              log.success(`Enriched #${finding.issueNum}`);
+              applied++;
+            } else {
+              failures.push(`#${finding.issueNum}: failed to enrich issue body`);
+            }
           } else {
             log.warn(`No enriched body for #${finding.issueNum}, skipping`);
           }
@@ -410,7 +472,12 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log('');
-  log.success(`Applied ${applied} triage action(s)`);
+  const actionSummary = `Applied ${applied} of ${attempted} triage action(s)`;
+  if (applied === attempted) {
+    log.success(actionSummary);
+  } else {
+    log.warn(actionSummary);
+  }
   if (appliedEpics > 0) {
     log.success(`Applied ${appliedEpics} epic proposal(s): ${appliedEpicNums.map((n) => `#${n}`).join(', ')}`);
   } else if (selectedEpicIndexes.length > 0) {

@@ -47,3 +47,23 @@ describe('CLI version', () => {
     expect(cliSource).not.toMatch(/\.version\('[^']*'\)/);
   });
 });
+
+describe('triage CLI help', () => {
+  it('documents deterministic dry-run replay options', () => {
+    const result = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', 'src/cli.ts', 'triage', '--help'],
+      { cwd: root, encoding: 'utf-8' },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toContain('--dry-run');
+    expect(result.stdout).toContain('save an exact replay plan');
+    expect(result.stdout).toContain('--apply <file>');
+    expect(result.stdout).toContain('without running AI analysis again');
+    expect(result.stdout).toContain('-y, --yes');
+    expect(result.stdout).toContain('use --apply to replay');
+    expect(result.stdout).toContain('a reviewed plan');
+  });
+});

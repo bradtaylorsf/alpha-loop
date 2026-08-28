@@ -72,6 +72,23 @@ export type TriageAnalysis = {
   epicGroups: ProposedEpicGroup[];
 };
 
+const TRIAGE_ACTION_BY_CATEGORY: Record<TriageCategory, TriageAction> = {
+  stale: 'close',
+  unclear: 'rewrite',
+  too_large: 'split',
+  duplicate: 'merge',
+  enrich: 'enrich',
+};
+
+export const TRIAGE_PLAN_VERSION = 1 as const;
+
+export type TriagePlanArtifact = {
+  version: typeof TRIAGE_PLAN_VERSION;
+  repo: string;
+  createdAt: string;
+  analysis: TriageAnalysis;
+};
+
 export type RoadmapAssignment = {
   issueNum: number;
   title: string;
@@ -388,7 +405,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function requireString(
   value: Record<string, unknown>,
-  field: keyof ProposedEpicGroup,
+  field: string,
   context: string,
 ): string {
   const raw = value[field];
@@ -400,7 +417,7 @@ function requireString(
 
 function requireStringArray(
   value: Record<string, unknown>,
-  field: keyof ProposedEpicGroup,
+  field: string,
   context: string,
 ): string[] {
   const raw = value[field];
@@ -447,7 +464,7 @@ function normalizeSelected(value: Record<string, unknown>, context: string): boo
 
 function normalizeOptionalIssueNumber(
   value: Record<string, unknown>,
-  field: keyof ProposedEpicGroup,
+  field: string,
   context: string,
 ): number | undefined {
   const raw = value[field];
@@ -456,6 +473,107 @@ function normalizeOptionalIssueNumber(
     throw new Error(`${context}.${String(field)} must be a positive integer issue number`);
   }
   return raw;
+}
+
+function normalizeOptionalString(
+  value: Record<string, unknown>,
+  field: string,
+  context: string,
+): string | undefined {
+  const raw = value[field];
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    throw new Error(`${context}.${field} must be a non-empty string`);
+  }
+  return raw;
+}
+
+function normalizeOptionalStringArray(
+  value: Record<string, unknown>,
+  field: string,
+  context: string,
+): string[] | undefined {
+  const raw = value[field];
+  if (raw === undefined || raw === null) return undefined;
+  if (
+    !Array.isArray(raw) ||
+    raw.some((item) => typeof item !== 'string' || item.trim().length === 0)
+  ) {
+    throw new Error(`${context}.${field} must be an array of non-empty strings`);
+  }
+  return raw.map((item) => (item as string).trim());
+}
+
+function normalizeTriageFinding(value: unknown, index: number): TriageFinding {
+  const context = `findings[${index}]`;
+  if (!isRecord(value)) {
+    throw new Error(`${context} must be an object`);
+  }
+
+  const issueNum = value.issueNum;
+  if (!Number.isInteger(issueNum) || (issueNum as number) <= 0) {
+    throw new Error(`${context}.issueNum must be a positive integer issue number`);
+  }
+
+  const validCategories: TriageCategory[] = ['stale', 'unclear', 'too_large', 'duplicate', 'enrich'];
+  if (!validCategories.includes(value.category as TriageCategory)) {
+    throw new Error(`${context}.category must be a supported triage category`);
+  }
+
+  const validActions: TriageAction[] = ['close', 'rewrite', 'split', 'merge', 'enrich'];
+  if (!validActions.includes(value.action as TriageAction)) {
+    throw new Error(`${context}.action must be a supported triage action`);
+  }
+
+  const category = value.category as TriageCategory;
+  const action = value.action as TriageAction;
+  if (action !== TRIAGE_ACTION_BY_CATEGORY[category]) {
+    throw new Error(`${context}.action must be ${TRIAGE_ACTION_BY_CATEGORY[category]} for category ${category}`);
+  }
+
+  const finding: TriageFinding = {
+    issueNum: issueNum as number,
+    title: requireString(value, 'title', context),
+    category,
+    reason: requireString(value, 'reason', context),
+    action,
+    rewrittenBody: normalizeOptionalString(value, 'rewrittenBody', context),
+    enrichedBody: normalizeOptionalString(value, 'enrichedBody', context),
+    splitInto: normalizeOptionalStringArray(value, 'splitInto', context),
+    duplicateOf: normalizeOptionalIssueNumber(value, 'duplicateOf', context),
+    selected: normalizeSelected(value, context),
+  };
+
+  if (category === 'unclear' && finding.rewrittenBody === undefined) {
+    throw new Error(`${context}.rewrittenBody is required for category unclear`);
+  }
+  if (category === 'too_large' && (!finding.splitInto || finding.splitInto.length === 0)) {
+    throw new Error(`${context}.splitInto must contain at least one title for category too_large`);
+  }
+  if (category === 'duplicate' && finding.duplicateOf === undefined) {
+    throw new Error(`${context}.duplicateOf is required for category duplicate`);
+  }
+  if (category === 'duplicate' && finding.duplicateOf === finding.issueNum) {
+    throw new Error(`${context}.duplicateOf must reference a different issue`);
+  }
+  if (category === 'enrich' && finding.enrichedBody === undefined) {
+    throw new Error(`${context}.enrichedBody is required for category enrich`);
+  }
+
+  return finding;
+}
+
+function normalizeTriageFindings(findings: unknown[]): TriageFinding[] {
+  const normalized = findings.map((finding, index) => normalizeTriageFinding(finding, index));
+  const seenIssueNumbers = new Set<number>();
+  for (let index = 0; index < normalized.length; index++) {
+    const issueNum = normalized[index].issueNum;
+    if (seenIssueNumbers.has(issueNum)) {
+      throw new Error(`findings[${index}].issueNum duplicates issue #${issueNum}`);
+    }
+    seenIssueNumbers.add(issueNum);
+  }
+  return normalized;
 }
 
 function normalizeProposedEpicGroup(value: unknown, index: number): ProposedEpicGroup {
@@ -481,7 +599,10 @@ function normalizeProposedEpicGroup(value: unknown, index: number): ProposedEpic
  */
 export function normalizeTriageAnalysis(value: unknown): TriageAnalysis {
   if (Array.isArray(value)) {
-    return { findings: value as TriageFinding[], epicGroups: [] };
+    return {
+      findings: normalizeTriageFindings(value),
+      epicGroups: [],
+    };
   }
 
   if (!isRecord(value)) {
@@ -499,7 +620,7 @@ export function normalizeTriageAnalysis(value: unknown): TriageAnalysis {
   }
 
   return {
-    findings: findings as TriageFinding[],
+    findings: normalizeTriageFindings(findings),
     epicGroups: epicGroups.map((group, index) => normalizeProposedEpicGroup(group, index)),
   };
 }
@@ -509,6 +630,67 @@ export function normalizeTriageAnalysis(value: unknown): TriageAnalysis {
  */
 export function parseTriageAnalysisResponse(response: string): TriageAnalysis {
   return normalizeTriageAnalysis(extractJsonFromResponse<unknown>(response));
+}
+
+/**
+ * Save the exact normalized triage preview for deterministic replay.
+ * Returns the project-relative artifact path shown to the user.
+ */
+export function saveTriagePlan(
+  repo: string,
+  analysis: TriageAnalysis,
+  projectDir: string,
+  createdAt = new Date().toISOString(),
+): string {
+  const normalizedAnalysis = normalizeTriageAnalysis(analysis);
+  const artifact: TriagePlanArtifact = {
+    version: TRIAGE_PLAN_VERSION,
+    repo,
+    createdAt,
+    analysis: normalizedAnalysis,
+  };
+  const timestamp = createdAt.replace(/[:.]/g, '-');
+  const relativePath = join('.alpha-loop', `triage-${timestamp}.json`);
+  mkdirSync(join(projectDir, '.alpha-loop'), { recursive: true });
+  writeFileSync(join(projectDir, relativePath), `${JSON.stringify(artifact, null, 2)}\n`, 'utf-8');
+  return relativePath;
+}
+
+/** Load and validate a repository-bound triage plan artifact. */
+export function loadTriagePlan(filePath: string, expectedRepo: string): TriagePlanArtifact {
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(filePath, 'utf-8')) as unknown;
+  } catch (err) {
+    throw new Error(`Unable to read triage plan "${filePath}": ${(err as Error).message}`);
+  }
+
+  if (!isRecord(value)) {
+    throw new Error('Triage plan must be a JSON object');
+  }
+  if (value.version !== TRIAGE_PLAN_VERSION) {
+    throw new Error(`Unsupported triage plan version: ${String(value.version)}`);
+  }
+  if (typeof value.repo !== 'string' || value.repo.trim().length === 0) {
+    throw new Error('Triage plan repo must be a non-empty string');
+  }
+  if (value.repo.toLowerCase() !== expectedRepo.toLowerCase()) {
+    throw new Error(`Triage plan is for ${value.repo}, but the configured repository is ${expectedRepo}`);
+  }
+  if (
+    typeof value.createdAt !== 'string' ||
+    Number.isNaN(Date.parse(value.createdAt)) ||
+    new Date(value.createdAt).toISOString() !== value.createdAt
+  ) {
+    throw new Error('Triage plan createdAt must be an ISO timestamp');
+  }
+
+  return {
+    version: TRIAGE_PLAN_VERSION,
+    repo: value.repo,
+    createdAt: value.createdAt,
+    analysis: normalizeTriageAnalysis(value.analysis),
+  };
 }
 
 /**

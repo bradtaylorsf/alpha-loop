@@ -42,6 +42,8 @@ jest.mock('../../src/lib/logger', () => ({
 
 jest.mock('../../src/lib/planning', () => ({
   parseTriageAnalysisResponse: jest.fn(),
+  saveTriagePlan: jest.fn(() => '.alpha-loop/triage-2026-08-15T19-30-45-123Z.json'),
+  loadTriagePlan: jest.fn(),
   formatTriageFindings: jest.fn(() => 'FORMATTED FINDINGS'),
   formatEpicGroupProposals: jest.fn(() => 'FORMATTED EPIC PROPOSALS'),
   buildPlanningContext: jest.fn(() => ({
@@ -78,7 +80,12 @@ jest.mock('../../src/lib/github', () => ({
 import { checkbox, confirm } from '@inquirer/prompts';
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
-import { parseTriageAnalysisResponse, formatEpicGroupProposals } from '../../src/lib/planning';
+import {
+  parseTriageAnalysisResponse,
+  saveTriagePlan,
+  loadTriagePlan,
+  formatEpicGroupProposals,
+} from '../../src/lib/planning';
 import {
   listOpenIssuesWithComments,
   closeIssue,
@@ -94,6 +101,8 @@ const mockCheckbox = checkbox as jest.MockedFunction<typeof checkbox>;
 const mockConfirm = confirm as jest.MockedFunction<typeof confirm>;
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockParseTriageAnalysis = parseTriageAnalysisResponse as jest.MockedFunction<typeof parseTriageAnalysisResponse>;
+const mockSaveTriagePlan = saveTriagePlan as jest.MockedFunction<typeof saveTriagePlan>;
+const mockLoadTriagePlan = loadTriagePlan as jest.MockedFunction<typeof loadTriagePlan>;
 const mockFormatEpicGroupProposals = formatEpicGroupProposals as jest.MockedFunction<typeof formatEpicGroupProposals>;
 const mockListOpenIssuesWithComments = listOpenIssuesWithComments as jest.MockedFunction<typeof listOpenIssuesWithComments>;
 const mockCloseIssue = closeIssue as jest.MockedFunction<typeof closeIssue>;
@@ -171,10 +180,15 @@ describe('triage command', () => {
   beforeEach(() => {
     consoleSpy = jest.spyOn(console, 'log').mockImplementation();
     jest.clearAllMocks();
+    mockSaveTriagePlan.mockReset();
+    mockSaveTriagePlan.mockReturnValue('.alpha-loop/triage-2026-08-15T19-30-45-123Z.json');
+    mockLoadTriagePlan.mockReset();
     mockCreateIssue.mockReturnValue(0);
     mockGetIssueBody.mockReturnValue('');
+    mockUpdateIssue.mockReturnValue(true);
     mockUpdateEpicIssueBody.mockReturnValue(true);
     mockCommentChildEpicBacklink.mockReturnValue(true);
+    mockCloseIssue.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -228,9 +242,83 @@ describe('triage command', () => {
     expect(mockCommentIssue).toHaveBeenCalledWith(
       'owner/repo', 4, expect.stringContaining('duplicate of #1'),
     );
-    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 4, 'not_planned');
+    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 4, 'duplicate', 1);
 
     expect(log.success).toHaveBeenCalledWith(expect.stringContaining('Applied'));
+  });
+
+  it.each([
+    {
+      label: 'stale',
+      finding: SAMPLE_FINDINGS[0],
+      successMessage: 'Closed stale issue #1',
+      failureMessage: '#1: failed to close stale issue',
+    },
+    {
+      label: 'split parent',
+      finding: SAMPLE_FINDINGS[2],
+      successMessage: 'Closed #3 after splitting',
+      failureMessage: '#3: failed to close issue after splitting',
+    },
+    {
+      label: 'duplicate',
+      finding: SAMPLE_FINDINGS[3],
+      successMessage: 'Closed duplicate #4',
+      failureMessage: '#4: failed to close as duplicate of #1',
+    },
+  ])('does not report a failed $label close as successful', async ({ finding, successMessage, failureMessage }) => {
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({ findings: [finding], epicGroups: [] });
+    mockCloseIssue.mockReturnValue(false);
+    if (finding.category === 'too_large') {
+      mockCreateIssue.mockReturnValueOnce(10).mockReturnValueOnce(11).mockReturnValueOnce(12);
+    }
+
+    await triageCommand({ yes: true });
+
+    expect(log.success).not.toHaveBeenCalledWith(expect.stringContaining(successMessage));
+    expect(log.warn).toHaveBeenCalledWith('Applied 0 of 1 triage action(s)');
+    expect(log.warn).toHaveBeenCalledWith('1 operation(s) failed:');
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining(failureMessage));
+  });
+
+  it.each([
+    {
+      label: 'rewrite',
+      finding: SAMPLE_FINDINGS[1],
+      successMessage: 'Rewrote body for #2',
+      failureMessage: '#2: failed to rewrite issue body',
+    },
+    {
+      label: 'enrichment',
+      finding: {
+        issueNum: 5,
+        title: 'Sparse issue',
+        category: 'enrich' as const,
+        reason: 'Missing implementation details',
+        action: 'enrich' as const,
+        enrichedBody: '## Summary\nAdd implementation details',
+        selected: true,
+      },
+      successMessage: 'Enriched #5',
+      failureMessage: '#5: failed to enrich issue body',
+    },
+  ])('does not report a failed $label mutation as successful', async ({ finding, successMessage, failureMessage }) => {
+    mockListOpenIssuesWithComments.mockReturnValue([
+      ...SAMPLE_ISSUES,
+      { number: 5, title: 'Sparse issue', body: 'Needs details', labels: [] },
+    ]);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({ findings: [finding], epicGroups: [] });
+    mockUpdateIssue.mockReturnValue(false);
+
+    await triageCommand({ yes: true });
+
+    expect(log.success).not.toHaveBeenCalledWith(expect.stringContaining(successMessage));
+    expect(mockCommentIssue).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith('Applied 0 of 1 triage action(s)');
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining(failureMessage));
   });
 
   it('exits gracefully on agent failure', async () => {
@@ -269,8 +357,137 @@ describe('triage command', () => {
     expect(mockUpdateIssue).not.toHaveBeenCalled();
     expect(mockCreateIssue).not.toHaveBeenCalled();
     expect(mockCommentIssue).not.toHaveBeenCalled();
+    expect(mockSaveTriagePlan).toHaveBeenCalledWith(
+      'owner/repo',
+      SAMPLE_ANALYSIS,
+      process.cwd(),
+    );
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('triage --apply'));
     // Should not show interactive prompts in dry-run
     expect(mockCheckbox).not.toHaveBeenCalled();
+  });
+
+  it('saves the exact filtered analysis displayed by dry-run', async () => {
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{"json":"here"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({
+      findings: [SAMPLE_FINDINGS[0]],
+      epicGroups: [
+        SAMPLE_EPIC_GROUPS[0],
+        {
+          ...SAMPLE_EPIC_GROUPS[0],
+          title: 'Epic: Invalid unknown issue group',
+          orderedChildIssueNumbers: [2, 999],
+        },
+      ],
+    });
+
+    await triageCommand({ dryRun: true });
+
+    expect(mockSaveTriagePlan).toHaveBeenCalledWith(
+      'owner/repo',
+      {
+        findings: [SAMPLE_FINDINGS[0]],
+        epicGroups: [SAMPLE_EPIC_GROUPS[0]],
+      },
+      process.cwd(),
+    );
+  });
+
+  it('saves an empty analysis so a no-op preview is replayable', async () => {
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue({ findings: [], epicGroups: [] });
+
+    await triageCommand({ dryRun: true });
+
+    expect(mockSaveTriagePlan).toHaveBeenCalledWith(
+      'owner/repo',
+      { findings: [], epicGroups: [] },
+      process.cwd(),
+    );
+    expect(log.dry).toHaveBeenCalled();
+  });
+
+  it('replays the dry-run plan unchanged without invoking or parsing a second agent response', async () => {
+    const persistedAnalysis = {
+      findings: [
+        SAMPLE_FINDINGS[0],
+        { ...SAMPLE_FINDINGS[3], selected: false },
+      ],
+      epicGroups: [
+        { ...SAMPLE_EPIC_GROUPS[0], selected: false },
+        { ...SAMPLE_EPIC_GROUPS[0], title: 'Epic: Persisted selection', selected: true },
+      ],
+    };
+    let savedAnalysis: typeof persistedAnalysis | undefined;
+    mockSaveTriagePlan.mockImplementation((_repo, analysis) => {
+      savedAnalysis = analysis as typeof persistedAnalysis;
+      return '.alpha-loop/reviewed.json';
+    });
+    mockListOpenIssuesWithComments.mockReturnValue(SAMPLE_ISSUES);
+    mockExec.mockReturnValue({ stdout: '{"first":"analysis"}', stderr: '', exitCode: 0 });
+    mockParseTriageAnalysis.mockReturnValue(persistedAnalysis);
+
+    await triageCommand({ dryRun: true });
+
+    expect(savedAnalysis).toEqual(persistedAnalysis);
+    expect(mockCloseIssue).not.toHaveBeenCalled();
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+
+    mockExec.mockClear();
+    mockParseTriageAnalysis.mockClear();
+    mockLoadTriagePlan.mockImplementation(() => ({
+      version: 1,
+      repo: 'owner/repo',
+      createdAt: '2026-08-15T19:30:45.123Z',
+      analysis: savedAnalysis!,
+    }));
+    mockCreateIssue.mockReturnValueOnce(250);
+
+    await triageCommand({ apply: '.alpha-loop/reviewed.json', yes: true });
+
+    expect(mockLoadTriagePlan).toHaveBeenCalledWith('.alpha-loop/reviewed.json', 'owner/repo');
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(mockParseTriageAnalysis).not.toHaveBeenCalled();
+    expect(mockCloseIssue).toHaveBeenCalledTimes(1);
+    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 1, 'not_planned');
+    expect(mockCloseIssue).not.toHaveBeenCalledWith('owner/repo', 4, expect.anything(), expect.anything());
+    expect(mockCreateIssue).toHaveBeenCalledTimes(1);
+    expect(mockCreateIssue).toHaveBeenCalledWith(
+      'owner/repo',
+      'Epic: Persisted selection',
+      expect.any(String),
+      ['epic'],
+    );
+  });
+
+  it.each([
+    ['invalid', 'Unsupported triage plan version: 2'],
+    ['for another repository', 'Triage plan is for other/repo, but the configured repository is owner/repo'],
+  ])('fails closed before fetching issues or mutating when a replay artifact is %s', async (_label, message) => {
+    mockLoadTriagePlan.mockImplementation(() => {
+      throw new Error(message);
+    });
+
+    await triageCommand({ apply: '.alpha-loop/invalid.json', yes: true });
+
+    expect(log.error).toHaveBeenCalledWith(`Cannot apply triage plan: ${message}`);
+    expect(mockListOpenIssuesWithComments).not.toHaveBeenCalled();
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(mockCloseIssue).not.toHaveBeenCalled();
+    expect(mockUpdateIssue).not.toHaveBeenCalled();
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+    expect(mockCommentIssue).not.toHaveBeenCalled();
+  });
+
+  it('rejects --dry-run with --apply before loading or generating a plan', async () => {
+    await triageCommand({ dryRun: true, apply: '.alpha-loop/reviewed.json' });
+
+    expect(log.error).toHaveBeenCalledWith(expect.stringContaining('cannot be combined'));
+    expect(mockLoadTriagePlan).not.toHaveBeenCalled();
+    expect(mockListOpenIssuesWithComments).not.toHaveBeenCalled();
+    expect(mockExec).not.toHaveBeenCalled();
   });
 
   it('displays epic proposals separately from cleanup findings in dry-run mode', async () => {
@@ -491,7 +708,7 @@ describe('triage command', () => {
     expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 1, 'not_planned');
     expect(mockUpdateIssue).toHaveBeenCalledWith('owner/repo', 2, { body: expect.any(String) });
     expect(mockCreateIssue).toHaveBeenCalledTimes(3);
-    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 4, 'not_planned');
+    expect(mockCloseIssue).toHaveBeenCalledWith('owner/repo', 4, 'duplicate', 1);
     expect(log.info).toHaveBeenCalledWith(expect.stringContaining('--yes: applying all'));
   });
 

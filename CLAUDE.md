@@ -33,6 +33,8 @@ alpha-loop scan          # Generate/refresh project context
 alpha-loop plan          # Generate project scope (milestones + issues) from seed inputs
 alpha-loop add           # Create a new issue from a free-form description using AI
 alpha-loop triage        # Analyze and improve existing issues
+alpha-loop triage --dry-run      # Preview and save .alpha-loop/triage-<timestamp>.json
+alpha-loop triage --apply <file> # Replay a saved plan without another AI analysis
 alpha-loop roadmap       # Organize open issues into milestones
 alpha-loop roadmap --queue       # Recommend the next ordered epic run queue
 alpha-loop vision        # (deprecated) Use "alpha-loop plan" instead

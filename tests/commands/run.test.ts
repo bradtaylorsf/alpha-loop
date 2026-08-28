@@ -140,7 +140,7 @@ jest.mock('node:child_process', () => ({
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
-import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
+import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue, closeIssue } from '../../src/lib/github';
 import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, readGateResult, type PipelineResult } from '../../src/lib/pipeline';
 import { cleanupWorktree, setupWorktree } from '../../src/lib/worktree';
 import { createSession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, recordSessionError, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
@@ -163,6 +163,7 @@ const mockGetIssueWithComments = getIssueWithComments as jest.MockedFunction<typ
 const mockUpdateEpicChecklist = updateEpicChecklist as jest.MockedFunction<typeof updateEpicChecklist>;
 const mockLabelIssue = labelIssue as jest.MockedFunction<typeof labelIssue>;
 const mockCommentIssue = commentIssue as jest.MockedFunction<typeof commentIssue>;
+const mockCloseIssue = closeIssue as jest.MockedFunction<typeof closeIssue>;
 const mockProcessIssue = processIssue as jest.MockedFunction<typeof processIssue>;
 const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch>;
 const mockFinalizeQuickRun = finalizeQuickRun as jest.MockedFunction<typeof finalizeQuickRun>;
@@ -277,6 +278,7 @@ beforeEach(() => {
   mockListEpics.mockReturnValue([]);
   mockGetEpicSubIssues.mockReturnValue([]);
   mockGetIssueWithComments.mockReturnValue(null);
+  mockCloseIssue.mockReturnValue(true);
   mockProcessBatch.mockResolvedValue([]);
   mockRunFullSuiteGate.mockResolvedValue({ testsPassing: true, testOutput: 'All tests passed' });
   mockReadGateResult.mockReturnValue({ passed: true, summary: 'Review passed', findings: [] });
@@ -1364,6 +1366,26 @@ describe('runCommand', () => {
     expect(mockProcessIssue).not.toHaveBeenCalled();
     expect(mockFinalizeSession).not.toHaveBeenCalled();
     expect(mockGetEpicSubIssues).toHaveBeenCalledWith('owner/repo', 195);
+  });
+
+  test('--verify-only fails instead of reporting success when the verified epic does not close', async () => {
+    mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => {
+      if (issueNum === 195) {
+        return { number: 195, title: 'Parent Epic', body: '- [x] #201 Build child', labels: ['epic'] };
+      }
+      if (issueNum === 201) {
+        return { number: 201, title: 'Build child', body: 'Child body', labels: ['ready'] };
+      }
+      return null;
+    });
+    mockGetEpicSubIssues.mockReturnValue([{ number: 201, checked: true, lineIndex: 0 }]);
+    mockCloseIssue.mockReturnValue(false);
+
+    await runCommand({ verifyOnly: 195 });
+
+    expect(process.exitCode).toBe(1);
+    expect(mockLog.success).not.toHaveBeenCalledWith('Epic #195 verified and closed');
+    expect(mockLog.error).toHaveBeenCalledWith('Epic #195 passed verification but could not be closed');
   });
 
   test('--issue dry-run processes exactly the requested standalone issue', async () => {
