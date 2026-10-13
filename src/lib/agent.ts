@@ -196,7 +196,14 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
         args.push('exec');
       }
       if (options.model) args.push('--model', options.model);
-      args.push('--full-auto');
+      // codex-cli 0.154 removed --full-auto (deprecated since ~0.130 with
+      // "use --sandbox workspace-write instead"). `codex exec resume` rejects
+      // --sandbox, so the resume path sets the same policy via config.
+      if (options.resume) {
+        args.push('-c', 'sandbox_mode="workspace-write"');
+      } else {
+        args.push('--sandbox', 'workspace-write');
+      }
       args.push(...codexSandboxArgs(options.cwd));
       return { command: 'codex', args };
     }
@@ -244,7 +251,7 @@ export function buildOneShotCommand(agent: AgentType, model: string, options: On
       if (options.textOnly) {
         parts.push('--sandbox', 'read-only');
       } else {
-        parts.push('--full-auto');
+        parts.push('--sandbox', 'workspace-write');
       }
       return parts.join(' ');
     }

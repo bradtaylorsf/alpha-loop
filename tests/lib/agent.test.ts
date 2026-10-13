@@ -90,7 +90,7 @@ describe('buildAgentArgs', () => {
     });
 
     expect(result.command).toBe('codex');
-    expect(result.args).toEqual(['exec', '--model', 'gpt-4', '--full-auto']);
+    expect(result.args).toEqual(['exec', '--model', 'gpt-4', '--sandbox', 'workspace-write']);
   });
 
   test('constructs correct args for opencode agent', () => {
@@ -150,7 +150,10 @@ describe('buildAgentArgs', () => {
     expect(result.args[0]).toBe('exec');
     expect(result.args[1]).toBe('resume');
     expect(result.args[2]).toBe('--last');
-    expect(result.args).toContain('--full-auto');
+    // `codex exec resume` rejects --sandbox; the policy goes in via config.
+    expect(result.args).toContain('sandbox_mode="workspace-write"');
+    expect(result.args).not.toContain('--sandbox');
+    expect(result.args).not.toContain('--full-auto');
   });
 
   test('opencode ignores resume flag (no resume support)', () => {
@@ -203,7 +206,7 @@ describe('buildOneShotCommand', () => {
 
   test('builds codex command with model', () => {
     const cmd = buildOneShotCommand('codex', 'gpt-5.4');
-    expect(cmd).toBe('codex exec --model gpt-5.4 --full-auto');
+    expect(cmd).toBe('codex exec --model gpt-5.4 --sandbox workspace-write');
   });
 
   test('builds codex text-only command with read-only sandbox', () => {
@@ -213,7 +216,7 @@ describe('buildOneShotCommand', () => {
 
   test('builds codex command without model', () => {
     const cmd = buildOneShotCommand('codex', '');
-    expect(cmd).toBe('codex exec --full-auto');
+    expect(cmd).toBe('codex exec --sandbox workspace-write');
   });
 
   test('builds ollama text-only command with read-only sandbox', () => {
@@ -615,7 +618,8 @@ describe('buildAgentArgs (lmstudio/ollama)', () => {
     });
     expect(result.command).toBe('codex');
     expect(result.args).toContain('exec');
-    expect(result.args).toContain('--full-auto');
+    expect(result.args).toContain('workspace-write');
+    expect(result.args).not.toContain('--full-auto');
     expect(result.args).toContain('--model');
     expect(result.args).toContain('llama3.1:70b');
   });
@@ -758,7 +762,7 @@ describe('codexSandboxArgs', () => {
     expect(result.args).toEqual([
       'exec',
       '--model', 'gpt-5.4',
-      '--full-auto',
+      '--sandbox', 'workspace-write',
       '-c', 'sandbox_workspace_write.writable_roots=["/repo/.git"]',
     ]);
   });

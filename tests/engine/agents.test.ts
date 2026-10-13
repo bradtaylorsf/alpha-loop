@@ -34,7 +34,7 @@ describe('buildAgentArgs', () => {
       expect(result.args).toEqual([
         'exec',
         '--model', 'codex',
-        '--full-auto',
+        '--sandbox=workspace-write',
         prompt,
       ]);
     });
@@ -100,7 +100,7 @@ describe('buildAgentArgs', () => {
       expect(result.args).toEqual([
         'exec',
         '--model', 'llama3.1:70b',
-        '--full-auto',
+        '--sandbox=workspace-write',
         prompt,
       ]);
     });

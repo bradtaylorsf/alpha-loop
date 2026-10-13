@@ -56,7 +56,8 @@ export const AGENT_CLI_MAP: Record<string, AgentCliDef> = {
     command: 'codex',
     promptFlag: 'exec',
     modelFlag: '--model',
-    permissionFlag: '--full-auto',
+    // Single argv token: codex-cli 0.154 removed --full-auto.
+    permissionFlag: '--sandbox=workspace-write',
     supportsMaxTurns: false,
     isSubcommand: true,
   },
@@ -86,7 +87,8 @@ export const AGENT_CLI_MAP: Record<string, AgentCliDef> = {
     command: 'codex',
     promptFlag: 'exec',
     modelFlag: '--model',
-    permissionFlag: '--full-auto',
+    // Single argv token: codex-cli 0.154 removed --full-auto.
+    permissionFlag: '--sandbox=workspace-write',
     supportsMaxTurns: false,
     isSubcommand: true,
   },
