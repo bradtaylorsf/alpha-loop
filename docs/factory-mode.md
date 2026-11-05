@@ -183,7 +183,45 @@ before calling `gh`), the shipper may retry the update after the interval. It st
 using the pre-update head's checks.
 
 `ship.merge` defaults to `false`. Out of the box the shipper only reports what it would merge or
-update; it makes neither mutation. `--dry-run` also makes no branch updates.
+update; it makes neither mutation. Release PR creation is a separate opt-in (`release_every`).
+`--dry-run` also makes no branch updates.
+
+### Release cadence
+
+Set `factory.ship.release_every: 5` to open a release PR once five releasable commits have landed
+since the last reachable stable semver tag. The default is `0` (disabled). This explicit opt-in works
+with `ship.merge: false`; that setting still controls only session branch updates and merges.
+`ship.enabled: false` or `--no-ship` disables release inspection and creation too.
+
+Each due ship pass checks releases after processing session PRs, even if there were no session PRs.
+It fetches the configured base (`--base`, otherwise `base_branch`) from `origin` and tags under the
+repository Git lock, then plans from a captured remote-base commit. It never uses the checkout's
+`HEAD` as the release base. Commit messages count once, regardless of body length. Empty messages,
+merge commits/wrappers and `chore(release): release vX.Y.Z` version stamps do not count; docs, chores
+and release-maintenance commits do.
+`BREAKING CHANGE` or `type(scope)!:` takes precedence (major), then `feat:` (minor), otherwise patch.
+Tags may have an optional `v`; prerelease and non-semver tags are ignored. No tag starts at `0.0.0`.
+
+A due release stamps only `package.json` in a dedicated temporary worktree, commits the version and
+release notes, pushes `chore/release-vX.Y.Z`, and opens a PR against that factory base. The shared
+checkout's branch, index and tracked files are untouched. The worktree is removed on success or
+failure. Git/gh operations are sequential, with shared ref/worktree mutations using the Git lock.
+
+Any open `chore/release-*` PR, including drafts and PRs targeting other bases, suppresses creation.
+The query covers every page and fails closed. The shipper rechecks before opening the PR. If pushing
+succeeded but PR creation failed, the next pass can reuse that exact release commit after verifying
+its metadata, ancestry and package-only change; it never force-pushes an existing release branch.
+A merged `chore(release): release vX.Y.Z` commit without its tag defers the next release while CI
+publishes. Other `chore(release):` maintenance commits do not trigger this wait.
+Outcomes and errors are recorded as `release.*` factory events; transient failures retry on later
+ship passes (with the existing idle-wait cap when using `--until-idle`).
+
+`--dry-run` reports a proposal from locally available `origin/<base>` and tags, which may be stale.
+It makes no fetches, locks, worktrees, commits, pushes or PR writes; missing local refs are reported
+as an inspection error. Release PRs never become factory-owned session PRs and are not auto-merged
+by this path. Review and merge them normally. CI remains responsible for publishing when merged
+to its configured release branch (`master` in this repository); using `--base feat/factory-mode`
+does not change CI's release trigger. The factory never runs `npm publish` or `pnpm release`.
 
 ### Verifying shipper changes
 
@@ -312,6 +350,7 @@ factory:
     require_checks: true
     checks_timeout_minutes: 60
     interval_seconds: 300
+    release_every: 0             # N releasable commits per release PR; 0 = disabled
     merge_method: squash
     head_prefixes: [session/issue-]
 ```

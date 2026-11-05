@@ -540,6 +540,13 @@ daemon:
     stale_after: 86400
     path: ""                 # defaults to .alpha-loop/daemon.lock
 
+# Optional factory release cadence (see docs/factory-mode.md)
+factory:
+  ship:
+    enabled: true
+    merge: false              # Session PR updates/merges require true
+    release_every: 0          # Opt in with N commits per release PR; independent of merge
+
 # Worktree retention for durable session manifests
 session_retention:
   paused_worktree_days: 0       # keep paused/waiting/QA worktrees until explicit cleanup
@@ -572,6 +579,12 @@ auto_capture: true  # capture failures as eval cases
 eval_dir: .alpha-loop/evals
 ```
 
+Factory releases use `--base` or `base_branch` and a dedicated temporary worktree. Cadence counts
+complete commits since the last reachable stable tag (including docs/chore), excluding merges and
+release metadata. Any open `chore/release-*` PR suppresses another release across all bases.
+`factory --dry-run` previews from local origin refs/tags without fetching or writing. CI publishes
+after merge to its configured release branch; the factory only opens the PR.
+
 ### Configuration Reference
 
 | Key | Default | Description |
@@ -594,6 +607,7 @@ eval_dir: .alpha-loop/evals
 | `max_issues` | `0` | Max issues to process per session (0 = unlimited) |
 | `max_session_duration` | `0` | Max session duration in seconds (0 = unlimited) |
 | `auto_merge` | `true` | Auto-merge issue PRs into the session branch |
+| `factory.ship.release_every` | `0` | Open a release PR after N releasable commits on the factory base; 0 disables. Independent of `ship.merge`; `--no-ship` disables both. See [release cadence](docs/factory-mode.md#release-cadence) |
 | `merge_to` | (none) | Use an existing branch instead of creating a session branch |
 | `skip_tests` | `false` | Skip test execution |
 | `skip_review` | `false` | Skip code review |
