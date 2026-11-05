@@ -452,6 +452,14 @@ Options:
   --max-ticks <n>               Stop after this many daemon ticks
 ```
 
+The daemon refuses to start while a live factory supervisor lease exists at
+`<factory.state_dir>/factory.lock`. The factory likewise refuses to start while the
+daemon lock is live (`.alpha-loop/daemon.lock` by default, or `daemon.lock.path`).
+Each refusal names the owning PID and lock path. Stop the running coordinator before
+starting the other. A stale competing lock is left untouched and reported once at startup.
+`daemon --no-lock` still checks for an existing factory lease, but leaves no daemon lock
+for a later factory start to detect; keep locking enabled for mutual exclusion.
+
 ### Factory Options
 
 ```bash
