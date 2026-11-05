@@ -6,6 +6,7 @@
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { checkbox, confirm } from '@inquirer/prompts';
 import { loadConfig, assertSafeShellArg } from '../lib/config.js';
 import { buildOneShotCommand } from '../lib/agent.js';
@@ -171,7 +172,7 @@ export async function triageCommand(options: TriageOptions): Promise<void> {
 
   const safeModel = assertSafeShellArg(config.model, 'model');
   const agentCmd = buildOneShotCommand(config.agent, safeModel);
-  const promptFile = join(tmpdir(), `alpha-loop-prompt-${Date.now()}`);
+  const promptFile = join(tmpdir(), `alpha-loop-prompt-${randomUUID()}`);
   writeFileSync(promptFile, triagePrompt, 'utf-8');
   let result;
   try {

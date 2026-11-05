@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import { decisionAllowed, evaluateIssuePolicy, evaluateSessionCapacityPolicy, type AutomationPolicyDecision } from './automation-policy.js';
@@ -7,6 +7,7 @@ import type { Config, DaemonConfig, DaemonMode } from './config.js';
 import { emitLifecycleEvent, type EventDeliverySummary } from './events.js';
 import type { Issue } from './github.js';
 import { hasLabel } from './labels.js';
+import { defaultPidAlive, reclaimStaleLockFile, releaseLockFileIfOwned } from './lease.js';
 import { log } from './logger.js';
 import {
   loadSessionManifest,
@@ -203,17 +204,6 @@ function parseLock(raw: string): DaemonLockPayload | null {
   }
 }
 
-function defaultPidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    return code === 'EPERM';
-  }
-}
-
 function lockIsStale(lock: DaemonLockPayload | null, daemon: DaemonConfig, now: Date, isPidAlive: (pid: number) => boolean): boolean {
   if (!lock) return true;
   if (!isPidAlive(lock.pid)) return true;
@@ -248,15 +238,18 @@ export function acquireDaemonLock(
     writeFileSync(lockPath, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
     return { path: lockPath, token: payload.token, payload };
   } catch {
-    let existing: DaemonLockPayload | null = null;
+    let observed: string | null = null;
     try {
-      existing = parseLock(readFileSync(lockPath, 'utf-8'));
+      observed = readFileSync(lockPath, 'utf-8');
     } catch {
-      existing = null;
+      observed = null;
     }
+    const existing = observed === null ? null : parseLock(observed);
 
     if (lockIsStale(existing, daemon, now, isPidAlive)) {
-      try { unlinkSync(lockPath); } catch { /* best effort */ }
+      // Rename-based reclaim: never unlink the lock path directly, or a
+      // concurrent reclaimer's fresh lock could be deleted (TOCTOU).
+      reclaimStaleLockFile(lockPath, observed);
       try {
         writeFileSync(lockPath, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
         return { path: lockPath, token: payload.token, payload };
@@ -280,14 +273,7 @@ export function acquireDaemonLock(
 
 export function releaseDaemonLock(lock: DaemonLockHandle | null): boolean {
   if (!lock) return false;
-  try {
-    const current = parseLock(readFileSync(lock.path, 'utf-8'));
-    if (current?.token !== lock.token) return false;
-    unlinkSync(lock.path);
-    return true;
-  } catch {
-    return false;
-  }
+  return releaseLockFileIfOwned(lock.path, lock.token, (raw) => parseLock(raw)?.token);
 }
 
 export function refreshDaemonLock(lock: DaemonLockHandle | null, now = new Date()): boolean {
@@ -299,7 +285,7 @@ export function refreshDaemonLock(lock: DaemonLockHandle | null, now = new Date(
       ...current,
       updatedAt: now.toISOString(),
     };
-    const tmpPath = `${lock.path}.tmp`;
+    const tmpPath = `${lock.path}.tmp-${randomUUID()}`;
     writeFileSync(tmpPath, JSON.stringify(payload, null, 2) + '\n');
     renameSync(tmpPath, lock.path);
     lock.payload = payload;

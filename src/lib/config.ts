@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 import { execSync } from 'node:child_process';
 import { parse as parseYaml } from 'yaml';
 
@@ -211,6 +212,73 @@ export type DaemonConfig = {
   lock: DaemonLockConfig;
 };
 
+/** Factory PM role: turns rough inbox ideas into GitHub issues/epics. */
+export type FactoryPmConfig = {
+  enabled: boolean;
+  /** Agent CLI for the PM role. '' falls back to the top-level `agent`. */
+  agent: string;
+  /** Model for the PM role. '' falls back to the agent's default. */
+  model: string;
+  /** Label created issues `ready` so developers pick them up immediately. */
+  autoReady: boolean;
+  maxIdeasPerTick: number;
+  timeoutSeconds: number;
+};
+
+export type FactoryMergeMethod = 'squash' | 'merge' | 'rebase';
+
+/** Factory shipper role: merges green session PRs into the base branch. */
+export type FactoryShipConfig = {
+  enabled: boolean;
+  /** Actually merge. When false the shipper only reports what it would merge. */
+  merge: boolean;
+  /** Use `gh pr merge --admin` to bypass required reviews. */
+  adminMerge: boolean;
+  /** Fail closed: a PR with no CI checks never merges (asks after the timeout). */
+  requireChecks: boolean;
+  checksTimeoutMinutes: number;
+  intervalSeconds: number;
+  mergeMethod: FactoryMergeMethod;
+  /** Only PRs whose head branch starts with one of these prefixes are shipped. */
+  headPrefixes: string[];
+};
+
+/** `alpha-loop factory` — parallel multi-role supervisor configuration. */
+export type FactoryConfig = {
+  /** Parallel developer workers (1..16). */
+  developers: number;
+  tickSeconds: number;
+  spawnStaggerSeconds: number;
+  /** 0 = unlimited. */
+  maxRuntimeMinutes: number;
+  /** Factory state directory (relative to the project root unless absolute). */
+  stateDir: string;
+  /** '' ⇒ `${stateDir}/inbox.md`. */
+  inboxPath: string;
+  /** '' ⇒ `${stateDir}/questions.md`. */
+  questionsPath: string;
+  /** Never dispatch two issues whose `## Touches` paths overlap. */
+  avoidOverlap: boolean;
+  /** Restrict dispatch to children of these epics. [] = whole repo. */
+  epics: number[];
+  /** Supervisor SIGTERMs a developer worker that runs longer than this. */
+  workerTimeoutMinutes: number;
+  pm: FactoryPmConfig;
+  ship: FactoryShipConfig;
+};
+
+/** Absolute factory file locations, resolved from the project root. */
+export type FactoryPaths = {
+  stateDir: string;
+  inboxPath: string;
+  questionsPath: string;
+  leasesDir: string;
+  workersDir: string;
+  statePath: string;
+  eventsPath: string;
+  lockDir: string;
+};
+
 export type WebAppViewportPreset = 'desktop' | 'tablet' | 'mobile';
 
 export type WebAppScreenshotConfig = {
@@ -282,6 +350,40 @@ export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {
     enabled: true,
     staleAfterSeconds: 24 * 60 * 60,
     path: '',
+  },
+};
+
+export const FACTORY_MAX_DEVELOPERS = 16;
+
+export const DEFAULT_FACTORY_CONFIG: FactoryConfig = {
+  developers: 2,
+  tickSeconds: 30,
+  spawnStaggerSeconds: 15,
+  maxRuntimeMinutes: 0,
+  stateDir: '.alpha-loop/factory',
+  inboxPath: '',
+  questionsPath: '',
+  avoidOverlap: true,
+  epics: [],
+  workerTimeoutMinutes: 120,
+  pm: {
+    enabled: true,
+    agent: '',
+    model: '',
+    autoReady: true,
+    maxIdeasPerTick: 1,
+    timeoutSeconds: 600,
+  },
+  ship: {
+    enabled: true,
+    // Fail safe: the shipper reports but never merges until explicitly enabled.
+    merge: false,
+    adminMerge: false,
+    requireChecks: true,
+    checksTimeoutMinutes: 60,
+    intervalSeconds: 300,
+    mergeMethod: 'squash',
+    headPrefixes: ['session/'],
   },
 };
 
@@ -457,6 +559,12 @@ export type Config = {
   automationPolicy?: AutomationPolicyConfig;
   /** Long-running hosted daemon mode configuration. */
   daemon?: DaemonConfig;
+  /**
+   * `alpha-loop factory` supervisor configuration. Always populated by
+   * loadConfig; optional in the type so hand-built test configs stay valid —
+   * read it through getFactoryConfig().
+   */
+  factory?: FactoryConfig;
   /** Optional web/app verification and QA handoff profile. */
   webApp?: WebAppConfig;
   /**
@@ -533,6 +641,7 @@ const DEFAULTS: Config = {
   events: DEFAULT_EVENTS_CONFIG,
   automationPolicy: DEFAULT_AUTOMATION_POLICY,
   daemon: DEFAULT_DAEMON_CONFIG,
+  factory: DEFAULT_FACTORY_CONFIG,
   webApp: undefined,
   preferEpics: false,
 };
@@ -984,6 +1093,192 @@ function parseDaemonConfig(raw: unknown): DaemonConfig | undefined {
   return daemon;
 }
 
+const VALID_FACTORY_MERGE_METHODS: readonly FactoryMergeMethod[] = ['squash', 'merge', 'rebase'] as const;
+
+function isPlainObject(raw: unknown): raw is Record<string, unknown> {
+  return !!raw && typeof raw === 'object' && !Array.isArray(raw);
+}
+
+function parseBooleanValue(raw: unknown, key: string, fallback: boolean): boolean {
+  if (raw === undefined) return fallback;
+  if (typeof raw === 'boolean') return raw;
+  console.warn(`[config] ${key}: expected a boolean (got ${String(raw)})`);
+  return fallback;
+}
+
+function parseIssueNumberList(raw: unknown, key: string): number[] | undefined {
+  if (raw === undefined) return undefined;
+  // Accept a YAML list or a comma-separated string ("12, 34").
+  const items = typeof raw === 'string' ? raw.split(',') : Array.isArray(raw) ? raw : undefined;
+  if (!items) {
+    console.warn(`[config] ${key}: expected a list of issue numbers`);
+    return undefined;
+  }
+  const numbers: number[] = [];
+  for (const item of items) {
+    const n = typeof item === 'number' ? item : Number(String(item).trim().replace(/^#/, ''));
+    if (Number.isInteger(n) && n > 0) {
+      if (!numbers.includes(n)) numbers.push(n);
+    } else if (String(item).trim() !== '') {
+      console.warn(`[config] ${key}: ignoring invalid issue number "${String(item)}"`);
+    }
+  }
+  return numbers;
+}
+
+function parseFactoryDevelopers(raw: unknown, fallback: number): number {
+  if (raw === undefined) return fallback;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    console.warn(`[config] factory.developers: expected a number between 1 and ${FACTORY_MAX_DEVELOPERS} (got ${String(raw)})`);
+    return fallback;
+  }
+  const n = Math.floor(raw);
+  const clamped = Math.min(FACTORY_MAX_DEVELOPERS, Math.max(1, n));
+  if (clamped !== n) {
+    console.warn(`[config] factory.developers: ${n} is outside 1..${FACTORY_MAX_DEVELOPERS}; using ${clamped}`);
+  }
+  return clamped;
+}
+
+function parseFactoryPmConfig(raw: unknown, base: FactoryPmConfig): FactoryPmConfig {
+  const pm: FactoryPmConfig = { ...base };
+  if (raw === undefined) return pm;
+  if (!isPlainObject(raw)) {
+    console.warn('[config] factory.pm: expected an object');
+    return pm;
+  }
+  pm.enabled = parseBooleanValue(raw.enabled, 'factory.pm.enabled', pm.enabled);
+  pm.agent = parseStringValue(raw.agent, 'factory.pm.agent') ?? pm.agent;
+  pm.model = parseStringValue(raw.model, 'factory.pm.model') ?? pm.model;
+  pm.autoReady = parseBooleanValue(raw.auto_ready, 'factory.pm.auto_ready', pm.autoReady);
+  pm.maxIdeasPerTick = parsePositiveInteger(raw.max_ideas_per_tick, 'factory.pm.max_ideas_per_tick', pm.maxIdeasPerTick);
+  pm.timeoutSeconds = parsePositiveInteger(raw.timeout_seconds, 'factory.pm.timeout_seconds', pm.timeoutSeconds);
+  return pm;
+}
+
+function parseFactoryShipConfig(raw: unknown, base: FactoryShipConfig): FactoryShipConfig {
+  const ship: FactoryShipConfig = { ...base, headPrefixes: [...base.headPrefixes] };
+  if (raw === undefined) return ship;
+  if (!isPlainObject(raw)) {
+    console.warn('[config] factory.ship: expected an object');
+    return ship;
+  }
+  ship.enabled = parseBooleanValue(raw.enabled, 'factory.ship.enabled', ship.enabled);
+  ship.merge = parseBooleanValue(raw.merge, 'factory.ship.merge', ship.merge);
+  ship.adminMerge = parseBooleanValue(raw.admin_merge, 'factory.ship.admin_merge', ship.adminMerge);
+  ship.requireChecks = parseBooleanValue(raw.require_checks, 'factory.ship.require_checks', ship.requireChecks);
+  ship.checksTimeoutMinutes = parsePositiveInteger(
+    raw.checks_timeout_minutes,
+    'factory.ship.checks_timeout_minutes',
+    ship.checksTimeoutMinutes,
+  );
+  ship.intervalSeconds = parsePositiveInteger(raw.interval_seconds, 'factory.ship.interval_seconds', ship.intervalSeconds);
+  if (raw.merge_method !== undefined) {
+    if (typeof raw.merge_method === 'string' && VALID_FACTORY_MERGE_METHODS.includes(raw.merge_method as FactoryMergeMethod)) {
+      ship.mergeMethod = raw.merge_method as FactoryMergeMethod;
+    } else {
+      console.warn(
+        `[config] factory.ship.merge_method: invalid method "${String(raw.merge_method)}" (expected one of ${VALID_FACTORY_MERGE_METHODS.join(', ')})`,
+      );
+    }
+  }
+  const headPrefixes = parseStringList(raw.head_prefixes, 'factory.ship.head_prefixes');
+  if (headPrefixes !== undefined) {
+    // An empty list would make the shipper consider every PR — keep the safe default instead.
+    if (headPrefixes.length > 0) ship.headPrefixes = headPrefixes;
+    else console.warn('[config] factory.ship.head_prefixes: empty list ignored');
+  }
+  return ship;
+}
+
+function parseFactoryConfig(raw: unknown): FactoryConfig | undefined {
+  if (!isPlainObject(raw)) {
+    if (raw !== undefined && raw !== null) console.warn('[config] factory: expected an object');
+    return undefined;
+  }
+  const factory: FactoryConfig = {
+    ...DEFAULT_FACTORY_CONFIG,
+    epics: [...DEFAULT_FACTORY_CONFIG.epics],
+    pm: { ...DEFAULT_FACTORY_CONFIG.pm },
+    ship: { ...DEFAULT_FACTORY_CONFIG.ship, headPrefixes: [...DEFAULT_FACTORY_CONFIG.ship.headPrefixes] },
+  };
+
+  factory.developers = parseFactoryDevelopers(raw.developers, factory.developers);
+  factory.tickSeconds = parsePositiveInteger(raw.tick_seconds, 'factory.tick_seconds', factory.tickSeconds);
+  factory.spawnStaggerSeconds = parseNonNegativeInteger(
+    raw.spawn_stagger_seconds,
+    'factory.spawn_stagger_seconds',
+    factory.spawnStaggerSeconds,
+  );
+  factory.maxRuntimeMinutes = parseNonNegativeInteger(
+    raw.max_runtime_minutes,
+    'factory.max_runtime_minutes',
+    factory.maxRuntimeMinutes,
+  );
+  const stateDir = parseStringValue(raw.state_dir, 'factory.state_dir');
+  if (stateDir) factory.stateDir = stateDir;
+  factory.inboxPath = parseStringValue(raw.inbox_path, 'factory.inbox_path') ?? factory.inboxPath;
+  factory.questionsPath = parseStringValue(raw.questions_path, 'factory.questions_path') ?? factory.questionsPath;
+  factory.avoidOverlap = parseBooleanValue(raw.avoid_overlap, 'factory.avoid_overlap', factory.avoidOverlap);
+  factory.epics = parseIssueNumberList(raw.epics, 'factory.epics') ?? factory.epics;
+  factory.workerTimeoutMinutes = parsePositiveInteger(
+    raw.worker_timeout_minutes,
+    'factory.worker_timeout_minutes',
+    factory.workerTimeoutMinutes,
+  );
+  factory.pm = parseFactoryPmConfig(raw.pm, factory.pm);
+  factory.ship = parseFactoryShipConfig(raw.ship, factory.ship);
+  return factory;
+}
+
+/**
+ * Merge factory config layers: defaults < yaml < overrides, with nested
+ * pm/ship merged key-by-key so a partial override keeps the other defaults.
+ */
+function mergeFactoryConfig(...layers: Array<Partial<FactoryConfig> | undefined>): FactoryConfig {
+  let merged: FactoryConfig = {
+    ...DEFAULT_FACTORY_CONFIG,
+    pm: { ...DEFAULT_FACTORY_CONFIG.pm },
+    ship: { ...DEFAULT_FACTORY_CONFIG.ship },
+  };
+  for (const layer of layers) {
+    if (!layer) continue;
+    merged = {
+      ...merged,
+      ...layer,
+      pm: { ...merged.pm, ...layer.pm },
+      ship: { ...merged.ship, ...layer.ship },
+    };
+  }
+  return merged;
+}
+
+/** The factory config for a loaded Config, falling back to defaults when absent. */
+export function getFactoryConfig(config: Pick<Config, 'factory'>): FactoryConfig {
+  return config.factory ?? DEFAULT_FACTORY_CONFIG;
+}
+
+/**
+ * Resolve the factory's on-disk locations as absolute paths. Relative paths
+ * resolve from process.cwd() — the project root, never a worktree.
+ */
+export function resolveFactoryPaths(config: Pick<Config, 'factory'>): FactoryPaths {
+  const factory = getFactoryConfig(config);
+  const root = process.cwd();
+  const abs = (p: string): string => (isAbsolute(p) ? resolve(p) : resolve(root, p));
+  const stateDir = abs(factory.stateDir || DEFAULT_FACTORY_CONFIG.stateDir);
+  return {
+    stateDir,
+    inboxPath: factory.inboxPath ? abs(factory.inboxPath) : join(stateDir, 'inbox.md'),
+    questionsPath: factory.questionsPath ? abs(factory.questionsPath) : join(stateDir, 'questions.md'),
+    leasesDir: join(stateDir, 'leases'),
+    workersDir: join(stateDir, 'workers'),
+    statePath: join(stateDir, 'state.json'),
+    eventsPath: join(stateDir, 'events.jsonl'),
+    lockDir: stateDir,
+  };
+}
+
 function parseEventsConfig(raw: unknown): EventsConfig | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const r = raw as Record<string, unknown>;
@@ -1326,6 +1621,14 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     }
   }
 
+  // Handle `alpha-loop factory` supervisor configuration.
+  if (parsed.factory !== undefined) {
+    const factory = parseFactoryConfig(parsed.factory);
+    if (factory) {
+      result.factory = factory;
+    }
+  }
+
   // Handle web/app verification profile.
   if (parsed.web_app !== undefined) {
     const webApp = parseWebAppConfig(parsed.web_app);
@@ -1428,6 +1731,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
       ...overrides?.daemon?.lock,
     },
   };
+  const factory = mergeFactoryConfig(yamlConfig.factory, overrides?.factory);
 
   const merged: Config = {
     ...DEFAULTS,
@@ -1443,6 +1747,7 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     webApp,
     automationPolicy,
     daemon,
+    factory,
   };
 
   if (merged.testScope !== 'full' && merged.testScope !== 'changed') {

@@ -12,6 +12,12 @@ jest.mock('../../src/lib/worktree', () => ({
   setupWorktree: jest.fn(),
 }));
 
+// node:fs is mocked below, so run the cross-process git lock inline.
+jest.mock('../../src/lib/lease', () => ({
+  ...jest.requireActual('../../src/lib/lease'),
+  withFileLockSync: jest.fn((_path: string, fn: () => unknown) => fn()),
+}));
+
 jest.mock('../../src/lib/logger', () => ({
   log: {
     info: jest.fn(),
@@ -250,6 +256,45 @@ describe('createSession', () => {
     expect(mockExec.mock.calls.some(([cmd, options]) => String(cmd).includes('git checkout') && options?.cwd === process.cwd())).toBe(false);
   });
 
+  test('runs the session git commands under the repo git lock, but not setupWorktree', async () => {
+    const { withFileLockSync } = jest.requireMock('../../src/lib/lease') as { withFileLockSync: jest.Mock };
+    let insideLock = false;
+    const lockedCommands: string[] = [];
+    withFileLockSync.mockImplementation((_path: string, fn: () => unknown) => {
+      insideLock = true;
+      try {
+        return fn();
+      } finally {
+        insideLock = false;
+      }
+    });
+    mockExec.mockImplementation((cmd: string) => {
+      if (insideLock) lockedCommands.push(cmd);
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    let setupRanInsideLock: boolean | null = null;
+    mockSetupWorktree.mockImplementation(async (options) => {
+      setupRanInsideLock = insideLock;
+      return { path: options.worktreePath ?? '/project/.worktrees/session-test', branch: options.branch ?? 'x', resumed: false };
+    });
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config);
+
+    await ensureSessionWorktree(session, config);
+
+    expect(withFileLockSync).toHaveBeenCalledWith(
+      expect.stringContaining('.alpha-loop/locks/git.lock'),
+      expect.any(Function),
+    );
+    expect(lockedCommands).toEqual(expect.arrayContaining([
+      'git fetch origin',
+      expect.stringContaining('git ls-remote --heads origin'),
+      expect.stringContaining('git commit --allow-empty'),
+      expect.stringContaining('git push origin'),
+    ]));
+    expect(setupRanInsideLock).toBe(false);
+  });
+
   test('does not create session branch in dryRun mode', () => {
     createSession(makeConfig({ autoMerge: true, dryRun: true }));
 
@@ -276,6 +321,42 @@ describe('createSession', () => {
   test('generates epic-scoped session name with only epicNum when epicTitle is absent', () => {
     const session = createSession(makeConfig(), { epicNum: 42 });
     expect(session.name).toBe('session/epic-42');
+  });
+
+  test('slugOverride names the session and takes precedence over epic naming', () => {
+    const session = createSession(makeConfig(), {
+      slugOverride: 'issue-512-add-factory-mode',
+      issueNum: 512,
+      issueTitle: 'Add factory mode',
+      parentEpicNum: 165,
+      parentEpicTitle: 'Hybrid Routing',
+      epicNum: 165,
+      epicTitle: 'Hybrid Routing',
+    });
+
+    expect(session.name).toBe('session/issue-512-add-factory-mode');
+    expect(session.branch).toBe('session/issue-512-add-factory-mode');
+    expect(session.resultsDir).toContain('.alpha-loop/sessions/session/issue-512-add-factory-mode');
+    // Epic metadata is still recorded.
+    expect(session.epic).toBe(165);
+    expect(session.parentEpicNum).toBe(165);
+    expect(session.currentIssueNum).toBe(512);
+  });
+
+  test('slugOverride takes precedence over milestone and timestamp naming', () => {
+    const session = createSession(makeConfig(), { slugOverride: 'issue-7-x', milestone: 'v1' });
+    expect(session.name).toBe('session/issue-7-x');
+  });
+
+  test('blank slugOverride falls back to normal naming', () => {
+    const session = createSession(makeConfig(), { slugOverride: '  ', epicNum: 42 });
+    expect(session.name).toBe('session/epic-42');
+  });
+
+  test('rejects a slugOverride that could escape the sessions directory', () => {
+    expect(() => createSession(makeConfig(), { slugOverride: '../../etc' })).toThrow('Invalid session slug override');
+    expect(() => createSession(makeConfig(), { slugOverride: 'a/b' })).toThrow('Invalid session slug override');
+    expect(() => createSession(makeConfig(), { slugOverride: 'issue..1' })).toThrow('Invalid session slug override');
   });
 
   test('slugifies epicTitle correctly (lowercase, hyphens)', () => {

@@ -253,6 +253,39 @@ describe('daemon locking', () => {
     expect(JSON.parse(readFileSync(lockPath, 'utf-8')).token).toBe(lock.token);
   });
 
+  it('does not delete a fresh lock another daemon created while this one judged the old lock stale', () => {
+    const daemon = makeDaemon({ lock: { ...DEFAULT_DAEMON_CONFIG.lock, path: join(tempDir, '.alpha-loop', 'daemon.lock') } });
+    const lockPath = daemonLockPath(daemon);
+    const lockBody = (token: string, pid: number) => JSON.stringify({
+      version: 1,
+      repo: 'owner/repo',
+      cwd: tempDir,
+      pid,
+      hostname: 'host',
+      startedAt: '2026-05-30T12:00:00.000Z',
+      updatedAt: '2026-05-30T12:00:00.000Z',
+      token,
+    }, null, 2) + '\n';
+    mkdirSync(dirname(lockPath), { recursive: true });
+    writeFileSync(lockPath, lockBody('stale', 999999));
+
+    // While we decide the stale lock is dead, a rival daemon reclaims it and
+    // writes its own fresh lock (the TOCTOU window the old unlink fell into).
+    let rivalWrote = false;
+    expect(() => acquireDaemonLock(makeConfig({ daemon }), daemon, {
+      now: new Date('2026-05-30T12:00:00.000Z'),
+      isPidAlive: (pid) => {
+        if (pid === 999999 && !rivalWrote) {
+          rivalWrote = true;
+          writeFileSync(lockPath, lockBody('rival', 4242));
+        }
+        return pid !== 999999;
+      },
+    })).toThrow(/Could not reclaim the stale daemon lock/);
+
+    expect(JSON.parse(readFileSync(lockPath, 'utf-8')).token).toBe('rival');
+  });
+
   it('throws DaemonLockError when a stale lock cannot be reclaimed', () => {
     const daemon = makeDaemon({ lock: { ...DEFAULT_DAEMON_CONFIG.lock, path: join(tempDir, '.alpha-loop', 'daemon.lock') } });
     const lockPath = daemonLockPath(daemon);

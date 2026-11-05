@@ -23,6 +23,11 @@ jest.mock('../../src/lib/config', () => ({
   loadConfig: jest.fn(),
   assertSafeShellArg: jest.fn((value: string) => value),
   resolveStepConfig: jest.fn((config: any) => ({ agent: config.agent, model: config.model })),
+  resolveFactoryPaths: jest.fn(() => {
+    const { join: joinPath } = jest.requireActual('node:path');
+    const stateDir = joinPath(process.cwd(), '.alpha-loop', 'factory');
+    return { stateDir, workersDir: joinPath(stateDir, 'workers') };
+  }),
 }));
 
 jest.mock('../../src/lib/github', () => ({
@@ -842,6 +847,185 @@ describe('runCommand', () => {
     expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('queue worker artifact paths'));
     expect(mockReadFileSync).not.toHaveBeenCalled();
     expect(mockWriteFileSync).not.toHaveBeenCalled();
+  });
+
+  describe('--factory-worker', () => {
+    const workerDir = join(process.cwd(), '.alpha-loop', 'factory', 'workers', 'dev-42-abc');
+    const contextPath = join(workerDir, 'context.json');
+    const resultPath = join(workerDir, 'result.json');
+
+    function workerContext(overrides: Record<string, unknown> = {}) {
+      return {
+        version: 1,
+        workerId: 'dev-42-abc',
+        issueNumber: 42,
+        baseBranch: 'develop',
+        sessionSlug: 'issue-42-target-issue',
+        resultPath,
+        ...overrides,
+      };
+    }
+
+    function stubContext(overrides: Record<string, unknown> = {}): void {
+      mockReadFileSync.mockImplementation((filePath: any) => (
+        String(filePath) === contextPath ? JSON.stringify(workerContext(overrides)) : ''
+      ));
+    }
+
+    function writtenResult(): any {
+      const write = mockWriteFileSync.mock.calls.find(([filePath]) => String(filePath).startsWith(`${resultPath}.tmp-`));
+      return write ? JSON.parse(String(write[1])) : undefined;
+    }
+
+    beforeEach(() => {
+      mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({
+        skipPostSessionReview: true,
+        skipVerify: true,
+        autoCapture: false,
+        mergeTo: 'shared-integration-branch',
+        ...overrides,
+      }) as any);
+      mockGetIssueWithComments.mockImplementation((_repo: string, issueNum: number) => (
+        issueNum === 42
+          ? { number: 42, title: 'Target issue', body: 'Target body', labels: ['ready'], state: 'OPEN' } as any
+          : null
+      ));
+      mockProcessIssue.mockResolvedValue({
+        issueNum: 42,
+        title: 'Target issue',
+        status: 'success',
+        testsPassing: true,
+        verifyPassing: true,
+        verifySkipped: false,
+        duration: 60,
+        filesChanged: 5,
+      });
+    });
+
+    test('runs the issue in its own session against the context base branch and writes a success result', async () => {
+      stubContext({ model: 'sonnet' });
+
+      await runCommand({ issue: 42, factoryWorker: contextPath, skipTests: true, skipLearn: true });
+
+      expect(mockCreateSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          autoMerge: true,
+          mergeTo: '',
+          baseBranch: 'develop',
+          skipPreflight: true,
+          model: 'sonnet',
+        }),
+        expect.objectContaining({ issueNum: 42, slugOverride: 'issue-42-target-issue' }),
+      );
+      expect(mockProcessIssue).toHaveBeenCalledTimes(1);
+      expect(writtenResult()).toEqual(expect.objectContaining({
+        issueNumber: 42,
+        status: 'success',
+        failures: [],
+      }));
+      expect(process.exitCode).not.toBe(1);
+    });
+
+    test('skips coordinator-only asset sync and context refresh', async () => {
+      stubContext();
+      mockContextNeedsRefresh.mockReturnValue(true);
+
+      await runCommand({ issue: 42, factoryWorker: contextPath, skipTests: true, skipLearn: true });
+
+      expect(mockSyncAgentAssets).not.toHaveBeenCalled();
+      expect(mockContextNeedsRefresh).not.toHaveBeenCalled();
+    });
+
+    test('writes a failure result and exits non-zero when the issue is not eligible', async () => {
+      stubContext();
+      mockGetIssueWithComments.mockReturnValue({
+        number: 42, title: 'Target issue', body: '', labels: [], state: 'OPEN',
+      } as any);
+
+      await runCommand({ issue: 42, factoryWorker: contextPath });
+
+      expect(mockCreateSession).not.toHaveBeenCalled();
+      expect(writtenResult()).toEqual(expect.objectContaining({
+        issueNumber: 42,
+        status: 'failure',
+        failures: [expect.objectContaining({ code: 'issue-not-ready' })],
+      }));
+      expect(process.exitCode).toBe(1);
+    });
+
+    test('converts unhandled errors into a failure result artifact', async () => {
+      stubContext();
+      mockCreateSession.mockImplementation(() => { throw new Error('disk full'); });
+
+      await runCommand({ issue: 42, factoryWorker: contextPath });
+
+      expect(writtenResult()).toEqual(expect.objectContaining({
+        issueNumber: 42,
+        status: 'failure',
+        failures: [expect.objectContaining({
+          code: 'issue-processing-error',
+          message: expect.stringContaining('disk full'),
+        })],
+      }));
+      expect(process.exitCode).toBe(1);
+    });
+
+    test('regular --issue runs do not override the session slug', async () => {
+      await runCommand({ issue: 42, dryRun: true });
+
+      expect(mockCreateSession).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({ slugOverride: undefined }),
+      );
+    });
+
+    test.each([
+      ['a context outside the factory workers directory', '/tmp/context.json', {}],
+      ['a context file not named context.json', join(workerDir, 'other.json'), {}],
+      ['an issue number that does not match --issue', contextPath, { issueNumber: 43 }],
+      ['a workerId that does not match its directory', contextPath, { workerId: 'dev-99-zzz' }],
+      ['a result path that is not the sibling result.json', contextPath, { resultPath: '/tmp/result.json' }],
+      ['an unsafe session slug', contextPath, { sessionSlug: '../escape' }],
+      ['an unsafe base branch', contextPath, { baseBranch: 'master; rm -rf /' }],
+      ['an unsupported version', contextPath, { version: 2 }],
+    ])('rejects %s without writing a result', async (_label, path, overrides) => {
+      stubContext(overrides as Record<string, unknown>);
+
+      await runCommand({ issue: 42, factoryWorker: path });
+
+      expect(process.exitCode).toBe(1);
+      expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('Invalid factory worker context'));
+      expect(mockCreateSession).not.toHaveBeenCalled();
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    test('rejects unreadable context JSON', async () => {
+      mockReadFileSync.mockImplementation(() => 'not json');
+
+      await runCommand({ issue: 42, factoryWorker: contextPath });
+
+      expect(process.exitCode).toBe(1);
+      expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('could not read'));
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    test('requires --issue', async () => {
+      await runCommand({ factoryWorker: contextPath });
+
+      expect(process.exitCode).toBe(1);
+      expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('--factory-worker requires --issue'));
+      expect(mockReadFileSync).not.toHaveBeenCalled();
+    });
+
+    test('cannot be combined with queue worker artifacts', async () => {
+      stubContext();
+
+      await runCommand({ issue: 42, factoryWorker: contextPath, queueContext: '/tmp/q.json', queueResult: '/tmp/r.json' });
+
+      expect(process.exitCode).toBe(1);
+      expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining('--queue-context'));
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
   });
 
   test('dry-run session preview does not sync assets or refresh generated context', async () => {

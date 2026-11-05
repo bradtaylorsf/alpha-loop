@@ -47,6 +47,7 @@ program
   .option('--parallel <n>', 'Run up to n dependency-ready epics concurrently (independent queues only)', Number)
   .addOption(new Option('--queue-context <path>').hideHelp())
   .addOption(new Option('--queue-result <path>').hideHelp())
+  .addOption(new Option('--factory-worker <path>').hideHelp())
   .option('--skip-epic', 'Skip epic discovery, use flat/milestone flow')
   .option('--verify-only <n>', 'Run only the verification pass on an existing epic', parseInt)
   .action(async (options) => {

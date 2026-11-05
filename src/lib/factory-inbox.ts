@@ -1,0 +1,301 @@
+/**
+ * Factory Inbox — the human-editable rough-ideas file the factory PM reads.
+ *
+ * The file is plain markdown. Every top-level `- [ ] ...` checkbox bullet is an
+ * idea; the checkbox character is its status and a trailing HTML comment
+ * (`<!-- factory:id=I-xxxxxx k=v -->`) carries the factory's bookkeeping.
+ * Everything else — headings, prose, blank lines, unrelated bullets — is the
+ * human's and is preserved verbatim. Writes rewrite only the one bullet line
+ * being changed, re-reading the file immediately before writing so edits the
+ * human saved in the meantime survive.
+ *
+ * Continuation lines indented (2+ spaces or a tab) directly under a bullet
+ * belong to that idea's text. An untagged idea's id is derived from its
+ * normalized text, so it is stable until the factory first tags it.
+ */
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+export type IdeaStatus = 'pending' | 'taken' | 'done' | 'question' | 'rejected';
+
+export type InboxIdea = {
+  id: string;
+  status: IdeaStatus;
+  text: string;
+  note: string;
+  line: number; // 0-based line of the bullet
+  meta: Record<string, string>;
+};
+
+const STATUS_CHAR: Record<IdeaStatus, string> = {
+  pending: ' ',
+  taken: '~',
+  done: 'x',
+  question: '?',
+  rejected: '-',
+};
+
+const CHAR_STATUS: Record<string, IdeaStatus> = {
+  ' ': 'pending',
+  '~': 'taken',
+  x: 'done',
+  X: 'done',
+  '?': 'question',
+  '-': 'rejected',
+};
+
+const INBOX_HEADER = [
+  '# Alpha Loop ideas inbox',
+  'Drop rough ideas below as `- [ ] ...` bullets. The factory PM turns each into issues.',
+  '',
+  '',
+].join('\n');
+
+/** Separator between the idea text and the factory's note on a bullet line. */
+const NOTE_SEP = ' → ';
+
+// Top-level bullets only (0–1 leading spaces); deeper bullets are continuation text.
+const BULLET_RE = /^( ?)([-*+])\s+\[([ ~xX?-])\]\s?(.*)$/;
+const TAG_RE = /\s*<!--\s*factory:([^>]*?)\s*-->\s*$/;
+const CONTINUATION_RE = /^(?: {2,}|\t)\s*\S/;
+const FENCE_RE = /^ ?(```|~~~)/;
+const META_KEY_RE = /^[A-Za-z0-9_.-]+$/;
+
+type InboxEntry = {
+  idea: InboxIdea;
+  indent: string;
+  marker: string;
+  head: string; // the bullet line's own text (no note, no tag)
+};
+
+/** `I-` + first 6 hex chars of sha256 over the whitespace-normalized, lowercased text. */
+export function ideaIdFor(text: string): string {
+  const normalized = text.toLowerCase().replace(/\s+/g, ' ').trim();
+  return `I-${createHash('sha256').update(normalized).digest('hex').slice(0, 6)}`;
+}
+
+function parseTag(body: string): { id?: string; meta: Record<string, string> } {
+  const meta: Record<string, string> = {};
+  let id: string | undefined;
+  for (const token of body.split(/\s+/)) {
+    const eq = token.indexOf('=');
+    if (eq <= 0) continue;
+    const key = token.slice(0, eq);
+    const value = token.slice(eq + 1);
+    if (key === 'id') id = value;
+    else meta[key] = value;
+  }
+  return { id, meta };
+}
+
+function parseEntries(lines: string[]): InboxEntry[] {
+  const entries: InboxEntry[] = [];
+  let inFence = false;
+  let current: { entry: Omit<InboxEntry, 'idea'>; line: number; status: IdeaStatus; tagId?: string; note: string; meta: Record<string, string>; continuation: string[] } | null = null;
+
+  const finish = () => {
+    if (!current) return;
+    const text = [current.entry.head, ...current.continuation].join('\n');
+    entries.push({
+      ...current.entry,
+      idea: {
+        id: current.tagId ?? ideaIdFor(text),
+        status: current.status,
+        text,
+        note: current.note,
+        line: current.line,
+        meta: current.meta,
+      },
+    });
+    current = null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (FENCE_RE.test(line)) {
+      finish();
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+
+    const bullet = BULLET_RE.exec(line);
+    if (bullet) {
+      finish();
+      let rest = bullet[4];
+      let tagId: string | undefined;
+      let meta: Record<string, string> = {};
+      const tag = TAG_RE.exec(rest);
+      if (tag) {
+        rest = rest.slice(0, tag.index);
+        ({ id: tagId, meta } = parseTag(tag[1]));
+      }
+      rest = rest.trim();
+      let head = rest;
+      let note = '';
+      // Only machine-written (tagged) lines carry a note; a human's own arrow stays in the text.
+      if (tag) {
+        const at = rest.lastIndexOf(NOTE_SEP);
+        if (at >= 0) {
+          head = rest.slice(0, at).trim();
+          note = rest.slice(at + NOTE_SEP.length).trim();
+        }
+      }
+      if (!head) continue; // an empty checkbox is not an idea
+      current = {
+        entry: { indent: bullet[1], marker: bullet[2], head },
+        line: i,
+        status: CHAR_STATUS[bullet[3]] ?? 'pending',
+        tagId,
+        note,
+        meta,
+        continuation: [],
+      };
+      continue;
+    }
+
+    if (current && CONTINUATION_RE.test(line)) {
+      current.continuation.push(line.trim());
+      continue;
+    }
+    finish();
+  }
+  finish();
+  return entries;
+}
+
+export function parseInbox(markdown: string): InboxIdea[] {
+  return parseEntries(markdown.split(/\r?\n/)).map((entry) => entry.idea);
+}
+
+function writeFileAtomic(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmpPath = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(tmpPath, content);
+  try {
+    renameSync(tmpPath, path);
+  } catch (err) {
+    rmSync(tmpPath, { force: true });
+    throw err;
+  }
+}
+
+function isoSeconds(date: Date): string {
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, ' ').replace(/<!--|-->/g, '').trim();
+}
+
+function renderBullet(entry: Pick<InboxEntry, 'indent' | 'marker' | 'head'>, id: string, status: IdeaStatus, note: string, meta: Record<string, string>): string {
+  // A literal note separator in the text would be misread as the note on the next parse.
+  const head = oneLine(entry.head).split(NOTE_SEP.trim()).join('->');
+  const tag = [`id=${id}`];
+  for (const [key, value] of Object.entries(meta)) {
+    if (key === 'id' || !META_KEY_RE.test(key)) continue;
+    tag.push(`${key}=${value.replace(/\s+/g, '_').replace(/-->|>/g, '')}`);
+  }
+  const noteText = oneLine(note);
+  return `${entry.indent}${entry.marker} [${STATUS_CHAR[status]}] ${head}${noteText ? `${NOTE_SEP}${noteText}` : ''}  <!-- factory:${tag.join(' ')} -->`;
+}
+
+/** Create the inbox with its header if it does not exist (parent dirs included). */
+export function ensureInboxFile(path: string): void {
+  if (existsSync(path)) return;
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, INBOX_HEADER, { flag: 'wx' });
+}
+
+export function readInbox(path: string): InboxIdea[] {
+  if (!existsSync(path)) return [];
+  return parseInbox(readFileSync(path, 'utf-8'));
+}
+
+function readLines(path: string): { lines: string[]; eol: string } {
+  const raw = readFileSync(path, 'utf-8');
+  return { lines: raw.split(/\r?\n/), eol: raw.includes('\r\n') ? '\r\n' : '\n' };
+}
+
+/**
+ * Append a pending idea. The first line becomes the bullet; further lines become
+ * indented continuation lines. The bullet is tagged with an id that is unique
+ * within the file (identical texts get distinct ids).
+ */
+export function appendIdea(path: string, text: string): InboxIdea {
+  const parts = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (parts.length === 0) throw new Error('Idea text is empty');
+  ensureInboxFile(path);
+
+  const { lines, eol } = readLines(path);
+  const taken = new Set(parseEntries(lines).map((entry) => entry.idea.id));
+  const fullText = parts.join('\n');
+  let id = ideaIdFor(fullText);
+  for (let n = 2; taken.has(id); n++) id = ideaIdFor(`${fullText}\n#${n}`);
+
+  // Drop trailing blank lines, then append after exactly one separating newline.
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+  const bullet = renderBullet({ indent: '', marker: '-', head: parts[0] }, id, 'pending', '', {});
+  const line = lines.length;
+  lines.push(bullet, ...parts.slice(1).map((part) => `  ${oneLine(part)}`), '');
+  writeFileAtomic(path, lines.join(eol));
+
+  return parseInbox(lines.join('\n')).find((idea) => idea.line === line)
+    ?? { id, status: 'pending', text: fullText, note: '', line, meta: {} };
+}
+
+function patchedBullet(entry: InboxEntry, patch: { status: IdeaStatus; note?: string; meta?: Record<string, string> }, now: Date): string {
+  const note = patch.note !== undefined ? patch.note : entry.idea.note;
+  const meta = patch.meta !== undefined ? { ...patch.meta } : { ...entry.idea.meta };
+  // The `taken` stamp only means something while the idea is taken.
+  if (patch.meta === undefined && patch.status !== 'taken') delete meta.taken;
+  if (patch.status === 'taken' && !meta.taken) meta.taken = isoSeconds(now);
+  return renderBullet(entry, entry.idea.id, patch.status, note, meta);
+}
+
+/**
+ * Rewrite one idea's bullet line (continuation lines are kept as-is).
+ *
+ * `note` undefined keeps the current note; '' clears it. `meta` replaces the
+ * non-id tag fields when given; when omitted the existing fields are kept,
+ * except `taken`, which is dropped unless the new status is 'taken'. Moving
+ * to 'taken' without a `taken` meta value stamps the current time.
+ * Returns false when the file or the idea is missing.
+ */
+export function updateIdea(path: string, id: string, patch: { status: IdeaStatus; note?: string; meta?: Record<string, string> }): boolean {
+  if (!existsSync(path)) return false;
+  const { lines, eol } = readLines(path);
+  const entry = parseEntries(lines).find((candidate) => candidate.idea.id === id);
+  if (!entry) return false;
+  lines[entry.idea.line] = patchedBullet(entry, patch, new Date());
+  writeFileAtomic(path, lines.join(eol));
+  return true;
+}
+
+export function nextPendingIdeas(ideas: InboxIdea[], limit: number): InboxIdea[] {
+  if (limit <= 0) return [];
+  return ideas.filter((idea) => idea.status === 'pending' && idea.text.trim() !== '').slice(0, limit);
+}
+
+/**
+ * Return ideas stuck in 'taken' (e.g. a PM worker died) to 'pending'. An idea is
+ * stale when its `taken` stamp is older than `olderThanMinutes` or missing/unparseable.
+ * All recoveries land in a single atomic write. Returns the recovered ids.
+ */
+export function recoverTakenIdeas(path: string, opts: { olderThanMinutes: number; now?: Date }): string[] {
+  if (!existsSync(path)) return [];
+  const now = opts.now ?? new Date();
+  const { lines, eol } = readLines(path);
+  const recovered: string[] = [];
+  for (const entry of parseEntries(lines)) {
+    if (entry.idea.status !== 'taken') continue;
+    const takenAt = Date.parse(entry.idea.meta.taken ?? '');
+    const stale = Number.isNaN(takenAt) || now.getTime() - takenAt > opts.olderThanMinutes * 60_000;
+    if (!stale) continue;
+    lines[entry.idea.line] = patchedBullet(entry, { status: 'pending' }, now);
+    recovered.push(entry.idea.id);
+  }
+  if (recovered.length > 0) writeFileAtomic(path, lines.join(eol));
+  return recovered;
+}

@@ -1,4 +1,4 @@
-import { setupWorktree, cleanupWorktree } from '../../src/lib/worktree';
+import { setupWorktree, cleanupWorktree, composeProjectName, gitLockPath } from '../../src/lib/worktree';
 
 // Mock dependencies
 jest.mock('../../src/lib/shell', () => ({
@@ -18,6 +18,13 @@ jest.mock('../../src/lib/logger', () => ({
   },
 }));
 
+// node:fs is mocked below, so the real cross-process lock can't run here;
+// record the lock path and run the critical section inline.
+jest.mock('../../src/lib/lease', () => ({
+  gitLockPath: jest.requireActual('../../src/lib/lease').gitLockPath,
+  withFileLockSync: jest.fn((_path: string, fn: () => unknown) => fn()),
+}));
+
 jest.mock('node:fs', () => ({
   existsSync: jest.fn(),
   mkdirSync: jest.fn(),
@@ -31,9 +38,11 @@ jest.mock('node:fs', () => ({
 
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
+import { withFileLockSync } from '../../src/lib/lease';
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
+const mockWithFileLock = withFileLockSync as jest.MockedFunction<typeof withFileLockSync>;
 const mockExists = existsSync as jest.MockedFunction<typeof existsSync>;
 const mockMkdir = mkdirSync as jest.MockedFunction<typeof mkdirSync>;
 const mockSymlink = symlinkSync as jest.MockedFunction<typeof symlinkSync>;
@@ -325,6 +334,59 @@ describe('setupWorktree', () => {
     );
   });
 
+  test('derives a per-worktree COMPOSE_PROJECT_NAME', async () => {
+    await setupWorktree(baseOptions);
+
+    expect(mockWriteFile).toHaveBeenCalledWith(
+      expect.stringContaining('issue-42/.env'),
+      'COMPOSE_PROJECT_NAME=project-issue-42\n',
+    );
+  });
+
+  test('serializes the shared-.git commands under the repo git lock, but not install/setup', async () => {
+    let insideLock = false;
+    const commandsInsideLock: string[] = [];
+    const commandsOutsideLock: string[] = [];
+    mockWithFileLock.mockImplementation((_path, fn) => {
+      insideLock = true;
+      try {
+        return fn();
+      } finally {
+        insideLock = false;
+      }
+    });
+    mockExec.mockImplementation((cmd: string) => {
+      (insideLock ? commandsInsideLock : commandsOutsideLock).push(cmd);
+      // No existing issue branch: take the fresh-creation path.
+      if (cmd.includes('rev-parse --verify')) return { stdout: '', stderr: 'missing', exitCode: 1 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await setupWorktree({ ...baseOptions, setupCommand: 'make deps' });
+
+    expect(mockWithFileLock).toHaveBeenCalledWith(
+      '/home/user/project/.alpha-loop/locks/git.lock',
+      expect.any(Function),
+    );
+    expect(commandsInsideLock).toEqual(expect.arrayContaining([
+      expect.stringContaining('git push origin --delete'),
+      'git fetch origin',
+      expect.stringContaining('git worktree add'),
+    ]));
+    expect(commandsInsideLock.some((cmd) => cmd.includes('pnpm install'))).toBe(false);
+    expect(commandsOutsideLock).toEqual(expect.arrayContaining(['pnpm install --frozen-lockfile', 'make deps']));
+  });
+
+  test('does not install dependencies when the locked git section throws', async () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.includes('git worktree add')) return { stdout: '', stderr: 'boom', exitCode: 1 };
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    await expect(setupWorktree(baseOptions)).rejects.toThrow(/Failed to create worktree/);
+    expect(mockExec).not.toHaveBeenCalledWith('pnpm install --frozen-lockfile', expect.anything());
+  });
+
   test('runs pnpm install unless skipInstall is true', async () => {
     await setupWorktree(baseOptions);
 
@@ -449,6 +511,17 @@ describe('cleanupWorktree', () => {
     expect(branchDeleteCalls).toHaveLength(0);
   });
 
+  test('removes the worktree under the repo git lock', async () => {
+    mockExists.mockReturnValue(true);
+
+    await cleanupWorktree(baseOptions);
+
+    expect(mockWithFileLock).toHaveBeenCalledWith(
+      '/home/user/project/.alpha-loop/locks/git.lock',
+      expect.any(Function),
+    );
+  });
+
   test('force removes and prunes on failure', async () => {
     mockExists.mockReturnValue(true);
     mockExec.mockImplementation((cmd: string) => {
@@ -540,5 +613,28 @@ describe('cleanupWorktree', () => {
       reason: 'unsafe-worktree-path',
     });
     expect(mockExec).not.toHaveBeenCalled();
+  });
+});
+
+describe('composeProjectName', () => {
+  test('keeps the bare repo name for the main checkout', () => {
+    expect(composeProjectName('/home/user/my-repo', '/home/user/my-repo')).toBe('my-repo');
+    expect(composeProjectName('/home/user/my-repo/', '/home/user/my-repo')).toBe('my-repo');
+  });
+
+  test('appends the worktree directory name for worktrees', () => {
+    expect(composeProjectName('/home/user/my-repo/.worktrees/issue-42', '/home/user/my-repo')).toBe('my-repo-issue-42');
+    expect(composeProjectName('/home/user/my-repo/.worktrees/session-epic-7-x', '/home/user/my-repo'))
+      .toBe('my-repo-session-epic-7-x');
+  });
+
+  test('normalizes to a valid compose project name', () => {
+    expect(composeProjectName('/w/My Repo/.worktrees/Issue.42', '/w/My Repo')).toBe('my-repo-issue-42');
+  });
+});
+
+describe('gitLockPath', () => {
+  test('lives under the project .alpha-loop/locks dir', () => {
+    expect(gitLockPath('/home/user/project')).toBe('/home/user/project/.alpha-loop/locks/git.lock');
   });
 });
