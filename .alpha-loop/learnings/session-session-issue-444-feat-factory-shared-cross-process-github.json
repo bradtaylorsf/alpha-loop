@@ -1,15 +1,15 @@
 {
   "name": "session/issue-444-feat-factory-shared-cross-process-github",
   "branch": "session/issue-444-feat-factory-shared-cross-process-github",
-  "completed": "2026-11-05T09:19:09.692Z",
+  "completed": "2026-11-05T09:42:02.537Z",
   "results": [
     {
       "issueNum": 444,
       "title": "feat(factory): shared cross-process GitHub mutation budget for parallel workers",
-      "status": "failure",
-      "testsPassing": false,
+      "status": "waiting",
+      "testsPassing": true,
       "verifyPassing": false,
-      "duration": 14,
+      "duration": 879,
       "filesChanged": 0
     }
   ],
@@ -40,6 +40,62 @@
       "tool_errors": 0,
       "stage_success": false,
       "started_at": "2026-11-05T09:19:04.035Z",
+      "issue_num": 444
+    },
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 64338,
+      "tokens_out": 49491,
+      "cost_usd": 0,
+      "wall_time_s": 195.767,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:23:48.398Z",
+      "issue_num": 444
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 240861,
+      "tokens_out": 185278,
+      "cost_usd": 0,
+      "wall_time_s": 357.182,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:27:04.833Z",
+      "issue_num": 444
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 121225,
+      "tokens_out": 93250,
+      "cost_usd": 0,
+      "wall_time_s": 123.832,
+      "tool_calls": 0,
+      "tool_errors": 1,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:33:07.216Z",
+      "issue_num": 444
+    },
+    {
+      "stage": "verify_fix",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 48391,
+      "tokens_out": 37224,
+      "cost_usd": 0,
+      "wall_time_s": 190.246,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:35:11.330Z",
       "issue_num": 444
     }
   ]
