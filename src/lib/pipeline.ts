@@ -16,7 +16,7 @@ import {
   appendEscalationEventToTrace,
 } from './escalation.js';
 import type { EscalationEvent } from './escalation.js';
-import { setupWorktree, cleanupWorktree, worktreeHasCommits } from './worktree.js';
+import { allowDestructiveWorktreeSetup, setupWorktree, cleanupWorktree, worktreeHasCommits } from './worktree.js';
 import {
   assignIssue,
   labelIssue,
@@ -1452,6 +1452,8 @@ export async function processIssue(
     } else {
       const wt = await setupWorktree({
         issueNum,
+        allowDestructive: allowDestructiveWorktreeSetup(config, issueNum),
+        checkDestructivePermission: () => allowDestructiveWorktreeSetup(config, issueNum),
         projectDir,
         baseBranch: config.baseBranch,
         sessionBranch: session.branch,
@@ -3001,6 +3003,8 @@ export async function processBatch(
   try {
     const wt = await setupWorktree({
       issueNum: issues[0].number, // Use first issue number for branch naming
+      allowDestructive: allowDestructiveWorktreeSetup(config, issues[0].number),
+      checkDestructivePermission: () => allowDestructiveWorktreeSetup(config, issues[0].number),
       projectDir,
       baseBranch: config.baseBranch,
       sessionBranch: session.branch,

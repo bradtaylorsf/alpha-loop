@@ -9,6 +9,7 @@ jest.mock('../../src/lib/shell', () => ({
 }));
 
 jest.mock('../../src/lib/worktree', () => ({
+  allowDestructiveWorktreeSetup: jest.fn(),
   setupWorktree: jest.fn(),
 }));
 
@@ -51,13 +52,14 @@ jest.mock('node:fs', () => ({
 }));
 
 import { exec } from '../../src/lib/shell';
-import { setupWorktree } from '../../src/lib/worktree';
+import { allowDestructiveWorktreeSetup, setupWorktree } from '../../src/lib/worktree';
 import { createPR } from '../../src/lib/github';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync, renameSync } from 'node:fs';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
+const mockAllowDestructive = jest.mocked(allowDestructiveWorktreeSetup);
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>;
@@ -159,6 +161,7 @@ function makeQueueContext(overrides: Partial<QueueSessionContext> = {}): QueueSe
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockAllowDestructive.mockReturnValue(true);
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
   mockExistsSync.mockReturnValue(false);
   mockReaddirSync.mockReturnValue([]);
@@ -171,6 +174,47 @@ beforeEach(() => {
 });
 
 describe('createSession', () => {
+  test.each(['missing', 'lost during setup'])('refuses a resumed session reset when the issue lease is %s', async scenario => {
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config, { issueNum: 42, slugOverride: 'issue-42-test' });
+    mockAllowDestructive.mockReturnValue(scenario !== 'missing');
+    mockSetupWorktree.mockImplementation(async options => {
+      mockAllowDestructive.mockReturnValue(false);
+      return { path: options.worktreePath!, branch: options.branch!, resumed: true };
+    });
+
+    await expect(ensureSessionWorktree(session, config)).rejects.toThrow(/issue #42.*lease/);
+    expect(mockExec.mock.calls.some(([cmd]) => /git (reset|commit|push)/.test(cmd))).toBe(false);
+    expect(session.worktreePath).toBeUndefined();
+    // A failed attempt must not cache the checkout and bypass the guard on retry.
+    await expect(ensureSessionWorktree(session, config)).rejects.toThrow(/lease/);
+  });
+
+  test('allows a resumed session reset while the issue lease is still owned', async () => {
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config, { issueNum: 42, slugOverride: 'issue-42-test' });
+    mockSetupWorktree.mockImplementation(async options => ({
+      path: options.worktreePath!, branch: options.branch!, resumed: true,
+    }));
+
+    await ensureSessionWorktree(session, config);
+
+    expect(mockExec).toHaveBeenCalledWith("git reset --hard 'origin/master'", { cwd: session.worktreePath });
+  });
+
+  test.each([true, false])('checks the target issue lease for session setup (permission %s)', async permission => {
+    const config = makeConfig();
+    const session = createSession(config, { issueNum: 42, parentEpicNum: 454, slugOverride: 'issue-42-test' });
+    mockAllowDestructive.mockReturnValue(permission);
+    await ensureSessionWorktree(session, config);
+    expect(mockAllowDestructive).toHaveBeenCalledWith(config, 42);
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 42, allowDestructive: permission }));
+    const recheck = mockSetupWorktree.mock.calls[0][0].checkDestructivePermission;
+    expect(recheck?.()).toBe(permission);
+    mockAllowDestructive.mockReturnValue(!permission);
+    expect(recheck?.()).toBe(!permission);
+  });
+
   test('generates session name with timestamp format', () => {
     const session = createSession(makeConfig());
 

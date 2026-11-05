@@ -3,8 +3,10 @@
  */
 import { existsSync, mkdirSync, symlinkSync, readlinkSync, unlinkSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join, resolve, basename, relative, isAbsolute } from 'node:path';
+import { hostname } from 'node:os';
 import { exec, shellQuote } from './shell.js';
-import { gitLockPath, withFileLockSync } from './lease.js';
+import { gitLockPath, withFileLockSync, readLease, isLeaseStale } from './lease.js';
+import { resolveFactoryPaths, type Config } from './config.js';
 import { log } from './logger.js';
 import { isWaitingFeedbackStatus } from './session-state.js';
 import type { SessionStatus } from './session.js';
@@ -32,6 +34,10 @@ export type SetupWorktreeOptions = {
   setupCommand?: string;
   savedBranch?: string | null;
   savedPath?: string | null;
+  /** Permit destructive recovery. Defaults to true for non-factory compatibility. */
+  allowDestructive?: boolean;
+  /** Revalidate lease-derived permission under the Git lock before destructive commands. */
+  checkDestructivePermission?: () => boolean;
   dryRun?: boolean;
 };
 
@@ -55,6 +61,27 @@ export type CleanupWorktreeResult = {
 };
 
 const ENV_FILES = ['.env', '.env.local', '.env.development', '.env.development.local'];
+
+/** Re-read ownership for every setup attempt; factory workers must own the issue lease. */
+export function allowDestructiveWorktreeSetup(config: Pick<Config, 'factory'>, issueNum: number): boolean {
+  const workerId = process.env.ALPHA_LOOP_FACTORY_WORKER;
+  if (workerId === undefined) return true;
+  if (!workerId.trim() || !Number.isInteger(issueNum) || issueNum <= 0) return false;
+
+  const key = `issue-${issueNum}`;
+  const lease = readLease(resolveFactoryPaths(config).leasesDir, key);
+  if (!lease || lease.key !== key || lease.meta?.issue !== issueNum
+    || lease.meta?.workerId !== workerId || lease.hostname !== hostname()
+    || lease.workerPid !== process.pid) return false;
+
+  // readLease validates the basic shape; invalid timestamps/ownership fields
+  // must also fail closed, including when TTL expiry has been disabled.
+  if (!lease.owner || !lease.token || !Number.isInteger(lease.pid) || lease.pid <= 0
+    || !Number.isFinite(lease.ttlSeconds) || !Number.isFinite(Date.parse(lease.acquiredAt))
+    || !Number.isFinite(Date.parse(lease.refreshedAt))) return false;
+  // aliveOverridesTtl is for the supervisor singleton, never issue ownership.
+  return !isLeaseStale({ ...lease, aliveOverridesTtl: false });
+}
 
 function isInsidePath(parent: string, child: string): boolean {
   const rel = relative(parent, child);
@@ -96,6 +123,11 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
   const { worktreesDir, worktreePath, safe } = resolveWorktreeLocation(projectDir, issueNum, requestedPath);
   const requiresSavedBranch = Boolean(savedBranch?.trim());
   const preservesNamedBranch = requiresSavedBranch || Boolean(explicitBranch);
+  const canDestroy = (): boolean => (options.allowDestructive ?? true)
+    && (options.checkDestructivePermission?.() ?? true);
+  const refuseDestructive = (reason: string): never => {
+    throw new Error(`Refusing destructive setup for issue #${issueNum}, branch ${branch}, worktree ${worktreePath}: ${reason}. Requires ownership of the live issue-${issueNum} lease or explicit allowDestructive: true`);
+  };
 
   if (!safe) {
     throw new Error(`Refusing unsafe worktree path outside ${worktreesDir}: ${worktreePath}`);
@@ -114,6 +146,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
   // worktree registry, the index lock). Parallel factory workers serialize
   // on one repo-wide lock; dependency install and setup stay outside it.
   const resumed = withFileLockSync(gitLockPath(projectDir), (): boolean => {
+    const allowDestructive = canDestroy();
     let reused = false;
 
     // --- Case 1: Worktree directory exists — check if we can reuse it ---
@@ -125,6 +158,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
         reused = true;
       } else {
         // Worktree exists but on wrong branch or broken — remove and recreate
+        if (!canDestroy()) refuseDestructive('existing worktree is on another branch or cannot be inspected');
         log.warn(`Worktree at ${worktreePath} is on wrong branch, removing...`);
         exec(`git worktree remove ${shellQuote(worktreePath)} --force`, { cwd: projectDir });
         exec('git worktree prune', { cwd: projectDir });
@@ -149,14 +183,37 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
           if (preservesNamedBranch) {
             throw new Error(`Failed to recreate worktree from ${branch}: ${reuseResult.stderr}`);
           }
+          if (!canDestroy()) refuseDestructive(`could not attach existing branch: ${reuseResult.stderr}`);
           // Can't reuse a disposable issue branch — force-delete and fall through to fresh creation.
           exec(`git branch -D ${shellQuote(branch)}`, { cwd: projectDir });
           exec('git worktree prune', { cwd: projectDir });
         }
-      } else if (preservesNamedBranch) {
-        exec('git fetch origin', { cwd: projectDir });
-        const remoteBranchCheck = exec(`git rev-parse --verify ${shellQuote(`origin/${branch}`)}`, { cwd: projectDir });
+      } else if (preservesNamedBranch || !allowDestructive) {
+        const fetchResult = exec('git fetch origin', { cwd: projectDir });
+        if (!allowDestructive && fetchResult.exitCode !== 0) {
+          refuseDestructive(`cannot fetch remote branch safely: ${fetchResult.stderr}`);
+        }
+        // Query origin directly when cleanup is forbidden: a missing/stale
+        // tracking ref does not prove the remote branch is absent. ls-remote
+        // exits 2 only when the query succeeded but found no matching ref.
+        const remoteBranchCheck = !allowDestructive
+          ? exec(`git ls-remote --exit-code --heads origin ${shellQuote(`refs/heads/${branch}`)}`, { cwd: projectDir })
+          : exec(`git rev-parse --verify ${shellQuote(`origin/${branch}`)}`, { cwd: projectDir });
+        if (!allowDestructive && remoteBranchCheck.exitCode !== 2
+          && (remoteBranchCheck.exitCode !== 0 || !remoteBranchCheck.stdout.trim())) {
+          refuseDestructive(`cannot determine whether remote branch exists: ${remoteBranchCheck.stderr}`);
+        }
         if (remoteBranchCheck.exitCode === 0) {
+          if (!allowDestructive) {
+            // A plain fetch may exclude this branch (e.g. a single-branch
+            // clone). Refresh its tracking ref before resuming, so we never
+            // attach to a missing or stale copy of the remote worker's work.
+            const refspec = `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
+            const branchFetch = exec(`git fetch origin ${shellQuote(refspec)}`, { cwd: projectDir });
+            if (branchFetch.exitCode !== 0) {
+              refuseDestructive(`cannot fetch remote issue branch safely: ${branchFetch.stderr}`);
+            }
+          }
           log.info(`Found remote branch origin/${branch}, recreating worktree from it (resuming previous work)`);
           const remoteReuseResult = exec(`git worktree add ${shellQuote(worktreePath)} -b ${shellQuote(branch)} ${shellQuote(`origin/${branch}`)}`, { cwd: projectDir });
           if (remoteReuseResult.exitCode === 0) {
@@ -164,6 +221,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
             log.info(`Resumed worktree with ${commitCount} commit(s)`);
             reused = true;
           } else {
+            if (!allowDestructive) refuseDestructive(`could not recover origin/${branch}: ${remoteReuseResult.stderr}`);
             throw new Error(`Failed to recreate worktree from origin/${branch}: ${remoteReuseResult.stderr}`);
           }
         }
@@ -178,7 +236,8 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
 
       // Issue branches are disposable between fresh runs. Explicitly named
       // branches (notably session branches) must never delete their remote.
-      if (!explicitBranch) {
+      if (allowDestructive && !explicitBranch) {
+        if (!canDestroy()) refuseDestructive('issue lease ownership changed before remote branch cleanup');
         exec(`git push origin --delete ${shellQuote(branch)}`, { cwd: projectDir });
       }
 
@@ -193,7 +252,10 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
       }
 
       // Fetch latest
-      exec('git fetch origin', { cwd: projectDir });
+      const fetchResult = exec('git fetch origin', { cwd: projectDir });
+      if (!allowDestructive && fetchResult.exitCode !== 0) {
+        refuseDestructive(`cannot fetch source branch safely: ${fetchResult.stderr}`);
+      }
 
       // Create worktree from the appropriate branch (try origin/ first, fall back to local)
       log.info(`Branching worktree from: ${fromBranch}`);

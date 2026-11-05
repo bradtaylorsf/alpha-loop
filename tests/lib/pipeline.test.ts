@@ -25,6 +25,7 @@ jest.mock('../../src/lib/agent', () => ({
 }));
 
 jest.mock('../../src/lib/worktree', () => ({
+  allowDestructiveWorktreeSetup: jest.fn(),
   setupWorktree: jest.fn(),
   cleanupWorktree: jest.fn(),
   worktreeHasCommits: jest.fn(),
@@ -142,7 +143,7 @@ jest.mock('node:fs', () => ({
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import { spawnAgent } from '../../src/lib/agent';
-import { setupWorktree, cleanupWorktree, worktreeHasCommits } from '../../src/lib/worktree';
+import { allowDestructiveWorktreeSetup, setupWorktree, cleanupWorktree, worktreeHasCommits } from '../../src/lib/worktree';
 import { labelIssue, commentIssue, createPR, createIssue, mergePR, updateProjectStatus } from '../../src/lib/github';
 import { runTests } from '../../src/lib/testing';
 import { runVerify } from '../../src/lib/verify';
@@ -172,6 +173,7 @@ import type { Config } from '../../src/lib/config';
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
+const mockAllowDestructive = jest.mocked(allowDestructiveWorktreeSetup);
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
 const mockWorktreeHasCommits = worktreeHasCommits as jest.MockedFunction<typeof worktreeHasCommits>;
@@ -296,6 +298,7 @@ function makeSession(): SessionContext {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockAllowDestructive.mockReturnValue(true);
   const { existsSync, readFileSync } = require('node:fs');
   (existsSync as jest.Mock).mockReset();
   (existsSync as jest.Mock).mockImplementation((path: unknown) => String(path).includes('review-'));
@@ -332,6 +335,18 @@ beforeEach(() => {
 });
 
 describe('processIssue', () => {
+  test.each([true, false])('passes current lease permission %s to single-issue setup', async permission => {
+    const config = makeConfig();
+    mockAllowDestructive.mockReturnValue(permission);
+    await processIssue(42, 'Test issue', 'Body', config, makeSession());
+    expect(mockAllowDestructive).toHaveBeenCalledWith(config, 42);
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 42, allowDestructive: permission }));
+    const recheck = mockSetupWorktree.mock.calls[0][0].checkDestructivePermission;
+    expect(recheck?.()).toBe(permission);
+    mockAllowDestructive.mockReturnValue(!permission);
+    expect(recheck?.()).toBe(!permission);
+  });
+
   test('fails closed when a review gate artifact is missing', async () => {
     const { existsSync } = require('node:fs');
     (existsSync as jest.Mock).mockReturnValue(false);
@@ -1825,6 +1840,18 @@ describe('processIssue — retry-with-escalation', () => {
 });
 
 describe('processBatch', () => {
+  test.each([true, false])('passes current lease permission %s to batch setup', async permission => {
+    const config = makeConfig({ batch: true });
+    mockAllowDestructive.mockReturnValue(permission);
+    await processBatch(batchIssues, config, makeSession());
+    expect(mockAllowDestructive).toHaveBeenCalledWith(config, 10);
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 10, allowDestructive: permission }));
+    const recheck = mockSetupWorktree.mock.calls[0][0].checkDestructivePermission;
+    expect(recheck?.()).toBe(permission);
+    mockAllowDestructive.mockReturnValue(!permission);
+    expect(recheck?.()).toBe(!permission);
+  });
+
   const batchIssues = [
     { number: 10, title: 'Issue 10', body: 'Body 10' },
     { number: 11, title: 'Issue 11', body: 'Body 11' },
