@@ -60,6 +60,15 @@ Flags override the `factory:` config block for one run. How the run ends:
 Only one supervisor runs per state directory. A second one exits with `factory already running (pid N)`
 and exit code 2.
 
+The factory also refuses to start while a live daemon lock exists (`.alpha-loop/daemon.lock`
+by default, or the configured `daemon.lock.path`). Conversely, the daemon refuses to start
+while the factory supervisor lease at `<factory.state_dir>/factory.lock` is live. Both
+errors include the owning PID and lock path; stop the running coordinator before starting
+the other. Stale competing locks are left untouched and produce one warning at startup.
+`factory --dry-run` remains available while the daemon runs. Keep daemon locking enabled:
+`daemon --no-lock` checks an existing factory lease but leaves no lock for a later factory
+start to detect.
+
 ### Watching status
 
 `alpha-loop factory status` prints one snapshot. Add `--watch` to refresh immediately and every
