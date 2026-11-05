@@ -144,12 +144,19 @@ A conflict raises the existing `ship:<n>:conflict` question for the owning issue
 are logged and retried after the interval. `--until-idle` keeps polling through these retries under
 its existing 30-minute limit. If `gh` reports that the branch is already current, the shipper records
 a skipped update and re-evaluates the next snapshot without requiring a head change.
+An earlier update's fresh-CI requirement survives a failed or skipped retry. An error with an
+uncertain outcome also retains that requirement, since GitHub may have accepted the update before
+the connection failed. If the update intent cannot be saved to `state.json`, the shipper waits and
+retries without updating the branch.
 
 After an update, the shipper keeps ownership and waits until a later snapshot has a different head
 commit and successful checks. Old green checks, missing checks and pending checks cannot authorize
 a merge, even with `ship.require_checks: false`. CI may already have passed on the new head when it
 is first observed. The attempt time and pre-update head are saved in `state.json` across restarts;
 `--until-idle` keeps polling for fresh CI under its existing 30-minute limit.
+Missing checks and branch-protection waits use the latest update attempt as their timeout origin,
+so an old PR gets time for new CI to start. If no checks appear within `ship.checks_timeout_minutes`,
+the shipper raises the existing no-checks question, including when `ship.require_checks: false`.
 If a saved update attempt left the head unchanged and still green and BEHIND (for example, a crash
 before calling `gh`), the shipper may retry the update after the interval. It still cannot merge
 using the pre-update head's checks.

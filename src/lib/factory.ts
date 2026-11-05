@@ -130,7 +130,7 @@ export type FactoryMemory = {
   owned: OwnedPr[];
   /** ship:* question key → PR state signature it was asked for (no re-ask until it changes). */
   shipAsked: Record<string, string>;
-  /** PR number → last update attempt and, after an update, the head whose CI is stale. */
+  /** PR number → last update attempt and the head awaiting fresh CI (including uncertain update outcomes). */
   branchUpdates: Record<string, { attemptedAt: string; previousHead?: string }>;
   /** Issues whose session PR this factory merged (dependency-satisfied even if still open). */
   mergedIssues: number[];
@@ -495,11 +495,20 @@ function shipGate(pr: ShipPr, owned: OwnedPr[], inFlightIssues: Set<number>): st
   return null;
 }
 
+function awaitingUpdatedChecks(pr: ShipPr, update: FactoryMemory['branchUpdates'][string] | undefined): boolean {
+  return update?.previousHead !== undefined
+    && (!update.previousHead || !pr.headRefOid || pr.headRefOid === update.previousHead || pr.checks !== 'success');
+}
+
 /** Apply persisted update throttling and require fresh CI, including in dry-run reports. */
 function decideRememberedShip(pr: ShipPr, policy: ShipPolicy, now: Date, memory: FactoryMemory, intervalSeconds: number): ShipDecision {
-  const decision = decideShip(pr, policy, now);
-  if (decision.action === 'skip') return decision;
   const update = memory.branchUpdates[pr.number];
+  // New CI gets its own timeout, independent of the PR's age. Checks remain
+  // mandatory after an update, even when ordinary PRs may merge without them.
+  const decision = update?.previousHead !== undefined
+    ? decideShip({ ...pr, createdAt: update.attemptedAt }, { ...policy, requireChecks: true }, now)
+    : decideShip(pr, policy, now);
+  if (decision.action === 'skip') return decision;
   if (decision.action === 'update-branch') {
     if (update && now.getTime() - Date.parse(update.attemptedAt) < intervalSeconds * 1000) {
       return { action: 'wait', reason: 'branch update throttled until ship.interval_seconds has elapsed' };
@@ -508,11 +517,7 @@ function decideRememberedShip(pr: ShipPr, policy: ShipPolicy, now: Date, memory:
     // green BEHIND head may retry after the interval; this does not permit merging.
     return decision;
   }
-  // A long-lived PR needs time for its new checks to appear. Keep waiting under
-  // the idle cap rather than immediately asking about its original creation age.
-  if (update?.previousHead !== undefined
-    && (decision.action !== 'ask' || decision.key === `ship:${pr.number}:no-checks`)
-    && (!update.previousHead || !pr.headRefOid || pr.headRefOid === update.previousHead || pr.checks !== 'success')) {
+  if (decision.action !== 'ask' && awaitingUpdatedChecks(pr, update)) {
     return { action: 'wait', reason: 'branch updated; waiting for a new head with successful CI checks' };
   }
   return decision;
@@ -901,7 +906,7 @@ async function superviseFactory(
     process.on('SIGTERM', onSignal);
   }
 
-  const writeState = (): void => {
+  const writeState = (): boolean => {
     for (const pr of Object.keys(memory.branchUpdates)) {
       if (!memory.owned.some((o) => o.pr === Number(pr) || prNumberFromUrl(o.url) === Number(pr))) delete memory.branchUpdates[pr];
     }
@@ -939,8 +944,10 @@ async function superviseFactory(
     };
     try {
       writeJsonAtomic(paths.statePath, state);
+      return true;
     } catch (err) {
       log.warn(`Factory: could not write state (${errorMessage(err)})`);
+      return false;
     }
   };
 
@@ -1455,16 +1462,35 @@ async function superviseFactory(
         }
         // Persist before the mutation: a crash after gh accepts it must not let a
         // restart repeat the update or merge using checks from the old head.
+        const previousUpdate = memory.branchUpdates[pr.number];
         const update = { attemptedAt: actions.now().toISOString(), previousHead: pr.headRefOid ?? '' };
         memory.branchUpdates[pr.number] = update;
-        writeState();
+        if (!writeState()) {
+          if (previousUpdate) memory.branchUpdates[pr.number] = previousUpdate;
+          else delete memory.branchUpdates[pr.number];
+          pending = true;
+          const error = 'could not persist branch update intent; retrying on the next ship pass';
+          decisions.push({ pr: pr.number, action: 'wait', reason: error });
+          record('ship.branch-update-failed', { pr: pr.number, updated: false, conflict: false, error });
+          continue;
+        }
         let result: ReturnType<FactoryActions['updateBranch']>;
         try {
           result = actions.updateBranch(pr);
         } catch (err) {
           result = { updated: false, conflict: false, error: errorMessage(err) };
         }
-        if (!result.updated) memory.branchUpdates[pr.number] = { attemptedAt: update.attemptedAt };
+        if (!result.updated) {
+          if (previousUpdate && awaitingUpdatedChecks(pr, previousUpdate)) {
+            // A stale snapshot can trigger a retry after the earlier update
+            // already succeeded. A no-op or failed retry cannot discharge its CI gate.
+            memory.branchUpdates[pr.number] = { ...previousUpdate, attemptedAt: update.attemptedAt };
+          } else if (result.conflict || !result.error) {
+            memory.branchUpdates[pr.number] = { attemptedAt: update.attemptedAt };
+          }
+          // Other errors can be lost responses to accepted updates. Retain the
+          // persisted intent until a later snapshot proves fresh CI succeeded.
+        }
         if (result.updated) {
           pending = true;
           decisions.push({ pr: pr.number, action: 'update-branch', reason: decision.reason });

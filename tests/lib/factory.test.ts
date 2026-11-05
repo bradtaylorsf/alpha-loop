@@ -806,6 +806,80 @@ describe('runFactory — branch updates', () => {
     expect(h.state().recent).toContainEqual(expect.objectContaining({ type: 'ship.branch-update-skipped', pr: 1 }));
   });
 
+  it.each(['no-op', 'failure', 'throw'])('keeps the fresh-CI gate across a %s retry and restart', async (outcome) => {
+    const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 30, requireChecks: false } });
+    own(h, 1);
+    h.actions.listShippable.mockReturnValue([behind()]);
+    h.actions.updateBranch.mockReturnValueOnce({ updated: true, conflict: false }).mockImplementation(() => {
+      if (outcome === 'throw') throw new Error('connection reset');
+      return { updated: false, conflict: false, ...(outcome === 'failure' ? { error: 'HTTP 502' } : {}) };
+    });
+    await h.run({ maxTicks: 2, shipMerge: true });
+    expect(h.actions.updateBranch).toHaveBeenCalledTimes(2);
+
+    // A retry against a stale BEHIND snapshot must not authorize the new head
+    // before its checks appear, even when checks are optional for ordinary PRs.
+    const fresh = shipPr(1, { headRefOid: 'new-head' });
+    h.actions.listShippable.mockReturnValueOnce([{ ...fresh, checks: 'none' }]).mockReturnValue([fresh]);
+    h.onTick(() => { expect(h.actions.merge).not.toHaveBeenCalled(); });
+    await h.run({ untilIdle: true, shipMerge: true });
+    expect(h.actions.merge).toHaveBeenCalledTimes(1);
+    expect(h.actions.merge).toHaveBeenCalledWith(fresh, false);
+  });
+
+  it('requires fresh CI when the first update may have succeeded before its response was lost', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 30, requireChecks: false } });
+    own(h, 1);
+    h.actions.listShippable.mockReturnValueOnce([behind()])
+      .mockReturnValue([shipPr(1, { headRefOid: 'new-head', checks: 'none' })]);
+    h.actions.updateBranch.mockReturnValue({ updated: false, conflict: false, error: 'connection reset after request' });
+    await h.run({ maxTicks: 2, shipMerge: true });
+    expect(h.actions.merge).not.toHaveBeenCalled();
+    expect(h.state().ship.decisions[0].action).toBe('wait');
+  });
+
+  it('gives required checks on an updated old PR time to appear before asking', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 30, adminMerge: true } });
+    own(h, 1);
+    const review = { reviewDecision: 'REVIEW_REQUIRED', requiredChecksMissing: [], createdAt: new Date(T0 - 120 * 60_000).toISOString() };
+    const fresh = shipPr(1, { ...review, headRefOid: 'new-head', mergeStateStatus: 'BLOCKED' });
+    h.actions.listShippable.mockReturnValueOnce([behind(1, review)])
+      .mockReturnValueOnce([{ ...fresh, requiredChecksMissing: ['e2e'] }]).mockReturnValue([fresh]);
+    await h.run({ untilIdle: true, shipMerge: true });
+    expect(h.questions()).toEqual([]);
+    expect(h.actions.merge).toHaveBeenCalledWith(fresh, true);
+  });
+
+  it.each([true, false])('asks when post-update CI never appears, including after restart (requireChecks=%s)', async (requireChecks) => {
+    const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 30, checksTimeoutMinutes: 1, requireChecks } });
+    own(h, 1);
+    h.actions.listShippable.mockReturnValueOnce([behind()])
+      .mockReturnValue([shipPr(1, { headRefOid: 'new-head', checks: 'none' })]);
+    await h.run({ once: true, shipMerge: true });
+    await h.run({ maxTicks: 4, shipMerge: true });
+    expect(h.actions.merge).not.toHaveBeenCalled();
+    expect(h.questions()).toHaveLength(1);
+    expect(h.questions()[0].key).toBe('ship:1:no-checks');
+  });
+
+  it('does not update a branch when its restart guard cannot be persisted', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 30 } });
+    own(h, 1);
+    h.actions.listShippable.mockImplementationOnce(() => {
+      // Replacing the state file with a directory makes atomic rename fail.
+      rmSync(h.paths.statePath);
+      mkdirSync(h.paths.statePath);
+      return [behind()];
+    }).mockReturnValue([behind()]);
+    h.onTick(() => {
+      expect(h.actions.updateBranch).not.toHaveBeenCalled();
+      rmSync(h.paths.statePath, { recursive: true });
+    });
+    await h.run({ maxTicks: 2, shipMerge: true });
+    expect(h.actions.updateBranch).toHaveBeenCalledTimes(1);
+    expect(h.state().memory?.branchUpdates['1'].previousHead).toBe('old-head');
+  });
+
   it.each(['failure', 'throw'])('untilIdle retries a transient %s and waits for fresh CI', async (outcome) => {
     const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 90 } });
     own(h, 1);
@@ -893,7 +967,7 @@ describe('runFactory — branch updates', () => {
     h.actions.listShippable.mockReturnValue([behind()]);
     h.actions.updateBranch.mockReturnValue({ updated: false, conflict: false, error: 'HTTP 502' });
     await h.run({ once: true, shipMerge: true });
-    expect(h.state().memory?.branchUpdates['1']).toEqual({ attemptedAt: new Date(T0).toISOString() });
+    expect(h.state().memory?.branchUpdates['1']).toEqual({ attemptedAt: new Date(T0).toISOString(), previousHead: 'old-head' });
 
     await h.run({ maxTicks: 3, shipMerge: true });
     expect(h.actions.updateBranch).toHaveBeenCalledTimes(1); // 60 seconds since the first attempt.
