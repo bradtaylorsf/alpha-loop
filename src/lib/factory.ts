@@ -1315,8 +1315,11 @@ async function superviseFactory(
     recoverQa();
   };
 
-  const qaPass = (): void => {
+  const qaPass = (dispatchedThisTick: number): void => {
     if (qaWorker || (status !== 'running' && qaMemory.mergesSinceLastQa < factory.qa.afterMerges)) return;
+    // A long check can outlast its own interval. Honour idle exit before
+    // starting another interval-only run, while still checking due merges.
+    if (run.untilIdle && tick > 1 && qaMemory.mergesSinceLastQa < factory.qa.afterMerges && isIdle(dispatchedThisTick)) return;
     const state = readQaState(paths.stateDir, run.baseBranch);
     const lastQaAt = [state.lastQaAt, qaMemory.lastQaAt].filter((at): at is string => at !== null)
       .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
@@ -1880,7 +1883,7 @@ async function superviseFactory(
         pmIntake();
         dispatchedThisTick = await dispatch();
       }
-      if (!stopRequested) { shipPass(); qaPass(); }
+      if (!stopRequested) { shipPass(); qaPass(dispatchedThisTick); }
       refreshDevLeases();
 
       if (status === 'running') {

@@ -206,9 +206,11 @@ last-green SHAs, the final 60 output lines, and first-parent commits since the l
 history includes squash and rebase merges. When no usable baseline exists, evidence explicitly labels
 recent history as a bounded fallback. The PM processes the idea through its normal issue-creation path.
 
-QA ideas carry `source=qa` and a fingerprint of the normalized command plus the first diagnostic error
-line from the full output (before truncation). ANSI and line-ending noise are removed. If no error
-line is recognizable, QA uses the first nonempty line, or a fixed empty-output marker. Lookup and
+QA captures stdout and stderr together so evidence retains the command's output order. Ideas carry
+`source=qa` and a fingerprint of the normalized command plus the first diagnostic error line from the
+full output (before truncation). ANSI and line-ending noise are removed; echoed pnpm scripts and
+generic lifecycle summaries are ignored when diagnostics exist. If no error line is recognizable,
+QA uses the first nonempty diagnostic line, or a fixed empty-output marker. Lookup and
 append share the inbox lock; the same failure stays deduplicated across all inbox statuses and restarts,
 even if its SHA or output tail changes. PM status updates retain this metadata and multiline evidence.
 
@@ -220,8 +222,10 @@ keeps QA pending until it can establish the process has exited; it never removes
 
 QA uses `worker_timeout_minutes` and the same process-group shutdown as developers. `--once` and
 other drain modes wait for started checks, including another check when merges during draining reach
-the threshold. Interval checks do not keep a drained or idle factory running. `--dry-run` starts no
-QA child and does not fetch, create worktrees, or modify QA state or the inbox. QA starts, outcomes,
+the threshold. After the initial tick, `--until-idle` skips interval-only checks when the rest of the
+factory is idle, even if the previous check outlasted its interval. Merge thresholds still trigger QA.
+Interval checks do not keep a drained factory running. `--dry-run` starts no QA child and does not
+fetch, create worktrees, or modify QA state or the inbox. QA starts, outcomes,
 bug dedupe decisions and worker failures are recorded in `events.jsonl`.
 
 ## The two files you use

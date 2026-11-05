@@ -41,6 +41,14 @@ describe('QA scheduling and evidence', () => {
     expect(qaFailureFingerprint({ command: 'pnpm test', output: 'Error: broken' })).not.toBe(qaFailureFingerprint(result.failure!));
     expect(qaFailureFingerprint({ command: ' pnpm  build ', output: '' })).toBe(qaFailureFingerprint({ command: 'pnpm build', output: '\r\n' }));
   });
+
+  it('ignores echoed scripts and lifecycle summaries when a diagnostic is available', () => {
+    const output = '> fixture@1.0.0 smoke /tmp/qa-worktrees/qa-one\n> node check-error.cjs\n'
+      + 'ELIFECYCLE Command failed with exit code 1.\nError: database unavailable';
+    const fingerprint = qaFailureFingerprint({ command: 'pnpm smoke', output });
+    expect(fingerprint).toBe(qaFailureFingerprint({ command: 'pnpm smoke', output: 'Error: database unavailable' }));
+    expect(fingerprint).not.toBe(qaFailureFingerprint({ command: 'pnpm smoke', output: output.replace('database unavailable', 'invalid response') }));
+  });
 });
 
 describe('runQa', () => {
@@ -229,6 +237,28 @@ describe('QA runtime smoke against a local origin', () => {
       }
       expect(readInbox(inbox)).toHaveLength(1);
       expect(readInbox(inbox)[0].text).toContain(`${regression} regression`);
+
+      // A different stderr failure with the same command and exit code must file
+      // a new idea. Its later stdout must remain at the end of the evidence.
+      writeFileSync(join(project, 'check.cjs'), [
+        "const { writeSync } = require('node:fs');",
+        "writeSync(2, 'Error: a different regression\\n');",
+        "for (let n = 0; n < 70; n++) writeSync(1, `diagnostic ${n}\\n`);",
+        'process.exit(7);',
+      ].join('\n'));
+      run('git add check.cjs');
+      run('git commit -m another-regression');
+      run('git push origin HEAD');
+      const different = runQa(opts);
+      expect(different.failure?.output.indexOf('Error: a different regression')).toBeLessThan(different.failure!.output.indexOf('diagnostic 0'));
+      const differentIdea = formatQaBugIdea(different);
+      expect(differentIdea).toContain('diagnostic 69');
+      expect(differentIdea).not.toContain('Error: a different regression');
+      expect(appendTaggedIdea(inbox, differentIdea, {
+        source: 'qa', fingerprint: qaFailureFingerprint(different.failure!),
+      }).created).toBe(true);
+      expect(readInbox(inbox)).toHaveLength(2);
+
       writeFileSync(join(project, 'check.cjs'), "console.log('fixed')\n");
       run('git add check.cjs');
       run('git commit -m recovered');

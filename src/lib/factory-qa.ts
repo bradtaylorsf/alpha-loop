@@ -52,8 +52,12 @@ function cleanOutput(text: string): string {
 /** Compute before truncating evidence. Banners and trailing logs do not change the key. */
 export function qaFailureFingerprint(failure: Pick<QaFailure, 'command' | 'output'>): string {
   const lines = cleanOutput(failure.output).split('\n').map(line => line.trim()).filter(Boolean);
-  const diagnostic = lines.find(line => /\b(error|err(?:_[\w]+)?|fatal|fail(?:ed|ure)?|exception|assertion)\b/i.test(line))
-    ?? lines[0] ?? '(no diagnostic output)';
+  // pnpm echoes scripts (and their temporary cwd) and adds a generic failure
+  // summary. Neither identifies the underlying error when diagnostics exist.
+  const diagnostics = lines.filter(line => !/^>\s/.test(line)
+    && !/^(?:ELIFECYCLE|ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL)\b/.test(line));
+  const diagnostic = diagnostics.find(line => /\b(error|err(?:_[\w]+)?|fatal|fail(?:ed|ure)?|exception|assertion)\b/i.test(line))
+    ?? diagnostics[0] ?? lines.find(line => !/^>\s/.test(line)) ?? '(no diagnostic output)';
   return createHash('sha256').update(`${cleanOutput(failure.command).trim().replace(/\s+/g, ' ')}\n${diagnostic}`).digest('hex');
 }
 
@@ -151,7 +155,10 @@ export type RunQaOptions = {
 
 export function runQa(opts: RunQaOptions): QaResult {
   const now = opts.now ?? (() => new Date());
-  const exec = opts.exec ?? shellExec;
+  // Merge streams in the shell so the first error and final 60 lines reflect
+  // emission order. Concatenating stdout then stderr moves early errors behind
+  // later pnpm summaries and can deduplicate unrelated regressions.
+  const exec: typeof shellExec = opts.exec ?? ((cmd, options) => shellExec(`(\n${cmd}\n) 2>&1`, options));
   const projectDir = resolve(opts.projectDir);
   const state = readQaState(opts.stateDir, opts.baseBranch);
   const startedAt = now().toISOString();

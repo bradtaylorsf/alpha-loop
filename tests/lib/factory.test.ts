@@ -1767,6 +1767,21 @@ describe('factory QA lifecycle', () => {
     expect(next.qas).toHaveLength(0);
   });
 
+  it('exits --until-idle after a check that lasts longer than the QA interval', async () => {
+    const h = harness({ qa: { enabled: true, intervalMinutes: 1 }, pm: { enabled: false }, ship: { enabled: false } });
+    const abort = new AbortController();
+    h.onTick(n => {
+      if (n === 2) h.qas[0].finish({ exitCode: 0, result: {
+        ...qaResult(), completedAt: new Date(h.clock()).toISOString(),
+      } });
+      // Bound the regression: previously another interval check kept it alive.
+      if (n === 3) abort.abort();
+    });
+    const summary = await h.run({ untilIdle: true, signal: abort.signal });
+    expect(summary.status).toBe('idle');
+    expect(h.qas).toHaveLength(1);
+  });
+
   it('counts only confirmed merges and runs after shipping at equality', async () => {
     const h = harness({ qa: { enabled: true, afterMerges: 2 }, pm: { enabled: false }, ship: { merge: true } });
     own(h, 1, 2, 3);
