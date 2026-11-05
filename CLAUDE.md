@@ -29,6 +29,10 @@ alpha-loop run --epics <ids> --queue-branch-mode independent --parallel <n> # Ru
 alpha-loop run --verify-only <N> # Run just the epic verification pass
 alpha-loop daemon        # Run hosted daemon mode continuously
 alpha-loop daemon --mode feedback-only # Poll feedback and resume without selecting new work
+alpha-loop factory status             # Worker roles/issues/elapsed/log tails, question ages, pending idea count, last 5 events
+alpha-loop factory status --watch     # Refresh every 5 seconds; Ctrl-C exits only the view
+alpha-loop factory status --watch 2   # Custom interval; redraw a terminal, append frames when redirected
+alpha-loop factory status --json      # One-shot snapshot without tails; incompatible with --watch
 alpha-loop scan          # Generate/refresh project context
 alpha-loop plan          # Generate project scope (milestones + issues) from seed inputs
 alpha-loop add           # Create a new issue from a free-form description using AI

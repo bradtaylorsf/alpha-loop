@@ -353,7 +353,8 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop daemon --mode feedback-only` | Poll feedback and resume eligible sessions without triage or new work selection |
 | `alpha-loop factory` | Run the parallel code factory: PM turns inbox ideas into issues, N developers build in parallel, the shipper merges green PRs (see [docs/factory-mode.md](docs/factory-mode.md)) |
 | `alpha-loop factory --dry-run` | Print what one factory tick would ingest, dispatch, and ship, without changing anything |
-| `alpha-loop factory status` | Show the supervisor, running workers, last plan, counts, and open questions |
+| `alpha-loop factory status` | Show supervisor, worker roles/issues/elapsed/log tails, question ages, pending idea count, last five events, plan and counts; `--json` emits the snapshot without tails |
+| `alpha-loop factory status --watch [seconds]` | Refresh every 5 seconds by default, or use `--watch 2`; Ctrl-C exits the view. Redraws a terminal, appends frames when redirected; incompatible with `--json` |
 | `alpha-loop factory idea <text>` | Add a rough idea to the factory inbox |
 | `alpha-loop factory questions` | List questions the factory needs you to answer |
 | `alpha-loop factory answer <id> <text>` | Answer a factory question; the running factory applies it on its next tick |
