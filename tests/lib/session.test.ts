@@ -9,7 +9,14 @@ jest.mock('../../src/lib/shell', () => ({
 }));
 
 jest.mock('../../src/lib/worktree', () => ({
+  allowDestructiveWorktreeSetup: jest.fn(),
   setupWorktree: jest.fn(),
+}));
+
+// node:fs is mocked below, so run the cross-process git lock inline.
+jest.mock('../../src/lib/lease', () => ({
+  ...jest.requireActual('../../src/lib/lease'),
+  withFileLockSync: jest.fn((_path: string, fn: () => unknown) => fn()),
 }));
 
 jest.mock('../../src/lib/logger', () => ({
@@ -45,13 +52,14 @@ jest.mock('node:fs', () => ({
 }));
 
 import { exec } from '../../src/lib/shell';
-import { setupWorktree } from '../../src/lib/worktree';
+import { allowDestructiveWorktreeSetup, setupWorktree } from '../../src/lib/worktree';
 import { createPR } from '../../src/lib/github';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync, renameSync } from 'node:fs';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
+const mockAllowDestructive = jest.mocked(allowDestructiveWorktreeSetup);
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>;
@@ -153,6 +161,7 @@ function makeQueueContext(overrides: Partial<QueueSessionContext> = {}): QueueSe
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockAllowDestructive.mockReturnValue(true);
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
   mockExistsSync.mockReturnValue(false);
   mockReaddirSync.mockReturnValue([]);
@@ -165,6 +174,47 @@ beforeEach(() => {
 });
 
 describe('createSession', () => {
+  test.each(['missing', 'lost during setup'])('refuses a resumed session reset when the issue lease is %s', async scenario => {
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config, { issueNum: 42, slugOverride: 'issue-42-test' });
+    mockAllowDestructive.mockReturnValue(scenario !== 'missing');
+    mockSetupWorktree.mockImplementation(async options => {
+      mockAllowDestructive.mockReturnValue(false);
+      return { path: options.worktreePath!, branch: options.branch!, resumed: true };
+    });
+
+    await expect(ensureSessionWorktree(session, config)).rejects.toThrow(/issue #42.*lease/);
+    expect(mockExec.mock.calls.some(([cmd]) => /git (reset|commit|push)/.test(cmd))).toBe(false);
+    expect(session.worktreePath).toBeUndefined();
+    // A failed attempt must not cache the checkout and bypass the guard on retry.
+    await expect(ensureSessionWorktree(session, config)).rejects.toThrow(/lease/);
+  });
+
+  test('allows a resumed session reset while the issue lease is still owned', async () => {
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config, { issueNum: 42, slugOverride: 'issue-42-test' });
+    mockSetupWorktree.mockImplementation(async options => ({
+      path: options.worktreePath!, branch: options.branch!, resumed: true,
+    }));
+
+    await ensureSessionWorktree(session, config);
+
+    expect(mockExec).toHaveBeenCalledWith("git reset --hard 'origin/master'", { cwd: session.worktreePath });
+  });
+
+  test.each([true, false])('checks the target issue lease for session setup (permission %s)', async permission => {
+    const config = makeConfig();
+    const session = createSession(config, { issueNum: 42, parentEpicNum: 454, slugOverride: 'issue-42-test' });
+    mockAllowDestructive.mockReturnValue(permission);
+    await ensureSessionWorktree(session, config);
+    expect(mockAllowDestructive).toHaveBeenCalledWith(config, 42);
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 42, allowDestructive: permission }));
+    const recheck = mockSetupWorktree.mock.calls[0][0].checkDestructivePermission;
+    expect(recheck?.()).toBe(permission);
+    mockAllowDestructive.mockReturnValue(!permission);
+    expect(recheck?.()).toBe(!permission);
+  });
+
   test('generates session name with timestamp format', () => {
     const session = createSession(makeConfig());
 
@@ -250,6 +300,45 @@ describe('createSession', () => {
     expect(mockExec.mock.calls.some(([cmd, options]) => String(cmd).includes('git checkout') && options?.cwd === process.cwd())).toBe(false);
   });
 
+  test('runs the session git commands under the repo git lock, but not setupWorktree', async () => {
+    const { withFileLockSync } = jest.requireMock('../../src/lib/lease') as { withFileLockSync: jest.Mock };
+    let insideLock = false;
+    const lockedCommands: string[] = [];
+    withFileLockSync.mockImplementation((_path: string, fn: () => unknown) => {
+      insideLock = true;
+      try {
+        return fn();
+      } finally {
+        insideLock = false;
+      }
+    });
+    mockExec.mockImplementation((cmd: string) => {
+      if (insideLock) lockedCommands.push(cmd);
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    let setupRanInsideLock: boolean | null = null;
+    mockSetupWorktree.mockImplementation(async (options) => {
+      setupRanInsideLock = insideLock;
+      return { path: options.worktreePath ?? '/project/.worktrees/session-test', branch: options.branch ?? 'x', resumed: false };
+    });
+    const config = makeConfig({ autoMerge: true });
+    const session = createSession(config);
+
+    await ensureSessionWorktree(session, config);
+
+    expect(withFileLockSync).toHaveBeenCalledWith(
+      expect.stringContaining('.alpha-loop/locks/git.lock'),
+      expect.any(Function),
+    );
+    expect(lockedCommands).toEqual(expect.arrayContaining([
+      'git fetch origin',
+      expect.stringContaining('git ls-remote --heads origin'),
+      expect.stringContaining('git commit --allow-empty'),
+      expect.stringContaining('git push origin'),
+    ]));
+    expect(setupRanInsideLock).toBe(false);
+  });
+
   test('does not create session branch in dryRun mode', () => {
     createSession(makeConfig({ autoMerge: true, dryRun: true }));
 
@@ -276,6 +365,42 @@ describe('createSession', () => {
   test('generates epic-scoped session name with only epicNum when epicTitle is absent', () => {
     const session = createSession(makeConfig(), { epicNum: 42 });
     expect(session.name).toBe('session/epic-42');
+  });
+
+  test('slugOverride names the session and takes precedence over epic naming', () => {
+    const session = createSession(makeConfig(), {
+      slugOverride: 'issue-512-add-factory-mode',
+      issueNum: 512,
+      issueTitle: 'Add factory mode',
+      parentEpicNum: 165,
+      parentEpicTitle: 'Hybrid Routing',
+      epicNum: 165,
+      epicTitle: 'Hybrid Routing',
+    });
+
+    expect(session.name).toBe('session/issue-512-add-factory-mode');
+    expect(session.branch).toBe('session/issue-512-add-factory-mode');
+    expect(session.resultsDir).toContain('.alpha-loop/sessions/session/issue-512-add-factory-mode');
+    // Epic metadata is still recorded.
+    expect(session.epic).toBe(165);
+    expect(session.parentEpicNum).toBe(165);
+    expect(session.currentIssueNum).toBe(512);
+  });
+
+  test('slugOverride takes precedence over milestone and timestamp naming', () => {
+    const session = createSession(makeConfig(), { slugOverride: 'issue-7-x', milestone: 'v1' });
+    expect(session.name).toBe('session/issue-7-x');
+  });
+
+  test('blank slugOverride falls back to normal naming', () => {
+    const session = createSession(makeConfig(), { slugOverride: '  ', epicNum: 42 });
+    expect(session.name).toBe('session/epic-42');
+  });
+
+  test('rejects a slugOverride that could escape the sessions directory', () => {
+    expect(() => createSession(makeConfig(), { slugOverride: '../../etc' })).toThrow('Invalid session slug override');
+    expect(() => createSession(makeConfig(), { slugOverride: 'a/b' })).toThrow('Invalid session slug override');
+    expect(() => createSession(makeConfig(), { slugOverride: 'issue..1' })).toThrow('Invalid session slug override');
   });
 
   test('slugifies epicTitle correctly (lowercase, hyphens)', () => {

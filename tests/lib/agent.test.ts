@@ -90,7 +90,7 @@ describe('buildAgentArgs', () => {
     });
 
     expect(result.command).toBe('codex');
-    expect(result.args).toEqual(['exec', '--model', 'gpt-4', '--full-auto']);
+    expect(result.args).toEqual(['exec', '--model', 'gpt-4', '--sandbox', 'workspace-write']);
   });
 
   test('constructs correct args for opencode agent', () => {
@@ -150,7 +150,10 @@ describe('buildAgentArgs', () => {
     expect(result.args[0]).toBe('exec');
     expect(result.args[1]).toBe('resume');
     expect(result.args[2]).toBe('--last');
-    expect(result.args).toContain('--full-auto');
+    // `codex exec resume` rejects --sandbox; the policy goes in via config.
+    expect(result.args).toContain('sandbox_mode="workspace-write"');
+    expect(result.args).not.toContain('--sandbox');
+    expect(result.args).not.toContain('--full-auto');
   });
 
   test('opencode ignores resume flag (no resume support)', () => {
@@ -203,7 +206,7 @@ describe('buildOneShotCommand', () => {
 
   test('builds codex command with model', () => {
     const cmd = buildOneShotCommand('codex', 'gpt-5.4');
-    expect(cmd).toBe('codex exec --model gpt-5.4 --full-auto');
+    expect(cmd).toBe('codex exec --model gpt-5.4 --sandbox workspace-write');
   });
 
   test('builds codex text-only command with read-only sandbox', () => {
@@ -213,7 +216,7 @@ describe('buildOneShotCommand', () => {
 
   test('builds codex command without model', () => {
     const cmd = buildOneShotCommand('codex', '');
-    expect(cmd).toBe('codex exec --full-auto');
+    expect(cmd).toBe('codex exec --sandbox workspace-write');
   });
 
   test('builds ollama text-only command with read-only sandbox', () => {
@@ -558,6 +561,80 @@ describe('spawnAgent', () => {
   });
 });
 
+describe('spawnAgent final response capture', () => {
+  const verdict = '{"verdict":"pass","findings":[]}';
+  let stdout: (data: Buffer) => void;
+  let stderr: (data: Buffer) => void;
+  let close: (code: number) => void;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockStdout.on.mockImplementation((event: string, cb: typeof stdout) => { if (event === 'data') stdout = cb; });
+    mockStderr.on.mockImplementation((event: string, cb: typeof stderr) => { if (event === 'data') stderr = cb; });
+    mockChild.on.mockImplementation((event: string, cb: typeof close) => { if (event === 'close') close = cb; });
+  });
+
+  afterEach(() => { jest.useRealTimers(); });
+
+  const run = (agent: AgentOptions['agent']) => spawnAgent({
+    agent, model: 'review-model', prompt: 'Review', cwd: '/project', finalResponseOnly: true,
+  });
+  const emit = (events: unknown[]) => stdout(Buffer.from(events.map((event) => JSON.stringify(event)).join('\n')));
+
+  test.each(['codex', 'ollama'] as const)('%s excludes progress and diagnostics from the verdict', async (agent) => {
+    const pending = run(agent);
+    stderr(Buffer.from('Reading source files...\n'));
+    stdout(Buffer.from(verdict.slice(0, 12)));
+    stderr(Buffer.from('tokens used: 123\n'));
+    stdout(Buffer.from(verdict.slice(12)));
+    close(0);
+    expect((await pending).output).toBe(verdict);
+  });
+
+  test('OpenCode extracts only the completed final step, preserving split Unicode chunks', async () => {
+    const pending = run('opencode');
+    expect(jest.mocked(spawn).mock.calls[0][1]).toEqual(['run', '--model', 'review-model', '--format', 'json']);
+    stderr(Buffer.from('Loading provider...\n'));
+    emit([
+      { type: 'step_start', part: { type: 'step-start' } },
+      { type: 'text', part: { id: 'intro', text: 'Inspecting...' } },
+      { type: 'tool_use', part: { state: { output: 'untrusted tool output' } } },
+      { type: 'step_finish', part: { reason: 'tool-calls' } },
+    ]);
+    stdout(Buffer.from('\n'));
+    const response = '{"verdict":"pass","findings":[{"severity":"info","description":"café"}]}';
+    const final = Buffer.from([
+      JSON.stringify({ type: 'step_start', part: { type: 'step-start' } }),
+      JSON.stringify({ type: 'text', part: { id: 'final', text: response } }),
+      JSON.stringify({ type: 'step_finish', part: { reason: 'stop' } }),
+    ].join('\n'));
+    const split = final.indexOf(Buffer.from('é')) + 1;
+    stdout(final.subarray(0, split));
+    stdout(final.subarray(split));
+    close(0);
+    expect(await pending).toMatchObject({ exitCode: 0, output: response });
+  });
+
+  test.each([
+    [{ type: 'text', part: { id: 'final', text: verdict } }],
+    [{ type: 'text', part: { id: 'final', text: verdict } }, { type: 'step_finish', part: { reason: 'length' } }],
+    [{ type: 'text', part: { id: 'final', text: verdict } }, { type: 'step_finish', part: { reason: 'stop' } }, { type: 'error', error: { message: 'Provider failed' } }],
+    [{ type: 'text', part: { id: 'final', text: verdict } }, { type: 'step_finish', part: { reason: 'stop' } }, { type: 'step_start' }],
+  ])('OpenCode cannot approve from incomplete or errored output: %j', async (...events) => {
+    const pending = run('opencode');
+    emit(events);
+    close(0);
+    expect(await pending).toMatchObject({ resultIsError: true });
+  });
+
+  test('Claude requires an authoritative result instead of falling back to raw output', async () => {
+    const pending = run('claude');
+    stdout(Buffer.from(verdict));
+    close(0);
+    expect(await pending).toMatchObject({ resultIsError: true });
+  });
+});
+
 describe('buildEndpointEnv', () => {
   test('sets ANTHROPIC_* for anthropic endpoints', () => {
     const endpoint: RoutingEndpoint = { type: 'anthropic', base_url: 'https://api.anthropic.com' };
@@ -615,7 +692,8 @@ describe('buildAgentArgs (lmstudio/ollama)', () => {
     });
     expect(result.command).toBe('codex');
     expect(result.args).toContain('exec');
-    expect(result.args).toContain('--full-auto');
+    expect(result.args).toContain('workspace-write');
+    expect(result.args).not.toContain('--full-auto');
     expect(result.args).toContain('--model');
     expect(result.args).toContain('llama3.1:70b');
   });
@@ -758,7 +836,7 @@ describe('codexSandboxArgs', () => {
     expect(result.args).toEqual([
       'exec',
       '--model', 'gpt-5.4',
-      '--full-auto',
+      '--sandbox', 'workspace-write',
       '-c', 'sandbox_workspace_write.writable_roots=["/repo/.git"]',
     ]);
   });

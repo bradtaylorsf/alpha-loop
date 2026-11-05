@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from '
 import { basename, join, relative } from 'node:path';
 import { log } from './logger.js';
 import { exec, shellQuote } from './shell.js';
+import { gitLockPath, withFileLockSync } from './lease.js';
 import { spawnAgent, buildEndpointEnv } from './agent.js';
 import type { AgentOptions } from './agent.js';
 import {
@@ -15,7 +16,7 @@ import {
   appendEscalationEventToTrace,
 } from './escalation.js';
 import type { EscalationEvent } from './escalation.js';
-import { setupWorktree, cleanupWorktree, worktreeHasCommits } from './worktree.js';
+import { allowDestructiveWorktreeSetup, setupWorktree, cleanupWorktree, worktreeHasCommits } from './worktree.js';
 import {
   assignIssue,
   labelIssue,
@@ -123,7 +124,8 @@ async function refreshSessionWorktree(
 ): Promise<void> {
   const sessionWorktreePath = await ensureSessionWorktree(session, config);
   if (!sessionWorktreePath) return;
-  exec('git fetch origin', { cwd: projectDir });
+  // The fetch mutates the shared .git refs; serialize it with parallel workers.
+  withFileLockSync(gitLockPath(projectDir), () => exec('git fetch origin', { cwd: projectDir }));
   exec(`git pull origin ${shellQuote(session.branch)} --no-edit --autostash`, { cwd: sessionWorktreePath });
 }
 
@@ -1450,6 +1452,8 @@ export async function processIssue(
     } else {
       const wt = await setupWorktree({
         issueNum,
+        allowDestructive: allowDestructiveWorktreeSetup(config, issueNum),
+        checkDestructivePermission: () => allowDestructiveWorktreeSetup(config, issueNum),
         projectDir,
         baseBranch: config.baseBranch,
         sessionBranch: session.branch,
@@ -2999,6 +3003,8 @@ export async function processBatch(
   try {
     const wt = await setupWorktree({
       issueNum: issues[0].number, // Use first issue number for branch naming
+      allowDestructive: allowDestructiveWorktreeSetup(config, issues[0].number),
+      checkDestructivePermission: () => allowDestructiveWorktreeSetup(config, issues[0].number),
       projectDir,
       baseBranch: config.baseBranch,
       sessionBranch: session.branch,

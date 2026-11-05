@@ -1,0 +1,89 @@
+{
+  "name": "session/issue-450-feat-factory-reviewer-role-independent-r",
+  "branch": "session/issue-450-feat-factory-reviewer-role-independent-r",
+  "completed": "2026-11-05T10:37:55.725Z",
+  "results": [
+    {
+      "issueNum": 450,
+      "title": "feat(factory): reviewer role — independent review pass on session PRs before shipping",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/467",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1191,
+      "filesChanged": 3
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 85748,
+      "tokens_out": 65960,
+      "cost_usd": 0,
+      "wall_time_s": 188.154,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:14:07.133Z",
+      "issue_num": 450
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 317998,
+      "tokens_out": 244614,
+      "cost_usd": 0,
+      "wall_time_s": 552.903,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:17:15.770Z",
+      "issue_num": 450
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 211440,
+      "tokens_out": 162646,
+      "cost_usd": 0,
+      "wall_time_s": 417.393,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:26:42.356Z",
+      "issue_num": 450
+    },
+    {
+      "stage": "learn",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 6352,
+      "tokens_out": 4886,
+      "cost_usd": 0,
+      "wall_time_s": 33.632,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:34:04.623Z",
+      "issue_num": 450
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 19691,
+      "tokens_out": 15147,
+      "cost_usd": 0,
+      "wall_time_s": 50.562,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:34:04.650Z",
+      "issue_num": 450
+    }
+  ]
+}

@@ -6,6 +6,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { input, checkbox, confirm, editor } from '@inquirer/prompts';
 import { loadConfig, assertSafeShellArg } from '../lib/config.js';
 import { buildOneShotCommand } from '../lib/agent.js';
@@ -194,7 +195,7 @@ export async function planCommand(options: PlanOptions): Promise<void> {
       const visionPrompt = `Based on this project description, generate a concise project vision document (under 500 words) in markdown.\n\nDescription: ${seedDescription}\n${projectContext ? `\nTechnical context:\n${projectContext}` : ''}`;
       const safeModel = assertSafeShellArg(config.model, 'model');
       const agentCmd = buildOneShotCommand(config.agent, safeModel);
-      const visionPromptFile = path.join(os.tmpdir(), `alpha-loop-prompt-${Date.now()}`);
+      const visionPromptFile = path.join(os.tmpdir(), `alpha-loop-prompt-${randomUUID()}`);
       fs.writeFileSync(visionPromptFile, visionPrompt, 'utf-8');
       let visionResult;
       try {
@@ -240,7 +241,7 @@ export async function planCommand(options: PlanOptions): Promise<void> {
 
     const safeModel = assertSafeShellArg(config.model, 'model');
     const agentCmd = buildOneShotCommand(config.agent, safeModel);
-    const planPromptFile = path.join(os.tmpdir(), `alpha-loop-prompt-${Date.now()}`);
+    const planPromptFile = path.join(os.tmpdir(), `alpha-loop-prompt-${randomUUID()}`);
     fs.writeFileSync(planPromptFile, planPrompt, 'utf-8');
     let planResult;
     try {

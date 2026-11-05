@@ -21,6 +21,7 @@
     "test": "jest --runInBand",
     "test:unit": "jest --runInBand",
     "test:watch": "jest --watch",
+    "verify:factory-ship": "pnpm exec jest --runInBand --runTestsByPath tests/lib/factory-ship.test.ts tests/lib/factory.test.ts && pnpm build",
     "prepublishOnly": "pnpm build",
     "release": "node scripts/deploy.mjs",
     "release:watch": "node scripts/release-watch.mjs"

@@ -2,7 +2,7 @@
 # Alpha Loop
 
 ## Overview
-Alpha Loop is an agent-agnostic automated development loop implementing The Loop methodology: Plan (GitHub Issues) -> Build (AI Agent) -> Test -> Review -> Ship (PR). GitHub is the source of truth for issues, labels, workflow state, PRs, and CI; Issues act as the kanban and PRs as review artifacts. The project is published as `@bradtaylorsf/alpha-loop`.
+Alpha Loop is an agent-agnostic automated development loop implementing The Loop methodology: Plan (GitHub Issues) -> Build (AI Agent) -> Test -> Review -> Ship (PR). GitHub is the source of truth: issues act as the kanban, labels encode workflow state, PRs hold reviews, and Actions runs CI. The project is published as `@bradtaylorsf/alpha-loop`.
 
 The CLI supports onboarding, project scanning, scope planning, issue creation and triage, roadmap organization, continuous or single-issue processing, ordered epic processing and verification, stranded-session recovery, session history inspection, browser authentication capture, and learning-driven improvement reviews. It integrates with configurable CLI coding harnesses rather than coupling the loop to one agent vendor.
 
@@ -12,7 +12,7 @@ The CLI supports onboarding, project scanning, scope planning, issue creation an
 - Runtime: Node.js; compiled output is written to `dist/`
 - CLI: Commander.js, exposed through the `alpha-loop` binary
 - Package manager: pnpm only
-- Agent integration: configurable support for 40+ CLI coding harnesses, including Codex, Claude, and OpenCode-style runners
+- Agent integration: configurable CLI runners, including Codex, Claude, and OpenCode, with agent-asset synchronization supporting 40+ harnesses
 - GitHub integration: GitHub CLI (`gh`) through shared local helpers
 - Browser integration: Playwright-based authentication-state capture and optional browser verification
 - Configuration: YAML via `.alpha-loop.yaml`
@@ -20,12 +20,12 @@ The CLI supports onboarding, project scanning, scope planning, issue creation an
 
 ## Directory Structure
 - `src/cli.ts` - CLI entry point and Commander command registration
-- `src/commands/` - Command handlers for onboarding, planning, execution, authentication, recovery, history, and learning review
-- `src/commands/run.ts` - Main loop command, including single-issue, dry-run, epic, and verification modes
+- `src/commands/` - Command handlers for onboarding, planning, issue creation, triage, roadmap organization, execution, authentication, recovery, history, and learning review
+- `src/commands/run.ts` - Main loop command, including single-issue, dry-run, ordered epic processing, and verification-only modes; completed epics are automatically verified
 - `src/commands/init.ts`, `src/commands/scan.ts` - Project onboarding and context generation
-- `src/commands/auth.ts`, `src/commands/resume.ts`, `src/commands/history.ts` - Browser state, session recovery, and history inspection
-- `src/commands/review.ts` - Learning-driven improvement review
-- `src/commands/vision.ts` - Legacy vision command; project scope now belongs to `plan`
+- `src/commands/auth.ts`, `src/commands/resume.ts`, `src/commands/history.ts` - Browser state, stranded-session recovery, and history inspection
+- `src/commands/review.ts` - Learning-driven improvement review and application
+- `src/commands/vision.ts` - Deprecated vision command; project scope generation now belongs to `plan`
 - `src/engine/agents.ts` - Agent CLI mappings and argument construction
 - `src/engine/prerequisites.ts` - Engine-level system prerequisite checks
 - `src/lib/agent.ts` - Agent runner abstraction
@@ -39,15 +39,16 @@ The CLI supports onboarding, project scanning, scope planning, issue creation an
 - `src/lib/prompts.ts` - Agent prompt generation
 - `src/lib/session.ts`, `src/lib/worktree.ts` - Session lifecycle and isolated worktree management
 - `tests/` - Jest suite organized around command, library, and engine behavior
-- `templates/` - Distribution starter skills and agent prompts copied into user projects by `alpha-loop init`
-- `.alpha-loop/templates/` - This repository's managed instructions, skills, and agent definitions; source for harness synchronization
-- `.alpha-loop/learnings/` - Tracked, team-shared knowledge and proposed updates
+- `templates/` - Distribution starter assets shipped with the package; skills and agent prompts are copied into user projects by `alpha-loop init`
+- `.alpha-loop/templates/` - This repository's managed instructions, skills, and agent definitions; source of truth for harness synchronization
+- `.alpha-loop/learnings/` - Tracked, team-shared knowledge; `proposed-updates/` holds proposed improvements
 - `.alpha-loop/sessions/` - Local, gitignored session logs and artifacts
 - `.Codex/`, `.agents/`, `.codex/` - Generated harness-specific outputs synchronized from managed templates
 - `.github/workflows/release.yml` - Automated versioning, npm publishing, tagging, and GitHub Release workflow
 
 ## Code Style
 - Prefer functional modules; avoid classes except where an established local pattern or external API wrapper requires one
+- Keep the implementation simple enough for a course graduate to understand
 - Use `node:` prefixes for Node.js built-in modules
 - Use ESM imports with `.js` extensions, including imports targeting TypeScript source modules
 - Export types from their defining modules and import them where needed
@@ -61,10 +62,11 @@ The CLI supports onboarding, project scanning, scope planning, issue creation an
 ## Non-Negotiables
 - The marker comment `<!-- managed by alpha-loop -->` must remain the first line of managed instructions files
 - The two template trees have different purposes: root `templates/` is distribution product code for new users, while `.alpha-loop/templates/` controls this repository's own loop behavior
-- Do not modify `AGENTS.md` unless explicitly requested
-- Do not edit generated harness outputs directly, including `CLAUDE.md`, `.agents/`, `.codex/`, `.claude/`, `.Codex/`, or any configured synchronization target
-- Changes to this repository's own agent assets must flow through `.alpha-loop/templates/`, preferably through `alpha-loop review --apply`
-- Never manually publish the package or edit its version; pushes to `master` drive automated semantic versioning and npm/GitHub releases through CI
+- Improve default starter skills and agent prompts in root `templates/`; those changes affect new alpha-loop users
+- Do not modify or delete `AGENTS.md` unless explicitly requested
+- Do not edit or delete generated harness outputs directly, including `CLAUDE.md`, `.agents/`, `.codex/`, `.claude/`, `.Codex/`, or any configured synchronization target
+- Changes to this repository's own agent assets must flow through `alpha-loop review --apply`, which updates `.alpha-loop/templates/`; do not modify that protected tree directly
+- Never manually publish the package or edit its version; qualifying pushes to `master`, excluding docs-only changes, drive automated semantic versioning and npm/GitHub releases through CI
 - Worktrees must live beneath `.worktrees/` inside the project directory
 - GitHub remains the datastore; do not introduce a separate persistent database for issues, workflow state, or review state
 - Runtime and recovery artifacts such as `.alpha-loop/sessions/`, `.alpha-loop/auth/`, `.worktrees/`, `logs/`, and `*.bak` files are not source unless a task explicitly targets that behavior

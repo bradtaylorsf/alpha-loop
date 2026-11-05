@@ -4,10 +4,12 @@
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { exec, shellQuote } from './shell.js';
 import { ghExec, getProjectCache, setProjectCache } from './rate-limit.js';
 import { log } from './logger.js';
 import { labelName } from './labels.js';
+import { gitLockPath, withFileLockSync } from './lease.js';
 import {
   findUnparsedSubIssueChecklistLines,
   flipChecklistItem,
@@ -98,8 +100,10 @@ export function listMilestones(repo: string): Milestone[] {
  * "Todo" status. Falls back to label-based polling when no project is set.
  *
  * When a milestone is specified, only issues in that milestone are returned.
+ * With `strict`, a gh failure or unparseable output throws instead of
+ * returning [] — for callers that must tell "nothing ready" from "could not look".
  */
-export function pollIssues(repo: string, label: string, limit = 10, options?: { project?: number; repoOwner?: string; milestone?: string }): Issue[] {
+export function pollIssues(repo: string, label: string, limit = 10, options?: { project?: number; repoOwner?: string; milestone?: string; strict?: boolean }): Issue[] {
   const project = options?.project;
   const repoOwner = options?.repoOwner ?? repo.split('/')[0];
   const milestone = options?.milestone;
@@ -108,11 +112,11 @@ export function pollIssues(repo: string, label: string, limit = 10, options?: { 
   // When a milestone is specified, skip the project board to avoid paginating
   // through all items (which can hit GraphQL rate limits on large boards).
   if (project && project > 0 && !milestone) {
-    return pollIssuesByProject(repoOwner, project, limit, { repo });
+    return pollIssuesByProject(repoOwner, project, limit, { repo, strict: options?.strict });
   }
 
   // Poll by label (optionally filtered by milestone)
-  return pollIssuesByLabel(repo, label, limit, milestone);
+  return pollIssuesByLabel(repo, label, limit, milestone, options?.strict);
 }
 
 /**
@@ -123,7 +127,7 @@ export function pollIssues(repo: string, label: string, limit = 10, options?: { 
  * Uses --jq to filter out Done items server-side, keeping the response small
  * even for large project boards.
  */
-function pollIssuesByProject(owner: string, project: number, limit: number, options?: { repo?: string; milestone?: string }): Issue[] {
+function pollIssuesByProject(owner: string, project: number, limit: number, options?: { repo?: string; milestone?: string; strict?: boolean }): Issue[] {
   // Fetch all project items but filter to only Todo issues via jq to avoid
   // truncating results when Done items fill the limit.
   const jqFilter = `{items: [.items[] | select(.status == "Todo" and .content.type == "Issue")]}`;
@@ -131,6 +135,7 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
     `gh project item-list ${project} --owner "${owner}" --format json --limit 200 --jq '${jqFilter}'`,
   );
   if (result.exitCode !== 0) {
+    if (options?.strict) throw new Error(`Failed to poll project board: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
     log.warn(`Failed to poll project board: ${result.stderr}`);
     return [];
   }
@@ -162,6 +167,7 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
         labels: compactLabelNames(item.labels),
       }));
   } catch {
+    if (options?.strict) throw new Error('Failed to parse project board JSON');
     log.warn('Failed to parse project board JSON');
     return [];
   }
@@ -188,13 +194,14 @@ function getMilestoneIssueNumbers(repo: string, milestone: string): Set<number> 
  * Optionally filters by milestone; the ready label remains authoritative
  * because milestones are scheduling metadata, not workflow state.
  */
-function pollIssuesByLabel(repo: string, label: string, limit: number, milestone?: string): Issue[] {
+function pollIssuesByLabel(repo: string, label: string, limit: number, milestone?: string, strict = false): Issue[] {
   const milestoneFlag = milestone ? ` --milestone "${milestone}"` : '';
   const labelFlag = label ? ` --label "${label}"` : '';
   const result = ghExec(
     `gh issue list --repo "${repo}"${labelFlag} --state open${milestoneFlag} --json number,title,body,labels --limit ${limit}`,
   );
   if (result.exitCode !== 0) {
+    if (strict) throw new Error(`Failed to poll issues: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
     log.warn(`Failed to poll issues: ${result.stderr}`);
     return [];
   }
@@ -215,6 +222,7 @@ function pollIssuesByLabel(repo: string, label: string, limit: number, milestone
       .sort((a, b) => a.number - b.number)
       .slice(0, limit);
   } catch {
+    if (strict) throw new Error('Failed to parse issues JSON');
     log.warn('Failed to parse issues JSON');
     return [];
   }
@@ -239,7 +247,7 @@ export function labelIssue(repo: string, issueNum: number, addLabel: string, rem
  * Uses --body-file to avoid shell escaping issues with newlines and special characters.
  */
 export function commentIssue(repo: string, issueNum: number, body: string): boolean {
-  const bodyFile = join(tmpdir(), `alpha-loop-comment-${Date.now()}`);
+  const bodyFile = join(tmpdir(), `alpha-loop-comment-${randomUUID()}`);
   // GitHub rejects comments over 65536 chars. Agent outputs (e.g. assumptions
   // notes) can balloon when they capture CLI banners/echoed prompts, so cap the
   // body rather than let the whole comment fail.
@@ -301,7 +309,8 @@ export type CreatePROptions = {
 function reconcilePushDivergence(head: string, cwd?: string): void {
   const quotedHead = shellQuote(head);
   const quotedRemoteRef = shellQuote(`origin/${head}`);
-  exec(`git fetch origin ${quotedHead}`, { cwd });
+  // The fetch mutates the shared .git refs; serialize it with parallel workers.
+  withFileLockSync(gitLockPath(process.cwd()), () => exec(`git fetch origin ${quotedHead}`, { cwd }));
 
   const remoteExists = exec(`git rev-parse --verify --quiet ${quotedRemoteRef}`, { cwd });
   if (remoteExists.exitCode !== 0) {
@@ -389,7 +398,7 @@ export function createPR(options: CreatePROptions): string {
 
   // Write body to a temp file to avoid shell argument length/escaping issues
   const truncatedBody = truncateBody(body);
-  const bodyFile = join(tmpdir(), `alpha-loop-pr-body-${Date.now()}`);
+  const bodyFile = join(tmpdir(), `alpha-loop-pr-body-${randomUUID()}`);
   writeFileSync(bodyFile, truncatedBody, 'utf-8');
 
   try {
@@ -637,7 +646,7 @@ export function updateProjectStatus(
  * Uses --body-file for shell safety (same pattern as commentIssue).
  */
 export function createIssue(repo: string, title: string, body: string, labels: string[], milestone?: string): number {
-  const bodyFile = join(tmpdir(), `alpha-loop-issue-body-${Date.now()}`);
+  const bodyFile = join(tmpdir(), `alpha-loop-issue-body-${randomUUID()}`);
   writeFileSync(bodyFile, body, 'utf-8');
   try {
     const labelFlags = labels.map((l) => `--label ${JSON.stringify(l)}`).join(' ');
@@ -670,7 +679,7 @@ export function updateIssue(repo: string, issueNum: number, updates: { title?: s
       cmd += ` --title ${JSON.stringify(updates.title)}`;
     }
     if (updates.body !== undefined) {
-      bodyFile = join(tmpdir(), `alpha-loop-issue-body-${Date.now()}`);
+      bodyFile = join(tmpdir(), `alpha-loop-issue-body-${randomUUID()}`);
       writeFileSync(bodyFile, updates.body, 'utf-8');
       cmd += ` --body-file "${bodyFile}"`;
     }
@@ -1101,24 +1110,76 @@ export function getEpicSubIssues(repo: string, epicNum: number): SubIssueRef[] {
  * fetched body. One-agent-per-epic is the contract; a missing line means
  * either external mutation since this session started or a bug — either way,
  * loud failure, not silent drift.
+ *
+ * GitHub has no compare-and-swap on issue bodies, so parallel factory workers
+ * finishing siblings of one epic can overwrite each other's flips. After each
+ * write the body is re-read and the box verified; on mismatch the whole
+ * read → flip → write cycle is retried (up to EPIC_CHECKLIST_MAX_ATTEMPTS)
+ * with a short jittered backoff, then it throws.
  */
-export function updateEpicChecklist(repo: string, epicNum: number, subIssueNum: number, checked: boolean): void {
+export function updateEpicChecklist(
+  repo: string,
+  epicNum: number,
+  subIssueNum: number,
+  checked: boolean,
+  options: { sleep?: (ms: number) => void } = {},
+): void {
+  const sleep = options.sleep ?? sleepSyncMs;
+  for (let attempt = 1; attempt <= EPIC_CHECKLIST_MAX_ATTEMPTS; attempt++) {
+    const body = fetchEpicChecklistBody(repo, epicNum, subIssueNum);
+    const newBody = flipChecklistItem(body, subIssueNum, checked);
+    if (newBody === body) {
+      // Already in the requested state — no-op.
+      return;
+    }
+    const written = updateIssue(repo, epicNum, { body: newBody });
+    if (written && epicChecklistItemIs(repo, epicNum, subIssueNum, checked)) {
+      return;
+    }
+    if (attempt < EPIC_CHECKLIST_MAX_ATTEMPTS) {
+      const delayMs = EPIC_CHECKLIST_BACKOFF_MS * attempt + Math.floor(Math.random() * EPIC_CHECKLIST_BACKOFF_MS);
+      log.warn(
+        `Epic #${epicNum} checklist flip for #${subIssueNum} did not stick (attempt ${attempt}/${EPIC_CHECKLIST_MAX_ATTEMPTS}) — retrying in ${delayMs}ms`,
+      );
+      sleep(delayMs);
+    }
+  }
+  throw new Error(
+    `updateEpicChecklist: could not set sub-issue #${subIssueNum} to ${checked ? 'checked' : 'unchecked'} on epic #${epicNum} after ${EPIC_CHECKLIST_MAX_ATTEMPTS} attempts (concurrent edits or write failure)`,
+  );
+}
+
+/** Max read → flip → write → verify cycles before updateEpicChecklist fails loudly. */
+const EPIC_CHECKLIST_MAX_ATTEMPTS = 3;
+/** Base backoff between checklist retries; jitter of up to the same amount is added. */
+const EPIC_CHECKLIST_BACKOFF_MS = 250;
+
+/** Fetch the epic body, throwing if it can't be read or no longer lists the sub-issue. */
+function fetchEpicChecklistBody(repo: string, epicNum: number, subIssueNum: number): string {
   const epic = getIssueWithComments(repo, epicNum);
   if (!epic) {
     throw new Error(`updateEpicChecklist: could not fetch epic #${epicNum}`);
   }
-  const refs = parseSubIssues(epic.body);
-  if (!refs.some((r) => r.number === subIssueNum)) {
+  if (!parseSubIssues(epic.body).some((r) => r.number === subIssueNum)) {
     throw new Error(
       `updateEpicChecklist: epic #${epicNum} body no longer contains a checklist line for sub-issue #${subIssueNum}`,
     );
   }
-  const newBody = flipChecklistItem(epic.body, subIssueNum, checked);
-  if (newBody === epic.body) {
-    // Already in the requested state — no-op.
-    return;
-  }
-  updateIssue(repo, epicNum, { body: newBody });
+  return epic.body;
+}
+
+/** Re-read the epic and report whether the sub-issue's box is in the requested state. */
+function epicChecklistItemIs(repo: string, epicNum: number, subIssueNum: number, checked: boolean): boolean {
+  const epic = getIssueWithComments(repo, epicNum);
+  if (!epic) return false;
+  const ref = parseSubIssues(epic.body).find((r) => r.number === subIssueNum);
+  return ref !== undefined && ref.checked === checked;
+}
+
+/** Synchronous, non-busy sleep for short backoffs (Atomics.wait on a private buffer). */
+function sleepSyncMs(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 type ClosingPullRequest = {

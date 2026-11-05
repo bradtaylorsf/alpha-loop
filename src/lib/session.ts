@@ -19,7 +19,8 @@ import {
   type HumanFeedbackTransitionInput,
 } from './session-state.js';
 import { acquireSessionLock, type SessionLockHandle } from './session-lock.js';
-import { setupWorktree } from './worktree.js';
+import { gitLockPath, withFileLockSync } from './lease.js';
+import { allowDestructiveWorktreeSetup, setupWorktree } from './worktree.js';
 import type { Config } from './config.js';
 import type { PipelineResult, GateResult } from './pipeline.js';
 import type { QueueEpicLink, QueueSessionContext } from './epic-queue.js';
@@ -284,6 +285,12 @@ export type CreateSessionOptions = {
   epicTitle?: string;
   /** Queue metadata when this session belongs to an ordered epic queue. */
   queue?: QueueSessionContext;
+  /**
+   * Explicit session slug (the part after `session/`). Takes precedence over
+   * epic/milestone/timestamp naming — factory workers use it so each issue gets
+   * its own deterministic `session/issue-<N>-<slug>` branch.
+   */
+  slugOverride?: string;
 };
 
 const RESUMABLE_STATUSES = new Set<SessionStatus>([
@@ -1098,8 +1105,16 @@ export function createSession(config: Config, options?: CreateSessionOptions): S
   const epicTitle = options?.epicTitle;
   const queue = options?.queue;
 
+  const slugOverride = options?.slugOverride?.trim();
   let slug: string;
-  if (epicNum !== undefined) {
+  if (slugOverride) {
+    // The slug lands in a branch name and a filesystem path; refuse anything
+    // that could escape `.alpha-loop/sessions/session/` or form an invalid ref.
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(slugOverride) || slugOverride.includes('..')) {
+      throw new Error(`Invalid session slug override: "${slugOverride}"`);
+    }
+    slug = slugOverride;
+  } else if (epicNum !== undefined) {
     const titleSlug = epicTitle ? slugify(epicTitle) : '';
     slug = titleSlug ? `epic-${epicNum}-${titleSlug}` : `epic-${epicNum}`;
   } else if (milestone) {
@@ -1242,12 +1257,20 @@ export async function ensureSessionWorktree(
   const worktreePath = join(projectDir, '.worktrees', `session-${slug}`);
   const branchSource = session.branchSource ?? session.queue?.branchedFromBranch ?? config.baseBranch;
 
-  exec('git fetch origin', { cwd: projectDir });
-  const remoteCheck = exec(`git ls-remote --heads origin ${shellQuote(session.branch)}`, { cwd: projectDir });
-  const remoteExists = Boolean(remoteCheck.stdout.trim());
+  // Fetch mutates the shared .git refs; serialize with parallel workers.
+  // setupWorktree takes the same lock for its own git section, and the
+  // install/setup command it runs afterwards stays outside the lock.
+  const remoteExists = withFileLockSync(gitLockPath(projectDir), () => {
+    exec('git fetch origin', { cwd: projectDir });
+    const remoteCheck = exec(`git ls-remote --heads origin ${shellQuote(session.branch)}`, { cwd: projectDir });
+    return Boolean(remoteCheck.stdout.trim());
+  });
 
+  const issueNum = session.currentIssueNum ?? session.epic ?? 0;
   const worktree = await setupWorktree({
-    issueNum: session.currentIssueNum ?? session.epic ?? 0,
+    issueNum,
+    allowDestructive: allowDestructiveWorktreeSetup(config, issueNum),
+    checkDestructivePermission: () => allowDestructiveWorktreeSetup(config, issueNum),
     projectDir,
     baseBranch: branchSource,
     branch: session.branch,
@@ -1255,20 +1278,23 @@ export async function ensureSessionWorktree(
     skipInstall: config.skipInstall,
     setupCommand: config.webApp?.setupCommand || config.setupCommand,
   });
-  session.worktreePath = worktree.path;
-
   if (config.autoMerge && !remoteExists) {
-    if (worktree.resumed) {
-      const reset = exec(`git reset --hard ${shellQuote(`origin/${branchSource}`)}`, { cwd: worktree.path });
-      if (reset.exitCode !== 0) {
-        throw new Error(`Failed to reset stale session branch ${session.branch}: ${reset.stderr}`);
+    withFileLockSync(gitLockPath(projectDir), () => {
+      if (worktree.resumed) {
+        if (!allowDestructiveWorktreeSetup(config, issueNum)) {
+          throw new Error(`Refusing destructive session reset for issue #${issueNum}, branch ${session.branch}, worktree ${worktree.path}: requires ownership of the live issue-${issueNum} lease`);
+        }
+        const reset = exec(`git reset --hard ${shellQuote(`origin/${branchSource}`)}`, { cwd: worktree.path });
+        if (reset.exitCode !== 0) {
+          throw new Error(`Failed to reset stale session branch ${session.branch}: ${reset.stderr}`);
+        }
       }
-    }
-    exec(`git commit --allow-empty -m ${shellQuote(`chore: start session ${session.name}`)}`, { cwd: worktree.path });
-    const pushResult = exec(`git push origin ${shellQuote(session.branch)}`, { cwd: worktree.path });
-    if (pushResult.exitCode !== 0) {
-      throw new Error(`Failed to push session branch ${session.branch}: ${pushResult.stderr}`);
-    }
+      exec(`git commit --allow-empty -m ${shellQuote(`chore: start session ${session.name}`)}`, { cwd: worktree.path });
+      const pushResult = exec(`git push origin ${shellQuote(session.branch)}`, { cwd: worktree.path });
+      if (pushResult.exitCode !== 0) {
+        throw new Error(`Failed to push session branch ${session.branch}: ${pushResult.stderr}`);
+      }
+    });
     log.info(`${worktree.resumed ? 'Recreated' : 'Created'} session branch: ${session.branch}`);
 
     if (options.createDraftPr !== false) {
@@ -1300,6 +1326,9 @@ export async function ensureSessionWorktree(
     log.info(`Session branch already exists: ${session.branch}`);
   }
 
+  // Cache only successful setup: a refused reset must not let a retry skip
+  // ownership checks or let the caller's finally block clean up this checkout.
+  session.worktreePath = worktree.path;
   return worktree.path;
 }
 
@@ -1408,8 +1437,12 @@ export async function finalizeSession(
   }
 
   // Fetch in the repository, then reconcile only inside the session worktree.
-  // Batch PRs may have been auto-merged into the remote session branch.
-  exec('git fetch origin', { cwd: projectDir });
+  // Batch PRs may have been auto-merged into the remote session branch. The
+  // fetch mutates the shared .git refs, so it holds the repo-wide git lock.
+  const fetched = withFileLockSync(gitLockPath(projectDir), () => exec('git fetch origin', { cwd: projectDir }));
+  if (fetched && fetched.exitCode !== 0) {
+    log.warn(`git fetch origin failed before finalizing ${session.branch} (${fetched.stderr.trim() || `exit ${fetched.exitCode}`}); reconciling against the last fetched refs`);
+  }
   const reconciled = reconcileSessionBranchWithRemote(session.branch, sessionWorktreePath);
   if (!reconciled) {
     log.warn(

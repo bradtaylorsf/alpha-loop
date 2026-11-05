@@ -351,6 +351,13 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
 | `alpha-loop daemon` | Run hosted daemon mode continuously for repo stewardship |
 | `alpha-loop daemon --mode feedback-only` | Poll feedback and resume eligible sessions without triage or new work selection |
+| `alpha-loop factory` | Run the parallel code factory: PM turns inbox ideas into issues, N developers build in parallel, the shipper merges green PRs (see [docs/factory-mode.md](docs/factory-mode.md)) |
+| `alpha-loop factory --dry-run` | Print what one factory tick would ingest, dispatch, and ship, without changing anything |
+| `alpha-loop factory status` | Show supervisor, worker roles/issues/elapsed/log tails, question ages, pending idea count, last five events, plan and counts; `--json` emits the snapshot without tails |
+| `alpha-loop factory status --watch [seconds]` | Refresh every 5 seconds by default, or use `--watch 2`; Ctrl-C exits the view. Redraws a terminal, appends frames when redirected; incompatible with `--json` |
+| `alpha-loop factory idea <text>` | Add a rough idea to the factory inbox |
+| `alpha-loop factory questions` | List questions the factory needs you to answer |
+| `alpha-loop factory answer <id> <text>` | Answer a factory question; the running factory applies it on its next tick |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
 | `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
 | `alpha-loop auth` | Save authenticated browser state for verification |
@@ -445,6 +452,41 @@ Options:
   --max-ticks <n>               Stop after this many daemon ticks
 ```
 
+The daemon refuses to start while a live factory supervisor lease exists at
+`<factory.state_dir>/factory.lock`. The factory likewise refuses to start while the
+daemon lock is live (`.alpha-loop/daemon.lock` by default, or `daemon.lock.path`).
+Each refusal names the owning PID and lock path. Stop the running coordinator before
+starting the other. A stale competing lock is left untouched and reported once at startup.
+Permission or I/O errors reading the competing lock stop startup.
+`daemon --no-lock` still checks for an existing factory lease, but leaves no daemon lock
+for a later factory start to detect; keep locking enabled for mutual exclusion.
+
+### Factory Options
+
+```bash
+alpha-loop factory [options]
+
+Options:
+  --developers <n>         Parallel developer workers (1-16)
+  --epic <ids>             Only build children of these epics (comma-separated)
+  --once                   Run one tick of new work, wait for its workers, then exit
+  --until-idle             Exit once nothing is running, ready, pending, or awaiting CI
+  --max-ticks <n>          Stop starting new work after n ticks, then drain
+  --max-runtime <minutes>  Stop starting new work after this many minutes, then drain
+  --no-pm                  Disable the PM role
+  --no-ship                Disable the shipper role
+  --ship-merge             Let the shipper actually merge green PRs
+  --base <branch>          Base branch for session PRs and merges
+  --dry-run                Print the plan for one tick; change nothing
+  --verbose                Stream live agent output into each worker log
+
+Subcommands:
+  status [--json]          Supervisor, workers, last plan, counts, open questions
+  idea <text...>           Add an idea to the inbox
+  questions [--all]        List questions waiting on you
+  answer <id> <text...>    Answer a question
+```
+
 For hosted website and web app operation, start with the [Hosted Alpha Loop Setup Guide](docs/hosted-alpha-loop.md). It covers server setup, GitHub labels and templates, safe starter config, lifecycle events, feedback ingestion, resume, QA handoff, health checks, cleanup, and troubleshooting. For the broader documentation map, see the [docs index](docs/README.md).
 
 ## Configuration
@@ -507,6 +549,13 @@ daemon:
     stale_after: 86400
     path: ""                 # defaults to .alpha-loop/daemon.lock
 
+# Optional factory release cadence (see docs/factory-mode.md)
+factory:
+  ship:
+    enabled: true
+    merge: false              # Session PR updates/merges require true
+    release_every: 0          # Opt in with N commits per release PR; independent of merge
+
 # Worktree retention for durable session manifests
 session_retention:
   paused_worktree_days: 0       # keep paused/waiting/QA worktrees until explicit cleanup
@@ -539,6 +588,12 @@ auto_capture: true  # capture failures as eval cases
 eval_dir: .alpha-loop/evals
 ```
 
+Factory releases use `--base` or `base_branch` and a dedicated temporary worktree. Cadence counts
+complete commits since the last reachable stable tag (including docs/chore), excluding merges and
+release metadata. Any open `chore/release-*` PR suppresses another release across all bases.
+`factory --dry-run` previews from local origin refs/tags without fetching or writing. CI publishes
+after merge to its configured release branch; the factory only opens the PR.
+
 ### Configuration Reference
 
 | Key | Default | Description |
@@ -561,6 +616,7 @@ eval_dir: .alpha-loop/evals
 | `max_issues` | `0` | Max issues to process per session (0 = unlimited) |
 | `max_session_duration` | `0` | Max session duration in seconds (0 = unlimited) |
 | `auto_merge` | `true` | Auto-merge issue PRs into the session branch |
+| `factory.ship.release_every` | `0` | Open a release PR after N releasable commits on the factory base; 0 disables. Independent of `ship.merge`; `--no-ship` disables both. See [release cadence](docs/factory-mode.md#release-cadence) |
 | `merge_to` | (none) | Use an existing branch instead of creating a session branch |
 | `skip_tests` | `false` | Skip test execution |
 | `skip_review` | `false` | Skip code review |

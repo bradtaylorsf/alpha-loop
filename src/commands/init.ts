@@ -352,6 +352,42 @@ automation_policy:
 #     stale_after: 86400
 #     path: ""                 # Defaults to .alpha-loop/daemon.lock
 
+# === Factory ================================================================
+# \`alpha-loop factory\` runs the loop as a parallel code factory: a PM turns
+# rough ideas (inbox.md) into issues, N developer workers build ready issues
+# in their own session branches/PRs, and a shipper merges green session PRs.
+# The factory only asks you things in questions.md. State lives in state_dir
+# (gitignored).
+# factory:
+#   developers: 2              # Parallel developer workers (1..16)
+#   tick_seconds: 30           # Seconds between supervisor ticks
+#   spawn_stagger_seconds: 15  # Delay between developer spawns
+#   max_runtime_minutes: 0     # Stop after N minutes (0 = unlimited)
+#   state_dir: .alpha-loop/factory
+#   inbox_path: ""             # Defaults to <state_dir>/inbox.md
+#   questions_path: ""         # Defaults to <state_dir>/questions.md
+#   avoid_overlap: true        # Never build two issues touching the same files at once
+#   epics: []                  # Restrict to children of these epics, e.g. [12, 34]
+#   worker_timeout_minutes: 120
+#   pm:
+#     enabled: true
+#     agent: ""                # Defaults to the top-level agent
+#     model: ""
+#     auto_ready: true         # Label new issues ready immediately
+#     max_ideas_per_tick: 1
+#     timeout_seconds: 600
+#   ship:
+#     enabled: true
+#     merge: false             # Update/merge session PRs only when true
+#     admin_merge: false       # Use gh pr merge --admin to bypass required reviews
+#     require_checks: true     # Never merge a PR with no CI checks
+#     checks_timeout_minutes: 60
+#     interval_seconds: 300
+#     release_every: 0         # Open a release PR after N releasable commits (0 = disabled)
+#     merge_method: squash     # squash | merge | rebase
+#     head_prefixes:
+#       - session/
+
 # === Session retention ======================================================
 # Durable session manifests are kept in .alpha-loop/sessions/<session>/session.json.
 # Paused/waiting/QA worktrees are preserved unless paused_worktree_days is > 0.

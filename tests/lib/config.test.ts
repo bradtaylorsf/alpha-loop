@@ -21,6 +21,9 @@ import {
   DEFAULT_ESCALATION_WINDOW,
   DEFAULT_ESCALATION_ERROR_THRESHOLD,
   DEFAULT_ESCALATION_REVERT_MS,
+  DEFAULT_FACTORY_CONFIG,
+  getFactoryConfig,
+  resolveFactoryPaths,
 } from '../../src/lib/config.js';
 import type { Config, PipelineConfig } from '../../src/lib/config.js';
 
@@ -1160,5 +1163,234 @@ routing:
     const picks = [100, 200, 300, 400, 500, 600, 700].map((id) => selectRoutingProfile(config, id));
     const unique = new Set(picks);
     expect(unique.size).toBeGreaterThan(1);
+  });
+});
+
+describe('factory config', () => {
+  it.each(['-1', 'true', '"5"', 'null'])('warns and disables invalid release cadence %s', raw => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      writeFileSync(join(tempDir, '.alpha-loop.yaml'), `factory:\n  ship:\n    release_every: ${raw}\n`);
+      expect(loadConfig().factory?.ship.releaseEvery).toBe(0);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('factory.ship.release_every'));
+    } finally { warn.mockRestore(); }
+  });
+
+  it('uses the existing integer parser convention for fractional release cadence', () => {
+    writeFileSync(join(tempDir, '.alpha-loop.yaml'), 'factory:\n  ship:\n    release_every: 3.8\n');
+    expect(loadConfig().factory?.ship.releaseEvery).toBe(3);
+  });
+
+  it('populates factory defaults when the YAML has no factory block', () => {
+    const config = loadConfig();
+    expect(config.factory).toEqual(DEFAULT_FACTORY_CONFIG);
+    expect(config.factory?.ship.merge).toBe(false);
+    expect(config.factory?.ship.releaseEvery).toBe(0);
+    expect(config.factory?.ship.requireChecks).toBe(true);
+  });
+
+  it('loads factory settings from nested config, including pm/ship and inline lists', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `factory:
+  developers: 4
+  tick_seconds: 10
+  spawn_stagger_seconds: 0
+  max_runtime_minutes: 90
+  state_dir: .factory-state
+  inbox_path: ideas/inbox.md
+  questions_path: ""
+  avoid_overlap: false
+  epics: [12, 34]
+  worker_timeout_minutes: 45
+  pm:
+    enabled: false
+    agent: claude
+    model: opus
+    auto_ready: false
+    max_ideas_per_tick: 3
+    timeout_seconds: 120
+  ship:
+    enabled: true
+    merge: true
+    admin_merge: true
+    require_checks: false
+    checks_timeout_minutes: 15
+    interval_seconds: 60
+    release_every: 5
+    merge_method: rebase
+    head_prefixes:
+      - session/
+      - agent/
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.factory).toEqual({
+      developers: 4,
+      tickSeconds: 10,
+      spawnStaggerSeconds: 0,
+      maxRuntimeMinutes: 90,
+      stateDir: '.factory-state',
+      inboxPath: 'ideas/inbox.md',
+      questionsPath: '',
+      avoidOverlap: false,
+      epics: [12, 34],
+      workerTimeoutMinutes: 45,
+      pm: {
+        enabled: false,
+        agent: 'claude',
+        model: 'opus',
+        autoReady: false,
+        maxIdeasPerTick: 3,
+        timeoutSeconds: 120,
+      },
+      ship: {
+        enabled: true,
+        merge: true,
+        adminMerge: true,
+        requireChecks: false,
+        checksTimeoutMinutes: 15,
+        intervalSeconds: 60,
+        releaseEvery: 5,
+        mergeMethod: 'rebase',
+        headPrefixes: ['session/', 'agent/'],
+      },
+    });
+  });
+
+  it('keeps nested defaults for keys a partial pm/ship block omits', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `factory:
+  pm:
+    model: sonnet
+  ship:
+    merge: true
+`,
+    );
+
+    const config = loadConfig();
+    expect(config.factory?.pm).toEqual({ ...DEFAULT_FACTORY_CONFIG.pm, model: 'sonnet' });
+    expect(config.factory?.ship).toEqual({ ...DEFAULT_FACTORY_CONFIG.ship, merge: true });
+    expect(config.factory?.developers).toBe(DEFAULT_FACTORY_CONFIG.developers);
+  });
+
+  it('clamps developers to 1..16 with a warning', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      writeFileSync(join(tempDir, '.alpha-loop.yaml'), 'factory:\n  developers: 40\n');
+      expect(loadConfig().factory?.developers).toBe(16);
+      writeFileSync(join(tempDir, '.alpha-loop.yaml'), 'factory:\n  developers: 0\n');
+      expect(loadConfig().factory?.developers).toBe(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('factory.developers'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns and falls back to defaults on invalid values', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      writeFileSync(
+        join(tempDir, '.alpha-loop.yaml'),
+        `factory:
+  developers: lots
+  tick_seconds: -5
+  avoid_overlap: "yes"
+  epics: [12, nope, 12]
+  ship:
+    merge_method: fast-forward
+    head_prefixes: []
+    merge: "true"
+  pm: nope
+`,
+      );
+
+      const factory = loadConfig().factory;
+      expect(factory?.developers).toBe(DEFAULT_FACTORY_CONFIG.developers);
+      expect(factory?.tickSeconds).toBe(DEFAULT_FACTORY_CONFIG.tickSeconds);
+      expect(factory?.avoidOverlap).toBe(true);
+      expect(factory?.epics).toEqual([12]);
+      expect(factory?.ship.mergeMethod).toBe('squash');
+      expect(factory?.ship.headPrefixes).toEqual(['session/issue-']);
+      expect(factory?.ship.merge).toBe(false);
+      expect(factory?.pm).toEqual(DEFAULT_FACTORY_CONFIG.pm);
+      const messages = warn.mock.calls.map((call) => String(call[0]));
+      for (const key of [
+        'factory.developers',
+        'factory.tick_seconds',
+        'factory.avoid_overlap',
+        'factory.epics',
+        'factory.ship.merge_method',
+        'factory.ship.head_prefixes',
+        'factory.ship.merge',
+        'factory.pm',
+      ]) {
+        expect(messages.some((m) => m.includes(key))).toBe(true);
+      }
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('lets overrides win over YAML, merging nested pm/ship', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `factory:
+  developers: 3
+  ship:
+    merge: true
+    interval_seconds: 30
+`,
+    );
+
+    const config = loadConfig({
+      factory: {
+        ...DEFAULT_FACTORY_CONFIG,
+        developers: 5,
+        ship: { ...DEFAULT_FACTORY_CONFIG.ship, merge: false },
+      },
+    });
+    expect(config.factory?.developers).toBe(5);
+    expect(config.factory?.ship.merge).toBe(false);
+    expect(config.factory?.ship.releaseEvery).toBe(0);
+  });
+
+  it('resolves default factory paths under the project root', () => {
+    const paths = resolveFactoryPaths(loadConfig());
+    const stateDir = join(process.cwd(), '.alpha-loop', 'factory');
+    expect(paths).toEqual({
+      stateDir,
+      inboxPath: join(stateDir, 'inbox.md'),
+      questionsPath: join(stateDir, 'questions.md'),
+      leasesDir: join(stateDir, 'leases'),
+      workersDir: join(stateDir, 'workers'),
+      statePath: join(stateDir, 'state.json'),
+      eventsPath: join(stateDir, 'events.jsonl'),
+      lockDir: stateDir,
+    });
+  });
+
+  it('resolves configured state dir, inbox and questions paths', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `factory:
+  state_dir: tmp/factory
+  inbox_path: IDEAS.md
+  questions_path: /abs/questions.md
+`,
+    );
+
+    const paths = resolveFactoryPaths(loadConfig());
+    expect(paths.stateDir).toBe(join(process.cwd(), 'tmp', 'factory'));
+    expect(paths.inboxPath).toBe(join(process.cwd(), 'IDEAS.md'));
+    expect(paths.questionsPath).toBe('/abs/questions.md');
+    expect(paths.workersDir).toBe(join(process.cwd(), 'tmp', 'factory', 'workers'));
+  });
+
+  it('getFactoryConfig falls back to defaults for hand-built configs', () => {
+    expect(getFactoryConfig({})).toBe(DEFAULT_FACTORY_CONFIG);
+    expect(resolveFactoryPaths({}).stateDir).toBe(join(process.cwd(), '.alpha-loop', 'factory'));
   });
 });

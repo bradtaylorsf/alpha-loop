@@ -29,6 +29,10 @@ alpha-loop run --epics <ids> --queue-branch-mode independent --parallel <n> # Ru
 alpha-loop run --verify-only <N> # Run just the epic verification pass
 alpha-loop daemon        # Run hosted daemon mode continuously
 alpha-loop daemon --mode feedback-only # Poll feedback and resume without selecting new work
+alpha-loop factory status             # Worker roles/issues/elapsed/log tails, question ages, pending idea count, last 5 events
+alpha-loop factory status --watch     # Refresh every 5 seconds; Ctrl-C exits only the view
+alpha-loop factory status --watch 2   # Custom interval; redraw a terminal, append frames when redirected
+alpha-loop factory status --json      # One-shot snapshot without tails; incompatible with --watch
 alpha-loop scan          # Generate/refresh project context
 alpha-loop plan          # Generate project scope (milestones + issues) from seed inputs
 alpha-loop add           # Create a new issue from a free-form description using AI
@@ -146,14 +150,20 @@ publishes it only if that version differs from the latest git tag.
   `fix:`/`chore:`/`docs:`/other → patch, `BREAKING CHANGE` or `!` → major), stamps
   `package.json`, and opens a `chore/release-vX.Y.Z` PR. Flags: `--patch` /
   `--minor` / `--major` to force a bump, `--dry-run` to preview.
+- **Factory cadence**: Set `factory.ship.release_every: N` (default `0`, disabled)
+  to open a release PR after N releasable commits on the factory base. The shipper
+  uses a temporary worktree, suppresses duplicates, and leaves the main checkout
+  untouched. This is independent of `ship.merge`; `--no-ship` disables it. Release
+  PRs are not auto-merged. See [factory release cadence](docs/factory-mode.md#release-cadence).
 - **Publish**: Merging that release PR to `master` triggers the release workflow,
   which gates on `package.json` version ≠ latest tag, then publishes to npm (with
   provenance), creates the `vX.Y.Z` tag, and a GitHub Release.
 - **Merging a normal feature PR does NOT release** — `package.json` is unchanged,
-  so the gate skips publishing. You must run `pnpm release` to ship.
+  so the gate skips publishing. Use `pnpm release` or opt into factory cadence.
+  Factory PRs targeting other bases do not change CI's `master` release trigger.
 - **After merge**: `pnpm release:watch` tails CI and verifies local == npm == tag.
 - **DO NOT** run `pnpm publish` / `npm publish` or hand-edit the `package.json`
-  version — always go through `pnpm release`.
+  version — use `pnpm release` or the factory release PR path.
 
 ## Testing Rules
 

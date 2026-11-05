@@ -4,7 +4,9 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
+    # Session and feature branches get checks too, so the factory shipper can
+    # gate merges into them on green CI.
+    branches: [master, 'session/**', 'agent/**', 'feat/**']
 
 jobs:
   type-check:

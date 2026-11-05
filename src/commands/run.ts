@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import * as readline from 'node:readline';
 import { log } from '../lib/logger.js';
 import { exec, shellQuote } from '../lib/shell.js';
-import { loadConfig, assertSafeShellArg, resolveStepConfig, type Config } from '../lib/config.js';
+import { loadConfig, assertSafeShellArg, resolveFactoryPaths, resolveStepConfig, type Config } from '../lib/config.js';
 import {
   pollIssues, listMilestones, listEpics, getEpicSubIssues, getIssueWithComments,
   getMergedPRForIssue, updateEpicChecklist, commentIssue, closeIssue, labelIssue,
@@ -34,7 +34,7 @@ import {
   type SessionStatus,
 } from '../lib/session.js';
 import { releaseSessionLock, SessionLockError } from '../lib/session-lock.js';
-import { cleanupWorktree, setupWorktree } from '../lib/worktree.js';
+import { allowDestructiveWorktreeSetup, cleanupWorktree, setupWorktree } from '../lib/worktree.js';
 import {
   extractLearnings,
   generateSessionSummary,
@@ -111,6 +111,10 @@ export type RunOptions = {
   queueContext?: string;
   /** Internal: child epic result artifact consumed by a queue coordinator. */
   queueResult?: string;
+  /** Internal: factory worker context JSON written by the `alpha-loop factory` supervisor. */
+  factoryWorker?: string;
+  /** Internal: session slug for a factory worker's per-issue session (set from the worker context). */
+  factorySessionSlug?: string;
   /** Skip the epic picker entirely, use flat/milestone flow. */
   skipEpic?: boolean;
   /** Run only the verification pass on an existing epic. */
@@ -203,6 +207,7 @@ type CommandExitErrorCode =
   | 'invalid-queue-branch-mode'
   | 'invalid-parallel'
   | 'invalid-queue-worker-context'
+  | 'invalid-factory-worker-context'
   | 'epic-queue-validation-failed'
   | 'epic-queue-stopped'
   | 'project-context-refresh-required'
@@ -927,6 +932,11 @@ async function runIssueSession(
       epicNum: activeEpic,
       epicTitle: activeEpicTitle,
       queue: queueContext,
+      // Factory workers own one deterministic session per issue
+      // (session/issue-<N>-<slug>) so parallel developers never share a branch.
+      slugOverride: target.type === 'issue' && options.factoryWorker !== undefined
+        ? options.factorySessionSlug
+        : undefined,
     });
   } catch (err) {
     if (err instanceof SessionLockError) {
@@ -944,7 +954,11 @@ async function runIssueSession(
   try {
     if (config.autoMerge) {
       try {
-        await ensureSessionWorktree(session, config);
+        // Factory developers open their session PR only at finalization. An
+        // early non-draft "session in progress" PR into the base branch would
+        // look shippable (green CI on an empty commit) while work is underway.
+        if (options.factoryWorker !== undefined) await ensureSessionWorktree(session, config, { createDraftPr: false });
+        else await ensureSessionWorktree(session, config);
       } catch (err) {
         const message = `Failed to set up session worktree: ${err instanceof Error ? err.message : err}`;
         log.error(message);
@@ -999,6 +1013,18 @@ async function cleanupSessionWorktree(
     reason: cleanupResult.reason,
     at: new Date().toISOString(),
   });
+}
+
+/**
+ * Generated-file preparation a coordinator (parallel epic queue, factory
+ * supervisor) runs once in the shared checkout before spawning workers, which
+ * skip it: sync agent assets to the harness dirs and refresh project context.
+ * Throws CommandExitError('project-context-refresh-required') when refreshed
+ * context must be reviewed and merged first.
+ */
+export async function prepareCoordinatorCheckout(config: Config): Promise<void> {
+  syncProjectAgentAssets(config);
+  await refreshProjectContext(config);
 }
 
 function syncProjectAgentAssets(config: Config): void {
@@ -1091,8 +1117,13 @@ async function executeSessionRun(
     },
   });
 
-  const capacityDecision = evaluateSessionCapacityPolicy(config, { excludeSessionId: session.id });
-  if (!decisionAllowed(capacityDecision)) {
+  // Factory workers skip the session cap: the supervisor already bounds
+  // concurrency with --developers, and stale manifests from crashed workers
+  // would otherwise pause every new worker.
+  const capacityDecision = options.factoryWorker !== undefined
+    ? null
+    : evaluateSessionCapacityPolicy(config, { excludeSessionId: session.id });
+  if (capacityDecision && !decisionAllowed(capacityDecision)) {
     recordSessionPolicyDecision(session, capacityDecision);
     transitionSessionStatus(session, 'human_input_requested', 'human_input_requested', {
       lastEventId: capacityDecision.id,
@@ -1204,10 +1235,10 @@ async function executeSessionRun(
   process.on('SIGINT', handleSigint);
   process.on('SIGTERM', handleSigterm);
 
-  // Parallel queue workers share a coordinator checkout. The coordinator performs
-  // generated-file preparation once before spawning them so workers only mutate
-  // their session worktrees.
-  const isParallelQueueWorker = options.queueContext !== undefined;
+  // Parallel queue workers and factory developer workers share a coordinator
+  // checkout. The coordinator performs generated-file preparation once before
+  // spawning them so workers only mutate their session worktrees.
+  const isParallelQueueWorker = options.queueContext !== undefined || options.factoryWorker !== undefined;
   if (!isParallelQueueWorker) {
     syncProjectAgentAssets(config);
   }
@@ -1553,6 +1584,8 @@ async function executeSessionRun(
         try {
           const wt = await setupWorktree({
             issueNum: issuesToProcess[0].number,
+            allowDestructive: allowDestructiveWorktreeSetup(config, issuesToProcess[0].number),
+            checkDestructivePermission: () => allowDestructiveWorktreeSetup(config, issuesToProcess[0].number),
             projectDir: process.cwd(),
             baseBranch: config.baseBranch,
             sessionBranch: session.branch,
@@ -2521,6 +2554,138 @@ function readQueueWorkerContext(filePath: string): QueueSessionContext {
   }
 }
 
+/** Context JSON the factory supervisor writes for each developer worker. */
+export type FactoryWorkerContext = {
+  version: 1;
+  workerId: string;
+  issueNumber: number;
+  baseBranch: string;
+  sessionSlug: string;
+  resultPath: string;
+  model?: string;
+};
+
+type ResolvedFactoryWorkerContext = FactoryWorkerContext & { contextPath: string };
+
+const FACTORY_SESSION_SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const FACTORY_BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
+function invalidFactoryWorkerContext(message: string, cause?: unknown): CommandExitError {
+  return new CommandExitError({
+    code: 'invalid-factory-worker-context',
+    message: `Invalid factory worker context: ${message}`,
+    exitCode: 1,
+    cause,
+  });
+}
+
+/**
+ * Read and validate a factory worker context. The context must live at
+ * `<state_dir>/workers/<workerId>/context.json`, target the same issue as
+ * --issue, and name its sibling result.json — so a worker can never be pointed
+ * at an arbitrary file to overwrite.
+ */
+export function readFactoryWorkerContext(
+  config: Config,
+  contextPath: string,
+  issueNumber: number,
+): ResolvedFactoryWorkerContext {
+  const workersDirs = Array.from(new Set([
+    resolve(process.cwd(), '.alpha-loop', 'factory', 'workers'),
+    resolveFactoryPaths(config).workersDir,
+  ]));
+  const resolvedContextPath = resolve(process.cwd(), contextPath);
+  const workerDir = dirname(resolvedContextPath);
+  const workerId = basename(workerDir);
+  const insideWorkers = workersDirs.some((dir) => dirname(workerDir) === dir && isInsideDirectory(dir, resolvedContextPath));
+  if (!insideWorkers || basename(resolvedContextPath) !== 'context.json') {
+    throw invalidFactoryWorkerContext('context must be <state_dir>/workers/<workerId>/context.json');
+  }
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(resolvedContextPath, 'utf-8'));
+  } catch (err) {
+    throw invalidFactoryWorkerContext(
+      `could not read ${resolvedContextPath}: ${err instanceof Error ? err.message : err}`,
+      err,
+    );
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw invalidFactoryWorkerContext('expected a JSON object');
+  }
+  const ctx = raw as Record<string, unknown>;
+  if (ctx.version !== 1) throw invalidFactoryWorkerContext(`unsupported version ${String(ctx.version)}`);
+  if (ctx.workerId !== workerId) {
+    throw invalidFactoryWorkerContext(`workerId ${String(ctx.workerId)} does not match worker directory ${workerId}`);
+  }
+  if (ctx.issueNumber !== issueNumber) {
+    throw invalidFactoryWorkerContext(`context targets issue #${String(ctx.issueNumber)}, not --issue ${issueNumber}`);
+  }
+  if (typeof ctx.baseBranch !== 'string' || !FACTORY_BRANCH_PATTERN.test(ctx.baseBranch) || ctx.baseBranch.includes('..')) {
+    throw invalidFactoryWorkerContext(`invalid baseBranch ${String(ctx.baseBranch)}`);
+  }
+  if (typeof ctx.sessionSlug !== 'string' || !FACTORY_SESSION_SLUG_PATTERN.test(ctx.sessionSlug) || ctx.sessionSlug.includes('..')) {
+    throw invalidFactoryWorkerContext(`invalid sessionSlug ${String(ctx.sessionSlug)}`);
+  }
+  const expectedResultPath = join(workerDir, 'result.json');
+  if (typeof ctx.resultPath !== 'string' || resolve(process.cwd(), ctx.resultPath) !== expectedResultPath) {
+    throw invalidFactoryWorkerContext('resultPath must be the sibling result.json of the context file');
+  }
+  if (ctx.model !== undefined && typeof ctx.model !== 'string') {
+    throw invalidFactoryWorkerContext('model must be a string when set');
+  }
+
+  return {
+    version: 1,
+    workerId,
+    issueNumber,
+    baseBranch: ctx.baseBranch,
+    sessionSlug: ctx.sessionSlug,
+    resultPath: expectedResultPath,
+    ...(typeof ctx.model === 'string' && ctx.model.trim() ? { model: ctx.model.trim() } : {}),
+    contextPath: resolvedContextPath,
+  };
+}
+
+/**
+ * Factory developer worker: run one issue in its own session/PR against the
+ * context's base branch and always leave a result artifact for the supervisor.
+ */
+async function runFactoryWorkerIssue(config: Config, options: RunOptions, issueNumber: number): Promise<void> {
+  if (options.queueContext !== undefined || options.queueResult !== undefined) {
+    throw invalidFactoryWorkerContext('--factory-worker cannot be combined with --queue-context/--queue-result');
+  }
+  const ctx = readFactoryWorkerContext(config, options.factoryWorker ?? '', issueNumber);
+  // Each worker owns a distinct per-issue session branch and opens its PR
+  // straight to the base branch. The supervisor ran preflight once already.
+  const workerConfig: Config = {
+    ...config,
+    autoMerge: true,
+    mergeTo: '',
+    baseBranch: ctx.baseBranch,
+    skipPreflight: true,
+    ...(ctx.model ? { model: ctx.model } : {}),
+  };
+  let result: IssueExecutionResult;
+  try {
+    result = await runSingleIssueExecution({
+      config: workerConfig,
+      issueNumber,
+      options: { ...options, factorySessionSlug: ctx.sessionSlug },
+    });
+  } catch (err) {
+    result = buildIssueFailureResult(issueNumber, {
+      code: 'issue-processing-error',
+      message: `Issue #${issueNumber} failed with an unhandled error: ${err instanceof Error ? err.message : err}`,
+      issueNum: issueNumber,
+      exitCode: 1,
+    });
+  }
+  writeJsonAtomic(ctx.resultPath, result);
+  if (result.status !== 'success') process.exitCode = 1;
+}
+
 function buildQueueChildArgs(args: {
   epicNumber: number;
   contextPath: string;
@@ -3197,8 +3362,16 @@ export async function runCommand(options: RunOptions): Promise<void> {
       });
     }
 
+    if (options.factoryWorker !== undefined && options.issue === undefined) {
+      throw invalidFactoryWorkerContext('--factory-worker requires --issue');
+    }
+
     if (options.issue !== undefined) {
       rejectIncompatibleSingleIssueOptions(options);
+      if (options.factoryWorker !== undefined) {
+        await runFactoryWorkerIssue(config, options, options.issue);
+        return;
+      }
       const result = await runSingleIssueExecution({
         config,
         issueNumber: options.issue,

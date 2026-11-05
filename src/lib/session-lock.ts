@@ -8,9 +8,10 @@
  * run fails fast unless that process is no longer alive.
  */
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
+import { defaultPidAlive, reclaimStaleLockFile, releaseLockFileIfOwned } from './lease.js';
 
 export type SessionLockPayload = {
   version: 1;
@@ -54,17 +55,6 @@ function parseLock(raw: string): SessionLockPayload | null {
   }
 }
 
-function defaultPidAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    return code === 'EPERM';
-  }
-}
-
 export type AcquireSessionLockOptions = {
   now?: Date;
   isPidAlive?: (pid: number) => boolean;
@@ -99,15 +89,18 @@ export function acquireSessionLock(
     writeFileSync(lockPath, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
     return { path: lockPath, token: payload.token, payload };
   } catch {
-    let existing: SessionLockPayload | null = null;
+    let observed: string | null = null;
     try {
-      existing = parseLock(readFileSync(lockPath, 'utf-8'));
+      observed = readFileSync(lockPath, 'utf-8');
     } catch {
-      existing = null;
+      observed = null;
     }
+    const existing = observed === null ? null : parseLock(observed);
 
     if (!existing || !isPidAlive(existing.pid)) {
-      try { unlinkSync(lockPath); } catch { /* best effort */ }
+      // Rename-based reclaim: never unlink the lock path directly, or a
+      // concurrent reclaimer's fresh lock could be deleted (TOCTOU).
+      reclaimStaleLockFile(lockPath, observed);
       try {
         writeFileSync(lockPath, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
         return { path: lockPath, token: payload.token, payload };
@@ -137,12 +130,5 @@ export function acquireSessionLock(
  */
 export function releaseSessionLock(lock: SessionLockHandle | null | undefined): boolean {
   if (!lock) return false;
-  try {
-    const current = parseLock(readFileSync(lock.path, 'utf-8'));
-    if (current?.token !== lock.token) return false;
-    unlinkSync(lock.path);
-    return true;
-  } catch {
-    return false;
-  }
+  return releaseLockFileIfOwned(lock.path, lock.token, (raw) => parseLock(raw)?.token);
 }

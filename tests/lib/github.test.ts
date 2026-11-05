@@ -4,7 +4,7 @@ import {
   setIssueMilestone, listOpenIssues, addIssueToProject,
   getIssueBody, updateEpicIssueBody, commentChildEpicBacklink,
   listRoadmapEpics, listEpics, getEpicSubIssues, updateProjectStatus,
-  getMergedPRForIssue,
+  getMergedPRForIssue, updateEpicChecklist,
 } from '../../src/lib/github';
 
 jest.mock('../../src/lib/shell', () => ({
@@ -61,6 +61,12 @@ beforeEach(() => {
 });
 
 describe('pollIssues', () => {
+  it('strict: throws on a gh failure instead of returning [] (regression)', () => {
+    mockExec.mockReturnValue({ stdout: '', stderr: 'API rate limit exceeded', exitCode: 1 });
+    expect(pollIssues('o/r', 'ready', 10)).toEqual([]);
+    expect(() => pollIssues('o/r', 'ready', 10, { strict: true })).toThrow(/rate limit/);
+  });
+
   test('returns parsed issues with number, title, body, labels', () => {
     mockExec.mockReturnValue({
       stdout: JSON.stringify([
@@ -1241,5 +1247,98 @@ describe('getMergedPRForIssue', () => {
 
     expect(getMergedPRForIssue('owner/repo', 7)).toBe('https://github.com/owner/repo/pull/13');
     expect(mockExec).toHaveBeenLastCalledWith(expect.stringContaining('--limit 100'));
+  });
+});
+
+describe('updateEpicChecklist', () => {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+
+  /** Stateful fake of `gh issue view/edit` for one epic body. */
+  function fakeEpicStore(initialBody: string, onEdit?: (written: string, editCount: number) => string) {
+    const store = { body: initialBody, edits: 0 };
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('gh issue view')) {
+        return {
+          stdout: JSON.stringify({ number: 50, title: 'Epic', body: store.body, labels: [], comments: [] }),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (cmd.startsWith('gh issue edit')) {
+        const file = cmd.match(/--body-file "([^"]+)"/)![1];
+        const written = readFileSync(file, 'utf-8');
+        store.edits += 1;
+        store.body = onEdit ? onEdit(written, store.edits) : written;
+        return { stdout: '', stderr: '', exitCode: 0 };
+      }
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    return store;
+  }
+
+  test('flips the box and verifies with a single write', () => {
+    const store = fakeEpicStore('## Ordered Work\n\n- [ ] #10\n- [ ] #11');
+    const sleep = jest.fn();
+
+    updateEpicChecklist('owner/repo', 50, 10, true, { sleep });
+
+    expect(store.body).toBe('## Ordered Work\n\n- [x] #10\n- [ ] #11');
+    expect(store.edits).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  test('re-flips when a concurrent sibling write clobbers the box', () => {
+    // A parallel worker flipping #11 lands right after our first write, based on
+    // the pre-write body — so our #10 flip is lost and must be retried.
+    const store = fakeEpicStore('- [ ] #10\n- [ ] #11', (written, editCount) =>
+      editCount === 1 ? '- [ ] #10\n- [x] #11' : written,
+    );
+    const sleep = jest.fn();
+
+    updateEpicChecklist('owner/repo', 50, 10, true, { sleep });
+
+    expect(store.body).toBe('- [x] #10\n- [x] #11');
+    expect(store.edits).toBe(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  test('throws after three attempts when the flip never sticks', () => {
+    const store = fakeEpicStore('- [ ] #10', () => '- [ ] #10');
+    const sleep = jest.fn();
+
+    expect(() => updateEpicChecklist('owner/repo', 50, 10, true, { sleep }))
+      .toThrow(/after 3 attempts/);
+    expect(store.edits).toBe(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  test('retries when the write itself fails', () => {
+    const store = { body: '- [ ] #10', edits: 0 };
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('gh issue view')) {
+        return { stdout: JSON.stringify({ number: 50, title: 'Epic', body: store.body, labels: [], comments: [] }), stderr: '', exitCode: 0 };
+      }
+      store.edits += 1;
+      if (store.edits === 1) return { stdout: '', stderr: 'HTTP 502', exitCode: 1 };
+      store.body = readFileSync(cmd.match(/--body-file "([^"]+)"/)![1], 'utf-8');
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+
+    updateEpicChecklist('owner/repo', 50, 10, true, { sleep: jest.fn() });
+
+    expect(store.body).toBe('- [x] #10');
+    expect(store.edits).toBe(2);
+  });
+
+  test('is a no-op when the box is already in the requested state', () => {
+    const store = fakeEpicStore('- [x] #10');
+    updateEpicChecklist('owner/repo', 50, 10, true, { sleep: jest.fn() });
+    expect(store.edits).toBe(0);
+  });
+
+  test('throws when the sub-issue line is missing', () => {
+    fakeEpicStore('- [ ] #11');
+    expect(() => updateEpicChecklist('owner/repo', 50, 10, true, { sleep: jest.fn() }))
+      .toThrow(/no longer contains a checklist line for sub-issue #10/);
   });
 });

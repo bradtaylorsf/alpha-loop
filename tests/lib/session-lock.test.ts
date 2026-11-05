@@ -182,6 +182,42 @@ describe('session lock', () => {
     expect((thrown as SessionLockError).message).toContain('Could not reclaim');
   });
 
+  test('reclaiming never deletes a fresh lock a concurrent run created after the stale read', () => {
+    mkdirSync(sessionDir, { recursive: true });
+    const lockBody = (token: string, pid: number) => JSON.stringify({
+      version: 1,
+      sessionName: 'session/epic-591-support',
+      pid,
+      hostname: 'host',
+      cwd: sessionDir,
+      startedAt: '2026-08-07T03:12:11.000Z',
+      token,
+    }) + '\n';
+    writeFileSync(sessionLockPath(sessionDir), lockBody('stale-token', 999999));
+
+    // Between our read of the stale lock and the reclaim, a rival run
+    // reclaims it first and writes its own lock.
+    let rivalWrote = false;
+    let thrown: unknown;
+    try {
+      acquireSessionLock(sessionDir, 'session/epic-591-support', {
+        isPidAlive: (pid) => {
+          if (pid === 999999 && !rivalWrote) {
+            rivalWrote = true;
+            writeFileSync(sessionLockPath(sessionDir), lockBody('rival-token', 4242));
+          }
+          return pid !== 999999;
+        },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(SessionLockError);
+    expect((thrown as SessionLockError).message).toContain('Could not reclaim');
+    expect(JSON.parse(readFileSync(sessionLockPath(sessionDir), 'utf-8')).token).toBe('rival-token');
+  });
+
   test('release refuses when the lock was taken over by another run', () => {
     const lock = acquireSessionLock(sessionDir, 'session/epic-591-support');
     const takenOver = acquireSessionLock(sessionDir, 'session/epic-591-support', {
