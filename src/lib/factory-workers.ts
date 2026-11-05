@@ -158,6 +158,7 @@ type StartArgs = {
   issue?: number;
   ideaId?: string;
   workerDir: string;
+  githubBudgetPath: string;
   args: string[];
   spawnImpl: SpawnImpl;
   /** null: signal only the direct child. Defaults to process-group kill with the real spawn. */
@@ -197,7 +198,11 @@ function startWorker(start: StartArgs): WorkerHandle {
     child = start.spawnImpl(process.execPath, start.args, {
       cwd: process.cwd(),
       stdio: ['ignore', logFd, logFd],
-      env: { ...process.env, ALPHA_LOOP_FACTORY_WORKER: start.id },
+      env: {
+        ...process.env,
+        ALPHA_LOOP_FACTORY_WORKER: start.id,
+        ALPHA_LOOP_SHARED_GH_BUDGET: start.githubBudgetPath,
+      },
       detached: true,
     });
   } catch (err) {
@@ -302,6 +307,7 @@ export function spawnDeveloperWorker(opts: {
   ];
   return startWorker({
     id, role: 'developer', issue: opts.issue, workerDir, args,
+    githubBudgetPath: join(opts.paths.stateDir, 'gh-budget.json'),
     spawnImpl: opts.spawnImpl ?? spawn,
     killGroup: resolveKillGroup(opts.spawnImpl, opts.killGroup),
     now,
@@ -342,6 +348,7 @@ export function spawnPmWorker(opts: {
   const args = [...process.execArgv, process.argv[1], 'factory', 'pm-worker', '--context', contextPath];
   return startWorker({
     id, role: 'pm', ideaId: opts.idea.id, workerDir, args,
+    githubBudgetPath: join(opts.paths.stateDir, 'gh-budget.json'),
     spawnImpl: opts.spawnImpl ?? spawn,
     killGroup: resolveKillGroup(opts.spawnImpl, opts.killGroup),
     now,

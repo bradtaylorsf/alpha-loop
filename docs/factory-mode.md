@@ -186,6 +186,13 @@ A blocker is asked once per key and is not repeated while the question is still 
   atomic rename. Two reclaimers can never both win.
 - **Shared `.git`.** Worktree creation, fetch and prune run under a repo-level file lock, so parallel
   workers do not fail on `.git` ref locks.
+- **Shared GitHub mutation budget.** The supervisor, developer workers and PM worker use one
+  `gh-budget.json` under `state_dir`, enforcing a 750 ms gap between mutation admissions across
+  processes. The factory sets `ALPHA_LOOP_SHARED_GH_BUDGET` to the absolute path for its run and its
+  workers, overriding any inherited value, and restores the supervisor's previous value on exit.
+  A separate `gh-budget.json.lock` protects atomic timestamp updates; it is released before waiting
+  or running `gh`. Failed mutation attempts still consume a slot. An unreadable or malformed budget,
+  failed write or lock timeout stops the mutation with an error.
 - **Single writer.** Workers never write `inbox.md` or `questions.md`. They return results as JSON,
   and the supervisor writes both files atomically, re-reading them first so your edits are kept.
 - **Workers skip shared setup.** Asset sync, context refresh and preflight run once in the supervisor,
@@ -196,6 +203,33 @@ A blocker is asked once per key and is not repeated while the question is still 
   not counted as failures and raise no questions.
 - **Timeouts.** A developer worker past `worker_timeout_minutes` gets SIGTERM, then SIGKILL 30 s later.
   Its lease is released and it is recorded as a failure with a `dev:N:failed` question.
+
+Other Alpha Loop processes can join the same mutation budget by setting the environment variable
+to the same absolute path (use your configured `state_dir` if different):
+
+```bash
+ALPHA_LOOP_SHARED_GH_BUDGET="$PWD/.alpha-loop/factory/gh-budget.json" alpha-loop run --once
+```
+
+Without this variable, mutation pacing stays local to each process. Read-only `ghExec` calls do not
+read or update the shared file. Primary quota headers and project metadata caches remain local to
+each process. A critical primary quota reset wait logs one notification for the full delay and sleeps
+in chunks of at most 60 seconds, including any final remainder. Factory dry runs do not set the shared
+budget variable or create the budget file.
+
+### Verify the shared GitHub budget (#444)
+
+Run the limiter, worker, supervisor, and file-lock suites, then build:
+
+```bash
+pnpm test -- --runTestsByPath tests/lib/rate-limit.test.ts tests/lib/factory-workers.test.ts tests/lib/factory.test.ts tests/lib/lease.test.ts && pnpm build
+```
+
+The `--` after `pnpm test` forwards `--runTestsByPath` to Jest. With this repository's pnpm 9,
+omitting it fails with `Unknown option: 'runTestsByPath'` before any tests run. Use the complete
+command above in the issue's generated verification plan. These suites use temporary files and
+injected time to verify mutation pacing, contention, worker environments, and long waits without
+real sleeps or GitHub mutations.
 
 ## Configuration
 
@@ -231,7 +265,8 @@ factory:
 
 ## Known limits (tracked in epic #454)
 
-- GitHub rate-limit accounting is still per process (#444).
+- Primary GitHub quota tracking is per process; only mutation pacing is shared. Direct `gh` calls
+  outside Alpha Loop's `ghExec` wrapper do not participate in this budget.
 - A PR that falls behind the base branch waits; auto-update is #445.
 - Issues stranded `in-progress` by a crashed worker are not reclaimed automatically yet (#446).
 - There is no independent reviewer role or post-merge QA role yet (#450, #451).

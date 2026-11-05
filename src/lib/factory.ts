@@ -1674,5 +1674,13 @@ export async function runFactory(
     ...overrides,
   };
   if (run.dryRun) return dryRunFactory(config, run, actions);
-  return superviseFactory(config, run, actions, options);
+  const previousBudget = process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+  process.env.ALPHA_LOOP_SHARED_GH_BUDGET = join(run.paths.stateDir, 'gh-budget.json');
+  try {
+    // Keep supervisor mutations (answers and shipping) on the workers' clock.
+    return await superviseFactory(config, run, actions, options);
+  } finally {
+    if (previousBudget === undefined) delete process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+    else process.env.ALPHA_LOOP_SHARED_GH_BUDGET = previousBudget;
+  }
 }
