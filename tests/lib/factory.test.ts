@@ -382,6 +382,37 @@ describe('runFactory — reaping developers', () => {
     expect(h.state().lastPlan.skipped).toEqual([expect.objectContaining({ issue: 2, reason: 'failed' })]);
   });
 
+  it('does not re-dispatch an issue that paused (waiting) earlier in this run', async () => {
+    const h = harness({ developers: 1, ship: { enabled: false }, pm: { enabled: false } });
+    h.actions.pollReady.mockReturnValue([issue(2)]);
+    h.onTick((n) => {
+      if (n === 1) h.devs[0].finish({ exitCode: 1, result: { issueNumber: 2, status: 'waiting', failures: [], sessionPrUrl: null } });
+    });
+
+    await h.run({ maxTicks: 3 });
+
+    expect(h.actions.spawnDeveloper).toHaveBeenCalledTimes(1);
+    expect(h.questions().map((q) => q.key)).toEqual(['dev:2:waiting']);
+  });
+
+  it('a waiting result from a worker stopped at shutdown raises no question', async () => {
+    const h = harness({ developers: 1, ship: { enabled: false }, pm: { enabled: false } });
+    h.actions.pollReady.mockReturnValue([issue(5)]);
+    h.actions.spawnDeveloper.mockImplementation((req: { issue: number }) => {
+      const w = fakeWorker(`dev-${req.issue}`, 'developer', { issue: req.issue }, (_signal, finish) =>
+        finish({ exitCode: 1, result: { issueNumber: req.issue, status: 'waiting', failures: [], sessionPrUrl: null } }));
+      h.devs.push(w);
+      return w.handle;
+    });
+    const controller = new AbortController();
+    h.onTick((n) => { if (n === 1) controller.abort(); });
+
+    await runFactory(h.config, { signal: controller.signal }, h.actions as unknown as FactoryActions);
+
+    expect(h.devs[0].kills).toEqual(['SIGTERM']);
+    expect(h.questions()).toEqual([]);
+  });
+
   it('kills a worker that exceeds the timeout (SIGTERM, then SIGKILL) and records a failure', async () => {
     const h = harness({ developers: 1, workerTimeoutMinutes: 1, ship: { enabled: false }, pm: { enabled: false } });
     h.actions.pollReady.mockReturnValueOnce([issue(7)]).mockReturnValue([]);

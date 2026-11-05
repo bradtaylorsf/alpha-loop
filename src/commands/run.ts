@@ -1117,8 +1117,13 @@ async function executeSessionRun(
     },
   });
 
-  const capacityDecision = evaluateSessionCapacityPolicy(config, { excludeSessionId: session.id });
-  if (!decisionAllowed(capacityDecision)) {
+  // Factory workers skip the session cap: the supervisor already bounds
+  // concurrency with --developers, and stale manifests from crashed workers
+  // would otherwise pause every new worker.
+  const capacityDecision = options.factoryWorker !== undefined
+    ? null
+    : evaluateSessionCapacityPolicy(config, { excludeSessionId: session.id });
+  if (capacityDecision && !decisionAllowed(capacityDecision)) {
     recordSessionPolicyDecision(session, capacityDecision);
     transitionSessionStatus(session, 'human_input_requested', 'human_input_requested', {
       lastEventId: capacityDecision.id,

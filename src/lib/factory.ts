@@ -925,7 +925,7 @@ async function superviseFactory(
     lastWorkerFinishedMs = actions.now().getTime();
     const outcome = classifyDeveloperExit(w, factory.workerTimeoutMinutes);
     const n = w.issue;
-    if (interrupted && outcome.status === 'failure') {
+    if (interrupted && outcome.status !== 'success') {
       record('worker.stopped', { workerId: w.handle.id, issue: n, exitCode: w.exit?.exitCode ?? null });
       return;
     }
@@ -943,6 +943,9 @@ async function superviseFactory(
       log.success(`Factory: #${n} finished${outcome.prUrl ? ` — ${outcome.prUrl}` : ''}`);
     } else if (outcome.status === 'waiting') {
       counts.waiting += 1;
+      // Like a failure, a paused issue is not re-dispatched until its question
+      // is answered; otherwise the planner picks it again on the next tick.
+      failedThisRun.add(n);
       record('worker.waiting', { workerId: w.handle.id, issue: n });
       ask({
         role: 'developer',
