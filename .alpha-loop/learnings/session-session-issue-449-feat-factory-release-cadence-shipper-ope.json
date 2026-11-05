@@ -1,0 +1,89 @@
+{
+  "name": "session/issue-449-feat-factory-release-cadence-shipper-ope",
+  "branch": "session/issue-449-feat-factory-release-cadence-shipper-ope",
+  "completed": "2026-11-05T10:34:04.571Z",
+  "results": [
+    {
+      "issueNum": 449,
+      "title": "feat(factory): release cadence — shipper opens the release PR from its own worktree",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/466",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1141,
+      "filesChanged": 4
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 85657,
+      "tokens_out": 65890,
+      "cost_usd": 0,
+      "wall_time_s": 265.348,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:08:00.754Z",
+      "issue_num": 449
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 312157,
+      "tokens_out": 240121,
+      "cost_usd": 0,
+      "wall_time_s": 628.853,
+      "tool_calls": 0,
+      "tool_errors": 1,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:12:26.560Z",
+      "issue_num": 449
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 112449,
+      "tokens_out": 86499,
+      "cost_usd": 0,
+      "wall_time_s": 216.037,
+      "tool_calls": 0,
+      "tool_errors": 1,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:23:07.557Z",
+      "issue_num": 449
+    },
+    {
+      "stage": "learn",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 5789,
+      "tokens_out": 4453,
+      "cost_usd": 0,
+      "wall_time_s": 28.89,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:27:08.731Z",
+      "issue_num": 449
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 20449,
+      "tokens_out": 15730,
+      "cost_usd": 0,
+      "wall_time_s": 52.148,
+      "tool_calls": 0,
+      "tool_errors": 1,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:27:08.760Z",
+      "issue_num": 449
+    }
+  ]
+}
