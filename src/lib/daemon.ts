@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { decisionAllowed, evaluateIssuePolicy, evaluateSessionCapacityPolicy, type AutomationPolicyDecision } from './automation-policy.js';
-import type { Config, DaemonConfig, DaemonMode } from './config.js';
+import { resolveFactoryPaths, type Config, type DaemonConfig, type DaemonMode } from './config.js';
 import { emitLifecycleEvent, type EventDeliverySummary } from './events.js';
 import type { Issue } from './github.js';
 import { hasLabel } from './labels.js';
-import { defaultPidAlive, reclaimStaleLockFile, releaseLockFileIfOwned } from './lease.js';
+import { defaultPidAlive, isLeaseStale, leasePath, readLease, reclaimStaleLockFile, releaseLockFileIfOwned } from './lease.js';
 import { log } from './logger.js';
 import {
   loadSessionManifest,
@@ -211,6 +211,44 @@ function lockIsStale(lock: DaemonLockPayload | null, daemon: DaemonConfig, now: 
   const updated = Date.parse(lock.updatedAt || lock.startedAt);
   if (!Number.isFinite(updated)) return true;
   return now.getTime() - updated > daemon.lock.staleAfterSeconds * 1000;
+}
+
+/** Inspect the competing lock without reclaiming or refreshing it. */
+export function assertNoLiveDaemon(
+  daemon: DaemonConfig,
+  options: { now?: Date; isPidAlive?: (pid: number) => boolean; cwd?: string } = {},
+): void {
+  const lockPath = resolve(options.cwd ?? process.cwd(), daemonLockPath(daemon, options.cwd));
+  let raw: string;
+  try {
+    raw = readFileSync(lockPath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+  const lock = parseLock(raw);
+  if (!lock || lockIsStale(lock, daemon, options.now ?? new Date(), options.isPidAlive ?? defaultPidAlive)) {
+    log.warn(`Ignoring stale daemon lock: ${lockPath}`);
+    return;
+  }
+  throw new DaemonLockError(
+    lockPath,
+    `Cannot start alpha-loop factory: alpha-loop daemon is already running (pid ${lock.pid}). Lock: ${lockPath}`,
+  );
+}
+
+function assertNoLiveFactory(config: Config, options: { now: Date; isPidAlive?: (pid: number) => boolean }): void {
+  const { stateDir } = resolveFactoryPaths(config);
+  const lockPath = leasePath(stateDir, 'factory');
+  const lease = readLease(stateDir, 'factory');
+  if (!lease || isLeaseStale(lease, options)) {
+    if (existsSync(lockPath)) log.warn(`Ignoring stale factory lock: ${lockPath}`);
+    return;
+  }
+  throw new DaemonLockError(
+    lockPath,
+    `Cannot start alpha-loop daemon: alpha-loop factory is already running (pid ${lease.pid}). Lock: ${lockPath}`,
+  );
 }
 
 export function acquireDaemonLock(
@@ -698,12 +736,15 @@ export async function runDaemonLoop(
   try {
     if (shouldAcquireLock) {
       lock = acquireDaemonLock(config, daemon, { now: now(), isPidAlive: options.isPidAlive });
-      if (daemon.lock.staleAfterSeconds > 0) {
-        const heartbeatMs = Math.max(1000, Math.min(60_000, Math.floor(daemon.lock.staleAfterSeconds * 500)));
-        lockHeartbeat = setInterval(() => {
-          refreshDaemonLock(lock);
-        }, heartbeatMs);
-      }
+    }
+    // Publish our lock first so overlapping starts cannot both pass their check.
+    // Even --no-lock must respect an existing factory supervisor lease.
+    assertNoLiveFactory(config, { now: now(), isPidAlive: options.isPidAlive });
+    if (lock && daemon.lock.staleAfterSeconds > 0) {
+      const heartbeatMs = Math.max(1000, Math.min(60_000, Math.floor(daemon.lock.staleAfterSeconds * 500)));
+      lockHeartbeat = setInterval(() => {
+        refreshDaemonLock(lock);
+      }, heartbeatMs);
     }
 
     writeDaemonState(config, daemon, {
