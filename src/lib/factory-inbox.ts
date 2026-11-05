@@ -189,8 +189,8 @@ function parseEntries(lines: string[]): InboxEntry[] {
       continue;
     }
 
-    if (current && CONTINUATION_RE.test(line)) {
-      current.continuation.push(line.trim());
+    if (current && (CONTINUATION_RE.test(line) || (current.meta.source === 'qa' && /^ {2}/.test(line)))) {
+      current.continuation.push(current.meta.source === 'qa' ? line.slice(2) : line.trim());
       continue;
     }
     finish();
@@ -270,7 +270,21 @@ export function appendIdea(path: string, text: string): InboxIdea {
   return withInboxLock(path, () => appendIdeaLocked(path, parts));
 }
 
-function appendIdeaLocked(path: string, parts: string[]): InboxIdea {
+/** Check and append under the same lock; tagged failures stay deduplicated after PM processing. */
+export function appendTaggedIdea(path: string, text: string, tag: { source: string; fingerprint: string }): { idea: InboxIdea; created: boolean } {
+  const parts = text.replace(/\r\n?/g, '\n').trim().split('\n');
+  if (!parts[0]?.trim() || !/^[A-Za-z0-9_-]+$/.test(tag.source) || !/^[a-f0-9]{64}$/.test(tag.fingerprint)) {
+    throw new Error('Invalid tagged idea');
+  }
+  return withInboxLock(path, () => {
+    ensureInboxFile(path);
+    const existing = readInbox(path).find(idea => idea.meta.source === tag.source && idea.meta.fingerprint === tag.fingerprint);
+    if (existing) return { idea: existing, created: false };
+    return { idea: appendIdeaLocked(path, parts, tag), created: true };
+  });
+}
+
+function appendIdeaLocked(path: string, parts: string[], meta: Record<string, string> = {}): InboxIdea {
   const { lines, eol } = readLines(path);
   const taken = new Set(parseEntries(lines).map((entry) => entry.idea.id));
   const fullText = parts.join('\n');
@@ -279,13 +293,13 @@ function appendIdeaLocked(path: string, parts: string[]): InboxIdea {
 
   // Drop trailing blank lines, then append after exactly one separating newline.
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
-  const bullet = renderBullet({ indent: '', marker: '-', head: parts[0] }, id, 'pending', '', {});
+  const bullet = renderBullet({ indent: '', marker: '-', head: parts[0] }, id, 'pending', '', meta);
   const line = lines.length;
-  lines.push(bullet, ...parts.slice(1).map((part) => `  ${oneLine(part)}`), '');
+  lines.push(bullet, ...parts.slice(1).map((part) => `  ${meta.source === 'qa' ? part : oneLine(part)}`), '');
   writeFileAtomic(path, lines.join(eol));
 
   return parseInbox(lines.join('\n')).find((idea) => idea.line === line)
-    ?? { id, status: 'pending', text: fullText, note: '', line, meta: {} };
+    ?? { id, status: 'pending', text: fullText, note: '', line, meta };
 }
 
 function patchedBullet(entry: InboxEntry, patch: { status: IdeaStatus; note?: string; meta?: Record<string, string> }, now: Date): string {

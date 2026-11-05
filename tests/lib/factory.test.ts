@@ -60,7 +60,7 @@ type FakeWorker = { handle: WorkerHandle; finish: (exit: WorkerExit) => void; ki
 
 function fakeWorker(
   id: string,
-  role: 'developer' | 'pm',
+  role: 'developer' | 'pm' | 'qa',
   extra: { issue?: number; ideaId?: string },
   onKill?: (signal: string, finish: (exit: WorkerExit) => void) => void,
 ): FakeWorker {
@@ -116,6 +116,7 @@ type Harness = {
   actions: MockActions;
   devs: FakeWorker[];
   pms: FakeWorker[];
+  qas: FakeWorker[];
   /** Hook run on each tick sleep (1-based count of tick sleeps). */
   onTick: (fn: (n: number) => void | Promise<void>) => void;
   clock: () => number;
@@ -126,18 +127,20 @@ type Harness = {
 
 let root: string;
 
-function harness(factory: Partial<Omit<FactoryConfig, 'pm' | 'ship'>> & { pm?: Partial<FactoryConfig['pm']>; ship?: Partial<FactoryConfig['ship']> } = {}): Harness {
+function harness(factory: Partial<Omit<FactoryConfig, 'pm' | 'ship' | 'qa'>> & { qa?: Partial<FactoryConfig['qa']>; pm?: Partial<FactoryConfig['pm']>; ship?: Partial<FactoryConfig['ship']> } = {}): Harness {
   let clock = T0;
   let tickSleeps = 0;
   let tickHook: (n: number) => void | Promise<void> = () => {};
   const devs: FakeWorker[] = [];
   const pms: FakeWorker[] = [];
-  const { pm, ship, ...rest } = factory;
+  const qas: FakeWorker[] = [];
+  const { pm, ship, qa, ...rest } = factory;
   const factoryConfig: FactoryConfig = {
     ...DEFAULT_FACTORY_CONFIG,
     stateDir: join(root, 'factory'),
     spawnStaggerSeconds: 0,
     ...rest,
+    qa: { ...DEFAULT_FACTORY_CONFIG.qa, enabled: false, ...qa },
     pm: { ...DEFAULT_FACTORY_CONFIG.pm, ...(pm ?? {}) },
     ship: { ...DEFAULT_FACTORY_CONFIG.ship, ...(ship ?? {}) },
   };
@@ -173,6 +176,15 @@ function harness(factory: Partial<Omit<FactoryConfig, 'pm' | 'ship'>> & { pm?: P
       pms.push(w);
       return w.handle;
     }),
+    spawnQa: jest.fn(() => {
+      const w = fakeWorker(`qa-${qas.length}`, 'qa', {});
+      w.handle.resultPath = join(paths.workersDir, w.handle.id, 'result.json');
+      qas.push(w);
+      return w.handle;
+    }),
+    qaProcessAlive: jest.fn(() => false),
+    killQaProcess: jest.fn(),
+    cleanupQa: jest.fn(() => []),
     listShippable: jest.fn((): ShipPr[] => []),
     updateBranch: jest.fn(() => ({ updated: true, conflict: false })),
     merge: jest.fn(() => ({ merged: true })),
@@ -189,6 +201,7 @@ function harness(factory: Partial<Omit<FactoryConfig, 'pm' | 'ship'>> & { pm?: P
     actions,
     devs,
     pms,
+    qas,
     onTick: (fn) => { tickHook = fn; },
     clock: () => clock,
     run: (options = {}) => runFactory(config, { handleSignals: false, ...options }, actions as unknown as FactoryActions),
@@ -1712,5 +1725,201 @@ describe('default actions', () => {
     const config = { repo: 'o/r', labelReady: 'ready', factory: DEFAULT_FACTORY_CONFIG } as unknown as Config;
     const actions = createDefaultFactoryActions(config, { paths: resolveFactoryPaths(config), baseBranch: 'master', shipMerge: false, dryRun: false });
     expect(actions.isIssueClosed(399)).toBe(true);
+  });
+});
+
+describe('factory QA lifecycle', () => {
+  const qaResult = (status: 'success' | 'failure' = 'success', startedAt = new Date(T0).toISOString()) => ({
+    version: 1, status, baseBranch: 'master', testedSha: 'a'.repeat(40), lastGreenSha: null,
+    startedAt, completedAt: startedAt, commits: [], historyKind: 'recent', cleanupErrors: [],
+    ...(status === 'failure' ? { failure: { command: 'pnpm build', exitCode: 1, output: 'Error: regression' } } : {}),
+  });
+  const finishQa = (h: Harness, status: 'success' | 'failure' = 'success') => {
+    const w = h.qas.at(-1)!;
+    w.finish({ exitCode: 0, result: qaResult(status, new Date(h.clock()).toISOString()) });
+  };
+  const cadence = (h: Harness) => h.state().memory!.qa!['refs/heads/master'];
+
+  it('runs an initial check without using developer slots and drains it in --once', async () => {
+    const h = harness({ qa: { enabled: true }, pm: { enabled: false }, ship: { enabled: false }, developers: 1 });
+    h.actions.pollReady.mockReturnValue([issue(1)]);
+    h.onTick(() => {
+      expect(h.qas).toHaveLength(1);
+      expect(h.devs).toHaveLength(1);
+      finishQa(h);
+      h.devs[0].finish({ exitCode: 0, result: { status: 'success' } });
+    });
+    const summary = await h.run({ once: true });
+    expect(summary.status).toBe('drained');
+    expect(h.actions.spawnQa).toHaveBeenCalledWith({ baseBranch: 'master', merges: 0 });
+    expect(cadence(h).consumed).toEqual(['qa-0']);
+  });
+
+  it('runs by interval alone, and --until-idle waits for the initial check', async () => {
+    const h = harness({ qa: { enabled: true, intervalMinutes: 1 }, pm: { enabled: false }, ship: { enabled: false } });
+    h.onTick(n => { if (n === 1 || n === 4) finishQa(h); });
+    await h.run({ maxTicks: 4 });
+    expect(h.qas).toHaveLength(2);
+    const next = harness({ qa: { enabled: true }, pm: { enabled: false }, ship: { enabled: false } });
+    next.onTick(() => finishQa(next));
+    await next.run({ untilIdle: true });
+    // A recent baseline/cadence is remembered across supervisor restarts.
+    expect(next.qas).toHaveLength(0);
+  });
+
+  it('exits --until-idle after a check that lasts longer than the QA interval', async () => {
+    const h = harness({ qa: { enabled: true, intervalMinutes: 1 }, pm: { enabled: false }, ship: { enabled: false } });
+    const abort = new AbortController();
+    h.onTick(n => {
+      if (n === 2) h.qas[0].finish({ exitCode: 0, result: {
+        ...qaResult(), completedAt: new Date(h.clock()).toISOString(),
+      } });
+      // Bound the regression: previously another interval check kept it alive.
+      if (n === 3) abort.abort();
+    });
+    const summary = await h.run({ untilIdle: true, signal: abort.signal });
+    expect(summary.status).toBe('idle');
+    expect(h.qas).toHaveLength(1);
+  });
+
+  it('counts only confirmed merges and runs after shipping at equality', async () => {
+    const h = harness({ qa: { enabled: true, afterMerges: 2 }, pm: { enabled: false }, ship: { merge: true } });
+    own(h, 1, 2, 3);
+    writeFileSync(join(h.paths.stateDir, 'qa.json'), JSON.stringify({ version: 1, baseBranch: 'master', lastQaAt: new Date(T0).toISOString(), lastGreenSha: null }));
+    h.actions.listShippable.mockReturnValue([shipPr(1), shipPr(2), shipPr(3)]);
+    h.actions.merge.mockImplementation((pr: ShipPr) => ({ merged: pr.number !== 2 }));
+    h.onTick(() => finishQa(h));
+    const summary = await h.run({ once: true });
+    expect(summary.counts.merged).toBe(2);
+    expect(h.actions.spawnQa).toHaveBeenCalledWith({ baseBranch: 'master', merges: 2 });
+    expect(cadence(h).mergesSinceLastQa).toBe(0);
+  });
+
+  it('preserves merges arriving during QA and starts the next check while draining', async () => {
+    const h = harness({ qa: { enabled: true, afterMerges: 1 }, pm: { enabled: false }, ship: { merge: true, intervalSeconds: 30 } });
+    own(h, 1, 2);
+    h.actions.listShippable.mockReturnValue([shipPr(1), shipPr(2, { checks: 'pending' })]);
+    h.onTick(n => {
+      if (n === 1) h.actions.listShippable.mockReturnValue([shipPr(2)]);
+      if (n === 2) finishQa(h);
+      if (n === 3) {
+        expect(h.actions.spawnQa).toHaveBeenLastCalledWith({ baseBranch: 'master', merges: 1 });
+        finishQa(h);
+      }
+    });
+    await h.run({ maxTicks: 2 });
+    expect(h.qas).toHaveLength(2);
+    expect(cadence(h).mergesSinceLastQa).toBe(0);
+  });
+
+  it('reaps a failure before PM intake, retaining QA metadata when the PM completes it', async () => {
+    const h = harness({ qa: { enabled: true }, ship: { enabled: false } });
+    h.onTick(n => {
+      if (n === 1) finishQa(h, 'failure');
+      if (n === 2) h.pms[0].finish({ exitCode: 0, result: { status: 'success', decision: { decision: 'issue' }, createdIssues: [451], note: 'filed bug' } });
+    });
+    await h.run({ maxTicks: 3 });
+    expect(h.actions.spawnPm).toHaveBeenCalledTimes(1);
+    expect(h.actions.spawnPm.mock.calls[0][0].idea.text).toContain('Bug: QA failed');
+    const ideas = readInbox(h.paths.inboxPath);
+    expect(ideas).toHaveLength(1);
+    expect(ideas[0].status).toBe('done');
+    expect(ideas[0].meta.source).toBe('qa');
+    expect(ideas[0].meta.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('does not consume merges when spawning fails', async () => {
+    const h = harness({ qa: { enabled: true, afterMerges: 1 }, pm: { enabled: false }, ship: { merge: true } });
+    own(h, 1);
+    h.actions.listShippable.mockReturnValue([shipPr(1)]);
+    h.actions.spawnQa.mockImplementation(() => { throw new Error('spawn failed'); });
+    await h.run({ once: true });
+    expect(cadence(h).mergesSinceLastQa).toBe(1);
+    expect(cadence(h).lastQaAt).toBeNull();
+    expect(h.state().recent.some(e => e.type === 'qa.spawn-failed')).toBe(true);
+  });
+
+  it('kills timed-out QA using the worker group and cleans abandoned worktrees', async () => {
+    const h = harness({ qa: { enabled: true }, workerTimeoutMinutes: 1, pm: { enabled: false }, ship: { enabled: false } });
+    h.onTick(n => {
+      if (n === 4) {
+        expect(h.qas[0].kills).toContain('SIGTERM');
+        h.qas[0].finish({ exitCode: 1, result: null, error: 'killed' });
+      }
+    });
+    await h.run({ once: true });
+    expect(h.qas[0].kills).toEqual(['SIGTERM']);
+    expect(h.state().recent.some(e => e.type === 'qa.worker-failed')).toBe(true);
+  });
+
+  it('includes QA in cancellation and never files an interrupted check as a bug', async () => {
+    const h = harness({ qa: { enabled: true }, pm: { enabled: false }, ship: { enabled: false } });
+    const abort = new AbortController();
+    h.actions.spawnQa.mockImplementation(() => {
+      const w = fakeWorker('qa-cancel', 'qa', {}, (_, finish) => finish({ exitCode: 1, result: null, error: 'terminated' }));
+      h.qas.push(w);
+      return w.handle;
+    });
+    h.onTick(() => abort.abort());
+    await h.run({ signal: abort.signal });
+    expect(h.qas[0].kills).toEqual(['SIGTERM']);
+    expect(readInbox(h.paths.inboxPath)).toEqual([]);
+    expect(h.state().recent.some(e => e.type === 'qa.stopped')).toBe(true);
+  });
+
+  it('does no QA work or writes in dry-run, even when initially due', async () => {
+    const h = harness({ qa: { enabled: true } });
+    await h.run({ dryRun: true });
+    expect(h.actions.spawnQa).not.toHaveBeenCalled();
+    expect(h.actions.cleanupQa).not.toHaveBeenCalled();
+    expect(existsSync(h.paths.stateDir)).toBe(false);
+  });
+
+  function orphan(h: Harness, result: unknown, pid = 123456): string {
+    const id = 'qa-orphan';
+    const dir = join(h.paths.workersDir, id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'context.json'), JSON.stringify({ version: 1, workerId: id, baseBranch: 'master', merges: 0,
+      resultPath: join(dir, 'result.json'), startedAt: new Date(T0).toISOString(), ownerPid: 999999, hostname: hostname() }));
+    writeFileSync(join(dir, 'process.json'), JSON.stringify({ pid }));
+    if (result !== null) writeFileSync(join(dir, 'result.json'), JSON.stringify(result));
+    return id;
+  }
+
+  it('recovers an unconsumed result once across restarts', async () => {
+    const h = harness({ qa: { enabled: true }, pm: { enabled: false }, ship: { enabled: false } });
+    orphan(h, qaResult('failure'));
+    await h.run({ once: true });
+    expect(h.qas).toHaveLength(0);
+    expect(readInbox(h.paths.inboxPath)).toHaveLength(1);
+    const second = harness({ qa: { enabled: true }, pm: { enabled: false }, ship: { enabled: false } });
+    await second.run({ once: true });
+    expect(second.qas).toHaveLength(0);
+    expect(readInbox(h.paths.inboxPath)).toHaveLength(1);
+    expect(cadence(second).consumed).toEqual(['qa-orphan']);
+  });
+
+  it('waits for a surviving worker before reaping its result or starting another', async () => {
+    const h = harness({ qa: { enabled: true }, pm: { enabled: false }, ship: { enabled: false } });
+    orphan(h, qaResult('failure'));
+    h.actions.qaProcessAlive.mockReturnValue(true);
+    h.onTick(() => {
+      expect(readInbox(h.paths.inboxPath)).toEqual([]);
+      expect(h.qas).toHaveLength(0);
+      h.actions.qaProcessAlive.mockReturnValue(false);
+    });
+    await h.run({ once: true });
+    expect(readInbox(h.paths.inboxPath)).toHaveLength(1);
+  });
+
+  it('cleans a dead QA worktree and retains the attempt cadence when its result is missing', async () => {
+    const h = harness({ qa: { enabled: true }, pm: { enabled: false }, ship: { enabled: false } });
+    const id = orphan(h, null);
+    mkdirSync(join(h.paths.stateDir, 'qa-worktrees', id), { recursive: true });
+    writeFileSync(join(h.paths.workersDir, id, 'attempted.json'), '{}');
+    await h.run({ once: true });
+    expect(h.actions.cleanupQa).toHaveBeenCalledWith(id);
+    expect(h.qas).toHaveLength(0);
+    expect(cadence(h).lastQaAt).toBe(new Date(T0).toISOString());
   });
 });

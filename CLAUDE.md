@@ -27,6 +27,7 @@ alpha-loop run --epic <N>        # Process an epic (sub-issues in checklist orde
 alpha-loop run --epics <ids>     # Process multiple epics in order, one session PR per epic
 alpha-loop run --epics <ids> --queue-branch-mode independent --parallel <n> # Run dependency-ready epics concurrently
 alpha-loop run --verify-only <N> # Run just the epic verification pass
+alpha-loop factory       # PM → parallel developers → shipper → post-merge QA; see docs/factory-mode.md
 alpha-loop daemon        # Run hosted daemon mode continuously
 alpha-loop daemon --mode feedback-only # Poll feedback and resume without selecting new work
 alpha-loop scan          # Generate/refresh project context
@@ -58,6 +59,7 @@ alpha-loop/
 │   ├── commands/               # Subcommand handlers
 │   │   ├── auth.ts             # Browser auth state management
 │   │   ├── daemon.ts           # Hosted daemon command
+│   │   ├── factory.ts           # Factory supervisor commands and hidden PM/QA workers
 │   │   ├── history.ts          # Session history viewer
 │   │   ├── init.ts             # Config template creation
 │   │   ├── resume.ts           # Resume stranded work from crashed sessions
@@ -73,6 +75,7 @@ alpha-loop/
 │       ├── config.ts           # YAML config loading
 │       ├── daemon.ts           # Hosted daemon scheduler, lock, and manifest recovery
 │       ├── context.ts          # Project context management
+│       ├── factory-qa.ts        # Remote-base build/smoke checks, cadence and bug evidence
 │       ├── github.ts           # GitHub API (issues, PRs, labels)
 │       ├── learning.ts         # Learning extraction/application
 │       ├── logger.ts           # Structured logging
@@ -112,6 +115,11 @@ This repo has TWO `templates/` directories with different purposes:
 When editing skills or agent prompts, make sure you're editing the right one:
 - Improving the **default starter skills** for new users → edit `templates/`
 - Improving **this repo's own** loop behavior → edit `.alpha-loop/templates/`
+
+Factory QA runs in its own child process, outside developer slots. `factory.qa` defaults to enabled,
+5 confirmed merges or 30 minutes, with an initial baseline. It runs `pnpm build` then top-level
+`smoke_test` (or `test_command`) in a fresh detached remote-base worktree. The child owns `qa.json`;
+the supervisor alone appends deduplicated bugs to the inbox. QA never invokes a coding agent.
 
 ## Architecture Principles
 

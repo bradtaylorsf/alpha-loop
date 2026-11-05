@@ -1216,6 +1216,7 @@ describe('factory config', () => {
       spawnStaggerSeconds: 0,
       maxRuntimeMinutes: 90,
       stateDir: '.factory-state',
+      qa: DEFAULT_FACTORY_CONFIG.qa,
       inboxPath: 'ideas/inbox.md',
       questionsPath: '',
       avoidOverlap: false,
@@ -1337,6 +1338,18 @@ describe('factory config', () => {
     });
     expect(config.factory?.developers).toBe(5);
     expect(config.factory?.ship.merge).toBe(false);
+  });
+
+  it('parses QA cadence and retains defaults for invalid thresholds', () => {
+    writeFileSync(join(tempDir, '.alpha-loop.yaml'), 'factory:\n  qa:\n    enabled: false\n    after_merges: 2\n    interval_minutes: 7\n');
+    expect(loadConfig().factory?.qa).toEqual({ enabled: false, afterMerges: 2, intervalMinutes: 7 });
+    for (const invalid of ['0', '-1', '1.5', 'true', '"3"', 'null']) {
+      writeFileSync(join(tempDir, '.alpha-loop.yaml'), `factory:\n  qa:\n    after_merges: ${invalid}\n    interval_minutes: ${invalid}\n`);
+      expect(loadConfig().factory?.qa).toEqual(DEFAULT_FACTORY_CONFIG.qa);
+    }
+    writeFileSync(join(tempDir, '.alpha-loop.yaml'), 'factory:\n  qa:\n    after_merges: 2\n');
+    const partial = { qa: { intervalMinutes: 9 } } as NonNullable<ReturnType<typeof loadConfig>['factory']>;
+    expect(loadConfig({ factory: partial }).factory?.qa).toEqual({ enabled: true, afterMerges: 2, intervalMinutes: 9 });
   });
 
   it('resolves default factory paths under the project root', () => {

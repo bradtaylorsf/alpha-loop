@@ -11,10 +11,11 @@ import { runFactory, type FactoryRunOptions, type FactoryState } from '../lib/fa
 import { appendIdea, readInbox } from '../lib/factory-inbox.js';
 import { runPmForIdea, type PmContext } from '../lib/factory-pm.js';
 import { answerQuestion, answeredQuestions, readQuestions, type FactoryQuestion } from '../lib/factory-questions.js';
-import { pmProgressPath, readPmWorkerContext, writeJsonAtomic, type PmWorkerProgress, type PmWorkerResult } from '../lib/factory-workers.js';
+import { pmProgressPath, readPmWorkerContext, readQaWorkerContext, writeJsonAtomic, type PmWorkerProgress, type PmWorkerResult } from '../lib/factory-workers.js';
 import { listOpenIssues } from '../lib/github.js';
-import { isLeaseStale, readLease, type LeasePayload } from '../lib/lease.js';
+import { acquireLease, releaseLease, isLeaseStale, readLease, type LeasePayload } from '../lib/lease.js';
 import { log } from '../lib/logger.js';
+import { runQa, type RunQaOptions } from '../lib/factory-qa.js';
 import { getVisionContext } from '../lib/vision.js';
 
 export type FactoryCommandOptions = {
@@ -407,4 +408,34 @@ export async function factoryPmWorkerCommand(options: { context?: string }, deps
   }
   writeResult(result);
   if (result.status !== 'success') process.exitCode = 1;
+}
+
+/** Hidden child entry point. No inbox or GitHub writes; QA state belongs to this process. */
+export function factoryQaWorkerCommand(options: { context?: string }, deps: {
+  config?: Config; runQa?: typeof runQa; exec?: RunQaOptions['exec']; now?: () => Date;
+} = {}): void {
+  let lease: ReturnType<typeof acquireLease> = null;
+  try {
+    const config = deps.config ?? loadConfig();
+    if (config.dryRun) throw new Error('QA worker cannot run in dry-run mode');
+    const paths = resolveFactoryPaths(config);
+    const ctx = readQaWorkerContext(paths, options.context ?? '');
+    writeJsonAtomic(join(paths.workersDir, ctx.workerId, 'started.json'), { pid: process.pid });
+    // An orphan surviving a supervisor crash must never overlap a new QA child.
+    lease = acquireLease(paths.stateDir, 'qa-worker', { owner: ctx.workerId, aliveOverridesTtl: true,
+      ttlSeconds: (config.factory?.workerTimeoutMinutes ?? 120) * 60 + 600 });
+    if (!lease) throw new Error('Another QA worker is still running');
+    writeJsonAtomic(join(paths.workersDir, ctx.workerId, 'attempted.json'), { at: (deps.now?.() ?? new Date()).toISOString() });
+    const result = (deps.runQa ?? runQa)({
+      projectDir: process.cwd(), stateDir: paths.stateDir, baseBranch: ctx.baseBranch, workerId: ctx.workerId,
+      smokeTest: config.smokeTest, testCommand: config.testCommand, setupCommand: config.setupCommand,
+      timeoutMinutes: config.factory?.workerTimeoutMinutes ?? 120, exec: deps.exec, now: deps.now,
+    });
+    writeJsonAtomic(ctx.resultPath, result);
+  } catch (err) {
+    log.error(`Factory QA: ${errorMessage(err)}`);
+    process.exitCode = 1;
+  } finally {
+    if (lease) releaseLease(lease);
+  }
 }

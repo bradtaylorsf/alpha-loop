@@ -9,7 +9,7 @@ questions file.
 ideas inbox ──► PM ──► GitHub issues / epics ──► planner ──► N developers (parallel worktrees)
                                                                    │ plan → build → test → review → PR
 you ◄── questions.md ◄── any role that is blocked                  ▼
-                                                      shipper ──► CI-gated merge ──► base branch
+                                                      shipper ──► CI-gated merge ──► base branch ──► QA ──► inbox
 ```
 
 GitHub stays the database. Issues are the kanban, labels are the state machine, and PRs are the
@@ -67,6 +67,7 @@ and exit code 2.
      key `dev:N:failed` with the failure messages and the worker log path. The issue is not dispatched
      again in this run until that question is answered.
    - PM results update the inbox (see below).
+   - QA failures append a deduplicated pending bug idea before PM intake.
 2. **Apply answers.** Issue questions: the answer is recorded on the issue through feedback ingest
    (falling back to a plain comment with a `<!-- factory:answer=Q-… -->` marker), the issue is
    relabeled `ready`, and `needs-human-input` and `failed` are removed. Idea questions: the idea goes
@@ -78,7 +79,8 @@ and exit code 2.
 4. **Dispatch.** The planner fills free developer slots. Each issue's lease is taken before its worker
    starts, and worker starts are spaced `spawn_stagger_seconds` apart.
 5. **Ship** every `ship.interval_seconds`, and right after any developer success.
-6. Write `state.json` and append to `events.jsonl`.
+6. **QA** checks a fresh snapshot of the remote base when its merge or time threshold is reached.
+7. Write `state.json` and append to `events.jsonl`.
 
 ### PM outcomes
 
@@ -101,6 +103,7 @@ failed attempt.
 | **PM** | Takes one inbox idea and turns it into an issue, an epic with ordered children, a duplicate or reject note, or a question for you | Child process. The agent runs in a scratch directory, so it can never edit the repo |
 | **Planner** | Picks which `ready` issues fill free developer slots | Deterministic, inside the supervisor |
 | **Developer ×N** | Runs the normal plan → implement → test → review → PR pipeline for one issue | One child process per issue (`alpha-loop run --issue N --factory-worker …`) with its own session `session/issue-N-<slug>`, worktree, and session PR |
+| **QA** | Builds and smoke-tests the remote base; sends failures to the ideas inbox for the PM | One child process, separate from developer slots, in a fresh detached worktree |
 | **Shipper** | Merges the session PRs this factory's developers finished, once CI is green and they are mergeable. Raises a question for blockers only a human can clear | Inside the supervisor, every `ship.interval_seconds` |
 
 ### How the planner chooses
@@ -176,6 +179,54 @@ This runs the shipper decision matrix and supervisor tests with mocked GitHub ac
 TypeScript. The tests cover BEHIND branch updates, fresh-CI waits, throttling, restart recovery,
 conflict questions, and report-only behavior. The script uses `pnpm exec jest` so Jest receives
 `--runTestsByPath` directly; `pnpm test --runTestsByPath ...` is rejected by pnpm 9 before tests run.
+
+## Post-merge QA
+
+QA runs an initial baseline, then after `factory.qa.after_merges` confirmed merges or
+`factory.qa.interval_minutes`, whichever comes first. It runs even when the shipper is disabled,
+so interval checks also cover changes merged elsewhere. Set `factory.qa.enabled: false` to disable
+new checks. Only one QA worker runs at a time; it does not consume a developer slot.
+
+The child fetches `origin/<base>` (including `--base` overrides), resolves the exact commit, and creates
+a detached worktree under `<state_dir>/qa-worktrees/`. Fetch, creation and removal use the existing
+Git lock. In that worktree it runs, in order:
+
+1. `pnpm install --frozen-lockfile`
+2. Top-level `setup_command`, when configured
+3. `pnpm build`
+4. Top-level `smoke_test`, or `test_command` when the smoke command is blank
+
+Checks stop on the first failure. QA never invokes a coding agent, edits source, commits, or writes to
+GitHub. The child saves the attempt time and last successful SHA in `<state_dir>/qa.json`; a failure
+keeps the previous green SHA. Switching bases invalidates that file's baseline. Cleanup runs in
+`finally`, with directory removal and Git prune as a fallback; cleanup errors are logged separately.
+
+The supervisor adds failures as pending bug ideas with the failing command, exit code, tested and
+last-green SHAs, the final 60 output lines, and first-parent commits since the last green run. This
+history includes squash and rebase merges. When no usable baseline exists, evidence explicitly labels
+recent history as a bounded fallback. The PM processes the idea through its normal issue-creation path.
+
+QA captures stdout and stderr together so evidence retains the command's output order. Ideas carry
+`source=qa` and a fingerprint of the normalized command plus the first diagnostic error line from the
+full output (before truncation). ANSI and line-ending noise are removed; echoed pnpm scripts and
+generic lifecycle summaries are ignored when diagnostics exist. If no error line is recognizable,
+QA uses the first nonempty diagnostic line, or a fixed empty-output marker. Lookup and
+append share the inbox lock; the same failure stays deduplicated across all inbox statuses and restarts,
+even if its SHA or output tail changes. PM status updates retain this metadata and multiline evidence.
+
+`state.json` remembers per-base merge counts and consumed QA results. Merges arriving during a check
+remain pending for the next check. The supervisor recovers completed results before PM intake and
+waits for surviving QA processes before starting another. A child lease also prevents overlapping
+checks. If a crash leaves an unknown worker PID, or the worker belongs to another host, the supervisor
+keeps QA pending until it can establish the process has exited; it never removes a possibly live worktree.
+
+QA uses `worker_timeout_minutes` and the same process-group shutdown as developers. `--once` and
+other drain modes wait for started checks, including another check when merges during draining reach
+the threshold. After the initial tick, `--until-idle` skips interval-only checks when the rest of the
+factory is idle, even if the previous check outlasted its interval. Merge thresholds still trigger QA.
+Interval checks do not keep a drained factory running. `--dry-run` starts no QA child and does not
+fetch, create worktrees, or modify QA state or the inbox. QA starts, outcomes,
+bug dedupe decisions and worker failures are recorded in `events.jsonl`.
 
 ## The two files you use
 
@@ -257,6 +308,10 @@ factory:
     auto_ready: true            # label PM-created issues `ready`
     max_ideas_per_tick: 1
     timeout_seconds: 600
+  qa:
+    enabled: true
+    after_merges: 5            # positive integer; confirmed factory merges only
+    interval_minutes: 30       # positive integer; either threshold triggers a check
   ship:
     enabled: true
     merge: false                # true = update behind branches and merge green PRs
@@ -272,6 +327,6 @@ factory:
 
 - GitHub rate-limit accounting is still per process (#444).
 - Issues stranded `in-progress` by a crashed worker are not reclaimed automatically yet (#446).
-- There is no independent reviewer role or post-merge QA role yet (#450, #451).
+- There is no independent reviewer role yet (#450).
 - On repos where the protected branch requires an approving review and the loop opens PRs under your
   own account, the shipper cannot merge into that branch without `ship.admin_merge`. It asks instead.

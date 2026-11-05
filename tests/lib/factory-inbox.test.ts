@@ -3,6 +3,7 @@ import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   appendIdea,
+  appendTaggedIdea,
   ensureInboxFile,
   ideaIdFor,
   nextPendingIdeas,
@@ -35,6 +36,23 @@ describe('factory-inbox', () => {
 
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('deduplicates tagged QA ideas across every status while preserving literal evidence', () => {
+    const tag = { source: 'qa', fingerprint: 'a'.repeat(64) };
+    const text = 'Bug: regression\nOutput:\n```\n  indented error\n\n- [ ] output, not another idea\n```';
+    const first = appendTaggedIdea(inbox, text, tag);
+    expect(first.created).toBe(true);
+    expect(readInbox(inbox)[0].text).toBe(text);
+    for (const status of ['pending', 'taken', 'done', 'question', 'rejected'] as const) {
+      updateIdea(inbox, first.idea.id, { status, note: 'PM note' });
+      expect(appendTaggedIdea(inbox, 'Bug: changed SHA and output', tag)).toMatchObject({ created: false, idea: { id: first.idea.id, status } });
+      expect(readInbox(inbox)[0].text).toBe(text);
+      expect(readInbox(inbox)[0].meta).toMatchObject(tag);
+    }
+    expect(appendTaggedIdea(inbox, 'Bug: another error', { ...tag, fingerprint: 'b'.repeat(64) }).created).toBe(true);
+    expect(readInbox(inbox)).toHaveLength(2);
+    expect(readdirSync(join(dir, 'nested'))).toEqual(['inbox.md']);
   });
 
   describe('parseInbox', () => {
