@@ -28,6 +28,8 @@ export type ShipPr = {
   failingChecks: string[];
   createdAt: string;
   closingIssues: number[];
+  /** PR label names; absent labels cannot satisfy the optional factory review gate. */
+  labels?: string[];
   /** Head commit the checks ran against; when set, merges pin to it (`--match-head-commit`). */
   headRefOid?: string;
   /**
@@ -42,6 +44,8 @@ export type ShipPolicy = {
   merge: boolean;
   adminMerge: boolean;
   requireChecks: boolean;
+  /** Require factory-reviewed and no factory-changes-requested before shipping. Default false. */
+  requireFactoryReview?: boolean;
   checksTimeoutMinutes: number;
   mergeMethod: 'squash' | 'merge' | 'rebase';
   /** Default ['session/issue-'] (factory developer session branches). */
@@ -69,7 +73,7 @@ const SUCCESS_STATES = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
 
 const PR_LIST_FIELDS = [
   'number', 'title', 'url', 'headRefName', 'headRefOid', 'baseRefName', 'isDraft', 'mergeable',
-  'mergeStateStatus', 'reviewDecision', 'statusCheckRollup', 'createdAt', 'closingIssuesReferences',
+  'mergeStateStatus', 'reviewDecision', 'statusCheckRollup', 'createdAt', 'closingIssuesReferences', 'labels',
 ].join(',');
 
 function upper(value: unknown): string {
@@ -216,6 +220,15 @@ function decideShipRaw(pr: ShipPr, policy: ShipPolicy, now: Date): ShipDecision 
       context: prContext(pr),
     };
   }
+  // This gate covers admin merges as well as normal merges and branch updates.
+  if (policy.requireFactoryReview) {
+    if (pr.labels?.includes('factory-changes-requested')) {
+      return { action: 'wait', reason: 'factory review requested changes' };
+    }
+    if (!pr.labels?.includes('factory-reviewed')) {
+      return { action: 'wait', reason: 'factory review has not passed' };
+    }
+  }
   if (review === 'REVIEW_REQUIRED') {
     // admin_merge exists only to get past the approving-review requirement the
     // loop cannot satisfy. Use it only when every required check is known to
@@ -313,6 +326,7 @@ type RawPr = {
   reviewDecision?: string | null;
   statusCheckRollup?: unknown[] | null;
   createdAt?: string;
+  labels?: Array<{ name?: string } | null> | null;
   closingIssuesReferences?: Array<{
     number?: number;
     repository?: { name?: string; owner?: { login?: string } } | null;
@@ -350,6 +364,7 @@ function toShipPr(repo: string, raw: RawPr): ShipPr | null {
     failingChecks: checks.failing,
     createdAt: raw.createdAt ?? '',
     closingIssues: closingIssueNumbers(repo, raw.closingIssuesReferences),
+    labels: (raw.labels ?? []).flatMap((label) => typeof label?.name === 'string' ? [label.name] : []),
     ...(raw.headRefOid ? { headRefOid: raw.headRefOid } : {}),
   };
 }

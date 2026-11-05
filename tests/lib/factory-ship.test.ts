@@ -116,6 +116,39 @@ describe('summarizeChecks', () => {
 });
 
 describe('decideShip', () => {
+  test.each([undefined, [], ['unrelated'], ['factory-changes-requested'], ['factory-reviewed', 'factory-changes-requested']])(
+    'required factory review waits without an unopposed pass: %j', (labels) => {
+      expect(decideShip(pr({ labels }), policy({ requireFactoryReview: true }), NOW)).toMatchObject({ action: 'wait' });
+    },
+  );
+
+  test.each(['CLEAN', 'HAS_HOOKS', 'UNSTABLE', 'BEHIND', 'BLOCKED'])(
+    'factory review gate covers every shipping path (%s), including admin merge', (mergeStateStatus) => {
+      const snapshot = pr({
+        mergeStateStatus, requiredChecksMissing: [],
+        reviewDecision: mergeStateStatus === 'BLOCKED' ? 'REVIEW_REQUIRED' : null,
+      });
+      const required = policy({ adminMerge: true, requireFactoryReview: true });
+      expect(decideShip(snapshot, required, NOW)).toMatchObject({ action: 'wait' });
+      expect(decideShip({ ...snapshot, labels: ['factory-reviewed'] }, required, NOW)).toMatchObject({
+        action: mergeStateStatus === 'BEHIND' ? 'update-branch' : 'merge',
+      });
+    },
+  );
+
+  test('factory review is opt-in and does not weaken CI, conflicts or human reviews', () => {
+    expect(decideShip(pr(), policy(), NOW)).toMatchObject({ action: 'merge' });
+    expect(decideShip(pr({ labels: ['factory-changes-requested'] }), policy({ requireFactoryReview: false }), NOW))
+      .toMatchObject({ action: 'merge' });
+    for (const overrides of [
+      { checks: 'failure' as const }, { checks: 'pending' as const }, { checks: 'none' as const },
+      { mergeable: 'CONFLICTING' }, { reviewDecision: 'CHANGES_REQUESTED' },
+    ]) {
+      const decision = decideShip(pr({ ...overrides, labels: ['factory-reviewed'] }), policy({ requireFactoryReview: true, adminMerge: true }), NOW);
+      expect(['ask', 'wait']).toContain(decision.action);
+    }
+  });
+
   test('draft → skip', () => {
     expect(decideShip(pr({ isDraft: true }), policy(), NOW)).toMatchObject({ action: 'skip' });
   });
@@ -326,8 +359,20 @@ describe('listShippablePrs', () => {
       createdAt: '2026-11-04T11:00:00Z',
       closingIssues: [498],
       headRefOid: 'abc123',
+      labels: [],
     });
     expect(prs[1].checks).toBe('none');
+  });
+
+  test('fetches and normalizes labels for the optional factory review gate', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify([rawPr({ labels: [{ name: 'factory-reviewed' }, { name: 'unrelated' }, {}, null] })]),
+      stderr: '', exitCode: 0,
+    });
+    const [snapshot] = listShippablePrs('o/r', 'master', ['session/']);
+    expect(snapshot.labels).toEqual(['factory-reviewed', 'unrelated']);
+    expect(mockGhExec.mock.calls[0][0]).toContain('closingIssuesReferences,labels');
+    expect(decideShip(snapshot, policy({ requireFactoryReview: true }), NOW)).toMatchObject({ action: 'merge' });
   });
 
   test('throws when gh fails', () => {
