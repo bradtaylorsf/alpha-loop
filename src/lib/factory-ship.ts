@@ -2,11 +2,11 @@
  * Factory Shipper — merge green session PRs, ask a human about stuck ones.
  *
  * `decideShip` is pure: given a PR snapshot and policy it returns merge / wait /
- * skip / ask. It fails closed — a PR with failing, pending, missing or
- * unrecognized checks never merges, and an unknown mergeability waits.
+ * update-branch / skip / ask. Failing, pending or unrecognized checks never
+ * merge. Updates always require successful checks; unknown mergeability waits.
  *
- * `listShippablePrs` and `mergeShippablePr` are the only gh calls, both via
- * ghExec (rate-limited), following github.ts conventions.
+ * GitHub reads and mutations use ghExec (rate-limited), following github.ts
+ * conventions. Branch updates always merge the base into the PR branch.
  */
 import { shellQuote } from './shell.js';
 import { ghExec } from './rate-limit.js';
@@ -52,6 +52,7 @@ export type ShipPolicy = {
 
 export type ShipDecision =
   | { action: 'merge'; admin: boolean; reason: string }
+  | { action: 'update-branch'; reason: string }
   | { action: 'wait'; reason: string }
   | { action: 'skip'; reason: string }
   | { action: 'ask'; key: string; question: string; context: string };
@@ -242,14 +243,18 @@ function decideShipRaw(pr: ShipPr, policy: ShipPolicy, now: Date): ShipDecision 
         }
         return { action: 'wait', reason: `required checks not reported yet: ${missing.join(', ')}` };
       }
-      return { action: 'merge', admin: true, reason: `checks ${pr.checks}; every required check passed; review required — admin merge` };
+      // A review bypass must not also bypass updating a stale branch and its CI.
+      if (mergeState !== 'BEHIND') {
+        return { action: 'merge', admin: true, reason: `checks ${pr.checks}; every required check passed; review required — admin merge` };
+      }
+    } else {
+      return {
+        action: 'ask',
+        key: `ship:${pr.number}:review-required`,
+        question: `PR #${pr.number} is green but ${pr.baseRefName} requires an approving review the loop cannot give. Approve it, or allow admin merge?`,
+        context: prContext(pr),
+      };
     }
-    return {
-      action: 'ask',
-      key: `ship:${pr.number}:review-required`,
-      question: `PR #${pr.number} is green but ${pr.baseRefName} requires an approving review the loop cannot give. Approve it, or allow admin merge?`,
-      context: prContext(pr),
-    };
   }
   if (mergeState === 'BLOCKED') {
     // Blocked by something other than reviews (a required check that has not
@@ -267,7 +272,8 @@ function decideShipRaw(pr: ShipPr, policy: ShipPolicy, now: Date): ShipDecision 
   }
 
   if (mergeState === 'BEHIND') {
-    return { action: 'wait', reason: `branch behind ${pr.baseRefName}; needs update (future auto-rebase)` };
+    if (pr.checks !== 'success') return { action: 'wait', reason: 'branch update requires successful CI checks' };
+    return { action: 'update-branch', reason: `branch behind ${pr.baseRefName}; merge base into PR branch and re-wait for CI` };
   }
   if (mergeState === 'CLEAN' || mergeState === 'HAS_HOOKS') {
     return { action: 'merge', admin: false, reason: `checks ${pr.checks}; merge state ${mergeState}` };
@@ -281,12 +287,15 @@ function decideShipRaw(pr: ShipPr, policy: ShipPolicy, now: Date): ShipDecision 
 /**
  * Decide what the shipper does with one PR. Fails closed: anything not
  * positively green and mergeable waits, skips, or asks a human.
- * `policy.merge === false` turns every merge into a skip (dry-run shipping).
+ * `policy.merge === false` turns merges and branch updates into report-only skips.
  */
 export function decideShip(pr: ShipPr, policy: ShipPolicy, now: Date): ShipDecision {
   const decision = decideShipRaw(pr, policy, now);
   if (decision.action === 'merge' && !policy.merge) {
     return { action: 'skip', reason: 'would merge (ship.merge disabled)' };
+  }
+  if (decision.action === 'update-branch' && !policy.merge) {
+    return { action: 'skip', reason: 'would update branch (ship.merge disabled)' };
   }
   return decision;
 }
@@ -416,6 +425,22 @@ export function listShippablePrs(
     })
     .filter((pr): pr is ShipPr => pr !== null)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.number - b.number);
+}
+
+/**
+ * Merge the base into a PR branch using gh's default strategy, never rebase or force-push.
+ * An already-current branch returns updated: false without an error.
+ */
+export function updateShippablePrBranch(repo: string, pr: ShipPr): { updated: boolean; conflict: boolean; error?: string } {
+  const result = ghExec(`gh pr update-branch ${pr.number} --repo ${shellQuote(repo)}`, undefined, true);
+  if (result.exitCode === 0) {
+    return { updated: !/\bPR branch (?:is )?already up-to-date\b/i.test(result.stdout), conflict: false };
+  }
+
+  const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join('\n');
+  // Match explicit merge conflicts, not a generic HTTP 409 (e.g. a changed head SHA).
+  const conflict = /\bmerge conflicts?\b|\bcannot update PR branch due to conflicts\b/i.test(detail);
+  return { updated: false, conflict, error: `gh pr update-branch #${pr.number} failed: ${detail || `exit ${result.exitCode}`}` };
 }
 
 /**

@@ -1,0 +1,103 @@
+{
+  "name": "session/issue-445-feat-factory-shipper-updates-behind-sess",
+  "branch": "session/issue-445-feat-factory-shipper-updates-behind-sess",
+  "completed": "2026-11-05T09:52:46.453Z",
+  "results": [
+    {
+      "issueNum": 445,
+      "title": "feat(factory): shipper updates BEHIND session PRs and re-waits for CI",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/457",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1270,
+      "filesChanged": 3
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 66882,
+      "tokens_out": 51448,
+      "cost_usd": 0,
+      "wall_time_s": 175.727,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:24:03.855Z",
+      "issue_num": 445
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 318802,
+      "tokens_out": 245232,
+      "cost_usd": 0,
+      "wall_time_s": 554.97,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:27:00.169Z",
+      "issue_num": 445
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 189657,
+      "tokens_out": 145890,
+      "cost_usd": 0,
+      "wall_time_s": 352.741,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:36:20.333Z",
+      "issue_num": 445
+    },
+    {
+      "stage": "verify_fix",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 24280,
+      "tokens_out": 18677,
+      "cost_usd": 0,
+      "wall_time_s": 169.864,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:42:13.358Z",
+      "issue_num": 445
+    },
+    {
+      "stage": "learn",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 5875,
+      "tokens_out": 4519,
+      "cost_usd": 0,
+      "wall_time_s": 41.463,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:45:24.408Z",
+      "issue_num": 445
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 42397,
+      "tokens_out": 32613,
+      "cost_usd": 0,
+      "wall_time_s": 48.529,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:45:24.431Z",
+      "issue_num": 445
+    }
+  ]
+}
