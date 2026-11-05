@@ -104,7 +104,11 @@ export type EventName =
   | 'daemon.work.skipped'
   | 'daemon.resume.requested'
   | 'daemon.shutdown'
-  | 'daemon.failed';
+  | 'daemon.failed'
+  | 'factory.question.asked'
+  | 'factory.pr.shipped'
+  | 'factory.worker.failed'
+  | 'factory.stopped';
 
 export type EventFilter = EventName | '*';
 export type EventFormat = 'json' | 'slack' | 'teams' | 'discord';
@@ -442,6 +446,10 @@ const VALID_EVENT_NAMES: readonly EventName[] = [
   'daemon.resume.requested',
   'daemon.shutdown',
   'daemon.failed',
+  'factory.question.asked',
+  'factory.pr.shipped',
+  'factory.worker.failed',
+  'factory.stopped',
 ] as const;
 
 const VALID_DAEMON_MODES: readonly DaemonMode[] = [

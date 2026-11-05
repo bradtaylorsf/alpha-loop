@@ -538,6 +538,19 @@ events:
     }));
   });
 
+  it('accepts all factory lifecycle destination filters', () => {
+    const names = ['factory.question.asked', 'factory.pr.shipped', 'factory.worker.failed', 'factory.stopped'];
+    writeFileSync(join(tempDir, '.alpha-loop.yaml'), `repo: owner/repo
+events:
+  destinations:
+    factory:
+      type: log
+      events: [${names.join(', ')}]
+`);
+
+    expect(loadConfig().events?.destinations.factory.events).toEqual(names);
+  });
+
   it('loads automation policy guardrails from YAML', () => {
     writeFileSync(
       join(tempDir, '.alpha-loop.yaml'),

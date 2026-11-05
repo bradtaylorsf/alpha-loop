@@ -661,6 +661,20 @@ eval_dir: .alpha-loop/evals
 
 Alpha Loop emits typed lifecycle events for hosted sessions and daemons: `session.started`, `session.paused`, `human_input.requested`, `qa.requested`, `feedback.received`, `feedback.classified`, `session.resume_requested`, `session.resumed`, `session.completed`, `session.failed`, `daemon.started`, `daemon.idle`, `daemon.health`, `daemon.work.selected`, `daemon.work.skipped`, `daemon.resume.requested`, `daemon.shutdown`, and `daemon.failed`.
 
+Factory runs also emit `factory.question.asked`, `factory.pr.shipped`, `factory.worker.failed`, and `factory.stopped` through `events.destinations`. For example, page someone for each new question:
+
+```yaml
+events:
+  destinations:
+    factory_questions:
+      type: webhook
+      events: [factory.question.asked]
+      url_env: FACTORY_WEBHOOK_URL
+      format: slack
+```
+
+Factory payloads include question text and answer instructions, issue/PR references, worker failure details, or final stop counts as applicable. They work without a session manifest and log to `<state_dir>/lifecycle-events.jsonl`; `events.jsonl` remains the supervisor audit stream. Factory delivery failures are logged and never stop supervision, even for required destinations. Configured redaction covers payloads and delivery diagnostics. See [factory notifications](docs/factory-mode.md#notifications) for details.
+
 ### Web/App QA Profile
 
 `web_app` adds browser-oriented verification for Astro, React/Vite, Next, and similar repos. It records screenshot paths, browser console errors, failed network requests, preview URLs, and a human QA checklist in session history, PR bodies, and `qa.requested` events. Preview discovery is provider-agnostic: set `preview.url` or provide a command that prints the URL. See [docs/web-app-profile.md](docs/web-app-profile.md).

@@ -46,6 +46,8 @@ import type { Issue } from '../../src/lib/github.js';
 import { ingestFeedback } from '../../src/lib/feedback.js';
 import { commentIssue, labelIssue } from '../../src/lib/github.js';
 import { ghExec } from '../../src/lib/rate-limit.js';
+import { emitFactoryEvent, type EmitFactoryEventInput, type FactoryEventName } from '../../src/lib/events.js';
+import { log } from '../../src/lib/logger.js';
 
 const mockIngest = ingestFeedback as jest.Mock;
 const mockComment = commentIssue as jest.Mock;
@@ -178,6 +180,7 @@ function harness(factory: Partial<Omit<FactoryConfig, 'pm' | 'ship'>> & { pm?: P
     prepare: jest.fn(async () => {}),
     defaultBranch: jest.fn(() => 'master'),
     closeIssue: jest.fn(() => true),
+    emitEvent: jest.fn(async () => {}),
   } as unknown as MockActions;
 
   return {
@@ -192,6 +195,11 @@ function harness(factory: Partial<Omit<FactoryConfig, 'pm' | 'ship'>> & { pm?: P
     state: () => JSON.parse(readFileSync(paths.statePath, 'utf-8')) as FactoryState,
     questions: () => readQuestions(paths.questionsPath),
   };
+}
+
+function notifications(h: Harness, type?: FactoryEventName): EmitFactoryEventInput[] {
+  const inputs = h.actions.emitEvent.mock.calls.map(([input]) => input as EmitFactoryEventInput);
+  return type ? inputs.filter((input) => input.type === type) : inputs;
 }
 
 /** Seed state.json memory: these PRs were finished by this factory's developers (so the shipper may act on them). */
@@ -364,6 +372,18 @@ describe('runFactory — reaping developers', () => {
     expect(byKey.get('dev:2:failed')!.context).toContain('/logs/');
     expect(byKey.get('dev:4:failed')!.context).toContain('no result file');
     expect(summary.counts.questionsAsked).toBe(3);
+    expect(notifications(h, 'factory.worker.failed').map((e) => e.context?.issueNumber)).toEqual([2, 4]);
+    expect(notifications(h, 'factory.worker.failed')[0].context).toEqual(expect.objectContaining({
+      error: 'tests failed',
+      metadata: expect.objectContaining({ role: 'developer', workerId: h.devs[1].handle.id, logPath: h.devs[1].handle.logPath }),
+    }));
+    expect(notifications(h, 'factory.question.asked').map((e) => e.context?.issueNumber)).toEqual([2, 3, 4]);
+    const waiting = notifications(h, 'factory.question.asked')[1];
+    expect(waiting.context).toEqual(expect.objectContaining({
+      question: byKey.get('dev:3:waiting')!.question,
+      resumeInstructions: expect.stringContaining(`alpha-loop factory answer ${byKey.get('dev:3:waiting')!.id}`),
+      metadata: expect.objectContaining({ questionId: byKey.get('dev:3:waiting')!.id, questionKey: 'dev:3:waiting', role: 'developer', questionsPath: h.paths.questionsPath }),
+    }));
     // Success triggers an immediate ship pass (initial pass + triggered pass).
     expect(h.actions.listShippable).toHaveBeenCalledTimes(2);
     expect(listLeases(h.paths.leasesDir)).toEqual([]);
@@ -380,6 +400,8 @@ describe('runFactory — reaping developers', () => {
 
     expect(h.actions.spawnDeveloper).toHaveBeenCalledTimes(1);
     expect(h.state().lastPlan.skipped).toEqual([expect.objectContaining({ issue: 2, reason: 'failed' })]);
+    expect(notifications(h, 'factory.worker.failed')).toHaveLength(1);
+    expect(notifications(h, 'factory.question.asked')).toHaveLength(1);
   });
 
   it('does not re-dispatch an issue that paused (waiting) earlier in this run', async () => {
@@ -431,6 +453,8 @@ describe('runFactory — reaping developers', () => {
     const q = h.questions().find((x) => x.key === 'dev:7:failed');
     expect(q?.context).toContain('exceeding 1 minute');
     expect(summary.status).toBe('drained');
+    expect(notifications(h, 'factory.worker.failed')).toHaveLength(1);
+    expect(notifications(h, 'factory.worker.failed')[0].context?.metadata?.timedOut).toBe(true);
   });
 });
 
@@ -447,6 +471,11 @@ describe('runFactory — questions', () => {
     expect(qs).toHaveLength(1);
     expect(qs[0]).toEqual(expect.objectContaining({ key: 'ship:7:checks-failing', role: 'shipper', pr: 7, issue: 70 }));
     expect(summary.counts.questionsAsked).toBe(1);
+    expect(notifications(h, 'factory.question.asked')).toHaveLength(1);
+    expect(notifications(h, 'factory.question.asked')[0].context).toEqual(expect.objectContaining({
+      issueNumber: 70, prNumber: 7, prUrl: 'https://github.com/o/r/pull/7',
+      metadata: expect.objectContaining({ role: 'shipper', questionId: qs[0].id, questionKey: qs[0].key }),
+    }));
   });
 
   it('applies answered issue, idea, and ship questions and marks them applied', async () => {
@@ -625,6 +654,18 @@ describe('runFactory — PM', () => {
     } else {
       expect(qs).toHaveLength(0);
     }
+    const asked = notifications(h, 'factory.question.asked');
+    expect(asked).toHaveLength(qs.length);
+    if (qs.length) expect(asked[0].context).toEqual(expect.objectContaining({
+      question: qs[0].question,
+      metadata: expect.objectContaining({ role: 'pm', ideaId: idea.id, questionId: qs[0].id }),
+    }));
+    const failures = notifications(h, 'factory.worker.failed');
+    expect(failures).toHaveLength(c.exit.exitCode === 0 ? 0 : 1);
+    if (failures.length) expect(failures[0].context).toEqual(expect.objectContaining({
+      error: expect.any(String),
+      metadata: expect.objectContaining({ role: 'pm', ideaId: idea.id, workerId: h.pms[0].handle.id, logPath: h.pms[0].handle.logPath }),
+    }));
   });
 
   it('kills a PM worker that runs far past its timeout and counts it as a failed attempt', async () => {
@@ -641,6 +682,10 @@ describe('runFactory — PM', () => {
 
     expect(h.pms[0].kills).toEqual(['SIGTERM']);
     expect(readInbox(h.paths.inboxPath).find((i) => i.id === idea.id)).toEqual(expect.objectContaining({ status: 'pending', meta: { attempts: '1' } }));
+    expect(notifications(h, 'factory.worker.failed')).toHaveLength(1);
+    expect(notifications(h, 'factory.worker.failed')[0].context).toEqual(expect.objectContaining({
+      error: 'PM worker timed out', metadata: expect.objectContaining({ timedOut: true, attempt: 1 }),
+    }));
   });
 
   it('does not ingest ideas when the PM is disabled', async () => {
@@ -673,6 +718,10 @@ describe('runFactory — ship pass', () => {
     const keys = h.questions().map((q) => q.key).sort();
     expect(keys).toEqual(['ship:2:conflict', 'ship:4:merge-failed']);
     expect(h.questions().find((q) => q.key === 'ship:2:conflict')).toEqual(expect.objectContaining({ pr: 2, issue: 20 }));
+    expect(notifications(h, 'factory.pr.shipped')).toHaveLength(1);
+    expect(notifications(h, 'factory.pr.shipped')[0].context).toEqual(expect.objectContaining({
+      issueNumber: 10, prNumber: 1, prUrl: 'https://github.com/o/r/pull/1', branch: 'session/issue-1-x',
+    }));
   });
 
   it('only reports what it would merge when merging is disabled', async () => {
@@ -682,6 +731,7 @@ describe('runFactory — ship pass', () => {
     await h.run({ maxTicks: 1 });
     expect(h.actions.merge).not.toHaveBeenCalled();
     expect(h.state().ship.decisions).toEqual([{ pr: 1, action: 'skip', reason: expect.stringContaining('ship.merge disabled') }]);
+    expect(notifications(h, 'factory.pr.shipped')).toEqual([]);
   });
 
   it('survives listShippable throwing and records the error', async () => {
@@ -801,6 +851,10 @@ describe('runFactory — termination', () => {
     // Interrupted workers are not failures and raise no questions.
     expect(summary.counts.failed).toBe(0);
     expect(h.questions()).toEqual([]);
+    expect(notifications(h).map((e) => e.type)).toEqual(['factory.stopped']);
+    expect(notifications(h)[0].context).toEqual(expect.objectContaining({
+      reason: 'aborted', metadata: expect.objectContaining({ counts: summary.counts }),
+    }));
     expect(process.listenerCount('SIGINT')).toBe(sigintBefore);
     expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore);
   });
@@ -866,7 +920,7 @@ describe('runFactory — dry run', () => {
 
     expect(snapshot(root)).toEqual(before); // the seeded state.json is read, never rewritten
     expect(existsSync(h.paths.leasesDir)).toBe(false);
-    for (const name of ['spawnDeveloper', 'spawnPm', 'merge', 'applyAnswer', 'preflight', 'sleep']) {
+    for (const name of ['spawnDeveloper', 'spawnPm', 'merge', 'applyAnswer', 'preflight', 'sleep', 'emitEvent']) {
       expect(h.actions[name as keyof MockActions]).not.toHaveBeenCalled();
     }
     expect(summary.status).toBe('dry-run');
@@ -1282,6 +1336,104 @@ describe('runFactory — shipper only ships what this factory finished', () => {
     await h.run({ maxTicks: 4 });
 
     expect(h.questions().map((q) => q.status).sort()).toEqual(['dismissed', 'open']);
+  });
+});
+
+describe('runFactory — lifecycle delivery', () => {
+  it('delivers sequentially, captures the resolved base and event time, and drains the final stop before returning', async () => {
+    const h = harness({ pm: { enabled: false } });
+    own(h, 7, 8);
+    h.actions.listShippable.mockReturnValue([shipPr(7, { checks: 'failure' }), shipPr(8, { checks: 'failure' })]);
+    let releaseFirst!: () => void;
+    let startedFirst!: () => void;
+    let releaseStop!: () => void;
+    let startedStop!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstStarted = new Promise<void>((resolve) => { startedFirst = resolve; });
+    const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+    const stopStarted = new Promise<void>((resolve) => { startedStop = resolve; });
+    const delivered: FactoryEventName[] = [];
+    h.actions.emitEvent.mockImplementation(async (input: EmitFactoryEventInput) => {
+      if (delivered.length === 0) {
+        startedFirst();
+        await firstGate;
+        h.actions.now.mockReturnValue(new Date(T0 + 1000));
+      }
+      if (input.type === 'factory.stopped') {
+        startedStop();
+        await stopGate;
+      }
+      delivered.push(input.type);
+    });
+    let returned = false;
+    const running = h.run({ maxTicks: 1, baseBranch: 'feat/factory-mode' }).then((summary) => {
+      returned = true;
+      return summary;
+    });
+    await firstStarted;
+    expect(h.actions.emitEvent).toHaveBeenCalledTimes(1);
+    expect(returned).toBe(false);
+    releaseFirst();
+    await stopStarted;
+    expect(delivered).toEqual(['factory.question.asked', 'factory.question.asked']);
+    expect(returned).toBe(false);
+    expect(h.state().status).toBe('stopped');
+    releaseStop();
+    const summary = await running;
+    expect(delivered).toEqual(['factory.question.asked', 'factory.question.asked', 'factory.stopped']);
+    expect(notifications(h).every((e) => e.config.baseBranch === 'feat/factory-mode')).toBe(true);
+    expect(notifications(h, 'factory.question.asked').map((e) => e.now)).toEqual([new Date(T0).toISOString(), new Date(T0).toISOString()]);
+    expect(notifications(h).at(-1)?.context).toEqual({
+      reason: 'max-ticks', metadata: { counts: summary.counts, ticks: 1, status: 'drained' },
+    });
+    expect(readLease(h.paths.stateDir, 'factory')).toBeNull();
+  });
+
+  it('isolates rejected emissions through the final stop and releases the supervisor lease', async () => {
+    const h = harness({ pm: { enabled: false } });
+    own(h, 7, 8);
+    h.actions.listShippable.mockReturnValue([shipPr(7, { checks: 'failure' }), shipPr(8, { checks: 'failure' })]);
+    h.actions.emitEvent.mockRejectedValue(new Error('untrusted-secret'));
+    const summary = await h.run({ maxTicks: 1 });
+    expect(summary.counts.questionsAsked).toBe(2);
+    expect(notifications(h).map((e) => e.type)).toEqual(['factory.question.asked', 'factory.question.asked', 'factory.stopped']);
+    expect(readLease(h.paths.stateDir, 'factory')).toBeNull();
+    expect(h.state().status).toBe('stopped');
+    expect(JSON.stringify((log.warn as jest.Mock).mock.calls)).not.toContain('untrusted-secret');
+  });
+
+  it('drains questions reaped during error shutdown before propagating the original error', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { enabled: false } });
+    h.actions.pollReady.mockReturnValueOnce([issue(5)]).mockReturnValue([]);
+    h.actions.emitEvent.mockRejectedValueOnce(new Error('delivery failed'));
+    h.onTick(() => {
+      h.devs[0].finish({ exitCode: 1, result: { status: 'waiting', failures: [] } });
+      throw new Error('tick failed');
+    });
+    await expect(h.run()).rejects.toThrow('tick failed');
+    expect(notifications(h).map((e) => e.type)).toEqual(['factory.question.asked', 'factory.stopped']);
+    expect(notifications(h).at(-1)?.context?.reason).toBe('error: tick failed');
+    expect(listLeases(h.paths.leasesDir)).toEqual([]);
+    expect(readLease(h.paths.stateDir, 'factory')).toBeNull();
+    expect(h.state().status).toBe('stopped');
+  });
+
+  it('uses the real emitter to deliver a factory question and stop without a session manifest', async () => {
+    const h = harness({ pm: { enabled: false } });
+    own(h, 7);
+    h.actions.listShippable.mockReturnValue([shipPr(7, { checks: 'failure' })]);
+    h.config.events = { includePromptText: false, redact: [], destinations: {
+      audit: { type: 'log', events: ['*'], format: 'json', required: true, timeout: 1, retries: 0 },
+    } };
+    h.actions.emitEvent.mockImplementation(emitFactoryEvent);
+    await h.run({ maxTicks: 1, baseBranch: 'feat/factory-mode' });
+    const records = readFileSync(join(h.paths.stateDir, 'lifecycle-events.jsonl'), 'utf-8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(records.map((r) => r.kind)).toEqual(['event', 'delivery', 'event', 'delivery']);
+    expect(records[0].event).toEqual(expect.objectContaining({
+      type: 'factory.question.asked', session: expect.objectContaining({ id: null }),
+      branch: expect.objectContaining({ base: 'feat/factory-mode' }),
+    }));
+    expect(records[2].event.type).toBe('factory.stopped');
   });
 });
 

@@ -50,6 +50,7 @@ import {
   type WorkerHandle,
 } from './factory-workers.js';
 import { parseSubIssues } from './epics.js';
+import { emitFactoryEvent, type EmitFactoryEventInput, type FactoryEventName, type LifecycleEventContext } from './events.js';
 import { ingestFeedback } from './feedback.js';
 import { closeIssue, commentIssue, getIssueWithComments, labelIssue, pollIssues, type Issue } from './github.js';
 import { acquireLease, defaultPidAlive, isLeaseStale, listLeases, readLease, refreshLease, releaseLease, type LeaseHandle } from './lease.js';
@@ -103,6 +104,8 @@ export type FactoryActions = {
   defaultBranch(): string | null;
   /** Close an issue as completed (after its session PR merged into a non-default base). */
   closeIssue(n: number): boolean;
+  /** Deliver a queued lifecycle notification without blocking synchronous state transitions. */
+  emitEvent(input: EmitFactoryEventInput): Promise<unknown>;
 };
 
 export type FactoryCounts = {
@@ -341,6 +344,7 @@ export function createDefaultFactoryActions(
       closeIssue(config.repo, n, 'completed');
       return true;
     },
+    emitEvent: emitFactoryEvent,
   };
 }
 
@@ -767,6 +771,30 @@ async function superviseFactory(
   const workerTimeoutMs = factory.workerTimeoutMinutes * 60_000;
   const pmTimeoutMs = (factory.pm.timeoutSeconds * 2 + 300) * 1000;
   const staggerMs = factory.spawnStaggerSeconds * 1000;
+  const notifications: EmitFactoryEventInput[] = [];
+  const eventConfig = { ...config, baseBranch: run.baseBranch };
+
+  const notify = (type: FactoryEventName, context: LifecycleEventContext): void => {
+    notifications.push({
+      config: eventConfig,
+      type,
+      stateDir: paths.stateDir,
+      context: structuredClone(context),
+      now: actions.now().toISOString(),
+    });
+  };
+
+  const deliverNotifications = async (): Promise<void> => {
+    for (const notification of notifications.splice(0)) {
+      try {
+        await actions.emitEvent(notification);
+      } catch {
+        // The default emitter logs redacted diagnostics. An injected emitter
+        // can still reject; do not echo its potentially sensitive error here.
+        log.warn(`Factory: could not deliver ${notification.type}; continuing`);
+      }
+    }
+  };
 
   const record = (type: string, data: Record<string, unknown> = {}): void => {
     const event: FactoryEvent = { at: actions.now().toISOString(), type, ...data };
@@ -785,6 +813,21 @@ async function superviseFactory(
       if (created) {
         counts.questionsAsked += 1;
         record('question.asked', { id: question.id, key: question.key, role: question.role });
+        notify('factory.question.asked', {
+          issueNumber: question.issue,
+          prNumber: question.pr,
+          prUrl: question.pr ? `https://github.com/${config.repo}/pull/${question.pr}` : undefined,
+          question: question.question,
+          resumeInstructions: `Answer under **Answer:** in ${paths.questionsPath}, or run alpha-loop factory answer ${question.id} "<text>".`,
+          metadata: {
+            questionId: question.id,
+            questionKey: question.key,
+            role: question.role,
+            ideaId: question.idea,
+            questionsPath: paths.questionsPath,
+            context: question.context,
+          },
+        });
         log.warn(`Factory question ${question.id}: ${question.question.split('\n')[0]}`);
       }
       return question;
@@ -925,7 +968,7 @@ async function superviseFactory(
     lastWorkerFinishedMs = actions.now().getTime();
     const outcome = classifyDeveloperExit(w, factory.workerTimeoutMinutes);
     const n = w.issue;
-    if (interrupted && outcome.status !== 'success') {
+    if (interrupted && !w.timedOut && outcome.status !== 'success') {
       record('worker.stopped', { workerId: w.handle.id, issue: n, exitCode: w.exit?.exitCode ?? null });
       return;
     }
@@ -958,6 +1001,13 @@ async function superviseFactory(
       counts.failed += 1;
       failedThisRun.add(n);
       record('worker.failed', { workerId: w.handle.id, issue: n, messages: outcome.messages, exitCode: w.exit?.exitCode ?? null });
+      notify('factory.worker.failed', {
+        issueNumber: n,
+        issueTitle: w.title,
+        prUrl: outcome.prUrl,
+        error: outcome.messages.join('\n') || 'worker failed',
+        metadata: { role: 'developer', workerId: w.handle.id, logPath: w.handle.logPath, exitCode: w.exit?.exitCode ?? null, timedOut: w.timedOut },
+      });
       log.warn(`Factory: #${n} failed — ${outcome.messages[0] ?? 'unknown error'}`);
       ask({
         role: 'developer',
@@ -1025,6 +1075,16 @@ async function superviseFactory(
       ? res.createdIssues.filter((n): n is number => Number.isInteger(n) && n > 0)
       : [];
     const created = [...new Set([...fromResult, ...(progress?.createdIssues ?? [])])];
+    if (mode !== 'shutdown' || timedOut || created.length > 0 || progress?.phase === 'applying') {
+      notify('factory.worker.failed', {
+        error,
+        metadata: {
+          role: 'pm', workerId: handle.id, ideaId: idea.id, logPath: handle.logPath,
+          exitCode: exit.exitCode, timedOut, createdIssues: created,
+          attempt: (Number(idea.meta.attempts) || 0) + 1,
+        },
+      });
+    }
     if (created.length > 0) {
       // Never re-run blindly: that would create the same issues again.
       const list = created.map((n) => `#${n}`).join(', ');
@@ -1055,7 +1115,7 @@ async function superviseFactory(
       return;
     }
 
-    if (mode === 'shutdown') {
+    if (mode === 'shutdown' && !timedOut) {
       // Stopped by us before any GitHub write: back to the queue, not a failed attempt.
       setIdea(idea.id, { status: 'pending', meta }, line);
       record('worker.stopped', { workerId: handle.id, idea: idea.id });
@@ -1424,6 +1484,13 @@ async function superviseFactory(
           counts.merged += 1;
           decisions.push({ pr: pr.number, action: 'merge', reason: decision.reason });
           record('ship.merged', { pr: pr.number, admin: decision.admin, issue });
+          notify('factory.pr.shipped', {
+            issueNumber: issue,
+            prNumber: pr.number,
+            prUrl: pr.url,
+            branch: pr.headRefName,
+            metadata: { role: 'shipper', issues, admin: decision.admin },
+          });
           log.success(`Factory ship: merged PR #${pr.number}${decision.admin ? ' (admin)' : ''}`);
           afterMerge(pr, issues);
         } else {
@@ -1615,6 +1682,7 @@ async function superviseFactory(
         }
       }
       writeState();
+      await deliverNotifications();
 
       if (stopRequested) break;
       if (status === 'draining' && workerCount() === 0) {
@@ -1643,9 +1711,20 @@ async function superviseFactory(
         process.removeListener('SIGTERM', onSignal);
       }
       options.signal?.removeEventListener('abort', onAbort);
-      record('factory.stopped', { reason: stopReason || 'stopped', counts: { ...counts } });
-      writeState();
-      releaseLease(supervisorLease);
+      try {
+        notify('factory.stopped', {
+          reason: stopReason || 'stopped',
+          metadata: { counts: { ...counts }, ticks: tick, status: finalStatus },
+        });
+        record('factory.stopped', { reason: stopReason || 'stopped', counts: { ...counts } });
+        writeState();
+      } finally {
+        try {
+          await deliverNotifications();
+        } finally {
+          releaseLease(supervisorLease);
+        }
+      }
     }
   }
 

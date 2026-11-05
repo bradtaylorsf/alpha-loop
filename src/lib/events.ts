@@ -1,5 +1,5 @@
 /**
- * Lifecycle events — canonical session payloads plus destination delivery.
+ * Lifecycle events — canonical session/factory payloads plus destination delivery.
  */
 import { createHmac, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -199,6 +199,17 @@ type EmitLifecycleEventInput = {
   session?: Pick<SessionContext, 'resultsDir' | 'logsDir' | 'manifestPath' | 'name' | 'branch'> | null;
   manifestPath?: string | null;
   manifest?: DurableSessionManifest | null;
+  /** Explicit log location for callers without a session. */
+  eventLogPath?: string;
+  context?: LifecycleEventContext;
+  now?: string;
+};
+
+export type FactoryEventName = Extract<EventName, `factory.${string}`>;
+export type EmitFactoryEventInput = {
+  config: Config;
+  type: FactoryEventName;
+  stateDir: string;
   context?: LifecycleEventContext;
   now?: string;
 };
@@ -279,7 +290,7 @@ export function buildLifecycleEvent(input: EmitLifecycleEventInput): LifecycleEv
   const context = input.context ?? {};
   const repo = input.config.repo;
   const { owner, name } = repoParts(repo);
-  const eventLog = eventLogPath(input.session, manifest);
+  const eventLog = resolvePath(input.eventLogPath) ?? eventLogPath(input.session, manifest);
   const selectedIssueNumber = context.issueNumber
     ?? manifest?.currentIssue?.issueNum
     ?? manifest?.issueNumber
@@ -431,14 +442,18 @@ function redactValue(value: unknown, key: string | null, redactionKeys: Set<stri
   return out;
 }
 
-export function redactLifecycleEvent(event: LifecycleEvent, config: Config): LifecycleEvent {
+function redactEventData<T>(value: T, config: Config): T {
   const redact = eventConfig(config).redact;
-  if (redact.length === 0) return event;
+  if (redact.length === 0) return value;
   const redactionKeys = new Set(redact.map((item) => item.toLowerCase()));
   const secretValues = redact
     .flatMap((item) => [process.env[item], item])
     .filter((item): item is string => Boolean(item && item.length >= 3));
-  return redactValue(event, null, redactionKeys, secretValues) as LifecycleEvent;
+  return redactValue(value, null, redactionKeys, secretValues) as T;
+}
+
+export function redactLifecycleEvent(event: LifecycleEvent, config: Config): LifecycleEvent {
+  return redactEventData(event, config);
 }
 
 function eventSummary(event: LifecycleEvent): string {
@@ -460,6 +475,11 @@ function summaryFields(event: LifecycleEvent): Array<{ title: string; value: str
     { title: 'Branch', value: fieldValue(event.branch.name) },
     { title: 'PR', value: fieldValue(event.pr.url) },
     { title: 'Preview', value: fieldValue(event.previewUrl) },
+    ...(event.type.startsWith('factory.') ? [
+      { title: 'Question', value: fieldValue(event.humanInput.question) },
+      { title: 'Answer', value: fieldValue(event.humanInput.resumeInstructions) },
+      { title: 'Reason', value: fieldValue(event.humanInput.reason ?? event.error) },
+    ] : []),
   ].filter((field) => field.value !== 'n/a');
 }
 
@@ -537,13 +557,14 @@ function matchingDestinations(config: Config, eventType: EventName): Array<[stri
     .filter(([, destination]) => eventMatchesDestination(eventType, destination));
 }
 
-function responseText(response: Response): Promise<string> {
-  return response.text().then((text) => text.slice(0, MAX_RESPONSE_CHARS)).catch(() => '');
+function responseText(response: Response, redactDiagnostic: (text: string) => string): Promise<string> {
+  return response.text().then((text) => redactDiagnostic(text).slice(0, MAX_RESPONSE_CHARS)).catch(() => '');
 }
 
 async function deliverWebhook(
   destination: WebhookEventDestinationConfig,
   event: LifecycleEvent,
+  redactDiagnostic: (text: string) => string,
 ): Promise<Pick<EventDeliveryRecord, 'responseStatus' | 'responseBody'>> {
   const url = process.env[destination.urlEnv];
   if (!url) throw new Error(`Environment variable ${destination.urlEnv} is not set`);
@@ -567,7 +588,7 @@ async function deliverWebhook(
       body,
       signal: controller.signal,
     });
-    const bodyText = await responseText(response);
+    const bodyText = await responseText(response, redactDiagnostic);
     if (!response.ok) {
       throw new WebhookDeliveryError(response.status, bodyText);
     }
@@ -580,6 +601,7 @@ async function deliverWebhook(
 async function deliverCommand(
   destination: CommandEventDestinationConfig,
   event: LifecycleEvent,
+  redactDiagnostic: (text: string) => string,
 ): Promise<Pick<EventDeliveryRecord, 'stdout' | 'stderr' | 'exitCode'>> {
   return new Promise((resolve, reject) => {
     const child = spawn(destination.command, {
@@ -604,19 +626,24 @@ async function deliverCommand(
     child.stderr?.on('data', (chunk) => {
       stderr += String(chunk);
     });
-    child.on('error', (err) => {
+    const onError = (err: Error): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      child.kill('SIGTERM');
       reject(err);
-    });
+    };
+    child.on('error', onError);
+    // A destination may exit before reading stdin (EPIPE). Stream errors do
+    // not reach the child's error handler and must not crash the supervisor.
+    child.stdin?.on('error', onError);
     child.on('close', (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       const result = {
-        stdout: stdout.trim().slice(0, MAX_RESPONSE_CHARS),
-        stderr: stderr.trim().slice(0, MAX_RESPONSE_CHARS),
+        stdout: redactDiagnostic(stdout).trim().slice(0, MAX_RESPONSE_CHARS),
+        stderr: redactDiagnostic(stderr).trim().slice(0, MAX_RESPONSE_CHARS),
         exitCode: code ?? 1,
       };
       if ((code ?? 1) !== 0) {
@@ -635,7 +662,7 @@ function appendEventLog(
   manifest: DurableSessionManifest | null,
   record: Record<string, unknown>,
 ): void {
-  const filePath = eventLogPath(input.session, manifest);
+  const filePath = resolvePath(input.eventLogPath) ?? eventLogPath(input.session, manifest);
   if (!filePath) return;
   try {
     mkdirSync(dirname(filePath), { recursive: true });
@@ -646,7 +673,7 @@ function appendEventLog(
       recordSessionLogFile(input.manifestPath, filePath);
     }
   } catch (err) {
-    log.warn(`Could not write lifecycle event log: ${err instanceof Error ? err.message : err}`);
+    log.warn(redactEventData(`Could not write lifecycle event log: ${err instanceof Error ? err.message : err}`, input.config));
   }
 }
 
@@ -655,6 +682,7 @@ async function deliverDestination(
   destination: EventDestinationConfig,
   event: LifecycleEvent,
   dryRun: boolean,
+  redactDiagnostic: (text: string) => string,
 ): Promise<EventDeliveryRecord[]> {
   if (dryRun) {
     log.dry(`Would deliver ${event.type} to ${name} (${destination.type}, ${destination.format})`);
@@ -695,8 +723,8 @@ async function deliverDestination(
     const started = Date.now();
     try {
       const details = destination.type === 'webhook'
-        ? await deliverWebhook(destination, event)
-        : await deliverCommand(destination, event);
+        ? await deliverWebhook(destination, event, redactDiagnostic)
+        : await deliverCommand(destination, event, redactDiagnostic);
       records.push({
         kind: 'delivery',
         eventId: event.id,
@@ -739,9 +767,9 @@ async function deliverDestination(
   return records;
 }
 
-export async function emitLifecycleEvent(input: EmitLifecycleEventInput): Promise<EventDeliverySummary> {
+async function emitEvent(input: EmitLifecycleEventInput, bestEffort: boolean): Promise<EventDeliverySummary> {
   const destinations = matchingDestinations(input.config, input.type);
-  if (destinations.length === 0) {
+  if (destinations.length === 0 && !input.eventLogPath) {
     const event = redactLifecycleEvent(buildLifecycleEvent({ ...input, manifest: null }), input.config);
     return { event, deliveries: [] };
   }
@@ -760,22 +788,46 @@ export async function emitLifecycleEvent(input: EmitLifecycleEventInput): Promis
     });
   }
 
+  // Redact complete diagnostics before truncation can leave a secret prefix
+  // that no longer matches its configured value.
+  const redactDiagnostic = (text: string): string => bestEffort ? redactEventData(text, input.config) : text;
   for (const [name, destination] of destinations) {
-    const records = await deliverDestination(name, destination, event, input.config.dryRun);
+    const rawRecords = await deliverDestination(name, destination, event, input.config.dryRun, redactDiagnostic);
+    const records = bestEffort ? redactEventData(rawRecords, input.config) : rawRecords;
     deliveries.push(...records);
     if (!input.config.dryRun) {
       for (const record of records) appendEventLog(input, rawManifest, record);
     }
 
-    const failed = records.at(-1)?.status === 'failed';
+    const failed = rawRecords.at(-1)?.status === 'failed';
     if (failed) {
       const message = `Lifecycle event ${event.type} failed for destination ${name}: ${records.at(-1)?.error ?? 'unknown error'}`;
-      if (destination.required) {
+      if (destination.required && !bestEffort) {
         throw new Error(message);
       }
-      log.warn(message);
+      log.warn(bestEffort ? redactEventData(message, input.config) : message);
     }
   }
 
   return { event, deliveries };
+}
+
+export async function emitLifecycleEvent(input: EmitLifecycleEventInput): Promise<EventDeliverySummary> {
+  return emitEvent(input, false);
+}
+
+/** Factory notifications must never stop supervision, even for required destinations. */
+export async function emitFactoryEvent(input: EmitFactoryEventInput): Promise<EventDeliverySummary | null> {
+  try {
+    return await emitEvent({
+      config: input.config,
+      type: input.type,
+      context: input.context,
+      now: input.now,
+      eventLogPath: join(input.stateDir, 'lifecycle-events.jsonl'),
+    }, true);
+  } catch (err) {
+    log.warn(redactEventData(`Factory event ${input.type} could not be emitted: ${err instanceof Error ? err.message : err}`, input.config));
+    return null;
+  }
 }
