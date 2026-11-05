@@ -92,6 +92,26 @@ describe('setupWorktree with real repositories', () => {
     }
   });
 
+  test.each(['missing', 'stale'])('recovers the remote tip with a restricted fetch and %s tracking ref', async trackingRef => {
+    const tip = commitIssueBranch();
+    git(projectDir, 'push', 'origin', branch);
+    git(projectDir, 'branch', '-D', branch);
+    // Single-branch clones do not update issue tracking refs on a plain fetch.
+    git(projectDir, 'config', 'remote.origin.fetch', '+refs/heads/master:refs/remotes/origin/master');
+    if (trackingRef === 'missing') {
+      git(projectDir, 'update-ref', '-d', `refs/remotes/origin/${branch}`);
+    } else {
+      git(projectDir, 'update-ref', `refs/remotes/origin/${branch}`, git(projectDir, 'rev-parse', 'master'));
+    }
+
+    const result = await setupWorktree(options(false));
+
+    expect(result.resumed).toBe(true);
+    expect(git(result.path, 'rev-parse', 'HEAD')).toBe(tip);
+    expect(git(origin, 'rev-parse', `refs/heads/${branch}`)).toBe(tip);
+    expect(readFileSync(join(result.path, 'tracked.txt'), 'utf-8')).toBe('previous worker commit\n');
+  });
+
   test.each([false, true, undefined])('failed attachment preserves the local tip without permission (%s)', async allowDestructive => {
     const tip = commitIssueBranch();
     mkdirSync(join(projectDir, '.worktrees'));

@@ -208,10 +208,11 @@ describe('setupWorktree', () => {
       expect(commands()).toContain(`git worktree add '${worktreePath}' -b 'agent/issue-42' 'origin/master'`);
     });
 
-    test.each(['fetch', 'discovery', 'empty discovery', 'recovery'])('fails closed on remote %s failure', async failure => {
+    test.each(['fetch', 'discovery', 'empty discovery', 'branch fetch', 'recovery'])('fails closed on remote %s failure', async failure => {
       mockExec.mockImplementation(cmd => {
         if (cmd === "git rev-parse --verify 'agent/issue-42'") return missing;
         if (cmd === 'git fetch origin' && failure === 'fetch') return missing;
+        if (cmd.startsWith('git fetch origin ') && failure === 'branch fetch') return missing;
         if (cmd.includes('ls-remote')) {
           if (failure === 'discovery') return missing;
           return { ...ok, stdout: failure === 'empty discovery' ? '' : 'abc123\trefs/heads/agent/issue-42' };
@@ -223,6 +224,9 @@ describe('setupWorktree', () => {
       expectNoDestruction();
       expect(commands().some(cmd => cmd.includes('origin/master'))).toBe(false);
       expect(commands().some(cmd => cmd.includes('pnpm install'))).toBe(false);
+      if (failure === 'branch fetch') {
+        expect(commands().some(cmd => cmd.includes('worktree add'))).toBe(false);
+      }
     });
 
     test('refuses an unreadable existing worktree without fallback', async () => {

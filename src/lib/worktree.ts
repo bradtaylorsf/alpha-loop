@@ -200,6 +200,16 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
           refuseDestructive(`cannot determine whether remote branch exists: ${remoteBranchCheck.stderr}`);
         }
         if (remoteBranchCheck.exitCode === 0) {
+          if (!allowDestructive) {
+            // A plain fetch may exclude this branch (e.g. a single-branch
+            // clone). Refresh its tracking ref before resuming, so we never
+            // attach to a missing or stale copy of the remote worker's work.
+            const refspec = `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
+            const branchFetch = exec(`git fetch origin ${shellQuote(refspec)}`, { cwd: projectDir });
+            if (branchFetch.exitCode !== 0) {
+              refuseDestructive(`cannot fetch remote issue branch safely: ${branchFetch.stderr}`);
+            }
+          }
           log.info(`Found remote branch origin/${branch}, recreating worktree from it (resuming previous work)`);
           const remoteReuseResult = exec(`git worktree add ${shellQuote(worktreePath)} -b ${shellQuote(branch)} ${shellQuote(`origin/${branch}`)}`, { cwd: projectDir });
           if (remoteReuseResult.exitCode === 0) {
