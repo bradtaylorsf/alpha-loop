@@ -65,6 +65,7 @@ by default, or the configured `daemon.lock.path`). Conversely, the daemon refuse
 while the factory supervisor lease at `<factory.state_dir>/factory.lock` is live. Both
 errors include the owning PID and lock path; stop the running coordinator before starting
 the other. Stale competing locks are left untouched and produce one warning at startup.
+Permission or I/O errors reading the competing lock stop startup.
 `factory --dry-run` remains available while the daemon runs. Keep daemon locking enabled:
 `daemon --no-lock` checks an existing factory lease but leaves no lock for a later factory
 start to detect.

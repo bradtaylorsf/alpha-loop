@@ -457,6 +457,7 @@ The daemon refuses to start while a live factory supervisor lease exists at
 daemon lock is live (`.alpha-loop/daemon.lock` by default, or `daemon.lock.path`).
 Each refusal names the owning PID and lock path. Stop the running coordinator before
 starting the other. A stale competing lock is left untouched and reported once at startup.
+Permission or I/O errors reading the competing lock stop startup.
 `daemon --no-lock` still checks for an existing factory lease, but leaves no daemon lock
 for a later factory start to detect; keep locking enabled for mutual exclusion.
 

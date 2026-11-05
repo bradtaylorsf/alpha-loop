@@ -58,6 +58,19 @@ describe('lease', () => {
     expect(leasePath('/x', '..')).toBe('/x/_.lock');
   });
 
+  test('strict reads still return null for absent or malformed leases', () => {
+    expect(readLease(dir, 'missing', { strict: true })).toBeNull();
+    writeLeaseFile(dir, 'broken', '{invalid');
+    expect(readLease(dir, 'broken', { strict: true })).toBeNull();
+  });
+
+  test('strict reads propagate I/O errors while ordinary reads remain best effort', () => {
+    mkdirSync(leasePath(dir, 'directory'));
+
+    expect(readLease(dir, 'directory')).toBeNull();
+    expect(() => readLease(dir, 'directory', { strict: true })).toThrow();
+  });
+
   test('acquire creates the lease file with owner, pid, token, and options', () => {
     const handle = acquireLease(dir, 'issue-7', {
       owner: 'factory', ttlSeconds: 60, workerPid: 99, meta: { title: 'x' }, now: NOW,

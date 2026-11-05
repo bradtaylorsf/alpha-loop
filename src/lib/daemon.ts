@@ -240,7 +240,7 @@ export function assertNoLiveDaemon(
 function assertNoLiveFactory(config: Config, options: { now: Date; isPidAlive?: (pid: number) => boolean }): void {
   const { stateDir } = resolveFactoryPaths(config);
   const lockPath = leasePath(stateDir, 'factory');
-  const lease = readLease(stateDir, 'factory');
+  const lease = readLease(stateDir, 'factory', { strict: true });
   if (!lease || isLeaseStale(lease, options)) {
     if (existsSync(lockPath)) log.warn(`Ignoring stale factory lock: ${lockPath}`);
     return;

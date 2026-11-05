@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -348,6 +348,31 @@ describe('daemon — factory exclusion', () => {
     expect(log.warn).not.toHaveBeenCalled();
     expect(isPidAlive).not.toHaveBeenCalled();
     expect(existsSync(resolveFactoryPaths(config).stateDir)).toBe(false);
+  });
+
+  it.each(['EACCES', 'EIO'])('refuses to work when reading the factory lease fails with %s', async (code) => {
+    const daemon = makeDaemon();
+    const config = makeConfig({ daemon });
+    const lease = seedFactory(config);
+    const actions = makeActions();
+    const error = Object.assign(new Error(`${code}: cannot read ${lease.path}`), { code, path: lease.path });
+    const read = fs.readFileSync;
+    const readSpy = jest.spyOn(fs, 'readFileSync').mockImplementation((path, options) => {
+      if (path === lease.path) throw error;
+      return read(path, options);
+    });
+
+    await expect(runDaemonLoop(config, daemon, actions, {
+      onceTick: true, now: () => now, isPidAlive: () => true, installSignalHandlers: false,
+    })).rejects.toBe(error);
+
+    expect(actions.triage).not.toHaveBeenCalled();
+    expect(actions.pollIssues).not.toHaveBeenCalled();
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
+    expect(existsSync(daemonLockPath(daemon))).toBe(false);
+    readSpy.mockRestore();
+    expect(readFileSync(lease.path, 'utf-8')).toBe(lease.original);
   });
 });
 
