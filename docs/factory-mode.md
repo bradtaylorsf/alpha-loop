@@ -208,6 +208,18 @@ A blocker is asked once per key and is not repeated while the question is still 
 - **Timeouts.** A developer worker past `worker_timeout_minutes` gets SIGTERM, then SIGKILL 30 s later.
   Its lease is released and it is recorded as a failure with a `dev:N:failed` question.
 
+### Verify lease-gated worktree setup
+
+Run the build and the worktree suites, including the real Git fixtures for issue #452:
+
+```bash
+pnpm build && pnpm test -- --runTestsByPath tests/lib/worktree.test.ts tests/lib/worktree.integration.test.ts
+```
+
+The `--` forwards Jest options to the test script. Without it, pnpm 9 rejects
+`--runTestsByPath` before any tests run. The integration suite uses disposable local
+repositories to check branch tips, dirty-file preservation, remote recovery and permitted cleanup.
+
 ## Configuration
 
 ```yaml
