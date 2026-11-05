@@ -132,6 +132,13 @@ describe('lease', () => {
   });
 
   describe('isLeaseStale', () => {
+    it('aliveOverridesTtl: a live owner on this host never expires by TTL (regression)', () => {
+      const old = payload({ refreshedAt: '2026-11-04T10:00:00.000Z', ttlSeconds: 300, aliveOverridesTtl: true });
+      expect(isLeaseStale(old, { now: NOW, isPidAlive: alive })).toBe(false);
+      expect(isLeaseStale(old, { now: NOW, isPidAlive: dead })).toBe(true);
+      expect(isLeaseStale({ ...old, hostname: 'elsewhere' }, { now: NOW, isPidAlive: alive })).toBe(true);
+    });
+
     test('live pid on this host within TTL is fresh', () => {
       expect(isLeaseStale(payload(), { now: NOW, isPidAlive: alive })).toBe(false);
     });

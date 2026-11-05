@@ -9,6 +9,7 @@ import { exec, shellQuote } from './shell.js';
 import { ghExec, getProjectCache, setProjectCache } from './rate-limit.js';
 import { log } from './logger.js';
 import { labelName } from './labels.js';
+import { gitLockPath, withFileLockSync } from './lease.js';
 import {
   findUnparsedSubIssueChecklistLines,
   flipChecklistItem,
@@ -99,8 +100,10 @@ export function listMilestones(repo: string): Milestone[] {
  * "Todo" status. Falls back to label-based polling when no project is set.
  *
  * When a milestone is specified, only issues in that milestone are returned.
+ * With `strict`, a gh failure or unparseable output throws instead of
+ * returning [] — for callers that must tell "nothing ready" from "could not look".
  */
-export function pollIssues(repo: string, label: string, limit = 10, options?: { project?: number; repoOwner?: string; milestone?: string }): Issue[] {
+export function pollIssues(repo: string, label: string, limit = 10, options?: { project?: number; repoOwner?: string; milestone?: string; strict?: boolean }): Issue[] {
   const project = options?.project;
   const repoOwner = options?.repoOwner ?? repo.split('/')[0];
   const milestone = options?.milestone;
@@ -109,11 +112,11 @@ export function pollIssues(repo: string, label: string, limit = 10, options?: { 
   // When a milestone is specified, skip the project board to avoid paginating
   // through all items (which can hit GraphQL rate limits on large boards).
   if (project && project > 0 && !milestone) {
-    return pollIssuesByProject(repoOwner, project, limit, { repo });
+    return pollIssuesByProject(repoOwner, project, limit, { repo, strict: options?.strict });
   }
 
   // Poll by label (optionally filtered by milestone)
-  return pollIssuesByLabel(repo, label, limit, milestone);
+  return pollIssuesByLabel(repo, label, limit, milestone, options?.strict);
 }
 
 /**
@@ -124,7 +127,7 @@ export function pollIssues(repo: string, label: string, limit = 10, options?: { 
  * Uses --jq to filter out Done items server-side, keeping the response small
  * even for large project boards.
  */
-function pollIssuesByProject(owner: string, project: number, limit: number, options?: { repo?: string; milestone?: string }): Issue[] {
+function pollIssuesByProject(owner: string, project: number, limit: number, options?: { repo?: string; milestone?: string; strict?: boolean }): Issue[] {
   // Fetch all project items but filter to only Todo issues via jq to avoid
   // truncating results when Done items fill the limit.
   const jqFilter = `{items: [.items[] | select(.status == "Todo" and .content.type == "Issue")]}`;
@@ -132,6 +135,7 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
     `gh project item-list ${project} --owner "${owner}" --format json --limit 200 --jq '${jqFilter}'`,
   );
   if (result.exitCode !== 0) {
+    if (options?.strict) throw new Error(`Failed to poll project board: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
     log.warn(`Failed to poll project board: ${result.stderr}`);
     return [];
   }
@@ -163,6 +167,7 @@ function pollIssuesByProject(owner: string, project: number, limit: number, opti
         labels: compactLabelNames(item.labels),
       }));
   } catch {
+    if (options?.strict) throw new Error('Failed to parse project board JSON');
     log.warn('Failed to parse project board JSON');
     return [];
   }
@@ -189,13 +194,14 @@ function getMilestoneIssueNumbers(repo: string, milestone: string): Set<number> 
  * Optionally filters by milestone; the ready label remains authoritative
  * because milestones are scheduling metadata, not workflow state.
  */
-function pollIssuesByLabel(repo: string, label: string, limit: number, milestone?: string): Issue[] {
+function pollIssuesByLabel(repo: string, label: string, limit: number, milestone?: string, strict = false): Issue[] {
   const milestoneFlag = milestone ? ` --milestone "${milestone}"` : '';
   const labelFlag = label ? ` --label "${label}"` : '';
   const result = ghExec(
     `gh issue list --repo "${repo}"${labelFlag} --state open${milestoneFlag} --json number,title,body,labels --limit ${limit}`,
   );
   if (result.exitCode !== 0) {
+    if (strict) throw new Error(`Failed to poll issues: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
     log.warn(`Failed to poll issues: ${result.stderr}`);
     return [];
   }
@@ -216,6 +222,7 @@ function pollIssuesByLabel(repo: string, label: string, limit: number, milestone
       .sort((a, b) => a.number - b.number)
       .slice(0, limit);
   } catch {
+    if (strict) throw new Error('Failed to parse issues JSON');
     log.warn('Failed to parse issues JSON');
     return [];
   }
@@ -302,7 +309,8 @@ export type CreatePROptions = {
 function reconcilePushDivergence(head: string, cwd?: string): void {
   const quotedHead = shellQuote(head);
   const quotedRemoteRef = shellQuote(`origin/${head}`);
-  exec(`git fetch origin ${quotedHead}`, { cwd });
+  // The fetch mutates the shared .git refs; serialize it with parallel workers.
+  withFileLockSync(gitLockPath(process.cwd()), () => exec(`git fetch origin ${quotedHead}`, { cwd }));
 
   const remoteExists = exec(`git rev-parse --verify --quiet ${quotedRemoteRef}`, { cwd });
   if (remoteExists.exitCode !== 0) {

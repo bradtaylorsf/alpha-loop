@@ -177,14 +177,40 @@ describe('decideShip', () => {
   test.each([
     [{ reviewDecision: 'REVIEW_REQUIRED', mergeStateStatus: 'BLOCKED' }],
     [{ reviewDecision: 'CHANGES_REQUESTED' }],
-    [{ mergeStateStatus: 'BLOCKED' }],
-  ])('review/branch protection %j → ask review-required', (overrides) => {
+  ])('review %j → ask review-required', (overrides) => {
     expect(decideShip(pr(overrides), policy(), NOW)).toMatchObject({ action: 'ask', key: 'ship:512:review-required' });
   });
 
-  test('review required + adminMerge → admin merge', () => {
-    expect(decideShip(pr({ reviewDecision: 'REVIEW_REQUIRED', mergeStateStatus: 'BLOCKED' }), policy({ adminMerge: true }), NOW))
+  test('review required + adminMerge + every required check passed → admin merge', () => {
+    expect(decideShip(pr({ reviewDecision: 'REVIEW_REQUIRED', mergeStateStatus: 'BLOCKED', requiredChecksMissing: [] }), policy({ adminMerge: true }), NOW))
       .toMatchObject({ action: 'merge', admin: true });
+  });
+
+  // Regression: admin merge used to fire on any BLOCKED state and over CHANGES_REQUESTED.
+  test('CHANGES_REQUESTED is never admin-merged', () => {
+    expect(decideShip(pr({ reviewDecision: 'CHANGES_REQUESTED', mergeStateStatus: 'BLOCKED', requiredChecksMissing: [] }), policy({ adminMerge: true }), NOW))
+      .toMatchObject({ action: 'ask', key: 'ship:512:review-required' });
+  });
+
+  test('BLOCKED without a review requirement waits (no admin merge), then asks after the checks timeout', () => {
+    const blocked = { mergeStateStatus: 'BLOCKED', requiredChecksMissing: [] };
+    expect(decideShip(pr(blocked), policy({ adminMerge: true }), NOW)).toMatchObject({ action: 'wait' });
+    const old = { ...blocked, createdAt: new Date(NOW.getTime() - 120 * 60_000).toISOString() };
+    expect(decideShip(pr(old), policy({ adminMerge: true, checksTimeoutMinutes: 60 }), NOW))
+      .toMatchObject({ action: 'ask', key: 'ship:512:blocked' });
+  });
+
+  test('review required + adminMerge with a required check not yet reported → wait, then ask', () => {
+    const missing = { reviewDecision: 'REVIEW_REQUIRED', mergeStateStatus: 'BLOCKED', requiredChecksMissing: ['e2e'] };
+    expect(decideShip(pr(missing), policy({ adminMerge: true }), NOW)).toMatchObject({ action: 'wait' });
+    const old = { ...missing, createdAt: new Date(NOW.getTime() - 120 * 60_000).toISOString() };
+    expect(decideShip(pr(old), policy({ adminMerge: true, checksTimeoutMinutes: 60 }), NOW))
+      .toMatchObject({ action: 'ask', key: 'ship:512:required-checks' });
+  });
+
+  test('review required + adminMerge when the required checks are unknown → ask, never admin merge', () => {
+    expect(decideShip(pr({ reviewDecision: 'REVIEW_REQUIRED', mergeStateStatus: 'BLOCKED' }), policy({ adminMerge: true }), NOW))
+      .toMatchObject({ action: 'ask', key: 'ship:512:review-required' });
   });
 
   test('BEHIND → wait', () => {
@@ -214,7 +240,7 @@ describe('decideShip', () => {
   test('policy.merge=false converts merge into skip', () => {
     expect(decideShip(pr(), policy({ merge: false }), NOW))
       .toEqual({ action: 'skip', reason: 'would merge (ship.merge disabled)' });
-    expect(decideShip(pr({ mergeStateStatus: 'BLOCKED' }), policy({ merge: false, adminMerge: true }), NOW))
+    expect(decideShip(pr({ reviewDecision: 'REVIEW_REQUIRED', mergeStateStatus: 'BLOCKED', requiredChecksMissing: [] }), policy({ merge: false, adminMerge: true }), NOW))
       .toEqual({ action: 'skip', reason: 'would merge (ship.merge disabled)' });
   });
 
@@ -295,6 +321,39 @@ describe('listShippablePrs', () => {
   test('empty stdout → []', () => {
     mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
     expect(listShippablePrs('o/r', 'master', ['session/'])).toEqual([]);
+  });
+
+  test('requiredChecks: reports required checks that have not passed on the head', () => {
+    mockExec.mockImplementation((cmd: string) => {
+      if (cmd.startsWith('gh api')) {
+        return { stdout: JSON.stringify({ contexts: ['test', 'e2e'], checks: [{ context: 'test' }] }), stderr: '', exitCode: 0 };
+      }
+      return { stdout: JSON.stringify([rawPr()]), stderr: '', exitCode: 0 };
+    });
+    const [prItem] = listShippablePrs('o/r', 'master', ['session/'], { requiredChecks: true });
+    expect(mockGhExec.mock.calls.some(([cmd]) => String(cmd).includes("gh api 'repos/o/r/branches/master/protection/required_status_checks'"))).toBe(true);
+    expect(prItem.requiredChecksMissing).toEqual(['e2e']);
+  });
+
+  test('requiredChecks: unprotected branch → nothing missing; unreadable protection → unknown', () => {
+    mockExec.mockImplementation((cmd: string) => (cmd.startsWith('gh api')
+      ? { stdout: '', stderr: 'gh: Branch not protected (HTTP 404)', exitCode: 1 }
+      : { stdout: JSON.stringify([rawPr()]), stderr: '', exitCode: 0 }));
+    expect(listShippablePrs('o/r', 'master', ['session/'], { requiredChecks: true })[0].requiredChecksMissing).toEqual([]);
+
+    mockExec.mockImplementation((cmd: string) => (cmd.startsWith('gh api')
+      ? { stdout: '', stderr: 'HTTP 403: Resource not accessible', exitCode: 1 }
+      : { stdout: JSON.stringify([rawPr()]), stderr: '', exitCode: 0 }));
+    expect(listShippablePrs('o/r', 'master', ['session/'], { requiredChecks: true })[0].requiredChecksMissing).toBeUndefined();
+  });
+
+  test('default head prefix is the factory developer branch session/issue-', () => {
+    mockExec.mockReturnValue({
+      stdout: JSON.stringify([rawPr(), rawPr({ number: 513, headRefName: 'session/epic-454' })]),
+      stderr: '',
+      exitCode: 0,
+    });
+    expect(listShippablePrs('o/r', 'master', []).map((p) => p.number)).toEqual([512]);
   });
 });
 

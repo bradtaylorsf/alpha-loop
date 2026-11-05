@@ -126,6 +126,11 @@ jest.mock('../../src/lib/prompts', () => ({
   buildAssumptionsPrompt: jest.fn().mockReturnValue('assumptions prompt'),
 }));
 
+// node:fs is mocked below, so the cross-process git lock runs its callback directly.
+jest.mock('../../src/lib/lease', () => ({
+  gitLockPath: (dir: string) => `${dir}/.alpha-loop/locks/git.lock`,
+  withFileLockSync: (_path: string, fn: () => unknown) => fn(),
+}));
 jest.mock('node:fs', () => ({
   mkdirSync: jest.fn(),
   existsSync: jest.fn().mockReturnValue(false),

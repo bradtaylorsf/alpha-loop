@@ -30,6 +30,12 @@ export type ShipPr = {
   closingIssues: number[];
   /** Head commit the checks ran against; when set, merges pin to it (`--match-head-commit`). */
   headRefOid?: string;
+  /**
+   * Required status checks for the base branch that have not reported success
+   * on this head. Only filled when listing with `requiredChecks: true`;
+   * undefined means unknown (not fetched, or the protection API failed).
+   */
+  requiredChecksMissing?: string[];
 };
 
 export type ShipPolicy = {
@@ -38,7 +44,7 @@ export type ShipPolicy = {
   requireChecks: boolean;
   checksTimeoutMinutes: number;
   mergeMethod: 'squash' | 'merge' | 'rebase';
-  /** Default ['session/']. */
+  /** Default ['session/issue-'] (factory developer session branches). */
   headPrefixes: string[];
   /** Pass --delete-branch on merge. Default false. */
   deleteBranch?: boolean;
@@ -49,6 +55,9 @@ export type ShipDecision =
   | { action: 'wait'; reason: string }
   | { action: 'skip'; reason: string }
   | { action: 'ask'; key: string; question: string; context: string };
+
+/** Factory developer workers open `session/issue-<N>-<slug>` branches. */
+export const DEFAULT_HEAD_PREFIX = 'session/issue-';
 
 const FAILURE_STATES = new Set([
   'FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE',
@@ -95,6 +104,18 @@ function checkItemName(item: Record<string, unknown>): string {
  * success. Unrecognized states count as pending (fail closed: never merge on
  * evidence we don't understand). An empty rollup is 'none'.
  */
+/** Names of rollup items that resolved to a success state. */
+export function passedCheckNames(rollup: unknown[]): string[] {
+  if (!Array.isArray(rollup)) return [];
+  const names: string[] = [];
+  for (const raw of rollup) {
+    if (!raw || typeof raw !== 'object') continue;
+    const item = raw as Record<string, unknown>;
+    if (SUCCESS_STATES.has(checkItemState(item))) names.push(checkItemName(item));
+  }
+  return names;
+}
+
 export function summarizeChecks(rollup: unknown[]): { state: PrCheckState; failing: string[] } {
   if (!Array.isArray(rollup) || rollup.length === 0) return { state: 'none', failing: [] };
   const failing: string[] = [];
@@ -139,7 +160,7 @@ function ageMinutes(createdAt: string, now: Date): number {
 function decideShipRaw(pr: ShipPr, policy: ShipPolicy, now: Date): ShipDecision {
   if (pr.isDraft) return { action: 'skip', reason: 'draft PR' };
 
-  const prefixes = policy.headPrefixes.length > 0 ? policy.headPrefixes : ['session/'];
+  const prefixes = policy.headPrefixes.length > 0 ? policy.headPrefixes : [DEFAULT_HEAD_PREFIX];
   if (!prefixes.some((prefix) => pr.headRefName.startsWith(prefix))) {
     return { action: 'skip', reason: `head branch ${pr.headRefName} is not a factory branch (${prefixes.join(', ')})` };
   }
@@ -185,21 +206,64 @@ function decideShipRaw(pr: ShipPr, policy: ShipPolicy, now: Date): ShipDecision 
   if (mergeable !== 'MERGEABLE') return { action: 'wait', reason: 'mergeability not yet computed' };
 
   const review = upper(pr.reviewDecision);
-  if (review === 'REVIEW_REQUIRED' || review === 'CHANGES_REQUESTED' || mergeState === 'BLOCKED') {
-    if (policy.adminMerge) {
-      return { action: 'merge', admin: true, reason: `checks ${pr.checks}; branch protection blocks a normal merge — admin merge` };
-    }
-    const why = review === 'CHANGES_REQUESTED'
-      ? 'has changes requested'
-      : review === 'REVIEW_REQUIRED'
-        ? 'requires an approving review the loop cannot give'
-        : 'is blocked by branch protection';
+  if (review === 'CHANGES_REQUESTED') {
+    // A human asked for changes: never override that, not even with admin merge.
     return {
       action: 'ask',
       key: `ship:${pr.number}:review-required`,
-      question: `PR #${pr.number} is green but ${pr.baseRefName} ${why}. Approve it, or allow admin merge?`,
+      question: `PR #${pr.number} is green but has changes requested. Address the review, or approve it?`,
       context: prContext(pr),
     };
+  }
+  if (review === 'REVIEW_REQUIRED') {
+    // admin_merge exists only to get past the approving-review requirement the
+    // loop cannot satisfy. Use it only when every required check is known to
+    // have passed on this head — BLOCKED can also mean a required check has
+    // not reported yet, and statusCheckRollup cannot show an absent check.
+    if (policy.adminMerge) {
+      const missing = pr.requiredChecksMissing;
+      if (missing === undefined) {
+        return {
+          action: 'ask',
+          key: `ship:${pr.number}:review-required`,
+          question: `PR #${pr.number} is green but ${pr.baseRefName} requires an approving review, and the factory could not verify the required checks for an admin merge. Approve it, or merge it by hand?`,
+          context: prContext(pr),
+        };
+      }
+      if (missing.length > 0) {
+        const age = ageMinutes(pr.createdAt, now);
+        if (Number.isFinite(age) && age > policy.checksTimeoutMinutes) {
+          return {
+            action: 'ask',
+            key: `ship:${pr.number}:required-checks`,
+            question: `PR #${pr.number} is still missing required checks (${missing.join(', ')}) after ${Math.round(age)} minutes. Is CI running for ${pr.baseRefName}?`,
+            context: prContext(pr, ['Missing required checks:', ...missing.map((name) => `- ${name}`)]),
+          };
+        }
+        return { action: 'wait', reason: `required checks not reported yet: ${missing.join(', ')}` };
+      }
+      return { action: 'merge', admin: true, reason: `checks ${pr.checks}; every required check passed; review required — admin merge` };
+    }
+    return {
+      action: 'ask',
+      key: `ship:${pr.number}:review-required`,
+      question: `PR #${pr.number} is green but ${pr.baseRefName} requires an approving review the loop cannot give. Approve it, or allow admin merge?`,
+      context: prContext(pr),
+    };
+  }
+  if (mergeState === 'BLOCKED') {
+    // Blocked by something other than reviews (a required check that has not
+    // reported, signatures, conversation resolution, ...). Never admin-merge.
+    const age = ageMinutes(pr.createdAt, now);
+    if (Number.isFinite(age) && age > policy.checksTimeoutMinutes) {
+      return {
+        action: 'ask',
+        key: `ship:${pr.number}:blocked`,
+        question: `PR #${pr.number} is green but ${pr.baseRefName} branch protection still blocks it after ${Math.round(age)} minutes. What is missing?`,
+        context: prContext(pr),
+      };
+    }
+    return { action: 'wait', reason: 'blocked by branch protection (not a review requirement)' };
   }
 
   if (mergeState === 'BEHIND') {
@@ -282,12 +346,47 @@ function toShipPr(repo: string, raw: RawPr): ShipPr | null {
 }
 
 /**
+ * Required status check names for `baseBranch` from the branch-protection API.
+ * [] when the branch is unprotected or has no required checks; null when the
+ * protection could not be read (permissions, network) — callers fail closed.
+ */
+export function requiredStatusContexts(repo: string, baseBranch: string): string[] | null {
+  const result = ghExec(
+    `gh api ${shellQuote(`repos/${repo}/branches/${baseBranch}/protection/required_status_checks`)}`,
+  );
+  if (result.exitCode !== 0) {
+    const text = `${result.stderr} ${result.stdout}`;
+    if (/not protected|required status checks not enabled|HTTP 404|Not Found/i.test(text)) return [];
+    return null;
+  }
+  try {
+    const data = JSON.parse(result.stdout || '{}') as { contexts?: unknown; checks?: Array<{ context?: unknown }> };
+    const names = new Set<string>();
+    if (Array.isArray(data.contexts)) {
+      for (const c of data.contexts) if (typeof c === 'string' && c.trim()) names.add(c.trim());
+    }
+    for (const check of data.checks ?? []) {
+      if (typeof check?.context === 'string' && check.context.trim()) names.add(check.context.trim());
+    }
+    return [...names];
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Open PRs into `baseBranch` whose head branch starts with one of
  * `headPrefixes`, oldest first. Throws when gh fails or returns unparseable
  * output so the supervisor can log a ship-tick failure instead of silently
- * believing there is nothing to ship.
+ * believing there is nothing to ship. With `requiredChecks`, each PR also gets
+ * `requiredChecksMissing` (needed before any admin merge).
  */
-export function listShippablePrs(repo: string, baseBranch: string, headPrefixes: string[]): ShipPr[] {
+export function listShippablePrs(
+  repo: string,
+  baseBranch: string,
+  headPrefixes: string[],
+  opts: { requiredChecks?: boolean } = {},
+): ShipPr[] {
   const result = ghExec(
     `gh pr list --repo ${shellQuote(repo)} --base ${shellQuote(baseBranch)} --state open --json ${PR_LIST_FIELDS} --limit 100`,
   );
@@ -302,11 +401,20 @@ export function listShippablePrs(repo: string, baseBranch: string, headPrefixes:
   }
   if (!Array.isArray(parsed)) throw new Error(`Unexpected PR list shape for ${baseBranch}`);
 
-  const prefixes = headPrefixes.length > 0 ? headPrefixes : ['session/'];
-  return (parsed as RawPr[])
-    .map((raw) => toShipPr(repo, raw))
+  const prefixes = headPrefixes.length > 0 ? headPrefixes : [DEFAULT_HEAD_PREFIX];
+  const matching = (parsed as RawPr[])
+    .filter((raw) => typeof raw.headRefName === 'string' && prefixes.some((prefix) => raw.headRefName!.startsWith(prefix)));
+  const required = opts.requiredChecks && matching.length > 0 ? requiredStatusContexts(repo, baseBranch) : undefined;
+  return matching
+    .map((raw) => {
+      const pr = toShipPr(repo, raw);
+      if (pr && opts.requiredChecks && required) {
+        const passed = new Set(passedCheckNames(raw.statusCheckRollup ?? []));
+        pr.requiredChecksMissing = required.filter((name) => !passed.has(name));
+      }
+      return pr;
+    })
     .filter((pr): pr is ShipPr => pr !== null)
-    .filter((pr) => prefixes.some((prefix) => pr.headRefName.startsWith(prefix)))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.number - b.number);
 }
 

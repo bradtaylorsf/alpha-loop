@@ -61,6 +61,12 @@ beforeEach(() => {
 });
 
 describe('pollIssues', () => {
+  it('strict: throws on a gh failure instead of returning [] (regression)', () => {
+    mockExec.mockReturnValue({ stdout: '', stderr: 'API rate limit exceeded', exitCode: 1 });
+    expect(pollIssues('o/r', 'ready', 10)).toEqual([]);
+    expect(() => pollIssues('o/r', 'ready', 10, { strict: true })).toThrow(/rate limit/);
+  });
+
   test('returns parsed issues with number, title, body, labels', () => {
     mockExec.mockReturnValue({
       stdout: JSON.stringify([

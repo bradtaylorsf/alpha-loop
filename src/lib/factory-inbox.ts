@@ -11,11 +11,18 @@
  *
  * Continuation lines indented (2+ spaces or a tab) directly under a bullet
  * belong to that idea's text. An untagged idea's id is derived from its
- * normalized text, so it is stable until the factory first tags it.
+ * normalized text, so it is stable until the factory first tags it. Ids are
+ * unique within the file: a repeated text (or a copied tag) gets the same
+ * `#n` disambiguation appendIdea uses, assigned in file order.
+ *
+ * Every read-modify-write holds `<inbox>.lock`, so the `factory idea` CLI and
+ * the supervisor (separate processes) cannot lose each other's writes.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { dirname } from 'node:path';
+import { defaultPidAlive, withFileLockSync } from './lease.js';
 
 export type IdeaStatus = 'pending' | 'taken' | 'done' | 'question' | 'rejected';
 
@@ -91,16 +98,43 @@ function parseTag(body: string): { id?: string; meta: Record<string, string> } {
 
 function parseEntries(lines: string[]): InboxEntry[] {
   const entries: InboxEntry[] = [];
+  // Every explicit tag in the file, so a computed id never collides with a tag
+  // that appears later in the file.
+  const explicitTags = new Set<string>();
+  {
+    let fence = false;
+    for (const line of lines) {
+      if (FENCE_RE.test(line)) { fence = !fence; continue; }
+      if (fence) continue;
+      const bullet = BULLET_RE.exec(line);
+      const tag = bullet ? TAG_RE.exec(bullet[4]) : null;
+      const id = tag ? parseTag(tag[1]).id : undefined;
+      if (id) explicitTags.add(id);
+    }
+  }
+  const used = new Set<string>();
+  const uniqueId = (tagId: string | undefined, text: string): string => {
+    // First holder of an explicit tag keeps it.
+    if (tagId && !used.has(tagId)) return tagId;
+    // Untagged ideas and copied tags: the text-derived id, disambiguated with
+    // appendIdea's `${text}\n#n` scheme against every id already used and
+    // every explicit tag anywhere in the file.
+    let id = ideaIdFor(text);
+    for (let n = 2; used.has(id) || explicitTags.has(id); n++) id = ideaIdFor(`${text}\n#${n}`);
+    return id;
+  };
   let inFence = false;
   let current: { entry: Omit<InboxEntry, 'idea'>; line: number; status: IdeaStatus; tagId?: string; note: string; meta: Record<string, string>; continuation: string[] } | null = null;
 
   const finish = () => {
     if (!current) return;
     const text = [current.entry.head, ...current.continuation].join('\n');
+    const id = uniqueId(current.tagId, text);
+    used.add(id);
     entries.push({
       ...current.entry,
       idea: {
-        id: current.tagId ?? ideaIdFor(text),
+        id,
         status: current.status,
         text,
         note: current.note,
@@ -213,6 +247,12 @@ export function readInbox(path: string): InboxIdea[] {
   return parseInbox(readFileSync(path, 'utf-8'));
 }
 
+/** Cross-process mutex around one read-modify-write of the inbox. */
+function withInboxLock<T>(path: string, fn: () => T): T {
+  mkdirSync(dirname(path), { recursive: true });
+  return withFileLockSync(`${path}.lock`, fn, { timeoutMs: 30_000, staleMs: 60_000 });
+}
+
 function readLines(path: string): { lines: string[]; eol: string } {
   const raw = readFileSync(path, 'utf-8');
   return { lines: raw.split(/\r?\n/), eol: raw.includes('\r\n') ? '\r\n' : '\n' };
@@ -227,7 +267,10 @@ export function appendIdea(path: string, text: string): InboxIdea {
   const parts = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (parts.length === 0) throw new Error('Idea text is empty');
   ensureInboxFile(path);
+  return withInboxLock(path, () => appendIdeaLocked(path, parts));
+}
 
+function appendIdeaLocked(path: string, parts: string[]): InboxIdea {
   const { lines, eol } = readLines(path);
   const taken = new Set(parseEntries(lines).map((entry) => entry.idea.id));
   const fullText = parts.join('\n');
@@ -248,8 +291,13 @@ export function appendIdea(path: string, text: string): InboxIdea {
 function patchedBullet(entry: InboxEntry, patch: { status: IdeaStatus; note?: string; meta?: Record<string, string> }, now: Date): string {
   const note = patch.note !== undefined ? patch.note : entry.idea.note;
   const meta = patch.meta !== undefined ? { ...patch.meta } : { ...entry.idea.meta };
-  // The `taken` stamp only means something while the idea is taken.
-  if (patch.meta === undefined && patch.status !== 'taken') delete meta.taken;
+  // The `taken` stamp and the PM worker's pid/host/worker only mean something while the idea is taken.
+  if (patch.meta === undefined && patch.status !== 'taken') {
+    delete meta.taken;
+    delete meta.pid;
+    delete meta.host;
+    delete meta.worker;
+  }
   if (patch.status === 'taken' && !meta.taken) meta.taken = isoSeconds(now);
   return renderBullet(entry, entry.idea.id, patch.status, note, meta);
 }
@@ -261,16 +309,28 @@ function patchedBullet(entry: InboxEntry, patch: { status: IdeaStatus; note?: st
  * non-id tag fields when given; when omitted the existing fields are kept,
  * except `taken`, which is dropped unless the new status is 'taken'. Moving
  * to 'taken' without a `taken` meta value stamps the current time.
+ *
+ * `opts.line` (the caller's snapshot of the idea's line) is preferred when an
+ * entry with that id sits there; otherwise the entry with that id is used
+ * (ids are unique per file, so lines may shift under human edits).
  * Returns false when the file or the idea is missing.
  */
-export function updateIdea(path: string, id: string, patch: { status: IdeaStatus; note?: string; meta?: Record<string, string> }): boolean {
+export function updateIdea(
+  path: string,
+  id: string,
+  patch: { status: IdeaStatus; note?: string; meta?: Record<string, string> },
+  opts: { line?: number } = {},
+): boolean {
   if (!existsSync(path)) return false;
-  const { lines, eol } = readLines(path);
-  const entry = parseEntries(lines).find((candidate) => candidate.idea.id === id);
-  if (!entry) return false;
-  lines[entry.idea.line] = patchedBullet(entry, patch, new Date());
-  writeFileAtomic(path, lines.join(eol));
-  return true;
+  return withInboxLock(path, () => {
+    const { lines, eol } = readLines(path);
+    const matches = parseEntries(lines).filter((candidate) => candidate.idea.id === id);
+    const entry = matches.find((candidate) => candidate.idea.line === opts.line) ?? matches[0];
+    if (!entry) return false;
+    lines[entry.idea.line] = patchedBullet(entry, patch, new Date());
+    writeFileAtomic(path, lines.join(eol));
+    return true;
+  });
 }
 
 export function nextPendingIdeas(ideas: InboxIdea[], limit: number): InboxIdea[] {
@@ -279,23 +339,47 @@ export function nextPendingIdeas(ideas: InboxIdea[], limit: number): InboxIdea[]
 }
 
 /**
- * Return ideas stuck in 'taken' (e.g. a PM worker died) to 'pending'. An idea is
- * stale when its `taken` stamp is older than `olderThanMinutes` or missing/unparseable.
- * All recoveries land in a single atomic write. Returns the recovered ids.
+ * Return ideas stuck in 'taken' (e.g. a PM worker died) to 'pending'.
+ *
+ * When the idea records the PM worker's `pid` and `host` (this host), the pid
+ * decides: a live worker keeps the idea taken, a dead one frees it at once.
+ * Otherwise an idea is stale when its `taken` stamp is older than
+ * `olderThanMinutes` or missing/unparseable. `skipIds` (the idea a live PM
+ * worker of this supervisor holds) are never touched. All recoveries land in
+ * a single atomic write. Returns the recovered ids.
  */
-export function recoverTakenIdeas(path: string, opts: { olderThanMinutes: number; now?: Date }): string[] {
+export function recoverTakenIdeas(
+  path: string,
+  opts: { olderThanMinutes: number; now?: Date; skipIds?: string[]; isPidAlive?: (pid: number) => boolean },
+): string[] {
   if (!existsSync(path)) return [];
   const now = opts.now ?? new Date();
-  const { lines, eol } = readLines(path);
-  const recovered: string[] = [];
-  for (const entry of parseEntries(lines)) {
-    if (entry.idea.status !== 'taken') continue;
-    const takenAt = Date.parse(entry.idea.meta.taken ?? '');
-    const stale = Number.isNaN(takenAt) || now.getTime() - takenAt > opts.olderThanMinutes * 60_000;
-    if (!stale) continue;
-    lines[entry.idea.line] = patchedBullet(entry, { status: 'pending' }, now);
-    recovered.push(entry.idea.id);
-  }
-  if (recovered.length > 0) writeFileAtomic(path, lines.join(eol));
-  return recovered;
+  const isPidAlive = opts.isPidAlive ?? defaultPidAlive;
+  const skip = new Set(opts.skipIds ?? []);
+  return withInboxLock(path, () => {
+    const { lines, eol } = readLines(path);
+    const recovered: string[] = [];
+    for (const entry of parseEntries(lines)) {
+      if (entry.idea.status !== 'taken' || skip.has(entry.idea.id)) continue;
+      const pid = Number(entry.idea.meta.pid);
+      const local = entry.idea.meta.host !== undefined && entry.idea.meta.host === hostname();
+      let stale: boolean;
+      if (local && Number.isInteger(pid) && pid > 0) {
+        stale = !isPidAlive(pid);
+      } else {
+        const takenAt = Date.parse(entry.idea.meta.taken ?? '');
+        stale = Number.isNaN(takenAt) || now.getTime() - takenAt > opts.olderThanMinutes * 60_000;
+      }
+      if (!stale) continue;
+      const meta = { ...entry.idea.meta };
+      delete meta.taken;
+      delete meta.pid;
+      delete meta.host;
+      delete meta.worker;
+      lines[entry.idea.line] = patchedBullet(entry, { status: 'pending', meta }, now);
+      recovered.push(entry.idea.id);
+    }
+    if (recovered.length > 0) writeFileAtomic(path, lines.join(eol));
+    return recovered;
+  });
 }

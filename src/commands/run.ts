@@ -954,7 +954,11 @@ async function runIssueSession(
   try {
     if (config.autoMerge) {
       try {
-        await ensureSessionWorktree(session, config);
+        // Factory developers open their session PR only at finalization. An
+        // early non-draft "session in progress" PR into the base branch would
+        // look shippable (green CI on an empty commit) while work is underway.
+        if (options.factoryWorker !== undefined) await ensureSessionWorktree(session, config, { createDraftPr: false });
+        else await ensureSessionWorktree(session, config);
       } catch (err) {
         const message = `Failed to set up session worktree: ${err instanceof Error ? err.message : err}`;
         log.error(message);
@@ -1009,6 +1013,18 @@ async function cleanupSessionWorktree(
     reason: cleanupResult.reason,
     at: new Date().toISOString(),
   });
+}
+
+/**
+ * Generated-file preparation a coordinator (parallel epic queue, factory
+ * supervisor) runs once in the shared checkout before spawning workers, which
+ * skip it: sync agent assets to the harness dirs and refresh project context.
+ * Throws CommandExitError('project-context-refresh-required') when refreshed
+ * context must be reviewed and merged first.
+ */
+export async function prepareCoordinatorCheckout(config: Config): Promise<void> {
+  syncProjectAgentAssets(config);
+  await refreshProjectContext(config);
 }
 
 function syncProjectAgentAssets(config: Config): void {

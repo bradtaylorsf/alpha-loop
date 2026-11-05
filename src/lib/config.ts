@@ -383,7 +383,7 @@ export const DEFAULT_FACTORY_CONFIG: FactoryConfig = {
     checksTimeoutMinutes: 60,
     intervalSeconds: 300,
     mergeMethod: 'squash',
-    headPrefixes: ['session/'],
+    headPrefixes: ['session/issue-'],
   },
 };
 

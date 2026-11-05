@@ -33,6 +33,67 @@ To run one epic overnight against a feature branch, so that nothing touches `mas
 alpha-loop factory --epic 454 --base feat/factory-mode --developers 3 --until-idle --ship-merge
 ```
 
+## Running it
+
+```
+alpha-loop factory [--developers n] [--epic <ids>] [--once] [--until-idle] [--max-ticks n]
+                   [--max-runtime <min>] [--no-pm] [--no-ship] [--ship-merge] [--base <branch>]
+                   [--dry-run] [--verbose]
+alpha-loop factory status [--json]
+alpha-loop factory idea <text...>
+alpha-loop factory questions [--all]
+alpha-loop factory answer <id> <text...>
+```
+
+Flags override the `factory:` config block for one run. How the run ends:
+
+| Flag | Behaviour |
+|---|---|
+| (none) | Runs until SIGINT/SIGTERM |
+| `--once` | One tick of new work, then waits for the workers it started and exits |
+| `--max-ticks n` / `--max-runtime m` | Stops starting new work after n ticks / m minutes, keeps reaping until the running workers finish (or hit their timeout), then exits |
+| `--until-idle` | Exits when no worker is running, the last plan had free slots but nothing to dispatch, no idea is pending (or the PM is off), no answer is waiting to be applied, and no session PR is waiting on CI. The CI wait is capped at 30 minutes after the last worker finished |
+| `--dry-run` | Computes one plan (ideas the PM would take, answers it would apply, issues it would dispatch with skip reasons, ship decisions) and prints it. No lease, no spawns, no file or GitHub writes |
+
+Only one supervisor runs per state directory. A second one exits with `factory already running (pid N)`
+and exit code 2.
+
+### Each tick
+
+1. **Reap** finished workers and release their leases.
+   - Developer `success`: counted, and a ship pass runs this tick.
+   - Developer `waiting`: asks `Issue #N paused and needs your input` (key `dev:N:waiting`).
+   - Developer `failure`, a missing or invalid `result.json`, a non-zero exit, or a timeout kill: asks
+     key `dev:N:failed` with the failure messages and the worker log path. The issue is not dispatched
+     again in this run until that question is answered.
+   - PM results update the inbox (see below).
+2. **Apply answers.** Issue questions: the answer is recorded on the issue through feedback ingest
+   (falling back to a plain comment with a `<!-- factory:answer=Q-… -->` marker), the issue is
+   relabeled `ready`, and `needs-human-input` and `failed` are removed. Idea questions: the idea goes
+   back to pending and the PM re-runs it with every answer given for that idea. Ship questions are
+   recorded only; you act on GitHub and the next ship pass re-evaluates the PR. Each answer is retried
+   at most 3 times per run if applying it fails, and one bad answer never blocks the others.
+3. **PM intake.** One PM worker at a time takes the first pending idea (`max_ideas_per_tick` is
+   effectively 1).
+4. **Dispatch.** The planner fills free developer slots. Each issue's lease is taken before its worker
+   starts, and worker starts are spaced `spawn_stagger_seconds` apart.
+5. **Ship** every `ship.interval_seconds`, and right after any developer success.
+6. Write `state.json` and append to `events.jsonl`.
+
+### PM outcomes
+
+| PM result | Inbox | Question |
+|---|---|---|
+| issue / epic | `[x]` with the created issue numbers | — |
+| question | `[?]` with the question id | `pm:<idea>` |
+| duplicate / reject | `[-]` with the reason | — |
+| failure (first) | back to `[ ]`, `attempts=1` | — |
+| failure (second) | `[?]` | `pm:<idea>:failed` |
+| failure after creating some issues | `[?]` noting the created issues; never re-run automatically | `pm:<idea>:partial` |
+
+A PM worker running longer than twice `pm.timeout_seconds` plus 5 minutes is killed and counts as a
+failed attempt.
+
 ## Roles
 
 | Role | What it does | How it runs |
@@ -40,7 +101,7 @@ alpha-loop factory --epic 454 --base feat/factory-mode --developers 3 --until-id
 | **PM** | Takes one inbox idea and turns it into an issue, an epic with ordered children, a duplicate or reject note, or a question for you | Child process. The agent runs in a scratch directory, so it can never edit the repo |
 | **Planner** | Picks which `ready` issues fill free developer slots | Deterministic, inside the supervisor |
 | **Developer ×N** | Runs the normal plan → implement → test → review → PR pipeline for one issue | One child process per issue (`alpha-loop run --issue N --factory-worker …`) with its own session `session/issue-N-<slug>`, worktree, and session PR |
-| **Shipper** | Merges session PRs whose CI is green and that are mergeable. Raises a question for blockers only a human can clear | Inside the supervisor, every `ship.interval_seconds` |
+| **Shipper** | Merges the session PRs this factory's developers finished, once CI is green and they are mergeable. Raises a question for blockers only a human can clear | Inside the supervisor, every `ship.interval_seconds` |
 
 ### How the planner chooses
 
@@ -53,16 +114,27 @@ alpha-loop factory --epic 454 --base feat/factory-mode --developers 3 --until-id
 
 ### How the shipper decides (fail closed)
 
+The shipper only considers PRs a developer worker of this factory reported as its finished session
+PR (remembered in `state.json` across restarts). It never touches session PRs from ordinary
+`alpha-loop run` / `--epic` sessions, or the PR of an issue a developer is still working on.
+
 | PR state | Decision |
 |---|---|
-| Draft, or head branch not `session/*` | skip |
+| Not produced by this factory, its issue is in flight, draft, or head branch not `session/issue-*` | skip |
 | Any failing check | ask you (once) |
 | No checks yet | wait. Ask once it is older than `ship.checks_timeout_minutes` |
 | Checks pending | wait |
 | Conflicting | ask you (once) |
-| Review required / blocked by branch protection | ask you, or merge with `--admin` only when `ship.admin_merge: true` |
+| Changes requested | ask you — never admin-merged |
+| Review required | ask you, or merge with `--admin` when `ship.admin_merge: true` **and** every required status check of the base branch has reported success on the head |
+| Blocked by branch protection for another reason | wait; ask once older than `ship.checks_timeout_minutes` |
 | Behind base | wait |
 | Green and clean | merge (only when `ship.merge: true` or `--ship-merge`), then re-read and require `MERGED` |
+
+A question you answer or dismiss is not asked again until the PR's state (head commit, checks,
+mergeability, review) changes. After merging into a base branch that is not the repository's default
+branch, the shipper closes the PR's issues itself (GitHub only honors `Closes #N` on the default
+branch), so dependent issues can dispatch.
 
 `ship.merge` defaults to `false`. Out of the box the shipper only reports what it would merge.
 
@@ -119,8 +191,11 @@ A blocker is asked once per key and is not repeated while the question is still 
 - **Workers skip shared setup.** Asset sync, context refresh and preflight run once in the supervisor,
   never in N workers at the same time.
 - **Shutdown.** SIGINT/SIGTERM stops dispatch, sends SIGTERM to workers, waits 60 s, then sends SIGKILL
-  to any still running, and releases their leases. A worker past `worker_timeout_minutes` is killed and
-  its issue is released.
+  to any still running, and releases their leases and the supervisor lease. A second SIGINT sends
+  SIGKILL immediately. An interrupted PM idea goes back to pending. Interrupted developer workers are
+  not counted as failures and raise no questions.
+- **Timeouts.** A developer worker past `worker_timeout_minutes` gets SIGTERM, then SIGKILL 30 s later.
+  Its lease is released and it is recorded as a failure with a `dev:N:failed` question.
 
 ## Configuration
 
@@ -146,12 +221,12 @@ factory:
   ship:
     enabled: true
     merge: false                # true = actually merge green PRs
-    admin_merge: false          # true = bypass required reviews with --admin
+    admin_merge: false          # true = bypass a required review with --admin (required checks must pass)
     require_checks: true
     checks_timeout_minutes: 60
     interval_seconds: 300
     merge_method: squash
-    head_prefixes: [session/]
+    head_prefixes: [session/issue-]
 ```
 
 ## Known limits (tracked in epic #454)

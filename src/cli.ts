@@ -74,6 +74,77 @@ program
     await daemonCommand(options);
   });
 
+// Factory subcommands — `run` (default) supervises the parallel PM/planner/
+// developer/shipper factory; the rest are the human's side of it.
+const factoryCmd = program
+  .command('factory')
+  .description('Run the parallel code factory: PM, planner, N developers, CI-gated shipper');
+
+factoryCmd
+  .command('run', { isDefault: true })
+  .description('Run the factory supervisor (default subcommand)')
+  .option('--developers <n>', 'Parallel developer workers (1-16)', parseInt)
+  .option('--epic <ids>', 'Only build children of these epics (comma-separated issue numbers)')
+  .option('--once', 'Run one tick of new work, wait for its workers, then exit')
+  .option('--until-idle', 'Exit once nothing is running, ready, pending, or awaiting CI')
+  .option('--max-ticks <n>', 'Stop starting new work after n ticks, then drain', parseInt)
+  .option('--max-runtime <minutes>', 'Stop starting new work after this many minutes, then drain', Number)
+  .option('--no-pm', 'Disable the PM role (do not ingest inbox ideas)')
+  .option('--no-ship', 'Disable the shipper role')
+  .option('--ship-merge', 'Let the shipper actually merge green PRs (overrides factory.ship.merge)')
+  .option('--base <branch>', 'Base branch for session PRs and merges (default: base_branch)')
+  .option('--dry-run', 'Print what one tick would ingest, dispatch, and ship; change nothing')
+  .option('--verbose', 'Stream live agent output into each worker log')
+  .action(async (options) => {
+    const { factoryRunCommand } = await import('./commands/factory.js');
+    await factoryRunCommand(options);
+  });
+
+factoryCmd
+  .command('status')
+  .description('Show the supervisor, workers, last plan, counts, and open questions')
+  .option('--json', 'Emit the status snapshot as JSON')
+  .action(async (options) => {
+    const { factoryStatusCommand } = await import('./commands/factory.js');
+    factoryStatusCommand(options);
+  });
+
+factoryCmd
+  .command('idea <text...>')
+  .description('Add a rough idea to the factory inbox')
+  // Free text: a word like "--json" inside the idea is text, not an option.
+  .allowUnknownOption()
+  .action(async (text: string[]) => {
+    const { factoryIdeaCommand } = await import('./commands/factory.js');
+    factoryIdeaCommand(text);
+  });
+
+factoryCmd
+  .command('questions')
+  .description('List questions the factory needs you to answer')
+  .option('--all', 'Include applied and dismissed questions')
+  .action(async (options) => {
+    const { factoryQuestionsCommand } = await import('./commands/factory.js');
+    factoryQuestionsCommand(options);
+  });
+
+factoryCmd
+  .command('answer <id> <text...>')
+  .description('Answer a factory question (applied on the next tick)')
+  .allowUnknownOption()
+  .action(async (id: string, text: string[]) => {
+    const { factoryAnswerCommand } = await import('./commands/factory.js');
+    factoryAnswerCommand(id, text);
+  });
+
+factoryCmd
+  .command('pm-worker', { hidden: true })
+  .requiredOption('--context <path>', 'PM worker context JSON written by the supervisor')
+  .action(async (options) => {
+    const { factoryPmWorkerCommand } = await import('./commands/factory.js');
+    await factoryPmWorkerCommand(options);
+  });
+
 program
   .command('history [session]')
   .description('View session and queue history')

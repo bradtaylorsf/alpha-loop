@@ -2,6 +2,7 @@ import {
   buildPmPrompt,
   normalizePmDecision,
   applyPmDecision,
+  filterExistingDependencies,
   runPmForIdea,
   setDependenciesSection,
   describePmDecision,
@@ -326,6 +327,54 @@ describe('applyPmDecision', () => {
       .toEqual({ createdIssues: [], question: ['Which base?'], note: 'needs answers' });
 
     for (const fake of Object.values(fakes)) expect(fake).not.toHaveBeenCalled();
+  });
+});
+
+describe('applyPmDecision — regressions', () => {
+  test('dependsOnIssues on an issue decision becomes Depends on lines (not wiped to None)', () => {
+    const { fakes, bodies } = fakeGitHub(500);
+    const decision = normalizePmDecision({ decision: 'issue', reason: 'r', issues: [issueDraft('a', { dependsOnIssues: [300] })] });
+    applyPmDecision(config, decision, { autoReady: true, ideaId: 'I-dep', ...fakes });
+    expect(bodies.get(500)).toContain('## Dependencies\n\n- Depends on #300');
+    expect(bodies.get(500)).not.toContain('- None');
+  });
+
+  test('dependsOnIssues must be positive integers', () => {
+    expect(() => normalizePmDecision({ decision: 'issue', reason: 'r', issues: [issueDraft('a', { dependsOnIssues: ['#300'] })] }))
+      .toThrow(/dependsOnIssues/);
+  });
+
+  test('filterExistingDependencies keeps only open issues the PM was shown', () => {
+    const decision = normalizePmDecision({ decision: 'issue', reason: 'r', issues: [issueDraft('a', { dependsOnIssues: [300, 999] })] });
+    const filtered = filterExistingDependencies(decision, [{ number: 300 }]);
+    expect(filtered.issues[0].dependsOnIssues).toEqual([300]);
+    expect(filterExistingDependencies(decision, []).issues[0].dependsOnIssues).toEqual([300, 999]);
+  });
+
+  test('shouldStop aborts before the next GitHub write with the created issues attached; hooks report progress', () => {
+    const { fakes } = fakeGitHub(500);
+    const decision = normalizePmDecision({
+      decision: 'epic', reason: 'r', epic: { title: 'E', body: '## Goal\nx' },
+      issues: [issueDraft('a'), issueDraft('b'), issueDraft('c')],
+    });
+    const progress: number[][] = [];
+    let started = 0;
+    let stop = false;
+    let thrown: unknown;
+    try {
+      applyPmDecision(config, decision, {
+        autoReady: true, ideaId: 'I-stop', ...fakes,
+        onApplyStart: () => { started += 1; },
+        onIssueCreated: (all) => { progress.push(all); if (all.length === 1) stop = true; },
+        shouldStop: () => stop,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(started).toBe(1);
+    expect(progress).toEqual([[500]]);
+    expect(fakes.createIssue).toHaveBeenCalledTimes(1);
+    expect(thrown).toEqual(expect.objectContaining({ createdIssues: [500], interrupted: true }));
   });
 });
 

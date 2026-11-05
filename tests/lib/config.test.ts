@@ -1296,7 +1296,7 @@ describe('factory config', () => {
       expect(factory?.avoidOverlap).toBe(true);
       expect(factory?.epics).toEqual([12]);
       expect(factory?.ship.mergeMethod).toBe('squash');
-      expect(factory?.ship.headPrefixes).toEqual(['session/']);
+      expect(factory?.ship.headPrefixes).toEqual(['session/issue-']);
       expect(factory?.ship.merge).toBe(false);
       expect(factory?.pm).toEqual(DEFAULT_FACTORY_CONFIG.pm);
       const messages = warn.mock.calls.map((call) => String(call[0]));

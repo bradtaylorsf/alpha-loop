@@ -351,6 +351,12 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
 | `alpha-loop daemon` | Run hosted daemon mode continuously for repo stewardship |
 | `alpha-loop daemon --mode feedback-only` | Poll feedback and resume eligible sessions without triage or new work selection |
+| `alpha-loop factory` | Run the parallel code factory: PM turns inbox ideas into issues, N developers build in parallel, the shipper merges green PRs (see [docs/factory-mode.md](docs/factory-mode.md)) |
+| `alpha-loop factory --dry-run` | Print what one factory tick would ingest, dispatch, and ship, without changing anything |
+| `alpha-loop factory status` | Show the supervisor, running workers, last plan, counts, and open questions |
+| `alpha-loop factory idea <text>` | Add a rough idea to the factory inbox |
+| `alpha-loop factory questions` | List questions the factory needs you to answer |
+| `alpha-loop factory answer <id> <text>` | Answer a factory question; the running factory applies it on its next tick |
 | `alpha-loop scan` | Generate/refresh project context and instructions file |
 | `alpha-loop vision` | **(deprecated)** Use `alpha-loop plan` instead |
 | `alpha-loop auth` | Save authenticated browser state for verification |
@@ -443,6 +449,32 @@ Options:
   --no-lock                     Disable the repo-level daemon lock
   --once-tick                   Run one due daemon tick and exit
   --max-ticks <n>               Stop after this many daemon ticks
+```
+
+### Factory Options
+
+```bash
+alpha-loop factory [options]
+
+Options:
+  --developers <n>         Parallel developer workers (1-16)
+  --epic <ids>             Only build children of these epics (comma-separated)
+  --once                   Run one tick of new work, wait for its workers, then exit
+  --until-idle             Exit once nothing is running, ready, pending, or awaiting CI
+  --max-ticks <n>          Stop starting new work after n ticks, then drain
+  --max-runtime <minutes>  Stop starting new work after this many minutes, then drain
+  --no-pm                  Disable the PM role
+  --no-ship                Disable the shipper role
+  --ship-merge             Let the shipper actually merge green PRs
+  --base <branch>          Base branch for session PRs and merges
+  --dry-run                Print the plan for one tick; change nothing
+  --verbose                Stream live agent output into each worker log
+
+Subcommands:
+  status [--json]          Supervisor, workers, last plan, counts, open questions
+  idea <text...>           Add an idea to the inbox
+  questions [--all]        List questions waiting on you
+  answer <id> <text...>    Answer a question
 ```
 
 For hosted website and web app operation, start with the [Hosted Alpha Loop Setup Guide](docs/hosted-alpha-loop.md). It covers server setup, GitHub labels and templates, safe starter config, lifecycle events, feedback ingestion, resume, QA handoff, health checks, cleanup, and troubleshooting. For the broader documentation map, see the [docs index](docs/README.md).

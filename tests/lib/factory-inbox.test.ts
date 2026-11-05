@@ -1,5 +1,5 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   appendIdea,
@@ -278,6 +278,72 @@ describe('factory-inbox', () => {
       const missing = join(dir, 'none.md');
       expect(recoverTakenIdeas(missing, { olderThanMinutes: 1 })).toEqual([]);
       expect(existsSync(missing)).toBe(false);
+    });
+  });
+  describe('duplicate ideas (regression)', () => {
+    it('gives identical untagged bullets distinct ids, using the appendIdea #n scheme', () => {
+      const ideas = parseInbox('- [ ] Add dark mode\n- [ ] Add dark mode\n- [ ] add  DARK mode\n');
+      expect(ideas[0].id).toBe(ideaIdFor('Add dark mode'));
+      expect(ideas[1].id).toBe(ideaIdFor('Add dark mode\n#2'));
+      expect(ideas[2].id).toBe(ideaIdFor('add  DARK mode\n#3'));
+      expect(new Set(ideas.map((i) => i.id)).size).toBe(3);
+    });
+
+    it('a retyped copy of a tagged idea gets its own id, even when the tagged line comes later', () => {
+      const tagged = ideaIdFor('Add dark mode');
+      const ideas = parseInbox(`- [ ] Add dark mode\n- [x] Add dark mode  <!-- factory:id=${tagged} -->\n`);
+      expect(ideas[1].id).toBe(tagged);
+      expect(ideas[0].id).not.toBe(tagged);
+    });
+
+    it('a copied tag line is disambiguated so updates reach the right bullet', () => {
+      const path = join(dir, 'copy.md');
+      writeFileSync(path, '- [x] Ship it  <!-- factory:id=I-abcdef -->\n- [ ] Ship it  <!-- factory:id=I-abcdef -->\n');
+      const [first, second] = readInbox(path);
+      expect(first.id).toBe('I-abcdef');
+      expect(second.id).not.toBe('I-abcdef');
+      expect(updateIdea(path, second.id, { status: 'taken' }, { line: second.line })).toBe(true);
+      const after = readInbox(path);
+      expect(after.map((i) => i.status)).toEqual(['done', 'taken']);
+    });
+
+    it('updating each copy of a duplicated bullet changes only that copy', () => {
+      ensureInboxFile(inbox);
+      writeFileSync(inbox, '- [ ] Add dark mode\n- [ ] Add dark mode\n');
+      for (let i = 0; i < 2; i++) {
+        const [next] = nextPendingIdeas(readInbox(inbox), 1);
+        expect(updateIdea(inbox, next.id, { status: 'done' }, { line: next.line })).toBe(true);
+      }
+      expect(readInbox(inbox).map((i) => i.status)).toEqual(['done', 'done']);
+      expect(nextPendingIdeas(readInbox(inbox), 1)).toEqual([]);
+    });
+  });
+
+  describe('recoverTakenIdeas with a recorded PM worker', () => {
+    const NOW2 = new Date('2026-11-05T10:00:00Z');
+    function write(meta: string): void {
+      ensureInboxFile(inbox);
+      writeFileSync(inbox, `- [~] Idea  <!-- factory:id=I-111111 taken=2026-11-05T09:59:00Z ${meta} -->\n`);
+    }
+
+    it('frees a fresh idea at once when its worker pid on this host is dead, and drops the worker meta', () => {
+      write(`pid=123 host=${hostname()} worker=pm-x`);
+      expect(recoverTakenIdeas(inbox, { olderThanMinutes: 30, now: NOW2, isPidAlive: () => false })).toEqual(['I-111111']);
+      const [idea] = readInbox(inbox);
+      expect(idea.status).toBe('pending');
+      expect(idea.meta).toEqual({});
+    });
+
+    it('keeps an old idea taken while its worker pid is alive', () => {
+      write(`pid=123 host=${hostname()}`);
+      const later = new Date(NOW2.getTime() + 3 * 3_600_000);
+      expect(recoverTakenIdeas(inbox, { olderThanMinutes: 30, now: later, isPidAlive: () => true })).toEqual([]);
+    });
+
+    it('never touches skipped ids', () => {
+      write('');
+      const later = new Date(NOW2.getTime() + 3 * 3_600_000);
+      expect(recoverTakenIdeas(inbox, { olderThanMinutes: 30, now: later, skipIds: ['I-111111'] })).toEqual([]);
     });
   });
 });

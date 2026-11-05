@@ -8,15 +8,18 @@
  * `answered`, the supervisor acts on it and marks it `applied`. The human may
  * mark a question `dismissed` by editing its heading.
  *
- * The supervisor is the single writer. Every write re-reads the file
- * immediately before rendering, changes only the target question, and writes
- * atomically, so answers the human saved to other questions are preserved.
+ * Every write re-reads the file immediately before rendering, changes only the
+ * target question, and writes atomically, so answers the human saved to other
+ * questions are preserved. Writers (the supervisor and the `factory answer`
+ * CLI, which are separate processes) hold `<questions>.lock` for the whole
+ * read-modify-write so neither loses the other's update.
  * Free text outside question sections (other than the fixed header) is not
  * preserved across a write.
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { withFileLockSync } from './lease.js';
 
 export type QuestionStatus = 'open' | 'answered' | 'applied' | 'dismissed';
 
@@ -189,6 +192,11 @@ function writeFileAtomic(path: string, content: string): void {
   }
 }
 
+function withQuestionsLock<T>(path: string, fn: () => T): T {
+  mkdirSync(dirname(path), { recursive: true });
+  return withFileLockSync(`${path}.lock`, fn, { timeoutMs: 30_000, staleMs: 60_000 });
+}
+
 function isoSeconds(date: Date): string {
   return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
@@ -200,6 +208,10 @@ function isoSeconds(date: Date): string {
  * (UTC date of `now`, next free NNN for that day). An empty key never dedupes.
  */
 export function askQuestion(path: string, q: NewQuestion, opts?: { now?: Date }): { question: FactoryQuestion; created: boolean } {
+  return withQuestionsLock(path, () => askQuestionLocked(path, q, opts));
+}
+
+function askQuestionLocked(path: string, q: NewQuestion, opts?: { now?: Date }): { question: FactoryQuestion; created: boolean } {
   const now = opts?.now ?? new Date();
   const existing = readQuestions(path);
   const key = headingField(q.key);
@@ -233,14 +245,17 @@ export function askQuestion(path: string, q: NewQuestion, opts?: { now?: Date })
 }
 
 function updateQuestion(path: string, id: string, change: (q: FactoryQuestion) => FactoryQuestion | null): boolean {
-  const questions = readQuestions(path);
-  const index = questions.findIndex((q) => q.id === id);
-  if (index < 0) return false;
-  const next = change(questions[index]);
-  if (!next) return false;
-  questions[index] = next;
-  writeFileAtomic(path, renderQuestions(questions));
-  return true;
+  if (!existsSync(path)) return false;
+  return withQuestionsLock(path, () => {
+    const questions = readQuestions(path);
+    const index = questions.findIndex((q) => q.id === id);
+    if (index < 0) return false;
+    const next = change(questions[index]);
+    if (!next) return false;
+    questions[index] = next;
+    writeFileAtomic(path, renderQuestions(questions));
+    return true;
+  });
 }
 
 /**

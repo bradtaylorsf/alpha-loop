@@ -33,6 +33,8 @@ export type PmIssueDraft = {
   body: string;
   labels: string[];
   dependsOn: string[];
+  /** Existing open issues (by number) this one must wait for. */
+  dependsOnIssues?: number[];
   touches: string[];
 };
 
@@ -62,7 +64,16 @@ export type PmApplyResult = {
   note: string;
 };
 
-export type PmApplyOptions = {
+export type PmApplyHooks = {
+  /** Called once, right before the first GitHub write of an issue/epic decision. */
+  onApplyStart?: () => void;
+  /** Called after each issue is created, with every number created so far. */
+  onIssueCreated?: (created: number[]) => void;
+  /** Checked before every GitHub write; true aborts with the issues created so far attached. */
+  shouldStop?: () => boolean;
+};
+
+export type PmApplyOptions = PmApplyHooks & {
   autoReady: boolean;
   ideaId: string;
   createIssue?: typeof createIssue;
@@ -80,7 +91,7 @@ export type PmRunOptions = {
   spawn?: typeof spawnAgent;
   autoReady: boolean;
   dryRun?: boolean;
-};
+} & PmApplyHooks;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -151,8 +162,9 @@ export function buildPmPrompt(idea: { id: string; text: string }, ctx: PmContext
     '  Use decision "issue" for one slice. Use "epic" for 2-12 ordered slices that together deliver the idea.',
     '- Every issue body MUST contain these sections:',
     '  `## Summary`, `## Acceptance Criteria` (markdown checkboxes `- [ ] ...`), `## Touches` (bullet list of likely files),',
-    '  and `## Dependencies` (leave it empty — the factory fills it in from "dependsOn").',
+    '  and `## Dependencies` (leave it empty — the factory fills it in from "dependsOn" and "dependsOnIssues").',
     '- Express ordering between your issues with "dependsOn" (other issues\' localId values), never with issue numbers.',
+    '- When an issue must wait for an EXISTING open issue listed below, put that issue number in "dependsOnIssues".',
     `- Labels: choose from ${CATEGORY_LABELS.join(', ')}, plus exactly one priority label from ${PRIORITY_LABELS.join(', ')}`,
     '  (p0 = urgent/broken, p1 = high, p2 = normal, p3 = low). Do not add "ready" or "epic"; the factory manages those.',
     '- Check the open issues below. If the idea is already covered, use decision "duplicate" with "duplicateOf" set to that',
@@ -175,6 +187,7 @@ export function buildPmPrompt(idea: { id: string; text: string }, ctx: PmContext
     '      "body": "## Summary\\n...\\n\\n## Acceptance Criteria\\n- [ ] ...\\n\\n## Touches\\n- `src/...`\\n\\n## Dependencies\\n",',
     '      "labels": ["enhancement", "p2"],',
     '      "dependsOn": [],',
+    '      "dependsOnIssues": [],               // existing open issue numbers this must wait for',
     '      "touches": ["src/lib/example.ts"]',
     '    }',
     '  ]',
@@ -239,17 +252,50 @@ function normalizeIssueLabels(labels: string[]): string[] {
   return [...categories, priority];
 }
 
+function optionalIssueNumbers(value: unknown, context: string): number[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((n) => typeof n !== 'number' || !Number.isInteger(n) || n <= 0)) {
+    throw new Error(`${context} must be an array of positive integer issue numbers`);
+  }
+  return [...new Set(value as number[])];
+}
+
 function normalizeIssueDraft(value: unknown, context: string): PmIssueDraft {
   if (!isRecord(value)) {
     throw new Error(`${context} must be an object`);
   }
+  const dependsOnIssues = optionalIssueNumbers(value.dependsOnIssues, `${context}.dependsOnIssues`);
   return {
     localId: requireNonEmptyString(value.localId, `${context}.localId`),
     title: requireNonEmptyString(value.title, `${context}.title`),
     body: requireNonEmptyString(value.body, `${context}.body`),
     labels: normalizeIssueLabels(optionalStringArray(value.labels, `${context}.labels`)),
     dependsOn: optionalStringArray(value.dependsOn, `${context}.dependsOn`),
+    ...(dependsOnIssues.length > 0 ? { dependsOnIssues } : {}),
     touches: optionalStringArray(value.touches, `${context}.touches`),
+  };
+}
+
+/**
+ * Keep only `dependsOnIssues` entries that name an open issue the PM was shown
+ * (a typo'd or closed number would hold the issue forever or mean nothing).
+ * With no open-issue list (listing failed) the numbers are kept as written.
+ */
+export function filterExistingDependencies(decision: PmDecision, openIssues: Array<{ number: number }>): PmDecision {
+  if (openIssues.length === 0) return decision;
+  const open = new Set(openIssues.map((i) => i.number));
+  return {
+    ...decision,
+    issues: decision.issues.map((draft) => {
+      if (!draft.dependsOnIssues) return draft;
+      const kept = draft.dependsOnIssues.filter((n) => open.has(n));
+      const dropped = draft.dependsOnIssues.filter((n) => !open.has(n));
+      if (dropped.length > 0) {
+        log.warn(`Factory PM: dropping dependsOnIssues ${dropped.map((n) => `#${n}`).join(', ')} on "${draft.title}" (not an open issue)`);
+      }
+      const { dependsOnIssues: _omit, ...rest } = draft;
+      return kept.length > 0 ? { ...rest, dependsOnIssues: kept } : rest;
+    }),
   };
 }
 
@@ -488,10 +534,19 @@ export function applyPmDecision(config: Config, decision: PmDecision, opts: PmAp
   const numbers = new Map<string, number>();
   const createdIssues: number[] = [];
   const needsBackfill: PmIssueDraft[] = [];
-  const depLinesFor = (draft: PmIssueDraft): string[] =>
-    draft.dependsOn.map((dep) => `- Depends on #${numbers.get(dep)}`);
+  const depLinesFor = (draft: PmIssueDraft): string[] => [
+    ...draft.dependsOn.map((dep) => `- Depends on #${numbers.get(dep)}`),
+    ...(draft.dependsOnIssues ?? []).map((n) => `- Depends on #${n}`),
+  ];
+  const checkStop = (): void => {
+    if (opts.shouldStop?.()) {
+      throw Object.assign(applyError('Factory PM: interrupted while creating issues', createdIssues), { interrupted: true });
+    }
+  };
 
+  opts.onApplyStart?.();
   for (const draft of decision.issues) {
+    checkStop();
     const depsKnown = draft.dependsOn.every((dep) => numbers.has(dep));
     const body = depsKnown
       ? finalIssueBody(draft, depLinesFor(draft), opts.ideaId)
@@ -503,10 +558,12 @@ export function applyPmDecision(config: Config, decision: PmDecision, opts: PmAp
     }
     numbers.set(draft.localId, num);
     createdIssues.push(num);
+    opts.onIssueCreated?.([...createdIssues]);
     if (!depsKnown) needsBackfill.push(draft);
   }
 
   for (const draft of needsBackfill) {
+    checkStop();
     const num = numbers.get(draft.localId)!;
     if (!doUpdateIssue(repo, num, { body: finalIssueBody(draft, depLinesFor(draft), opts.ideaId) })) {
       throw applyError(`Factory PM: failed to backfill dependencies on #${num}`, createdIssues);
@@ -518,6 +575,7 @@ export function applyPmDecision(config: Config, decision: PmDecision, opts: PmAp
     return { createdIssues, note: createdIssues.map((n) => `#${n}`).join(', ') };
   }
 
+  checkStop();
   const { goal, criteria } = splitEpicBody(decision.epic!.body);
   const epicBody = `${buildEpicIssueBody({
     goal: stripLeadingGoalHeading(goal) || goal,
@@ -609,6 +667,12 @@ export async function runPmForIdea(
     };
   }
 
-  const applied = applyPmDecision(config, decision, { autoReady: opts.autoReady, ideaId: idea.id });
+  const applied = applyPmDecision(config, filterExistingDependencies(decision, opts.ctx.openIssues), {
+    autoReady: opts.autoReady,
+    ideaId: idea.id,
+    ...(opts.onApplyStart ? { onApplyStart: opts.onApplyStart } : {}),
+    ...(opts.onIssueCreated ? { onIssueCreated: opts.onIssueCreated } : {}),
+    ...(opts.shouldStop ? { shouldStop: opts.shouldStop } : {}),
+  });
   return { ...applied, decision };
 }

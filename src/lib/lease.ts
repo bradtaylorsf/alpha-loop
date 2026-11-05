@@ -46,6 +46,12 @@ export type LeasePayload = {
   ttlSeconds: number;
   /** The process actually doing the work (e.g. a spawned worker child). */
   workerPid?: number;
+  /**
+   * When true, a lease whose owner pid is alive on this host never expires by
+   * TTL. For long-lived singletons (the factory supervisor) whose refresh can
+   * be delayed by a long synchronous step such as preflight.
+   */
+  aliveOverridesTtl?: boolean;
   meta?: Record<string, unknown>;
 };
 
@@ -57,6 +63,8 @@ export type LeaseOptions = {
   ttlSeconds?: number;
   meta?: Record<string, unknown>;
   workerPid?: number;
+  /** See LeasePayload.aliveOverridesTtl. */
+  aliveOverridesTtl?: boolean;
   now?: Date;
   isPidAlive?: (pid: number) => boolean;
 };
@@ -244,7 +252,8 @@ export function readLease(dir: string, key: string): LeasePayload | null {
 /**
  * A lease is stale when its owner (and its worker, if any) are dead, or it
  * has not been refreshed within its TTL. Pids can only be probed on this
- * host, so a lease from another hostname expires by TTL alone.
+ * host, so a lease from another hostname expires by TTL alone. A lease marked
+ * `aliveOverridesTtl` whose owner is alive on this host is never stale.
  */
 export function isLeaseStale(
   payload: LeasePayload,
@@ -252,6 +261,9 @@ export function isLeaseStale(
 ): boolean {
   const now = opts.now ?? new Date();
   const isPidAlive = opts.isPidAlive ?? defaultPidAlive;
+  const sameHost = !payload.hostname || payload.hostname === hostname();
+
+  if (payload.aliveOverridesTtl === true && sameHost && isPidAlive(payload.pid)) return false;
 
   if (payload.ttlSeconds > 0) {
     const refreshed = Date.parse(payload.refreshedAt || payload.acquiredAt);
@@ -282,6 +294,7 @@ export function acquireLease(dir: string, key: string, opts: LeaseOptions): Leas
     refreshedAt: now,
     ttlSeconds: opts.ttlSeconds ?? DEFAULT_TTL_SECONDS,
     ...(opts.workerPid !== undefined ? { workerPid: opts.workerPid } : {}),
+    ...(opts.aliveOverridesTtl ? { aliveOverridesTtl: true } : {}),
     ...(opts.meta ? { meta: opts.meta } : {}),
   };
   const content = JSON.stringify(payload, null, 2) + '\n';

@@ -1430,8 +1430,12 @@ export async function finalizeSession(
   }
 
   // Fetch in the repository, then reconcile only inside the session worktree.
-  // Batch PRs may have been auto-merged into the remote session branch.
-  exec('git fetch origin', { cwd: projectDir });
+  // Batch PRs may have been auto-merged into the remote session branch. The
+  // fetch mutates the shared .git refs, so it holds the repo-wide git lock.
+  const fetched = withFileLockSync(gitLockPath(projectDir), () => exec('git fetch origin', { cwd: projectDir }));
+  if (fetched && fetched.exitCode !== 0) {
+    log.warn(`git fetch origin failed before finalizing ${session.branch} (${fetched.stderr.trim() || `exit ${fetched.exitCode}`}); reconciling against the last fetched refs`);
+  }
   const reconciled = reconcileSessionBranchWithRemote(session.branch, sessionWorktreePath);
   if (!reconciled) {
     log.warn(
