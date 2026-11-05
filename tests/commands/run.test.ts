@@ -85,6 +85,7 @@ jest.mock('../../src/lib/verify-epic', () => ({
 }));
 
 jest.mock('../../src/lib/worktree', () => ({
+  allowDestructiveWorktreeSetup: jest.fn(),
   cleanupWorktree: jest.fn(),
   setupWorktree: jest.fn(),
 }));
@@ -147,7 +148,7 @@ import { log } from '../../src/lib/logger';
 import { loadConfig } from '../../src/lib/config';
 import { pollIssues, listEpics, getEpicSubIssues, getIssueWithComments, updateEpicChecklist, labelIssue, commentIssue } from '../../src/lib/github';
 import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate, readGateResult, type PipelineResult } from '../../src/lib/pipeline';
-import { cleanupWorktree, setupWorktree } from '../../src/lib/worktree';
+import { allowDestructiveWorktreeSetup, cleanupWorktree, setupWorktree } from '../../src/lib/worktree';
 import { createSession, ensureSessionWorktree, finalizeSession, recordSessionBackgroundTaskError, recordSessionError, transitionSessionStatus, recordSessionPolicyDecision, saveResult } from '../../src/lib/session';
 import { releaseSessionLock, SessionLockError } from '../../src/lib/session-lock';
 import { extractLearnings, generateSessionSummary, repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
@@ -173,6 +174,7 @@ const mockProcessBatch = processBatch as jest.MockedFunction<typeof processBatch
 const mockFinalizeQuickRun = finalizeQuickRun as jest.MockedFunction<typeof finalizeQuickRun>;
 const mockRunFullSuiteGate = runFullSuiteGate as jest.MockedFunction<typeof runFullSuiteGate>;
 const mockReadGateResult = readGateResult as jest.MockedFunction<typeof readGateResult>;
+const mockAllowDestructive = jest.mocked(allowDestructiveWorktreeSetup);
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCleanupWorktree = cleanupWorktree as jest.MockedFunction<typeof cleanupWorktree>;
 const mockCreateSession = createSession as jest.MockedFunction<typeof createSession>;
@@ -257,6 +259,7 @@ const mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined 
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockAllowDestructive.mockReturnValue(true);
   process.exitCode = undefined;
 
   mockExistsSync.mockReturnValue(false);
@@ -2079,7 +2082,8 @@ Coordinate hosted work.
     );
   });
 
-  test('quick mode shares one worktree across issues and runs the finalize pass', async () => {
+  test.each([true, false])('quick mode passes current lease permission %s to its shared worktree', async permission => {
+    mockAllowDestructive.mockReturnValue(permission);
     mockLoadConfig.mockImplementation((overrides: any = {}) => makeConfig({ ...overrides, quick: true, autoMerge: true }) as any);
     mockPollIssues.mockReturnValue([
       { number: 42, title: 'First issue', body: 'Body A', labels: ['ready'] },
@@ -2107,7 +2111,8 @@ Coordinate hosted work.
 
     // One shared worktree, created once
     expect(mockSetupWorktree).toHaveBeenCalledTimes(1);
-    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 42 }));
+    expect(mockAllowDestructive).toHaveBeenCalledWith(expect.objectContaining({ quick: true }), 42);
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 42, allowDestructive: permission }));
 
     // Both issues processed with the shared quick worktree
     expect(mockProcessIssue).toHaveBeenCalledTimes(2);

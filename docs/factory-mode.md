@@ -186,6 +186,17 @@ A blocker is asked once per key and is not repeated while the question is still 
   atomic rename. Two reclaimers can never both win.
 - **Shared `.git`.** Worktree creation, fetch and prune run under a repo-level file lock, so parallel
   workers do not fail on `.git` ref locks.
+- **Lease-gated worktree setup.** Before each checkout setup, a factory worker checks the issue lease
+  in the configured `state_dir`. Its issue number, worker ID (`ALPHA_LOOP_FACTORY_WORKER`), hostname
+  and worker PID must match, and the lease must be valid and live. Only an owner may force-remove a
+  conflicting worktree, force-delete a local issue branch after failed reuse, or delete a disposable
+  remote issue branch. Other workers reuse existing local or remote work, including branches backing
+  open PRs. They create fresh work only after confirming the remote branch is absent; fetch, discovery
+  or recovery failures stop setup. Refusal errors identify the issue, branch and path: restore the
+  worker's valid lease ownership before retrying, or resolve the conflicting checkout with its owner.
+  Programmatic callers can explicitly set `SetupWorktreeOptions.allowDestructive: true`; it defaults
+  to `true` for backward compatibility outside factory mode. Saved and explicitly named branches
+  retain their existing protections even with permission.
 - **Single writer.** Workers never write `inbox.md` or `questions.md`. They return results as JSON,
   and the supervisor writes both files atomically, re-reading them first so your edits are kept.
 - **Workers skip shared setup.** Asset sync, context refresh and preflight run once in the supervisor,
@@ -196,6 +207,18 @@ A blocker is asked once per key and is not repeated while the question is still 
   not counted as failures and raise no questions.
 - **Timeouts.** A developer worker past `worker_timeout_minutes` gets SIGTERM, then SIGKILL 30 s later.
   Its lease is released and it is recorded as a failure with a `dev:N:failed` question.
+
+### Verify lease-gated worktree setup
+
+Run the build and the worktree suites, including the real Git fixtures for issue #452:
+
+```bash
+pnpm build && pnpm test -- --runTestsByPath tests/lib/worktree.test.ts tests/lib/worktree.integration.test.ts
+```
+
+The `--` forwards Jest options to the test script. Without it, pnpm 9 rejects
+`--runTestsByPath` before any tests run. The integration suite uses disposable local
+repositories to check branch tips, dirty-file preservation, remote recovery and permitted cleanup.
 
 ## Configuration
 

@@ -20,7 +20,7 @@ import {
 } from './session-state.js';
 import { acquireSessionLock, type SessionLockHandle } from './session-lock.js';
 import { gitLockPath, withFileLockSync } from './lease.js';
-import { setupWorktree } from './worktree.js';
+import { allowDestructiveWorktreeSetup, setupWorktree } from './worktree.js';
 import type { Config } from './config.js';
 import type { PipelineResult, GateResult } from './pipeline.js';
 import type { QueueEpicLink, QueueSessionContext } from './epic-queue.js';
@@ -1266,8 +1266,10 @@ export async function ensureSessionWorktree(
     return Boolean(remoteCheck.stdout.trim());
   });
 
+  const issueNum = session.currentIssueNum ?? session.epic ?? 0;
   const worktree = await setupWorktree({
-    issueNum: session.currentIssueNum ?? session.epic ?? 0,
+    issueNum,
+    allowDestructive: allowDestructiveWorktreeSetup(config, issueNum),
     projectDir,
     baseBranch: branchSource,
     branch: session.branch,
