@@ -378,11 +378,12 @@ automation_policy:
 #     timeout_seconds: 600
 #   ship:
 #     enabled: true
-#     merge: false             # Report-only until you set this to true
+#     merge: false             # Update/merge session PRs only when true
 #     admin_merge: false       # Use gh pr merge --admin to bypass required reviews
 #     require_checks: true     # Never merge a PR with no CI checks
 #     checks_timeout_minutes: 60
 #     interval_seconds: 300
+#     release_every: 0         # Open a release PR after N releasable commits (0 = disabled)
 #     merge_method: squash     # squash | merge | rebase
 #     head_prefixes:
 #       - session/

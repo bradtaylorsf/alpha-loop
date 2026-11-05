@@ -18,6 +18,10 @@ jest.mock('../../src/lib/feedback', () => ({
 jest.mock('../../src/lib/rate-limit', () => ({
   ghExec: jest.fn(() => { throw new Error('real ghExec called'); }),
 }));
+jest.mock('../../src/lib/factory-release', () => ({
+  inspectFactoryRelease: jest.fn(() => { throw new Error('real release inspection called'); }),
+  createFactoryRelease: jest.fn(() => { throw new Error('real release creation called'); }),
+}));
 jest.mock('../../src/lib/preflight', () => ({
   runPreflight: jest.fn(() => { throw new Error('real runPreflight called'); }),
 }));
@@ -41,6 +45,7 @@ import {
 import { appendIdea, ensureInboxFile, readInbox, updateIdea } from '../../src/lib/factory-inbox.js';
 import { answerQuestion, askQuestion, markQuestion, readQuestions, type FactoryQuestion } from '../../src/lib/factory-questions.js';
 import type { ShipPr } from '../../src/lib/factory-ship.js';
+import { inspectFactoryRelease, createFactoryRelease, type DueRelease } from '../../src/lib/factory-release.js';
 import type { WorkerExit, WorkerHandle } from '../../src/lib/factory-workers.js';
 import { acquireLease, listLeases, readLease } from '../../src/lib/lease.js';
 import type { Issue } from '../../src/lib/github.js';
@@ -174,6 +179,8 @@ function harness(factory: Partial<Omit<FactoryConfig, 'pm' | 'ship'>> & { pm?: P
       return w.handle;
     }),
     listShippable: jest.fn((): ShipPr[] => []),
+    inspectRelease: jest.fn(() => ({ status: 'skipped', reason: 'not due' })),
+    createRelease: jest.fn(() => ({ status: 'created', plan: { version: '1.1.0', bump: 'minor', branch: 'chore/release-v1.1.0' }, url: 'https://github.com/o/r/pull/99' })),
     updateBranch: jest.fn(() => ({ updated: true, conflict: false })),
     merge: jest.fn(() => ({ merged: true })),
     applyAnswer: jest.fn(() => ({ applied: true, note: 'commented' })),
@@ -1697,6 +1704,26 @@ describe('runFactory — shipper only ships what this factory finished', () => {
 });
 
 describe('default actions', () => {
+  it.each([false, true])('wires release options and enforces the dry-run boundary (%s)', dryRun => {
+    const h = harness({ ship: { releaseEvery: 5 } });
+    const actions = createDefaultFactoryActions(h.config, { paths: h.paths, baseBranch: 'feat/custom-base', shipMerge: false, dryRun });
+    const due: DueRelease = { status: 'due', baseSha: 'abc', commits: ['feat: x'], lastTag: 'v1.0.0', plan: { version: '1.1.0', bump: 'minor', branch: 'chore/release-v1.1.0' } };
+    const inspect = jest.mocked(inspectFactoryRelease);
+    const create = jest.mocked(createFactoryRelease);
+    inspect.mockReset().mockReturnValue(due);
+    create.mockReset().mockReturnValue({ status: 'created', plan: due.plan, url: 'url' });
+    expect(actions.inspectRelease()).toBe(due);
+    const expected = { projectDir: process.cwd(), repo: 'o/r', baseBranch: 'feat/custom-base', releaseEvery: 5 };
+    expect(inspect).toHaveBeenCalledWith(expected, dryRun);
+    if (dryRun) {
+      expect(() => actions.createRelease(due)).toThrow('dry run');
+      expect(create).not.toHaveBeenCalled();
+    } else {
+      actions.createRelease(due);
+      expect(create).toHaveBeenCalledWith(expected, due);
+    }
+  });
+
   it('wires branch updating through the gh helper using the default merge strategy', () => {
     const mockGh = ghExec as jest.Mock;
     mockGh.mockReturnValueOnce({ exitCode: 0, stdout: '', stderr: '' });
@@ -1712,5 +1739,67 @@ describe('default actions', () => {
     const config = { repo: 'o/r', labelReady: 'ready', factory: DEFAULT_FACTORY_CONFIG } as unknown as Config;
     const actions = createDefaultFactoryActions(config, { paths: resolveFactoryPaths(config), baseBranch: 'master', shipMerge: false, dryRun: false });
     expect(actions.isIssueClosed(399)).toBe(true);
+  });
+});
+
+
+describe('factory release cadence', () => {
+  const due = { status: 'due', plan: { version: '1.1.0', bump: 'minor', branch: 'chore/release-v1.1.0' }, baseSha: 'abc', lastTag: 'v1.0.0', commits: ['feat: x'] };
+
+  it('opens releases on due ship passes without session PRs, independently of merge', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { releaseEvery: 1, intervalSeconds: 60, merge: false } });
+    h.actions.inspectRelease.mockReturnValue(due);
+    await h.run({ maxTicks: 3 });
+    expect(h.actions.inspectRelease).toHaveBeenCalledTimes(2);
+    expect(h.actions.createRelease).toHaveBeenCalledWith(due);
+    expect(h.actions.merge).not.toHaveBeenCalled();
+    expect(h.state().memory?.owned).toEqual([]);
+    expect(h.state().recent).toContainEqual(expect.objectContaining({ type: 'release.created', url: 'https://github.com/o/r/pull/99' }));
+  });
+
+  it.each(['default', 'disabled', 'flag'])('does not inspect or create releases when %s', async mode => {
+    const h = harness({ pm: { enabled: false }, ship: { releaseEvery: mode === 'default' ? 0 : 1, enabled: mode !== 'disabled' } });
+    await h.run({ once: true, ...(mode === 'flag' ? { ship: false } : {}) });
+    expect(h.actions.inspectRelease).not.toHaveBeenCalled();
+    expect(h.actions.createRelease).not.toHaveBeenCalled();
+  });
+
+  it('inspects after session merges, preserving the existing ownership gate', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { releaseEvery: 1 } });
+    own(h, 1);
+    h.actions.listShippable.mockReturnValue([shipPr(1), shipPr(99, { headRefName: 'chore/release-v1.1.0' })]);
+    h.actions.inspectRelease.mockImplementation(() => {
+      expect(h.actions.merge).toHaveBeenCalledTimes(1);
+      return due;
+    });
+    await h.run({ once: true, shipMerge: true });
+    expect(h.actions.createRelease).toHaveBeenCalledWith(due);
+    expect(h.state().ship.decisions.find(d => d.pr === 99)?.action).toBe('skip');
+  });
+
+  it('reports the dry-run proposal and never calls creation', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { releaseEvery: 1 } });
+    h.actions.inspectRelease.mockReturnValue(due);
+    const summary = await h.run({ dryRun: true });
+    expect(summary.dryRun?.release).toEqual(due);
+    expect(h.actions.createRelease).not.toHaveBeenCalled();
+    expect(existsSync(h.paths.stateDir)).toBe(false);
+  });
+
+  it.each(['inspectRelease', 'createRelease'] as const)('records %s failures and retries on the next ship pass', async action => {
+    const h = harness({ pm: { enabled: false }, ship: { releaseEvery: 1, intervalSeconds: 30 } });
+    h.actions.inspectRelease.mockReturnValue(due);
+    h.actions[action].mockImplementationOnce(() => { throw new Error('network unavailable'); });
+    await h.run({ untilIdle: true });
+    expect(h.actions.inspectRelease).toHaveBeenCalledTimes(2);
+    expect(h.state().recent).toContainEqual(expect.objectContaining({ type: 'release.error', error: 'network unavailable' }));
+    expect(h.state().recent).toContainEqual(expect.objectContaining({ type: 'release.created' }));
+  });
+
+  it('records duplicate or cadence skips without creating a PR', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { releaseEvery: 1 } });
+    await h.run({ once: true });
+    expect(h.actions.createRelease).not.toHaveBeenCalled();
+    expect(h.state().recent).toContainEqual(expect.objectContaining({ type: 'release.skipped', reason: 'not due' }));
   });
 });

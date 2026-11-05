@@ -230,7 +230,7 @@ export type FactoryMergeMethod = 'squash' | 'merge' | 'rebase';
 /** Factory shipper role: merges green session PRs into the base branch. */
 export type FactoryShipConfig = {
   enabled: boolean;
-  /** Actually merge. When false the shipper only reports what it would merge. */
+  /** Actually update/merge session PRs. Independent of release PR creation. */
   merge: boolean;
   /** Use `gh pr merge --admin` to bypass required reviews. */
   adminMerge: boolean;
@@ -238,8 +238,10 @@ export type FactoryShipConfig = {
   requireChecks: boolean;
   checksTimeoutMinutes: number;
   intervalSeconds: number;
+  /** Releasable commits per release PR; 0 disables release creation. Independent of merge. */
+  releaseEvery: number;
   mergeMethod: FactoryMergeMethod;
-  /** Only PRs whose head branch starts with one of these prefixes are shipped. */
+  /** Only session PRs with these head prefixes are considered for merging. */
   headPrefixes: string[];
 };
 
@@ -382,6 +384,7 @@ export const DEFAULT_FACTORY_CONFIG: FactoryConfig = {
     requireChecks: true,
     checksTimeoutMinutes: 60,
     intervalSeconds: 300,
+    releaseEvery: 0,
     mergeMethod: 'squash',
     headPrefixes: ['session/issue-'],
   },
@@ -1173,6 +1176,7 @@ function parseFactoryShipConfig(raw: unknown, base: FactoryShipConfig): FactoryS
     ship.checksTimeoutMinutes,
   );
   ship.intervalSeconds = parsePositiveInteger(raw.interval_seconds, 'factory.ship.interval_seconds', ship.intervalSeconds);
+  ship.releaseEvery = parseNonNegativeInteger(raw.release_every, 'factory.ship.release_every', ship.releaseEvery);
   if (raw.merge_method !== undefined) {
     if (typeof raw.merge_method === 'string' && VALID_FACTORY_MERGE_METHODS.includes(raw.merge_method as FactoryMergeMethod)) {
       ship.mergeMethod = raw.merge_method as FactoryMergeMethod;
