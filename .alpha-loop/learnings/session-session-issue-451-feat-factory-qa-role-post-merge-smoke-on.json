@@ -1,0 +1,89 @@
+{
+  "name": "session/issue-451-feat-factory-qa-role-post-merge-smoke-on",
+  "branch": "session/issue-451-feat-factory-qa-role-post-merge-smoke-on",
+  "completed": "2026-11-05T10:56:17.570Z",
+  "results": [
+    {
+      "issueNum": 451,
+      "title": "feat(factory): QA role — post-merge smoke on the base branch files bugs into the inbox",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/471",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1877,
+      "filesChanged": 3
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 94266,
+      "tokens_out": 72512,
+      "cost_usd": 0,
+      "wall_time_s": 225.56,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:18:16.642Z",
+      "issue_num": 451
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 174060,
+      "tokens_out": 133892,
+      "cost_usd": 0,
+      "wall_time_s": 1257.494,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:22:02.682Z",
+      "issue_num": 451
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 234438,
+      "tokens_out": 180337,
+      "cost_usd": 0,
+      "wall_time_s": 372.082,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:43:08.236Z",
+      "issue_num": 451
+    },
+    {
+      "stage": "learn",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 6162,
+      "tokens_out": 4740,
+      "cost_usd": 0,
+      "wall_time_s": 30.295,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:49:40.393Z",
+      "issue_num": 451
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 46588,
+      "tokens_out": 35837,
+      "cost_usd": 0,
+      "wall_time_s": 52.765,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:49:40.419Z",
+      "issue_num": 451
+    }
+  ]
+}
