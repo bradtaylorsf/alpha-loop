@@ -380,6 +380,11 @@ describe('listShippablePrs', () => {
 });
 
 describe('updateShippablePrBranch', () => {
+  test('an already-current branch is a successful no-op, not an update', () => {
+    mockExec.mockReturnValueOnce({ exitCode: 0, stdout: '✓ PR branch already up-to-date\n', stderr: '' });
+    expect(updateShippablePrBranch('o/r', pr())).toEqual({ updated: false, conflict: false });
+  });
+
   test('uses the default merge strategy, quotes the repo, and marks the gh call as a mutation', () => {
     expect(updateShippablePrBranch("o/r's", pr())).toEqual({ updated: true, conflict: false });
     expect(mockGhExec).toHaveBeenCalledTimes(1);

@@ -759,10 +759,10 @@ describe('runFactory — branch updates', () => {
     expect(h.questions()[0].key).toBe(`ship:1:${key}`);
   });
 
-  it('caps waiting for the new head at the existing untilIdle timeout without repeating updates', async () => {
+  it('caps waiting on a stale CLEAN snapshot without merging old checks or repeating updates', async () => {
     const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 30 } });
     own(h, 1);
-    h.actions.listShippable.mockReturnValue([behind()]);
+    h.actions.listShippable.mockReturnValueOnce([behind()]).mockReturnValue([shipPr(1, { headRefOid: 'old-head' })]);
 
     const summary = await h.run({ untilIdle: true, shipMerge: true });
 
@@ -770,6 +770,95 @@ describe('runFactory — branch updates', () => {
     expect(h.clock() - T0).toBe(30 * 60_000);
     expect(h.actions.updateBranch).toHaveBeenCalledTimes(1);
     expect(h.actions.merge).not.toHaveBeenCalled();
+  });
+
+  it('retries a persisted update intent after the interval when a crash left the head unchanged and BEHIND', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 90 } });
+    own(h, 1);
+    const memory = readFactoryMemory(h.paths.statePath);
+    memory.branchUpdates['1'] = { attemptedAt: new Date(T0).toISOString(), previousHead: 'old-head' };
+    writeFileSync(h.paths.statePath, JSON.stringify({ memory }));
+    h.actions.listShippable.mockImplementation(() => [h.actions.updateBranch.mock.calls.length
+      ? shipPr(1, { headRefOid: 'new-head' }) : behind()]);
+    const attempts: number[] = [];
+    h.actions.updateBranch.mockImplementation(() => {
+      attempts.push(h.clock() - T0);
+      return { updated: true, conflict: false };
+    });
+
+    await h.run({ untilIdle: true, shipMerge: true });
+
+    expect(attempts).toEqual([90_000]);
+    expect(h.actions.merge).toHaveBeenCalledWith(expect.objectContaining({ headRefOid: 'new-head' }), false);
+  });
+
+  it('re-evaluates a successful no-op on the next pass without waiting for a nonexistent head change', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 30 } });
+    own(h, 1);
+    h.actions.listShippable.mockReturnValueOnce([behind()]).mockReturnValue([shipPr(1, { headRefOid: 'old-head' })]);
+    h.actions.updateBranch.mockReturnValue({ updated: false, conflict: false });
+
+    const summary = await h.run({ untilIdle: true, shipMerge: true });
+
+    expect(summary.ticks).toBe(2);
+    expect(h.actions.merge).toHaveBeenCalledTimes(1);
+    expect(h.questions()).toEqual([]);
+    expect(h.state().recent).toContainEqual(expect.objectContaining({ type: 'ship.branch-update-skipped', pr: 1 }));
+  });
+
+  it.each(['failure', 'throw'])('untilIdle retries a transient %s and waits for fresh CI', async (outcome) => {
+    const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 90 } });
+    own(h, 1);
+    const attempts: number[] = [];
+    h.actions.listShippable.mockImplementation(() => [attempts.length < 2 ? behind() : shipPr(1, { headRefOid: 'new-head' })]);
+    h.actions.updateBranch.mockImplementation(() => {
+      attempts.push(h.clock() - T0);
+      if (attempts.length === 1) {
+        if (outcome === 'throw') throw new Error('HTTP 502');
+        return { updated: false, conflict: false, error: 'HTTP 502' };
+      }
+      return { updated: true, conflict: false };
+    });
+
+    await h.run({ untilIdle: true, shipMerge: true });
+
+    expect(attempts).toEqual([0, 90_000]);
+    expect(h.actions.merge).toHaveBeenCalledWith(expect.objectContaining({ headRefOid: 'new-head' }), false);
+    expect(h.questions()).toEqual([]);
+  });
+
+  it('untilIdle waits out a failed-attempt throttle restored after restart', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 90 } });
+    own(h, 1);
+    const memory = readFactoryMemory(h.paths.statePath);
+    memory.branchUpdates['1'] = { attemptedAt: new Date(T0).toISOString() };
+    writeFileSync(h.paths.statePath, JSON.stringify({ memory }));
+    const attempts: number[] = [];
+    h.actions.listShippable.mockImplementation(() => [attempts.length ? shipPr(1, { headRefOid: 'new-head' }) : behind()]);
+    h.actions.updateBranch.mockImplementation(() => {
+      attempts.push(h.clock() - T0);
+      return { updated: true, conflict: false };
+    });
+
+    await h.run({ untilIdle: true, shipMerge: true });
+
+    expect(attempts).toEqual([90_000]);
+    expect(h.actions.merge).toHaveBeenCalledTimes(1);
+  });
+
+  it('untilIdle stops for an update conflict that requires human input', async () => {
+    const h = harness({ pm: { enabled: false }, ship: { intervalSeconds: 90 } });
+    own(h, 1);
+    h.actions.listShippable.mockReturnValue([behind()]);
+    h.actions.updateBranch.mockReturnValue({ updated: false, conflict: true, error: 'merge conflict' });
+
+    const first = await h.run({ untilIdle: true, shipMerge: true });
+    const restarted = await h.run({ untilIdle: true, shipMerge: true });
+
+    expect(first.ticks).toBe(1);
+    expect(restarted.ticks).toBe(1);
+    expect(h.actions.updateBranch).toHaveBeenCalledTimes(1);
+    expect(h.questions()).toHaveLength(1);
   });
 
   it.each(['failure', 'throw'])('throttles each PR across developer-triggered passes, including %s attempts', async (outcome) => {

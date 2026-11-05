@@ -500,16 +500,20 @@ function decideRememberedShip(pr: ShipPr, policy: ShipPolicy, now: Date, memory:
   const decision = decideShip(pr, policy, now);
   if (decision.action === 'skip') return decision;
   const update = memory.branchUpdates[pr.number];
+  if (decision.action === 'update-branch') {
+    if (update && now.getTime() - Date.parse(update.attemptedAt) < intervalSeconds * 1000) {
+      return { action: 'wait', reason: 'branch update throttled until ship.interval_seconds has elapsed' };
+    }
+    // A crash can leave the persisted intent without ever calling gh. A still
+    // green BEHIND head may retry after the interval; this does not permit merging.
+    return decision;
+  }
   // A long-lived PR needs time for its new checks to appear. Keep waiting under
   // the idle cap rather than immediately asking about its original creation age.
   if (update?.previousHead !== undefined
     && (decision.action !== 'ask' || decision.key === `ship:${pr.number}:no-checks`)
     && (!update.previousHead || !pr.headRefOid || pr.headRefOid === update.previousHead || pr.checks !== 'success')) {
     return { action: 'wait', reason: 'branch updated; waiting for a new head with successful CI checks' };
-  }
-  if (decision.action === 'update-branch' && update
-    && now.getTime() - Date.parse(update.attemptedAt) < intervalSeconds * 1000) {
-    return { action: 'wait', reason: 'branch update throttled until ship.interval_seconds has elapsed' };
   }
   return decision;
 }
@@ -1460,13 +1464,20 @@ async function superviseFactory(
         } catch (err) {
           result = { updated: false, conflict: false, error: errorMessage(err) };
         }
+        if (!result.updated) memory.branchUpdates[pr.number] = { attemptedAt: update.attemptedAt };
         if (result.updated) {
           pending = true;
           decisions.push({ pr: pr.number, action: 'update-branch', reason: decision.reason });
           record('ship.branch-updated', { pr: pr.number, ...result });
           log.info(`Factory ship: updated PR #${pr.number}; waiting for fresh CI`);
+        } else if (!result.conflict && !result.error) {
+          pending = true;
+          decisions.push({ pr: pr.number, action: 'branch-update-skipped', reason: 'branch already up-to-date; re-evaluate on the next ship pass' });
+          record('ship.branch-update-skipped', { pr: pr.number, ...result });
+          log.info(`Factory ship: PR #${pr.number} is already up-to-date; re-evaluating next pass`);
         } else {
-          memory.branchUpdates[pr.number] = { attemptedAt: update.attemptedAt };
+          // Keep --until-idle alive for retryable failures under its existing cap.
+          if (!result.conflict) pending = true;
           const error = result.error ?? 'branch update did not complete';
           decisions.push({ pr: pr.number, action: 'branch-update-failed', reason: error });
           record('ship.branch-update-failed', { pr: pr.number, ...result, error });
@@ -1524,8 +1535,11 @@ async function superviseFactory(
         }, pr);
         decisions.push({ pr: pr.number, action: 'ask', reason: asked ? decision.key : `${decision.key} (already asked for this PR state)` });
       } else {
+        const waitingForUpdate = memory.branchUpdates[pr.number] !== undefined
+          && pr.mergeStateStatus.toUpperCase() === 'BEHIND'
+          && memory.shipAsked[`ship:${pr.number}:conflict`] !== prSignature(pr);
         if (decision.action === 'wait' && (pr.checks === 'pending' || pr.checks === 'none'
-          || memory.branchUpdates[pr.number]?.previousHead !== undefined)) pending = true;
+          || memory.branchUpdates[pr.number]?.previousHead !== undefined || waitingForUpdate)) pending = true;
         decisions.push({ pr: pr.number, action: decision.action, reason: decision.reason });
       }
     }

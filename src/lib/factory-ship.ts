@@ -427,10 +427,15 @@ export function listShippablePrs(
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.number - b.number);
 }
 
-/** Merge the base into a PR branch using gh's default strategy, never rebase or force-push. */
+/**
+ * Merge the base into a PR branch using gh's default strategy, never rebase or force-push.
+ * An already-current branch returns updated: false without an error.
+ */
 export function updateShippablePrBranch(repo: string, pr: ShipPr): { updated: boolean; conflict: boolean; error?: string } {
   const result = ghExec(`gh pr update-branch ${pr.number} --repo ${shellQuote(repo)}`, undefined, true);
-  if (result.exitCode === 0) return { updated: true, conflict: false };
+  if (result.exitCode === 0) {
+    return { updated: !/\bPR branch (?:is )?already up-to-date\b/i.test(result.stdout), conflict: false };
+  }
 
   const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join('\n');
   // Match explicit merge conflicts, not a generic HTTP 409 (e.g. a changed head SHA).

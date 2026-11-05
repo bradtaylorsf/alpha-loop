@@ -141,13 +141,18 @@ Behind PRs are updated with `gh pr update-branch` using its default merge strate
 most one update attempt per `ship.interval_seconds`, including failed attempts and ship passes
 triggered by developer completion. Update attempts and their outcomes are recorded in factory events.
 A conflict raises the existing `ship:<n>:conflict` question for the owning issue; other update errors
-are logged and can be retried after the interval.
+are logged and retried after the interval. `--until-idle` keeps polling through these retries under
+its existing 30-minute limit. If `gh` reports that the branch is already current, the shipper records
+a skipped update and re-evaluates the next snapshot without requiring a head change.
 
 After an update, the shipper keeps ownership and waits until a later snapshot has a different head
 commit and successful checks. Old green checks, missing checks and pending checks cannot authorize
 a merge, even with `ship.require_checks: false`. CI may already have passed on the new head when it
 is first observed. The attempt time and pre-update head are saved in `state.json` across restarts;
 `--until-idle` keeps polling for fresh CI under its existing 30-minute limit.
+If a saved update attempt left the head unchanged and still green and BEHIND (for example, a crash
+before calling `gh`), the shipper may retry the update after the interval. It still cannot merge
+using the pre-update head's checks.
 
 `ship.merge` defaults to `false`. Out of the box the shipper only reports what it would merge or
 update; it makes neither mutation. `--dry-run` also makes no branch updates.
