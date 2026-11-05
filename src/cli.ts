@@ -102,11 +102,12 @@ factoryCmd
 
 factoryCmd
   .command('status')
-  .description('Show the supervisor, workers, last plan, counts, and open questions')
+  .description('Show workers with log tails, question ages, pending ideas, and recent events')
   .option('--json', 'Emit the status snapshot as JSON')
+  .option('--watch [seconds]', 'Refresh live status (default: 5 seconds; Ctrl-C to stop; incompatible with --json)')
   .action(async (options) => {
     const { factoryStatusCommand } = await import('./commands/factory.js');
-    factoryStatusCommand(options);
+    await factoryStatusCommand(options);
   });
 
 factoryCmd
