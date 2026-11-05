@@ -19,7 +19,7 @@ open.
 ## Quick start
 
 ```bash
-alpha-loop factory idea "Let the shipper auto-rebase PRs that fall behind master"
+alpha-loop factory idea "Add a post-merge smoke test for session PRs"
 alpha-loop factory --dry-run          # show what the next tick would ingest, dispatch, and ship
 alpha-loop factory --developers 3     # run continuously
 alpha-loop factory status             # in another terminal
@@ -128,7 +128,7 @@ PR (remembered in `state.json` across restarts). It never touches session PRs fr
 | Changes requested | ask you — never admin-merged |
 | Review required | ask you, or merge with `--admin` when `ship.admin_merge: true` **and** every required status check of the base branch has reported success on the head |
 | Blocked by branch protection for another reason | wait; ask once older than `ship.checks_timeout_minutes` |
-| Behind base | wait |
+| Behind base, checks successful and mergeable, with review safeguards satisfied | update the PR branch by merging the base into it, then wait for fresh CI (only when `ship.merge: true` or `--ship-merge`) |
 | Green and clean | merge (only when `ship.merge: true` or `--ship-merge`), then re-read and require `MERGED` |
 
 A question you answer or dismiss is not asked again until the PR's state (head commit, checks,
@@ -136,7 +136,21 @@ mergeability, review) changes. After merging into a base branch that is not the 
 branch, the shipper closes the PR's issues itself (GitHub only honors `Closes #N` on the default
 branch), so dependent issues can dispatch.
 
-`ship.merge` defaults to `false`. Out of the box the shipper only reports what it would merge.
+Behind PRs are updated with `gh pr update-branch` using its default merge strategy, regardless of
+`ship.merge_method`; the shipper never rebases or force-pushes for a branch update. Each PR gets at
+most one update attempt per `ship.interval_seconds`, including failed attempts and ship passes
+triggered by developer completion. Update attempts and their outcomes are recorded in factory events.
+A conflict raises the existing `ship:<n>:conflict` question for the owning issue; other update errors
+are logged and can be retried after the interval.
+
+After an update, the shipper keeps ownership and waits until a later snapshot has a different head
+commit and successful checks. Old green checks, missing checks and pending checks cannot authorize
+a merge, even with `ship.require_checks: false`. CI may already have passed on the new head when it
+is first observed. The attempt time and pre-update head are saved in `state.json` across restarts;
+`--until-idle` keeps polling for fresh CI under its existing 30-minute limit.
+
+`ship.merge` defaults to `false`. Out of the box the shipper only reports what it would merge or
+update; it makes neither mutation. `--dry-run` also makes no branch updates.
 
 ## The two files you use
 
@@ -146,7 +160,7 @@ Both live under `.alpha-loop/factory/` by default (gitignored). You can point `i
 ### `inbox.md` — rough ideas in
 
 ```md
-- [ ] Let the shipper auto-rebase stale PRs
+- [ ] Add a post-merge smoke test for session PRs
 - [~] Being turned into issues right now          <!-- factory:id=I-3f2a1c -->
 - [x] Done → #512, #513                           <!-- factory:id=I-9b1e22 -->
 - [?] Needs your answer → Q-20261104-002           <!-- factory:id=I-77aa01 -->
@@ -220,7 +234,7 @@ factory:
     timeout_seconds: 600
   ship:
     enabled: true
-    merge: false                # true = actually merge green PRs
+    merge: false                # true = update behind branches and merge green PRs
     admin_merge: false          # true = bypass a required review with --admin (required checks must pass)
     require_checks: true
     checks_timeout_minutes: 60
@@ -232,7 +246,6 @@ factory:
 ## Known limits (tracked in epic #454)
 
 - GitHub rate-limit accounting is still per process (#444).
-- A PR that falls behind the base branch waits; auto-update is #445.
 - Issues stranded `in-progress` by a crashed worker are not reclaimed automatically yet (#446).
 - There is no independent reviewer role or post-merge QA role yet (#450, #451).
 - On repos where the protected branch requires an approving review and the loop opens PRs under your

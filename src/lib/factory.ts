@@ -38,7 +38,7 @@ import {
   type FactoryQuestion,
   type NewQuestion,
 } from './factory-questions.js';
-import { decideShip, listShippablePrs, mergeShippablePr, type ShipDecision, type ShipPolicy, type ShipPr } from './factory-ship.js';
+import { decideShip, listShippablePrs, mergeShippablePr, updateShippablePrBranch, type ShipDecision, type ShipPolicy, type ShipPr } from './factory-ship.js';
 import {
   readPmProgress,
   readWorkerResult,
@@ -93,6 +93,7 @@ export type FactoryActions = {
   spawnDeveloper(req: DeveloperSpawnRequest): WorkerHandle;
   spawnPm(req: PmSpawnRequest): WorkerHandle;
   listShippable(): ShipPr[];
+  updateBranch(pr: ShipPr): ReturnType<typeof updateShippablePrBranch>;
   merge(pr: ShipPr, admin: boolean): { merged: boolean; error?: string };
   /** Issue questions: comment the answer on the issue, then relabel it ready. */
   applyAnswer(q: FactoryQuestion): { applied: boolean; note: string };
@@ -129,6 +130,8 @@ export type FactoryMemory = {
   owned: OwnedPr[];
   /** ship:* question key → PR state signature it was asked for (no re-ask until it changes). */
   shipAsked: Record<string, string>;
+  /** PR number → last update attempt and, after an update, the head whose CI is stale. */
+  branchUpdates: Record<string, { attemptedAt: string; previousHead?: string }>;
   /** Issues whose session PR this factory merged (dependency-satisfied even if still open). */
   mergedIssues: number[];
 };
@@ -310,6 +313,7 @@ export function createDefaultFactoryActions(
       requiredChecks: factory.ship.adminMerge,
     }),
     merge: (pr, admin) => mergeShippablePr(config.repo, pr, shipPolicyFor(factory, ctx.shipMerge), admin),
+    updateBranch: (pr) => updateShippablePrBranch(config.repo, pr),
     applyAnswer: (q) => applyIssueAnswer(config, q),
     preflight: async () => {
       const result = await runPreflight({
@@ -422,7 +426,7 @@ function ideaMeta(meta: Record<string, string>, drop: string[]): Record<string, 
 }
 
 function emptyMemory(): FactoryMemory {
-  return { owned: [], shipAsked: {}, mergedIssues: [] };
+  return { owned: [], shipAsked: {}, branchUpdates: {}, mergedIssues: [] };
 }
 
 /** The memory a previous supervisor persisted in state.json (empty when absent or unreadable). */
@@ -438,7 +442,19 @@ export function readFactoryMemory(statePath: string): FactoryMemory {
       for (const [k, v] of Object.entries(m.shipAsked)) if (typeof v === 'string') shipAsked[k] = v;
     }
     const mergedIssues = Array.isArray(m.mergedIssues) ? m.mergedIssues.filter((n) => Number.isInteger(n) && n > 0) : [];
-    return { owned, shipAsked, mergedIssues };
+    const branchUpdates: FactoryMemory['branchUpdates'] = {};
+    if (m.branchUpdates && typeof m.branchUpdates === 'object') {
+      for (const [pr, update] of Object.entries(m.branchUpdates)) {
+        if (!/^\d+$/.test(pr) || Number(pr) <= 0 || !update || typeof update.attemptedAt !== 'string'
+          || !Number.isFinite(Date.parse(update.attemptedAt))
+          || (update.previousHead !== undefined && typeof update.previousHead !== 'string')) continue;
+        branchUpdates[pr] = {
+          attemptedAt: update.attemptedAt,
+          ...(update.previousHead !== undefined ? { previousHead: update.previousHead } : {}),
+        };
+      }
+    }
+    return { owned, shipAsked, branchUpdates, mergedIssues };
   } catch {
     return emptyMemory();
   }
@@ -477,6 +493,25 @@ function shipGate(pr: ShipPr, owned: OwnedPr[], inFlightIssues: Set<number>): st
   if (headIssue !== undefined && inFlightIssues.has(headIssue)) return `issue #${headIssue} is still being worked on`;
   if (!findOwned(owned, pr)) return 'not a session PR this factory finished';
   return null;
+}
+
+/** Apply persisted update throttling and require fresh CI, including in dry-run reports. */
+function decideRememberedShip(pr: ShipPr, policy: ShipPolicy, now: Date, memory: FactoryMemory, intervalSeconds: number): ShipDecision {
+  const decision = decideShip(pr, policy, now);
+  if (decision.action === 'skip') return decision;
+  const update = memory.branchUpdates[pr.number];
+  // A long-lived PR needs time for its new checks to appear. Keep waiting under
+  // the idle cap rather than immediately asking about its original creation age.
+  if (update?.previousHead !== undefined
+    && (decision.action !== 'ask' || decision.key === `ship:${pr.number}:no-checks`)
+    && (!update.previousHead || !pr.headRefOid || pr.headRefOid === update.previousHead || pr.checks !== 'success')) {
+    return { action: 'wait', reason: 'branch updated; waiting for a new head with successful CI checks' };
+  }
+  if (decision.action === 'update-branch' && update
+    && now.getTime() - Date.parse(update.attemptedAt) < intervalSeconds * 1000) {
+    return { action: 'wait', reason: 'branch update throttled until ship.interval_seconds has elapsed' };
+  }
+  return decision;
 }
 
 function pendingIdeaCount(path: string): number {
@@ -656,7 +691,7 @@ async function dryRunFactory(config: Config, run: ResolvedFactoryRun, actions: F
           plan.ship.push({ pr: pr.number, action: 'skip', reason: gate });
           continue;
         }
-        const d = decideShip(pr, policy, now);
+        const d = decideRememberedShip(pr, policy, now, memory, run.factory.ship.intervalSeconds);
         plan.ship.push({ pr: pr.number, action: d.action, reason: d.action === 'ask' ? d.question : d.reason });
       }
     } catch (err) {
@@ -863,6 +898,9 @@ async function superviseFactory(
   }
 
   const writeState = (): void => {
+    for (const pr of Object.keys(memory.branchUpdates)) {
+      if (!memory.owned.some((o) => o.pr === Number(pr) || prNumberFromUrl(o.url) === Number(pr))) delete memory.branchUpdates[pr];
+    }
     let openQuestions = 0;
     try { openQuestions = openQuestionCount(readQuestions(paths.questionsPath)); } catch { /* unreadable → 0 */ }
     const state: FactoryState = {
@@ -893,7 +931,7 @@ async function superviseFactory(
       openQuestions,
       pendingIdeas: pendingIdeaCount(paths.inboxPath),
       recent: [...recent],
-      memory: { owned: memory.owned, shipAsked: memory.shipAsked, mergedIssues: [...mergedIssues] },
+      memory: { ...memory, mergedIssues: [...mergedIssues] },
     };
     try {
       writeJsonAtomic(paths.statePath, state);
@@ -1401,12 +1439,51 @@ async function superviseFactory(
       const issue = issues[0];
       let decision: ShipDecision;
       try {
-        decision = decideShip(pr, policy, now);
+        decision = decideRememberedShip(pr, policy, actions.now(), memory, factory.ship.intervalSeconds);
       } catch (err) {
         decisions.push({ pr: pr.number, action: 'skip', reason: `could not decide (${errorMessage(err)})` });
         continue;
       }
-      if (decision.action === 'merge') {
+      if (decision.action === 'update-branch') {
+        if (stopRequested || !refreshSupervisor()) {
+          decisions.push({ pr: pr.number, action: 'skip', reason: 'supervisor stopping' });
+          continue;
+        }
+        // Persist before the mutation: a crash after gh accepts it must not let a
+        // restart repeat the update or merge using checks from the old head.
+        const update = { attemptedAt: actions.now().toISOString(), previousHead: pr.headRefOid ?? '' };
+        memory.branchUpdates[pr.number] = update;
+        writeState();
+        let result: ReturnType<FactoryActions['updateBranch']>;
+        try {
+          result = actions.updateBranch(pr);
+        } catch (err) {
+          result = { updated: false, conflict: false, error: errorMessage(err) };
+        }
+        if (result.updated) {
+          pending = true;
+          decisions.push({ pr: pr.number, action: 'update-branch', reason: decision.reason });
+          record('ship.branch-updated', { pr: pr.number, ...result });
+          log.info(`Factory ship: updated PR #${pr.number}; waiting for fresh CI`);
+        } else {
+          memory.branchUpdates[pr.number] = { attemptedAt: update.attemptedAt };
+          const error = result.error ?? 'branch update did not complete';
+          decisions.push({ pr: pr.number, action: 'branch-update-failed', reason: error });
+          record('ship.branch-update-failed', { pr: pr.number, ...result, error });
+          log.warn(`Factory ship: could not update PR #${pr.number} (${error})`);
+          if (result.conflict) {
+            const ownerIssue = findOwned(memory.owned, pr)?.issue;
+            askShip({
+              role: 'shipper',
+              key: `ship:${pr.number}:conflict`,
+              pr: pr.number,
+              ...(ownerIssue !== undefined ? { issue: ownerIssue } : {}),
+              question: `PR #${pr.number} has merge conflicts with ${pr.baseRefName}. Resolve them, or close and re-queue the issue?`,
+              context: `${pr.title}\n${pr.url}\n${error}`,
+            }, pr);
+          }
+        }
+      } else if (decision.action === 'merge') {
         if (stopRequested || !refreshSupervisor()) {
           decisions.push({ pr: pr.number, action: 'skip', reason: 'supervisor stopping' });
           continue;
@@ -1447,7 +1524,8 @@ async function superviseFactory(
         }, pr);
         decisions.push({ pr: pr.number, action: 'ask', reason: asked ? decision.key : `${decision.key} (already asked for this PR state)` });
       } else {
-        if (decision.action === 'wait' && (pr.checks === 'pending' || pr.checks === 'none')) pending = true;
+        if (decision.action === 'wait' && (pr.checks === 'pending' || pr.checks === 'none'
+          || memory.branchUpdates[pr.number]?.previousHead !== undefined)) pending = true;
         decisions.push({ pr: pr.number, action: decision.action, reason: decision.reason });
       }
     }
