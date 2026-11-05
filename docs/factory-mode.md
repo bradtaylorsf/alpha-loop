@@ -157,6 +157,19 @@ using the pre-update head's checks.
 `ship.merge` defaults to `false`. Out of the box the shipper only reports what it would merge or
 update; it makes neither mutation. `--dry-run` also makes no branch updates.
 
+### Verifying shipper changes
+
+From the Alpha Loop repository root, run:
+
+```bash
+pnpm run verify:factory-ship
+```
+
+This runs the shipper decision matrix and supervisor tests with mocked GitHub actions, then builds
+TypeScript. The tests cover BEHIND branch updates, fresh-CI waits, throttling, restart recovery,
+conflict questions, and report-only behavior. The script uses `pnpm exec jest` so Jest receives
+`--runTestsByPath` directly; `pnpm test --runTestsByPath ...` is rejected by pnpm 9 before tests run.
+
 ## The two files you use
 
 Both live under `.alpha-loop/factory/` by default (gitignored). You can point `inbox_path` and
