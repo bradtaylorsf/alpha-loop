@@ -34,7 +34,7 @@ import {
   type SessionStatus,
 } from '../lib/session.js';
 import { releaseSessionLock, SessionLockError } from '../lib/session-lock.js';
-import { cleanupWorktree, setupWorktree } from '../lib/worktree.js';
+import { allowDestructiveWorktreeSetup, cleanupWorktree, setupWorktree } from '../lib/worktree.js';
 import {
   extractLearnings,
   generateSessionSummary,
@@ -1584,6 +1584,7 @@ async function executeSessionRun(
         try {
           const wt = await setupWorktree({
             issueNum: issuesToProcess[0].number,
+            allowDestructive: allowDestructiveWorktreeSetup(config, issuesToProcess[0].number),
             projectDir: process.cwd(),
             baseBranch: config.baseBranch,
             sessionBranch: session.branch,

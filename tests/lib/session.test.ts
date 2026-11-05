@@ -9,6 +9,7 @@ jest.mock('../../src/lib/shell', () => ({
 }));
 
 jest.mock('../../src/lib/worktree', () => ({
+  allowDestructiveWorktreeSetup: jest.fn(),
   setupWorktree: jest.fn(),
 }));
 
@@ -51,13 +52,14 @@ jest.mock('node:fs', () => ({
 }));
 
 import { exec } from '../../src/lib/shell';
-import { setupWorktree } from '../../src/lib/worktree';
+import { allowDestructiveWorktreeSetup, setupWorktree } from '../../src/lib/worktree';
 import { createPR } from '../../src/lib/github';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync, renameSync } from 'node:fs';
 import type { Config } from '../../src/lib/config';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
+const mockAllowDestructive = jest.mocked(allowDestructiveWorktreeSetup);
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
 const mockCreatePR = createPR as jest.MockedFunction<typeof createPR>;
 const mockMkdirSync = mkdirSync as jest.MockedFunction<typeof mkdirSync>;
@@ -159,6 +161,7 @@ function makeQueueContext(overrides: Partial<QueueSessionContext> = {}): QueueSe
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockAllowDestructive.mockReturnValue(true);
   mockExec.mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
   mockExistsSync.mockReturnValue(false);
   mockReaddirSync.mockReturnValue([]);
@@ -171,6 +174,15 @@ beforeEach(() => {
 });
 
 describe('createSession', () => {
+  test.each([true, false])('checks the target issue lease for session setup (permission %s)', async permission => {
+    const config = makeConfig();
+    const session = createSession(config, { issueNum: 42, parentEpicNum: 454, slugOverride: 'issue-42-test' });
+    mockAllowDestructive.mockReturnValue(permission);
+    await ensureSessionWorktree(session, config);
+    expect(mockAllowDestructive).toHaveBeenCalledWith(config, 42);
+    expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 42, allowDestructive: permission }));
+  });
+
   test('generates session name with timestamp format', () => {
     const session = createSession(makeConfig());
 
