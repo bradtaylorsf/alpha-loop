@@ -78,7 +78,7 @@ and exit code 2.
 4. **Dispatch.** The planner fills free developer slots. Each issue's lease is taken before its worker
    starts, and worker starts are spaced `spawn_stagger_seconds` apart.
 5. **Ship** every `ship.interval_seconds`, and right after any developer success.
-6. Write `state.json` and append to `events.jsonl`.
+6. Write `state.json`, append to `events.jsonl`, and deliver queued lifecycle notifications.
 
 ### PM outcomes
 
@@ -175,6 +175,50 @@ applies the answer:
 - idea questions: re-queues the idea with your answer as context
 
 A blocker is asked once per key and is not repeated while the question is still open.
+
+## Notifications
+
+Use `events.destinations` to receive a notification when the factory needs an answer:
+
+```yaml
+events:
+  redact: [OPENAI_API_KEY, ANTHROPIC_API_KEY]
+  destinations:
+    factory_questions:
+      type: webhook
+      events: [factory.question.asked]
+      url_env: FACTORY_WEBHOOK_URL
+      format: slack
+      timeout: 10
+      retries: 1
+```
+
+Set `FACTORY_WEBHOOK_URL` in the supervisor's environment. Webhook, command, and log destinations
+use the same exact event filters and `'*'` wildcard as session events.
+
+| Event | When it is sent |
+|---|---|
+| `factory.question.asked` | A new question is written, from any role; suppressed duplicates do not notify |
+| `factory.pr.shipped` | The shipper confirms a merge; report-only decisions do not notify |
+| `factory.worker.failed` | A developer or PM attempt fails, including timeouts and partial PM failures; ordinary shutdown cancellations do not notify |
+| `factory.stopped` | The supervisor finishes, including signal and error shutdowns |
+
+Factory events use the canonical lifecycle payload without a session manifest. Questions include
+`humanInput.question`, `humanInput.resumeInstructions`, and metadata containing `questionId`,
+`questionKey`, `role`, `ideaId` when applicable, `questionsPath`, and the question's `context`.
+Issue and PR references use `issue` and `pr`; shipped PRs include their URL. Worker failures include
+`error` and metadata with `workerId`, `role`, and `logPath`. Stop events include the reason and final
+counts. `branch.base` reflects the resolved factory base, including `--base`.
+
+The supervisor delivers notifications sequentially at tick boundaries and drains the queue before
+exiting. Delivery respects destination timeouts and retries. Failures are logged and subsequent
+destinations still run, even when `required: true`; they never stop the factory. Session events keep
+their existing required-destination failure behavior.
+
+Canonical events and delivery attempts go to `<state_dir>/lifecycle-events.jsonl`, separate from the
+existing supervisor audit stream at `<state_dir>/events.jsonl`. Configured redaction applies to
+notification payloads and delivery diagnostics. `factory --dry-run` sends nothing and writes no
+notification logs. See [hosted events](hosted-events.md) for all destination formats.
 
 ## Safety model
 

@@ -1,6 +1,6 @@
 # Hosted Lifecycle Events
 
-Alpha Loop can emit session lifecycle events to logs, webhooks, and local commands. The canonical event is JSON and includes repo, issue, PR, session, branch, worktree, logs, screenshots, preview URL, QA checklist, feedback, web/app browser artifacts, and harness metadata.
+Alpha Loop can emit session, daemon, and factory lifecycle events to logs, webhooks, and local commands. The canonical event is JSON and includes repo, issue, PR, session, branch, worktree, logs, screenshots, preview URL, QA checklist, feedback, web/app browser artifacts, and harness metadata.
 When automation policy pauses work, the payload also includes `policy.latestDecision` and the session's `policy.decisions` history.
 For `qa.requested` events from `web_app`, the payload includes `screenshots`, `previewUrl`, `qaChecklist`, and `webApp` metadata with `artifactPath`, `browserResultPath`, `consoleErrors`, and `networkErrors`.
 
@@ -24,6 +24,10 @@ Supported events:
 - `daemon.resume.requested`
 - `daemon.shutdown`
 - `daemon.failed`
+- `factory.question.asked`
+- `factory.pr.shipped`
+- `factory.worker.failed`
+- `factory.stopped`
 
 ## Base Configuration
 
@@ -41,6 +45,39 @@ events:
 ```
 
 `include_prompt_text: false` keeps prompt text out of external payloads while retaining prompt paths and hashes. Redaction entries match object keys and replace matching env var values or literal values anywhere in the event.
+
+## Factory Questions
+
+Set `FACTORY_WEBHOOK_URL` to a webhook that should receive new questions:
+
+```yaml
+events:
+  redact: [OPENAI_API_KEY, ANTHROPIC_API_KEY]
+  destinations:
+    factory_questions:
+      type: webhook
+      events: [factory.question.asked]
+      url_env: FACTORY_WEBHOOK_URL
+      format: json
+      retries: 1
+      timeout: 10
+```
+
+Factory notifications use the same transports and exact-name / `'*'` filters, without needing a
+session manifest. Session identity fields are null; `branch.base` is the resolved factory base.
+Questions include `humanInput.question` and `humanInput.resumeInstructions`, plus `metadata.questionId`,
+`questionKey`, `role`, `ideaId` when relevant, `questionsPath`, and `context`. Issue/PR references are in
+`issue` and `pr`. Slack, Teams, and Discord formats also show the question and answer instructions.
+Shipped events include the confirmed PR URL; worker failures carry `error`, `metadata.workerId`,
+`role`, and `logPath`; stopped events carry `humanInput.reason` and `metadata.counts`.
+
+Canonical factory events and delivery attempts are written to `<state_dir>/lifecycle-events.jsonl`
+(by default `.alpha-loop/factory/lifecycle-events.jsonl`). The existing `events.jsonl` supervisor
+audit stream is separate. Factory delivery is best effort: failures are logged, including failures
+of `required: true` destinations, and later destinations still run. Configured redaction also covers
+factory delivery responses, stdout/stderr, and warnings. The supervisor drains queued notifications
+before returning; retries and timeouts still apply. `factory --dry-run` sends nothing and writes no
+files. See [factory mode](factory-mode.md#notifications) for event triggers.
 
 ## Slack
 
@@ -139,4 +176,4 @@ events:
       required: true
 ```
 
-Delivery attempts and responses are appended to `.alpha-loop/sessions/<session>/logs/events.jsonl`. In `alpha-loop run --dry-run`, matching destinations are printed and no webhook or command is executed.
+Session delivery attempts and responses are appended to `.alpha-loop/sessions/<session>/logs/events.jsonl`. Session callers still fail when a required destination exhausts its retries. In `alpha-loop run --dry-run`, matching destinations are printed and no webhook or command is executed.

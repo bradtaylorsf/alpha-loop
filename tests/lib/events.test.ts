@@ -1,15 +1,20 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import childProcess from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import {
   buildLifecycleEvent,
   emitLifecycleEvent,
+  emitFactoryEvent,
   eventMatchesDestination,
   formatEventPayload,
   redactLifecycleEvent,
 } from '../../src/lib/events.js';
 import { sessionManifestPath, type DurableSessionManifest } from '../../src/lib/session.js';
 import type { Config, EventDestinationConfig } from '../../src/lib/config.js';
+import { log } from '../../src/lib/logger.js';
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -193,6 +198,7 @@ describe('lifecycle events', () => {
     rmSync(tempDir, { recursive: true, force: true });
     globalThis.fetch = originalFetch!;
     process.env = originalEnv;
+    jest.useRealTimers();
     jest.restoreAllMocks();
   });
 
@@ -205,6 +211,36 @@ describe('lifecycle events', () => {
     writeFileSync(sessionManifestPath(sessionDir), JSON.stringify(manifest, null, 2));
     return sessionDir;
   }
+
+  it('delivers sessionless factory events to exact and wildcard destinations in a separate log', async () => {
+    const stateDir = join(tempDir, 'factory');
+    mkdirSync(stateDir);
+    writeFileSync(join(stateDir, 'events.jsonl'), 'existing audit\n');
+    const destination: EventDestinationConfig = {
+      type: 'log', events: ['factory.question.asked'], format: 'json', required: false, timeout: 1, retries: 0,
+    };
+    const result = await emitFactoryEvent({
+      config: makeConfig({ events: { includePromptText: false, redact: [], destinations: {
+        exact: destination,
+        wildcard: { ...destination, events: ['*'] },
+        unrelated: { ...destination, events: ['session.started'] },
+      } } }),
+      type: 'factory.question.asked', stateDir, now: '2026-11-05T10:00:00Z',
+      context: { issueNumber: 448, question: 'Which base?', resumeInstructions: 'Answer Q-1', metadata: { questionId: 'Q-1' } },
+    });
+
+    expect(result?.deliveries.map((d) => d.destination)).toEqual(['exact', 'wildcard']);
+    expect(result?.event).toEqual(expect.objectContaining({
+      type: 'factory.question.asked', createdAt: '2026-11-05T10:00:00Z',
+      issue: expect.objectContaining({ number: 448 }),
+      session: expect.objectContaining({ id: null }),
+      humanInput: expect.objectContaining({ question: 'Which base?', resumeInstructions: 'Answer Q-1' }),
+      logs: expect.objectContaining({ eventLogPath: join(stateDir, 'lifecycle-events.jsonl') }),
+    }));
+    const records = readFileSync(join(stateDir, 'lifecycle-events.jsonl'), 'utf-8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(records.map((r) => r.kind)).toEqual(['event', 'delivery', 'delivery']);
+    expect(readFileSync(join(stateDir, 'events.jsonl'), 'utf-8')).toBe('existing audit\n');
+  });
 
   it('builds canonical payloads with session, issue, logs, QA, and harness metadata', () => {
     const sessionDir = writeManifest();
@@ -242,6 +278,142 @@ describe('lifecycle events', () => {
       transcriptPath: expect.stringContaining('issue-269-implement.log'),
       sessionLogPath: expect.stringContaining('logs'),
     }));
+  });
+
+  it('logs a factory event even with no matching destinations and supports an explicit sessionless log path', async () => {
+    const config = makeConfig({ events: { includePromptText: false, redact: [], destinations: {} } });
+    const eventLogPath = join(tempDir, 'custom', 'events.jsonl');
+    const result = await emitLifecycleEvent({ config, type: 'factory.stopped', eventLogPath });
+    expect(result.event.session.id).toBeNull();
+    expect(result.event.logs.eventLogPath).toBe(eventLogPath);
+    expect(JSON.parse(readFileSync(eventLogPath, 'utf-8')).event.type).toBe('factory.stopped');
+  });
+
+  it('redacts nested factory payloads and echoed diagnostics before logging and delivering to all transports', async () => {
+    process.env.FACTORY_SECRET = 'environment-secret';
+    process.env.EVENT_URL = 'https://events.example.test/hook';
+    const echoed = 'environment-secret literal-secret';
+    const fetchMock = jest.fn().mockResolvedValue(new Response(echoed, { status: 500 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const warn = jest.spyOn(log, 'warn').mockImplementation(() => {});
+    const stateDir = join(tempDir, 'factory');
+    const common = { events: ['factory.question.asked' as const], format: 'json' as const, required: true, timeout: 5, retries: 1 };
+    // Echo stdin to prove the command receives the same redacted canonical payload.
+    const command = `"${process.execPath}" -e "process.stdin.pipe(process.stdout);process.stderr.write('environment-secret literal-secret');process.exitCode=1"`;
+    const result = await emitFactoryEvent({
+      config: makeConfig({ events: { includePromptText: false, redact: ['FACTORY_SECRET', 'token', 'literal-secret'], destinations: {
+        webhook: { ...common, type: 'webhook', urlEnv: 'EVENT_URL' },
+        command: { ...common, retries: 0, type: 'command', command, stdin: 'json' },
+        audit: { ...common, type: 'log' },
+      } } }),
+      type: 'factory.question.asked', stateDir,
+      context: { question: `Proceed with ${echoed}?`, metadata: { nested: [{ TOKEN: 'key-secret', safe: echoed }] } },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.humanInput.question).toBe('Proceed with [REDACTED] [REDACTED]?');
+    expect(body.metadata.nested).toEqual([{ TOKEN: '[REDACTED]', safe: '[REDACTED] [REDACTED]' }]);
+    expect(result?.deliveries.map((d) => [d.destination, d.status])).toEqual([
+      ['webhook', 'failed'], ['webhook', 'failed'], ['command', 'failed'], ['audit', 'success'],
+    ]);
+    expect(result?.deliveries[0]).toEqual(expect.objectContaining({ responseBody: '[REDACTED] [REDACTED]' }));
+    expect(result?.deliveries[2]).toEqual(expect.objectContaining({ stdout: expect.stringContaining('factory.question.asked'), stderr: '[REDACTED] [REDACTED]' }));
+    const recorded = readFileSync(join(stateDir, 'lifecycle-events.jsonl'), 'utf-8');
+    for (const output of [JSON.stringify(result), recorded, JSON.stringify(warn.mock.calls), JSON.stringify(fetchMock.mock.calls)]) {
+      for (const secret of ['environment-secret', 'literal-secret', 'key-secret']) expect(output).not.toContain(secret);
+    }
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['slack', 'teams', 'discord'] as const)('includes the question and answer instructions in %s factory notifications', async (format) => {
+    process.env.EVENT_URL = 'https://events.example.test/hook';
+    const fetchMock = jest.fn().mockResolvedValue(new Response('ok'));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    await emitFactoryEvent({
+      config: makeConfig({ events: { includePromptText: false, redact: ['literal-secret'], destinations: {
+        alert: { type: 'webhook', events: ['factory.question.asked'], format, required: false, timeout: 5, retries: 0, urlEnv: 'EVENT_URL' },
+      } } }),
+      type: 'factory.question.asked', stateDir: tempDir,
+      context: { question: 'Use literal-secret?', resumeInstructions: 'alpha-loop factory answer Q-1 "<text>"' },
+    });
+    const payload = fetchMock.mock.calls[0][1].body as string;
+    expect(payload).toContain('Use [REDACTED]?');
+    expect(payload).toContain('alpha-loop factory answer Q-1');
+    expect(payload).not.toContain('literal-secret');
+  });
+
+  it('bounds factory webhook delivery with the configured timeout and continues to a log destination', async () => {
+    jest.useFakeTimers();
+    process.env.EVENT_URL = 'https://events.example.test/hook';
+    globalThis.fetch = jest.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    })) as unknown as typeof fetch;
+    const pending = emitFactoryEvent({
+      config: makeConfig({ events: { includePromptText: false, redact: [], destinations: {
+        slow: { type: 'webhook', events: ['*'], format: 'json', required: true, timeout: 1, retries: 0, urlEnv: 'EVENT_URL' },
+        audit: { type: 'log', events: ['*'], format: 'json', required: false, timeout: 1, retries: 0 },
+      } } }),
+      type: 'factory.stopped', stateDir: tempDir,
+    });
+    await jest.advanceTimersByTimeAsync(1000);
+    expect((await pending)?.deliveries.map((d) => d.status)).toEqual(['failed', 'success']);
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('handles command stdin failures without an unhandled error or skipping later destinations', async () => {
+    jest.useFakeTimers();
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), { stdin, stdout, stderr, kill: jest.fn() });
+    jest.spyOn(childProcess, 'spawn').mockReturnValue(child as unknown as ReturnType<typeof childProcess.spawn>);
+    const pending = emitFactoryEvent({
+      config: makeConfig({ events: { includePromptText: false, redact: [], destinations: {
+        script: { type: 'command', command: 'on-event', stdin: 'json', events: ['*'], format: 'json', required: true, timeout: 1, retries: 0 },
+        audit: { type: 'log', events: ['*'], format: 'json', required: false, timeout: 1, retries: 0 },
+      } } }),
+      type: 'factory.stopped', stateDir: tempDir,
+    });
+    try {
+      stdin.emit('error', new Error('broken pipe'));
+      child.emit('close', 1);
+      const result = await pending;
+      expect(result?.deliveries.map((d) => d.status)).toEqual(['failed', 'success']);
+      expect(result?.deliveries[0].error).toBe('broken pipe');
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      stdin.destroy();
+      stdout.destroy();
+      stderr.destroy();
+    }
+  });
+
+  it('catches unexpected factory emission errors and redacts the warning', async () => {
+    const warn = jest.spyOn(log, 'warn').mockImplementation(() => {});
+    const config = makeConfig();
+    Object.defineProperty(config, 'repo', { get: () => { throw new Error('unexpected literal-secret'); } });
+    config.events = { includePromptText: false, redact: ['literal-secret'], destinations: {} };
+    await expect(emitFactoryEvent({ config, type: 'factory.stopped', stateDir: tempDir })).resolves.toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('unexpected [REDACTED]'));
+  });
+
+  it('keeps factory dry runs free of file writes and transport sends', async () => {
+    const fetchMock = jest.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const stateDir = join(tempDir, 'dry-factory');
+    const common = { events: ['*' as const], format: 'json' as const, required: true, timeout: 1, retries: 0 };
+    const result = await emitFactoryEvent({
+      config: makeConfig({ dryRun: true, events: { includePromptText: false, redact: [], destinations: {
+        webhook: { ...common, type: 'webhook', urlEnv: 'EVENT_URL' },
+        command: { ...common, type: 'command', command: 'exit 1', stdin: 'json' },
+        audit: { ...common, type: 'log' },
+      } } }),
+      type: 'factory.stopped', stateDir,
+    });
+    expect(result?.deliveries.map((d) => d.status)).toEqual(['dry-run', 'dry-run', 'dry-run']);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(existsSync(stateDir)).toBe(false);
   });
 
   it('redacts configured secret values and matching keys while retaining prompt references', () => {
