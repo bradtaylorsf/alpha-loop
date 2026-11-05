@@ -233,6 +233,12 @@ describe('factory release worktree', () => {
     expect(due().plan.version).toBe('1.3.1');
   });
 
+  it('does not wait for a tag after release maintenance that leaves the version unchanged', () => {
+    commit('chore(release): repair the publish workflow');
+    git(project, 'push', 'origin', 'feat/factory-mode');
+    expect(due().plan.version).toBe('1.3.0');
+  });
+
   it('recovers a pushed branch after PR creation fails, even when base advances', () => {
     const handler = mockGh.getMockImplementation()!;
     mockGh.mockImplementation((cmd, opts, mutation) => {

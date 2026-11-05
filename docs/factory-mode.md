@@ -176,7 +176,8 @@ Each due ship pass checks releases after processing session PRs, even if there w
 It fetches the configured base (`--base`, otherwise `base_branch`) from `origin` and tags under the
 repository Git lock, then plans from a captured remote-base commit. It never uses the checkout's
 `HEAD` as the release base. Commit messages count once, regardless of body length. Empty messages,
-merge commits/wrappers and `chore(release):` metadata do not count; docs, chores and other commits do.
+merge commits/wrappers and `chore(release): release vX.Y.Z` version stamps do not count; docs, chores
+and release-maintenance commits do.
 `BREAKING CHANGE` or `type(scope)!:` takes precedence (major), then `feat:` (minor), otherwise patch.
 Tags may have an optional `v`; prerelease and non-semver tags are ignored. No tag starts at `0.0.0`.
 
@@ -189,7 +190,8 @@ Any open `chore/release-*` PR, including drafts and PRs targeting other bases, s
 The query covers every page and fails closed. The shipper rechecks before opening the PR. If pushing
 succeeded but PR creation failed, the next pass can reuse that exact release commit after verifying
 its metadata, ancestry and package-only change; it never force-pushes an existing release branch.
-A merged `chore(release):` commit without its tag defers the next release while CI publishes.
+A merged `chore(release): release vX.Y.Z` commit without its tag defers the next release while CI
+publishes. Other `chore(release):` maintenance commits do not trigger this wait.
 Outcomes and errors are recorded as `release.*` factory events; transient failures retry on later
 ship passes (with the existing idle-wait cap when using `--until-idle`).
 

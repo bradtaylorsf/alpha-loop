@@ -11,7 +11,7 @@
 //   pnpm release --major        # force major
 //   pnpm release --dry-run      # print plan without touching anything
 
-import { execSync, spawnSync } from 'node:child_process';
+import { execFileSync, execSync, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
@@ -91,8 +91,10 @@ function main() {
   try { lastTag = sh('git describe --tags --abbrev=0'); } catch { /* first release */ }
   const currentTagged = lastTag ? lastTag.replace(/^v/, '') : '0.0.0';
 
-  const range = lastTag ? `${lastTag}..HEAD` : 'HEAD';
-  const commits = sh(`git log ${range} --format='%B%x00'`).split('\0').filter(message => message.trim());
+  const range = lastTag ? `refs/tags/${lastTag}..HEAD` : 'HEAD';
+  // Tag names may contain shell metacharacters. Pass the revision as an argument.
+  const commits = execFileSync('git', ['log', '--format=%B%x00', range, '--'], { encoding: 'utf8' })
+    .split('\0').filter(message => message.trim());
   if (commits.length === 0) {
     console.log('\nNothing to release — no commits since ' + (lastTag || 'repo init') + '.');
     process.exit(0);
@@ -112,7 +114,7 @@ function main() {
     : `chore/release-v${nextVersion}`;
   console.log(`  release branch: ${releaseBranch}${releaseBranch === branch ? ' (current)' : ' (will create)'}`);
 
-  const oneline = sh(`git log ${range} --format='%h %s'`);
+  const oneline = execFileSync('git', ['log', '--format=%h %s', range, '--'], { encoding: 'utf8' }).trim();
   const notes = oneline.split('\n').map((l) => `- ${l}`).join('\n');
   console.log(`\nCommits since ${lastTag || 'repo init'}:`);
   console.log(oneline.split('\n').map((l) => `  ${l}`).join('\n'));

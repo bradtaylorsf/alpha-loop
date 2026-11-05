@@ -23,7 +23,11 @@ export function bumpVersion(version: string, bump: ReleaseBump): string {
 }
 
 export function isReleaseCommit(message: string): boolean {
-  return /^chore\(release\):/i.test(message.trim());
+  // Only version-stamping commits from the deploy/factory path await CI tags.
+  // GitHub may append the PR number when squash-merging the release.
+  const title = message.trim().split('\n')[0];
+  const version = /^chore\(release\): release (v\S+?)(?: \(#\d+\))?$/i.exec(title)?.[1];
+  return version !== undefined && STABLE_VERSION.test(version);
 }
 
 export function releasableCommits(commits: readonly string[]): string[] {

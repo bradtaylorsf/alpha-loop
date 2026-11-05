@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { bumpVersion, computeBump, planRelease, type ReleaseBump } from '../../src/lib/release.js';
+import { bumpVersion, computeBump, isReleaseCommit, planRelease, type ReleaseBump } from '../../src/lib/release.js';
 
 const cases: Array<[string[], ReleaseBump]> = [
   [[], 'patch'],
@@ -13,6 +13,15 @@ const cases: Array<[string[], ReleaseBump]> = [
 ];
 
 describe('release planning', () => {
+  it('recognizes version stamps, including squash titles, without mistaking maintenance for a release', () => {
+    expect(isReleaseCommit('chore(release): release v1.3.0\n\nRelease notes')).toBe(true);
+    expect(isReleaseCommit('chore(release): release v1.3.0 (#42)')).toBe(true);
+    expect(isReleaseCommit('chore(release): repair the publish workflow')).toBe(false);
+    expect(isReleaseCommit('chore(release): release v1.3.0-rc.1')).toBe(false);
+    expect(planRelease({ lastTag: 'v1.2.3', commits: ['chore(release): repair the publish workflow'], releaseEvery: 1 }))
+      .toEqual({ version: '1.2.4', bump: 'patch', branch: 'chore/release-v1.2.4' });
+  });
+
   it.each(cases)('computes the bump for %j', (commits, bump) => {
     expect(computeBump(commits)).toBe(bump);
   });
