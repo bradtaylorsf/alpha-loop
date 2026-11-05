@@ -1,0 +1,46 @@
+{
+  "name": "session/issue-444-feat-factory-shared-cross-process-github",
+  "branch": "session/issue-444-feat-factory-shared-cross-process-github",
+  "completed": "2026-11-05T09:19:09.692Z",
+  "results": [
+    {
+      "issueNum": 444,
+      "title": "feat(factory): shared cross-process GitHub mutation budget for parallel workers",
+      "status": "failure",
+      "testsPassing": false,
+      "verifyPassing": false,
+      "duration": 14,
+      "filesChanged": 0
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 75,
+      "tokens_out": 58,
+      "cost_usd": 0,
+      "wall_time_s": 0.008,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": false,
+      "started_at": "2026-11-05T09:19:03.538Z",
+      "issue_num": 444
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 75,
+      "tokens_out": 58,
+      "cost_usd": 0,
+      "wall_time_s": 0.009,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": false,
+      "started_at": "2026-11-05T09:19:04.035Z",
+      "issue_num": 444
+    }
+  ]
+}
