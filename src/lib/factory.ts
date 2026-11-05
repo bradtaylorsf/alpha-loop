@@ -1263,8 +1263,8 @@ async function superviseFactory(
       error: result ? undefined : w.exit.error ?? 'missing or invalid QA result', cleanupErrors,
     });
     if (!result && !interrupted) log.warn(`Factory QA: ${w.exit.error ?? 'missing or invalid worker result'} (${w.handle.logPath})`);
+    // Periodic QA creates no PR whose CI needs a fresh idle wait budget.
     qaWorker = null;
-    lastWorkerFinishedMs = actions.now().getTime();
   };
 
   /** Adopt unconsumed QA children, including a child surviving its old supervisor. */
@@ -1797,8 +1797,17 @@ async function superviseFactory(
     await flushMicrotasks();
     reapDevelopers();
     reapPm('tick');
-    recoverQa();
-    reapQa();
+    try {
+      recoverQa();
+      reapQa();
+    } catch (err) {
+      // A result/inbox write failure must not bypass signalling live workers.
+      // Leave the exited child's files unacknowledged for recovery on restart;
+      // it must not be discarded as an interrupted check below.
+      record('qa.reap-failed', { workerId: qaWorker?.handle.id, error: errorMessage(err) });
+      log.warn(`Factory QA: could not reap result during shutdown (${errorMessage(err)}); retained for recovery`);
+      if (qaWorker?.exit) qaWorker = null;
+    }
 
     const live = liveHandles();
     if (live.length > 0) {

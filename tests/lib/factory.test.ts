@@ -1782,6 +1782,24 @@ describe('factory QA lifecycle', () => {
     expect(h.qas).toHaveLength(1);
   });
 
+  it('does not extend the pending CI idle cap when periodic QA finishes', async () => {
+    const h = harness({ qa: { enabled: true, intervalMinutes: 1 }, pm: { enabled: false } });
+    own(h, 1);
+    h.actions.listShippable.mockReturnValue([shipPr(1, { checks: 'pending' })]);
+    const abort = new AbortController();
+    h.onTick(n => {
+      finishQa(h);
+      // Bound the regression without a real timer if QA keeps resetting the cap.
+      if (n === 65) abort.abort();
+    });
+
+    const summary = await h.run({ untilIdle: true, signal: abort.signal });
+
+    expect(summary.status).toBe('idle');
+    expect(h.clock() - T0).toBe(30 * 60_000);
+    expect(h.qas.length).toBeGreaterThan(1);
+  });
+
   it('counts only confirmed merges and runs after shipping at equality', async () => {
     const h = harness({ qa: { enabled: true, afterMerges: 2 }, pm: { enabled: false }, ship: { merge: true } });
     own(h, 1, 2, 3);
@@ -1897,6 +1915,39 @@ describe('factory QA lifecycle', () => {
     expect(second.qas).toHaveLength(0);
     expect(readInbox(h.paths.inboxPath)).toHaveLength(1);
     expect(cadence(second).consumed).toEqual(['qa-orphan']);
+  });
+
+  it('still stops developers when a QA inbox write fails, and recovers the result after repair', async () => {
+    const h = harness({ qa: { enabled: true }, pm: { enabled: false }, ship: { enabled: false } });
+    h.actions.pollReady.mockReturnValueOnce([issue(1)]).mockReturnValue([]);
+    h.actions.spawnDeveloper.mockImplementation(() => {
+      const w = fakeWorker('dev-1', 'developer', { issue: 1 }, (_, finish) => finish({ exitCode: 1, result: null }));
+      h.devs.push(w);
+      return w.handle;
+    });
+    h.actions.spawnQa.mockImplementation(() => {
+      const w = fakeWorker('qa-orphan', 'qa', {});
+      w.handle.resultPath = join(h.paths.workersDir, w.handle.id, 'result.json');
+      h.qas.push(w);
+      return w.handle;
+    });
+    h.onTick(n => {
+      if (n !== 1) return;
+      orphan(h, qaResult('failure'));
+      rmSync(h.paths.inboxPath);
+      mkdirSync(h.paths.inboxPath);
+      finishQa(h, 'failure');
+    });
+
+    await expect(h.run({ once: true })).rejects.toThrow(/EISDIR/);
+    expect(h.devs[0].kills).toEqual(['SIGTERM']);
+    expect(cadence(h).consumed).not.toContain('qa-orphan');
+
+    rmSync(h.paths.inboxPath, { recursive: true });
+    const restarted = harness({ qa: { enabled: true }, pm: { enabled: false }, ship: { enabled: false } });
+    await restarted.run({ once: true });
+    expect(readInbox(restarted.paths.inboxPath)).toHaveLength(1);
+    expect(cadence(restarted).consumed).toEqual(['qa-orphan']);
   });
 
   it('waits for a surviving worker before reaping its result or starting another', async () => {

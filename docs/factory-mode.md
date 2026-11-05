@@ -219,6 +219,8 @@ remain pending for the next check. The supervisor recovers completed results bef
 waits for surviving QA processes before starting another. A child lease also prevents overlapping
 checks. If a crash leaves an unknown worker PID, or the worker belongs to another host, the supervisor
 keeps QA pending until it can establish the process has exited; it never removes a possibly live worktree.
+If filing a QA result fails, shutdown still stops the other workers and retains the unconsumed
+result for recovery after the inbox is repaired and the factory restarts.
 
 QA uses `worker_timeout_minutes` and the same process-group shutdown as developers. `--once` and
 other drain modes wait for started checks, including another check when merges during draining reach
@@ -227,6 +229,7 @@ factory is idle, even if the previous check outlasted its interval. Merge thresh
 Interval checks do not keep a drained factory running. `--dry-run` starts no QA child and does not
 fetch, create worktrees, or modify QA state or the inbox. QA starts, outcomes,
 bug dedupe decisions and worker failures are recorded in `events.jsonl`.
+Periodic QA completion does not reset the shipper's 30-minute pending-CI idle limit.
 
 ## The two files you use
 
