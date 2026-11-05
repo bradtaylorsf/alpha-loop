@@ -49,6 +49,7 @@ import {
   type WorkerExit,
   type WorkerHandle,
 } from './factory-workers.js';
+import { createFactoryRelease, inspectFactoryRelease, type DueRelease, type ReleaseInspection, type ReleaseOutcome } from './factory-release.js';
 import { parseSubIssues } from './epics.js';
 import { ingestFeedback } from './feedback.js';
 import { closeIssue, commentIssue, getIssueWithComments, labelIssue, pollIssues, type Issue } from './github.js';
@@ -93,6 +94,8 @@ export type FactoryActions = {
   spawnDeveloper(req: DeveloperSpawnRequest): WorkerHandle;
   spawnPm(req: PmSpawnRequest): WorkerHandle;
   listShippable(): ShipPr[];
+  inspectRelease(): ReleaseInspection;
+  createRelease(due: DueRelease): ReleaseOutcome;
   updateBranch(pr: ShipPr): ReturnType<typeof updateShippablePrBranch>;
   merge(pr: ShipPr, admin: boolean): { merged: boolean; error?: string };
   /** Issue questions: comment the answer on the issue, then relabel it ready. */
@@ -165,6 +168,8 @@ export type FactoryDryRunPlan = {
   queued: Array<{ issue: number; title: string }>;
   ship: Array<{ pr: number; action: ShipDecision['action']; reason: string }>;
   shipError?: string;
+  release?: ReleaseInspection;
+  releaseError?: string;
 };
 
 export type FactorySummary = {
@@ -291,6 +296,7 @@ export function createDefaultFactoryActions(
   ctx: { paths: FactoryPaths; baseBranch: string; shipMerge: boolean; dryRun: boolean },
 ): FactoryActions {
   const factory = getFactoryConfig(config);
+  const releaseOptions = { projectDir: process.cwd(), repo: config.repo, baseBranch: ctx.baseBranch, releaseEvery: factory.ship.releaseEvery };
   return {
     now: () => new Date(),
     sleep: abortableSleep,
@@ -312,6 +318,11 @@ export function createDefaultFactoryActions(
     listShippable: () => listShippablePrs(config.repo, ctx.baseBranch, factory.ship.headPrefixes, {
       requiredChecks: factory.ship.adminMerge,
     }),
+    inspectRelease: () => inspectFactoryRelease(releaseOptions, ctx.dryRun),
+    createRelease: (due) => {
+      if (ctx.dryRun) throw new Error('Cannot create a release during a dry run');
+      return createFactoryRelease(releaseOptions, due);
+    },
     merge: (pr, admin) => mergeShippablePr(config.repo, pr, shipPolicyFor(factory, ctx.shipMerge), admin),
     updateBranch: (pr) => updateShippablePrBranch(config.repo, pr),
     applyAnswer: (q) => applyIssueAnswer(config, q),
@@ -706,6 +717,10 @@ async function dryRunFactory(config: Config, run: ResolvedFactoryRun, actions: F
     } catch (err) {
       plan.shipError = errorMessage(err);
     }
+    if (run.factory.ship.releaseEvery > 0) {
+      try { plan.release = actions.inspectRelease(); }
+      catch (err) { plan.releaseError = errorMessage(err); }
+    }
   }
 
   log.dry(`Factory dry run — base ${run.baseBranch}, ${run.developers} developer slot(s)${run.epics.length ? `, epics ${run.epics.map((e) => `#${e}`).join(', ')}` : ''}`);
@@ -727,6 +742,10 @@ async function dryRunFactory(config: Config, run: ResolvedFactoryRun, actions: F
   else if (plan.shipError) log.dry(`Shipper: could not list PRs (${plan.shipError})`);
   else if (plan.ship.length === 0) log.dry('Shipper: no open session PRs');
   for (const s of plan.ship) log.dry(`Ship PR #${s.pr}: ${s.action} — ${s.reason}`);
+
+  if (plan.release?.status === 'due') log.dry(`Would open release PR ${plan.release.plan.branch} into ${run.baseBranch} (local origin snapshot; no fetch)`);
+  else if (plan.release) log.dry(`Release: ${plan.release.reason}`);
+  if (plan.releaseError) log.dry(`Release: could not inspect (${plan.releaseError})`);
 
   return { status: 'dry-run', reason: 'dry run', ticks: 0, counts: emptyCounts(), dryRun: plan };
 }
@@ -1575,6 +1594,19 @@ async function superviseFactory(
     pendingChecks = pending;
     shipState = { lastRunAt, decisions };
     record('ship.pass', { prs: prs.length, merged: decisions.filter((d) => d.action === 'merge').length });
+    if (factory.ship.releaseEvery > 0 && !stopRequested && refreshSupervisor()) {
+      try {
+        const inspection = actions.inspectRelease();
+        const outcome = inspection.status === 'due' ? actions.createRelease(inspection) : inspection;
+        record(`release.${outcome.status}`, outcome);
+        if (outcome.status === 'created') log.success(`Factory release: opened ${outcome.plan.branch} — ${outcome.url}`);
+      } catch (err) {
+        const error = errorMessage(err);
+        record('release.error', { error });
+        log.warn(`Factory release: ${error}; retrying on the next ship pass`);
+        pendingChecks = true; // Keep --until-idle alive for retry under its existing cap.
+      }
+    }
   };
 
   const refreshDevLeases = (): void => {

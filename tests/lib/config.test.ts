@@ -1167,10 +1167,25 @@ routing:
 });
 
 describe('factory config', () => {
+  it.each(['-1', 'true', '"5"', 'null'])('warns and disables invalid release cadence %s', raw => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      writeFileSync(join(tempDir, '.alpha-loop.yaml'), `factory:\n  ship:\n    release_every: ${raw}\n`);
+      expect(loadConfig().factory?.ship.releaseEvery).toBe(0);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('factory.ship.release_every'));
+    } finally { warn.mockRestore(); }
+  });
+
+  it('uses the existing integer parser convention for fractional release cadence', () => {
+    writeFileSync(join(tempDir, '.alpha-loop.yaml'), 'factory:\n  ship:\n    release_every: 3.8\n');
+    expect(loadConfig().factory?.ship.releaseEvery).toBe(3);
+  });
+
   it('populates factory defaults when the YAML has no factory block', () => {
     const config = loadConfig();
     expect(config.factory).toEqual(DEFAULT_FACTORY_CONFIG);
     expect(config.factory?.ship.merge).toBe(false);
+    expect(config.factory?.ship.releaseEvery).toBe(0);
     expect(config.factory?.ship.requireChecks).toBe(true);
   });
 
@@ -1202,6 +1217,7 @@ describe('factory config', () => {
     require_checks: false
     checks_timeout_minutes: 15
     interval_seconds: 60
+    release_every: 5
     merge_method: rebase
     head_prefixes:
       - session/
@@ -1236,6 +1252,7 @@ describe('factory config', () => {
         requireChecks: false,
         checksTimeoutMinutes: 15,
         intervalSeconds: 60,
+        releaseEvery: 5,
         mergeMethod: 'rebase',
         headPrefixes: ['session/', 'agent/'],
       },
@@ -1337,6 +1354,7 @@ describe('factory config', () => {
     });
     expect(config.factory?.developers).toBe(5);
     expect(config.factory?.ship.merge).toBe(false);
+    expect(config.factory?.ship.releaseEvery).toBe(0);
   });
 
   it('resolves default factory paths under the project root', () => {
