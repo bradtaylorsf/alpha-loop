@@ -1,4 +1,14 @@
+jest.mock('../../src/lib/shell', () => ({ exec: jest.fn() }));
+jest.mock('../../src/lib/logger', () => ({ log: { rate: jest.fn() } }));
+
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { exec } from '../../src/lib/shell';
+import { log } from '../../src/lib/logger';
 import {
+  ghExec,
   parseRateLimitHeaders,
   stripDebugOutput,
   getThrottleTier,
@@ -12,6 +22,228 @@ import {
 beforeEach(() => {
   resetRateLimitState();
   clearProjectCache();
+});
+
+describe('ghExec mutation budget', () => {
+  let root: string;
+  let budgetPath: string;
+  let previousBudget: string | undefined;
+  let clock: number;
+  let sleep: jest.Mock<void, [number]>;
+  const mockExec = jest.mocked(exec);
+  const deps = () => ({ now: () => clock, sleep });
+  const mutate = () => ghExec('gh issue edit 1', undefined, true, deps());
+  const readBudget = () => JSON.parse(readFileSync(budgetPath, 'utf-8')) as { lastMutationAt: number };
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'gh-budget-'));
+    budgetPath = join(root, 'gh-budget.json');
+    previousBudget = process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+    delete process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+    clock = Date.parse('2026-11-05T10:00:00Z');
+    sleep = jest.fn((ms: number) => { clock += ms; });
+    mockExec.mockReset().mockImplementation(() => ({ stdout: 'ok', stderr: '', exitCode: 0 }));
+    jest.mocked(log.rate).mockClear();
+  });
+
+  afterEach(() => {
+    if (previousBudget === undefined) delete process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+    else process.env.ALPHA_LOOP_SHARED_GH_BUDGET = previousBudget;
+    jest.restoreAllMocks();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('keeps process-local completion pacing without the opt-in', () => {
+    mockExec.mockImplementationOnce(() => {
+      clock += 200;
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    });
+    mutate();
+    clock += 250;
+    mutate();
+    expect(sleep.mock.calls).toEqual([[500]]);
+    expect(readdirSync(root)).toEqual([]);
+    resetRateLimitState();
+    mutate();
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves read-only calls outside the shared budget, even with invalid state', () => {
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    ghExec('gh issue list', { cwd: root, timeout: 1000 }, false, deps());
+    expect(readdirSync(root)).toEqual([]);
+    writeFileSync(budgetPath, 'broken');
+    ghExec('gh issue list', undefined, false, deps());
+    expect(readFileSync(budgetPath, 'utf-8')).toBe('broken');
+    expect(sleep).not.toHaveBeenCalled();
+    expect(mockExec).toHaveBeenCalledWith('gh issue list', { cwd: root, timeout: 1000, env: { GH_DEBUG: 'api' } });
+  });
+
+  it('creates missing parent directories and claims the first slot before execution', () => {
+    budgetPath = join(root, 'nested', 'gh-budget.json');
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    mockExec.mockImplementationOnce(() => {
+      expect(readBudget()).toEqual({ lastMutationAt: clock });
+      expect(existsSync(`${budgetPath}.lock`)).toBe(false);
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    });
+    expect(mutate().stdout).toBe('ok');
+    expect(sleep).not.toHaveBeenCalled();
+    expect(readdirSync(join(root, 'nested'))).toEqual(['gh-budget.json']);
+  });
+
+  it.each([[0, 750], [250, 500], [749, 1], [750, 0], [751, 0]])(
+    'enforces the remaining gap after %i ms', (elapsed, wait) => {
+      process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+      writeFileSync(budgetPath, JSON.stringify({ lastMutationAt: clock - elapsed }));
+      mutate();
+      expect(sleep.mock.calls).toEqual(wait ? [[wait]] : []);
+      expect(readBudget()).toEqual({ lastMutationAt: clock });
+    },
+  );
+
+  it('preserves the shared clock across local state resets', () => {
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    mutate();
+    resetRateLimitState();
+    mutate();
+    expect(sleep.mock.calls).toEqual([[750]]);
+  });
+
+  it('coordinates independent module instances through the same file', () => {
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    let otherGhExec!: typeof ghExec;
+    jest.isolateModules(() => {
+      otherGhExec = (require('../../src/lib/rate-limit') as typeof import('../../src/lib/rate-limit')).ghExec;
+      const otherExec = (require('../../src/lib/shell') as typeof import('../../src/lib/shell')).exec;
+      jest.mocked(otherExec).mockReturnValue({ stdout: '', stderr: '', exitCode: 0 });
+    });
+    mutate();
+    otherGhExec('gh issue edit 2', undefined, true, deps());
+    mutate();
+    expect(sleep.mock.calls).toEqual([[750], [750]]);
+  });
+
+  it('reads the environment at call time and keeps separate budget files independent', () => {
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    mutate();
+    const first = readBudget();
+    resetRateLimitState();
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = join(root, 'other.json');
+    mutate();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(readBudget()).toEqual(first);
+    resetRateLimitState();
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    mutate();
+    expect(sleep.mock.calls).toEqual([[750]]);
+  });
+
+  it('also respects this process\'s completion timestamp', () => {
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    mockExec.mockImplementationOnce(() => {
+      clock += 1000;
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    mutate();
+    mutate();
+    expect(sleep.mock.calls).toEqual([[750]]);
+  });
+
+  it('releases the lock during waits and rereads a competing claim before admission', () => {
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    mutate();
+    const first = readBudget();
+    sleep.mockImplementationOnce((ms) => {
+      expect(existsSync(`${budgetPath}.lock`)).toBe(false);
+      expect(readBudget()).toEqual(first); // no reservation of a future slot
+      clock += ms;
+      writeFileSync(budgetPath, JSON.stringify({ lastMutationAt: clock - 100 }));
+    });
+    mutate();
+    expect(sleep.mock.calls).toEqual([[750], [650]]);
+    expect(readBudget()).toEqual({ lastMutationAt: clock });
+  });
+
+  it.each(['nonzero exit', 'exception'])('charges a failed mutation (%s)', (failure) => {
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    if (failure === 'exception') {
+      mockExec.mockImplementationOnce(() => { throw new Error('execution failed'); });
+      expect(mutate).toThrow('execution failed');
+    } else {
+      mockExec.mockReturnValueOnce({ stdout: '', stderr: 'failed', exitCode: 1 });
+      expect(mutate().exitCode).toBe(1);
+    }
+    expect(readBudget()).toEqual({ lastMutationAt: clock });
+    expect(existsSync(`${budgetPath}.lock`)).toBe(false);
+    resetRateLimitState();
+    mutate();
+    expect(sleep.mock.calls).toEqual([[750]]);
+  });
+
+  it.each(['broken', 'null', '[]', '{}', '{"lastMutationAt":"123"}', '{"lastMutationAt":-1}', '{"lastMutationAt":1.5}', '{"lastMutationAt":1e999}'])(
+    'rejects invalid state %s without executing and releases the lock', (raw) => {
+      process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+      writeFileSync(budgetPath, raw);
+      expect(mutate).toThrow(/shared GitHub mutation budget/i);
+      expect(mockExec).not.toHaveBeenCalled();
+      expect(readFileSync(budgetPath, 'utf-8')).toBe(raw);
+      expect(readdirSync(root)).toEqual(['gh-budget.json']);
+    },
+  );
+
+  it('fails closed on filesystem errors', () => {
+    writeFileSync(budgetPath, 'not a directory');
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = join(budgetPath, 'nested.json');
+    expect(mutate).toThrow();
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on a read error and releases the lock', () => {
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    mkdirSync(budgetPath);
+    expect(mutate).toThrow();
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(existsSync(`${budgetPath}.lock`)).toBe(false);
+  });
+
+  it('cleans up a failed atomic write and preserves the previous budget', () => {
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    const raw = JSON.stringify({ lastMutationAt: clock - 1000 });
+    writeFileSync(budgetPath, raw);
+    const rename = fs.renameSync;
+    jest.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (to === budgetPath) throw new Error('rename failed');
+      rename(from, to);
+    });
+    expect(mutate).toThrow('rename failed');
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(readFileSync(budgetPath, 'utf-8')).toBe(raw);
+    expect(readdirSync(root)).toEqual(['gh-budget.json']);
+  });
+
+  it('uses injected time and sleep for lock contention and fails closed on timeout', () => {
+    process.env.ALPHA_LOOP_SHARED_GH_BUDGET = budgetPath;
+    const held = JSON.stringify({ version: 1, pid: process.pid, hostname: hostname(), token: 'holder', acquiredAt: new Date(clock).toISOString() });
+    writeFileSync(`${budgetPath}.lock`, held);
+    expect(mutate).toThrow(/Timed out.*waiting for lock/);
+    expect(sleep.mock.calls.reduce((sum, [ms]) => sum + ms, 0)).toBe(120_000);
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(readFileSync(`${budgetPath}.lock`, 'utf-8')).toBe(held);
+  });
+
+  it('waits for a 125-second reset in bounded chunks and logs the wait once', () => {
+    mockExec.mockReturnValueOnce({
+      stdout: '', exitCode: 1,
+      stderr: `< X-Ratelimit-Limit: 5000\n< X-Ratelimit-Remaining: 0\n< X-Ratelimit-Reset: ${(clock + 125_000) / 1000}\nquota exhausted`,
+    });
+    expect(ghExec('gh issue list', undefined, false, deps()).stderr).toBe('quota exhausted');
+    expect(mutate().exitCode).toBe(0);
+    expect(sleep.mock.calls).toEqual([[60_000], [60_000], [5000]]);
+    const notifications = jest.mocked(log.rate).mock.calls.filter(([message]) => message.includes('Waiting'));
+    expect(notifications).toEqual([['Rate limit critical (0/5000). Waiting 125s for reset...']]);
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('parseRateLimitHeaders', () => {

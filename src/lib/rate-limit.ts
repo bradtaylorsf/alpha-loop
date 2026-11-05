@@ -7,7 +7,10 @@
  * rate limits.
  */
 import { execSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { exec, type ExecResult } from './shell.js';
+import { withFileLockSync } from './lease.js';
 import { log } from './logger.js';
 
 // ── Rate limit state ────────────────────────────────────────────────────────
@@ -87,25 +90,71 @@ export function getThrottleTier(ratio: number): { tier: string; delayMs: number 
   return { tier: 'critical', delayMs: 0 }; // handled specially — waits for reset
 }
 
-/** Maximum time sleepSync will wait before throwing (60 seconds). */
+/** Maximum duration of one blocking sleep (60 seconds). */
 const MAX_SLEEP_MS = 60_000;
 
-/**
- * Synchronous sleep that does NOT busy-wait.
- * Uses child_process.execSync('sleep') for CPU-friendly blocking.
- * Throws if requested duration exceeds MAX_SLEEP_MS.
- */
-function sleepSync(ms: number): void {
-  if (ms <= 0) return;
-  if (ms > MAX_SLEEP_MS) {
-    throw new Error(
-      `Rate limit sleep of ${Math.ceil(ms / 1000)}s exceeds maximum ${MAX_SLEEP_MS / 1000}s. ` +
-      `GitHub rate limit is likely exhausted — wait for reset or increase your limit.`,
-    );
+function sleepChunk(ms: number): void {
+  execSync(`sleep ${(ms / 1000).toFixed(3)}`, { stdio: 'ignore' });
+}
+
+/** Synchronous, CPU-friendly sleep, split into bounded chunks. */
+function sleepSync(ms: number, sleep: (ms: number) => void = sleepChunk): void {
+  for (let remaining = ms; remaining > 0;) {
+    const chunk = Math.min(remaining, MAX_SLEEP_MS);
+    sleep(chunk);
+    remaining -= chunk;
   }
-  // Use execSync('sleep') to block without pegging CPU
-  const seconds = ms / 1000;
-  execSync(`sleep ${seconds.toFixed(3)}`, { stdio: 'ignore' });
+}
+
+function readSharedMutationAt(path: string): number | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+  const state: unknown = JSON.parse(raw);
+  const timestamp = state && typeof state === 'object' && !Array.isArray(state)
+    ? (state as Record<string, unknown>).lastMutationAt
+    : undefined;
+  if (typeof timestamp !== 'number' || !Number.isSafeInteger(timestamp) || timestamp < 0) {
+    throw new Error('lastMutationAt must be a non-negative integer in epoch milliseconds');
+  }
+  return timestamp;
+}
+
+/** Claim only an eligible slot; never hold the lock during throttle waits or gh execution. */
+function claimSharedMutation(path: string, now: () => number, sleep: (ms: number) => void): void {
+  try {
+    for (;;) {
+      const waitMs = withFileLockSync(`${path}.lock`, () => {
+        const sharedMutationAt = readSharedMutationAt(path);
+        const current = now();
+        const wait = Math.max(
+          sharedMutationAt === null ? 0 : sharedMutationAt + MUTATION_GAP_MS - current,
+          lastMutationAt > 0 ? lastMutationAt + MUTATION_GAP_MS - current : 0,
+        );
+        if (wait > 0) return wait;
+
+        // The lock creates the parent directory. Publish the complete state
+        // before executing, so failed mutations still consume their slot.
+        const tmpPath = `${path}.tmp-${randomUUID()}`;
+        try {
+          writeFileSync(tmpPath, JSON.stringify({ lastMutationAt: current }) + '\n', { flag: 'wx' });
+          renameSync(tmpPath, path);
+        } finally {
+          rmSync(tmpPath, { force: true });
+        }
+        return 0;
+      }, { now, sleep });
+      if (waitMs <= 0) return;
+      sleep(waitMs);
+      // Another process may claim a slot during our wait: reread under the lock.
+    }
+  } catch (err) {
+    throw new Error(`Shared GitHub mutation budget ${path}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -129,12 +178,16 @@ export function getRateLimitStatus(): RateLimitState & { ratio: number } {
  * @param command - The gh CLI command to execute
  * @param options - Optional cwd/timeout overrides
  * @param mutation - Whether this is a write/mutation call (default false)
+ * @param deps - Optional wall clock and synchronous sleep primitive for tests
  */
 export function ghExec(
   command: string,
   options?: { cwd?: string; timeout?: number },
   mutation = false,
+  deps: { now?: () => number; sleep?: (ms: number) => void } = {},
 ): ExecResult {
+  const now = deps.now ?? Date.now;
+  const sleep = (ms: number): void => sleepSync(ms, deps.sleep);
   callCount++;
 
   // ── Pre-call throttle ───────────────────────────────────────────────────
@@ -150,27 +203,30 @@ export function ghExec(
   // Critical: wait for reset window or apply fallback delay
   if (tier === 'critical') {
     if (rateLimitState.resetAt > 0) {
-      const waitMs = (rateLimitState.resetAt * 1000) - Date.now();
+      const waitMs = (rateLimitState.resetAt * 1000) - now();
       if (waitMs > 0) {
         const waitSec = Math.ceil(waitMs / 1000);
         log.rate(`Rate limit critical (${rateLimitState.remaining}/${rateLimitState.limit}). Waiting ${waitSec}s for reset...`);
-        sleepSync(waitMs); // throws if > MAX_SLEEP_MS
+        sleep(waitMs);
       }
     } else {
       // No reset time known yet — apply a conservative fallback delay
       const CRITICAL_FALLBACK_MS = 5000;
       log.rate(`Rate limit critical (${rateLimitState.remaining}/${rateLimitState.limit}). No reset time known, waiting ${CRITICAL_FALLBACK_MS / 1000}s...`);
-      sleepSync(CRITICAL_FALLBACK_MS);
+      sleep(CRITICAL_FALLBACK_MS);
     }
   } else if (delayMs > 0) {
-    sleepSync(delayMs);
+    sleep(delayMs);
   }
 
   // Enforce mutation gap (secondary rate limit: 80 mutations/min)
-  if (mutation && lastMutationAt > 0) {
-    const elapsed = Date.now() - lastMutationAt;
-    if (elapsed < MUTATION_GAP_MS) {
-      sleepSync(MUTATION_GAP_MS - elapsed);
+  if (mutation) {
+    const budgetPath = process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+    if (budgetPath) {
+      claimSharedMutation(budgetPath, now, sleep);
+    } else if (lastMutationAt > 0) {
+      const elapsed = now() - lastMutationAt;
+      if (elapsed < MUTATION_GAP_MS) sleep(MUTATION_GAP_MS - elapsed);
     }
   }
 
@@ -182,7 +238,7 @@ export function ghExec(
   });
 
   if (mutation) {
-    lastMutationAt = Date.now();
+    lastMutationAt = now();
   }
 
   // ── Parse rate limit headers from stderr ────────────────────────────────

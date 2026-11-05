@@ -53,6 +53,47 @@ describe('factory workers', () => {
     });
   });
 
+  describe('shared GitHub budget', () => {
+    let previousBudget: string | undefined;
+
+    beforeEach(() => {
+      previousBudget = process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+      process.env.ALPHA_LOOP_SHARED_GH_BUDGET = '/inherited/other-budget.json';
+      jest.spyOn(process, 'cwd').mockReturnValue(root);
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+      if (previousBudget === undefined) delete process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+      else process.env.ALPHA_LOOP_SHARED_GH_BUDGET = previousBudget;
+    });
+
+    it.each(['default', 'relative', 'absolute'])('gives both roles the same absolute path for a %s state directory', (kind) => {
+      const stateDir = kind === 'default' ? DEFAULT_FACTORY_CONFIG.stateDir
+        : kind === 'relative' ? 'custom/state' : join(root, 'custom/state');
+      config.factory = { ...DEFAULT_FACTORY_CONFIG, stateDir };
+      paths = resolveFactoryPaths(config);
+      const expected = join(root, kind === 'default' ? '.alpha-loop/factory' : 'custom/state', 'gh-budget.json');
+      const dev = fakeSpawn();
+      const pm = fakeSpawn();
+      spawnDeveloperWorker({ paths, issue: 5, title: 'x', baseBranch: 'master', spawnImpl: dev.impl, now: NOW });
+      spawnPmWorker({
+        paths,
+        idea: { id: 'I-budget', status: 'pending', text: 'An idea', note: '', line: 1, meta: {} },
+        priorAnswers: [],
+        pm: { autoReady: true, agent: '', model: '', timeoutSeconds: 120 },
+        spawnImpl: pm.impl,
+        now: NOW,
+      });
+      for (const fake of [dev, pm]) {
+        const env = fake.calls[0].options.env as NodeJS.ProcessEnv;
+        expect(env.ALPHA_LOOP_SHARED_GH_BUDGET).toBe(expected);
+        expect(fake.calls[0].options.cwd).toBe(root);
+      }
+      expect(process.env.ALPHA_LOOP_SHARED_GH_BUDGET).toBe('/inherited/other-budget.json');
+    });
+  });
+
   describe('spawnDeveloperWorker', () => {
     it('writes a context run.ts accepts and spawns run --issue --factory-worker from the project root', () => {
       const { impl, calls } = fakeSpawn();

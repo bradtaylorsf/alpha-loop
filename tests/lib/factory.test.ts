@@ -267,6 +267,86 @@ describe('runFactory — startup', () => {
   });
 });
 
+describe('runFactory — shared GitHub budget', () => {
+  let previousBudget: string | undefined;
+
+  beforeEach(() => {
+    previousBudget = process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+  });
+
+  afterEach(() => {
+    if (previousBudget === undefined) delete process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+    else process.env.ALPHA_LOOP_SHARED_GH_BUDGET = previousBudget;
+  });
+
+  describe.each([undefined, '/inherited/gh-budget.json'])('with inherited value %s', (inherited) => {
+    beforeEach(() => {
+      if (inherited === undefined) delete process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+      else process.env.ALPHA_LOOP_SHARED_GH_BUDGET = inherited;
+    });
+
+    it('covers awaited preparation, answer application and shipping, then restores the environment', async () => {
+      const h = harness({ pm: { enabled: false } });
+      const observed: Array<[string, string | undefined]> = [];
+      h.actions.prepare.mockImplementation(async () => {
+        await Promise.resolve();
+        observed.push(['prepare', process.env.ALPHA_LOOP_SHARED_GH_BUDGET]);
+      });
+      const q = askQuestion(h.paths.questionsPath, { role: 'developer', key: 'dev:5:failed', issue: 5, question: 'Retry?', context: '' }).question;
+      answerQuestion(h.paths.questionsPath, q.id, 'retry');
+      h.actions.applyAnswer.mockImplementation(() => {
+        observed.push(['answer', process.env.ALPHA_LOOP_SHARED_GH_BUDGET]);
+        return { applied: true, note: 'commented' };
+      });
+      own(h, 1);
+      h.actions.listShippable.mockReturnValue([shipPr(1)]);
+      h.actions.merge.mockImplementation(() => {
+        observed.push(['merge', process.env.ALPHA_LOOP_SHARED_GH_BUDGET]);
+        return { merged: true };
+      });
+
+      await h.run({ maxTicks: 1, shipMerge: true });
+
+      const expected = join(h.paths.stateDir, 'gh-budget.json');
+      expect(observed).toEqual([['prepare', expected], ['answer', expected], ['merge', expected]]);
+      expect(process.env.ALPHA_LOOP_SHARED_GH_BUDGET).toBe(inherited);
+    });
+
+    it('restores the environment when startup fails before the main supervisor loop', async () => {
+      const h = harness();
+      acquireLease(h.paths.stateDir, 'factory', { owner: 'other', now: new Date(T0) });
+      await expect(h.run({ maxTicks: 1 })).rejects.toThrow(/factory already running/);
+      expect(process.env.ALPHA_LOOP_SHARED_GH_BUDGET).toBe(inherited);
+    });
+
+    it('restores the environment after an awaited action rejects', async () => {
+      const h = harness();
+      let observed: string | undefined;
+      h.actions.prepare.mockImplementation(async () => {
+        await Promise.resolve();
+        observed = process.env.ALPHA_LOOP_SHARED_GH_BUDGET;
+        throw new Error('prepare failed');
+      });
+      await expect(h.run({ maxTicks: 1 })).rejects.toThrow('prepare failed');
+      expect(observed).toBe(join(h.paths.stateDir, 'gh-budget.json'));
+      expect(process.env.ALPHA_LOOP_SHARED_GH_BUDGET).toBe(inherited);
+    });
+
+    it('leaves the environment and shared budget untouched for a dry run', async () => {
+      const h = harness();
+      const observed: Array<string | undefined> = [];
+      h.actions.pollReady.mockImplementation(() => {
+        observed.push(process.env.ALPHA_LOOP_SHARED_GH_BUDGET);
+        return [];
+      });
+      await h.run({ dryRun: true });
+      expect(observed).toEqual([inherited]);
+      expect(process.env.ALPHA_LOOP_SHARED_GH_BUDGET).toBe(inherited);
+      expect(existsSync(h.paths.stateDir)).toBe(false);
+    });
+  });
+});
+
 describe('runFactory — dispatch', () => {
   it('fills only free slots, skips leased issues, staggers spawns, and leases before spawning', async () => {
     const h = harness({ developers: 2, spawnStaggerSeconds: 15, ship: { enabled: false }, pm: { enabled: false } });
