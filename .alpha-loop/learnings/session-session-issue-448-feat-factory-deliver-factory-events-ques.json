@@ -1,0 +1,89 @@
+{
+  "name": "session/issue-448-feat-factory-deliver-factory-events-ques",
+  "branch": "session/issue-448-feat-factory-deliver-factory-events-ques",
+  "completed": "2026-11-05T10:07:39.872Z",
+  "results": [
+    {
+      "issueNum": 448,
+      "title": "feat(factory): deliver factory events (question asked, PR shipped) through event destinations",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/460",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1041,
+      "filesChanged": 4
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 83340,
+      "tokens_out": 64108,
+      "cost_usd": 0,
+      "wall_time_s": 194.213,
+      "tool_calls": 0,
+      "tool_errors": 2,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:42:28.518Z",
+      "issue_num": 448
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 474899,
+      "tokens_out": 365307,
+      "cost_usd": 0,
+      "wall_time_s": 549.652,
+      "tool_calls": 0,
+      "tool_errors": 1,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:45:43.222Z",
+      "issue_num": 448
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 180157,
+      "tokens_out": 138582,
+      "cost_usd": 0,
+      "wall_time_s": 280.635,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:54:57.990Z",
+      "issue_num": 448
+    },
+    {
+      "stage": "learn",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 5867,
+      "tokens_out": 4513,
+      "cost_usd": 0,
+      "wall_time_s": 33.026,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:59:53.884Z",
+      "issue_num": 448
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 43523,
+      "tokens_out": 33479,
+      "cost_usd": 0,
+      "wall_time_s": 45.167,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:59:53.913Z",
+      "issue_num": 448
+    }
+  ]
+}
