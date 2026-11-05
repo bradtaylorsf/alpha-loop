@@ -19,6 +19,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync
 import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
+  DEFAULT_DAEMON_CONFIG,
   getFactoryConfig,
   resolveFactoryPaths,
   type Config,
@@ -26,6 +27,7 @@ import {
   type FactoryPaths,
   FACTORY_MAX_DEVELOPERS,
 } from './config.js';
+import { assertNoLiveDaemon } from './daemon.js';
 import { ensureInboxFile, nextPendingIdeas, readInbox, recoverTakenIdeas, updateIdea, type InboxIdea } from './factory-inbox.js';
 import { planDispatch, extractTouches, type DispatchCandidate, type DispatchPlan, type DispatchSkip } from './factory-planner.js';
 import {
@@ -79,6 +81,8 @@ export type FactoryRunOptions = {
   signal?: AbortSignal;
   /** Install SIGINT/SIGTERM handlers (default true). */
   handleSignals?: boolean;
+  /** Startup lock liveness probe; defaults to checking local processes. */
+  isPidAlive?: (pid: number) => boolean;
 };
 
 export type DeveloperSpawnRequest = { issue: number; title: string; baseBranch: string; verbose?: boolean };
@@ -786,6 +790,7 @@ async function superviseFactory(
   const { paths, factory } = run;
   mkdirSync(paths.stateDir, { recursive: true });
   const startNow = actions.now();
+  const isPidAlive = options.isPidAlive ?? defaultPidAlive;
   const supervisorLease = acquireLease(paths.stateDir, SUPERVISOR_LEASE_KEY, {
     owner: 'factory-supervisor',
     ttlSeconds: SUPERVISOR_LEASE_TTL_SECONDS,
@@ -793,11 +798,24 @@ async function superviseFactory(
     // while this one is alive; the TTL still frees it on other hosts.
     aliveOverridesTtl: true,
     now: startNow,
+    isPidAlive,
     meta: { baseBranch: run.baseBranch },
   });
   if (!supervisorLease) {
     const held = readLease(paths.stateDir, SUPERVISOR_LEASE_KEY);
     throw new Error(`factory already running (pid ${held?.pid ?? 'unknown'}${held?.hostname ? ` on ${held.hostname}` : ''})`);
+  }
+
+  // Publish our lease before checking the daemon, including overlapping starts.
+  try {
+    assertNoLiveDaemon({
+      ...DEFAULT_DAEMON_CONFIG,
+      ...config.daemon,
+      lock: { ...DEFAULT_DAEMON_CONFIG.lock, ...config.daemon?.lock },
+    }, { now: startNow, isPidAlive });
+  } catch (err) {
+    releaseLease(supervisorLease);
+    throw err;
   }
 
   const counts = emptyCounts();

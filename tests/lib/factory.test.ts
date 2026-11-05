@@ -28,8 +28,9 @@ jest.mock('../../src/lib/preflight', () => ({
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
-import { DEFAULT_FACTORY_CONFIG, resolveFactoryPaths, type Config, type FactoryConfig, type FactoryPaths } from '../../src/lib/config.js';
+import { join, relative, resolve } from 'node:path';
+import { DEFAULT_DAEMON_CONFIG, DEFAULT_FACTORY_CONFIG, resolveFactoryPaths, type Config, type FactoryConfig, type FactoryPaths } from '../../src/lib/config.js';
+import { acquireDaemonLock, daemonLockPath, runDaemonLoop, type DaemonActions, type DaemonLockPayload } from '../../src/lib/daemon.js';
 import {
   answerEventId,
   applyIssueAnswer,
@@ -153,6 +154,7 @@ function harness(factory: Partial<Omit<FactoryConfig, 'pm' | 'ship'>> & { pm?: P
     testCommand: 'true',
     dryRun: false,
     factory: factoryConfig,
+    daemon: { ...DEFAULT_DAEMON_CONFIG, lock: { ...DEFAULT_DAEMON_CONFIG.lock, path: join(root, 'daemon.lock') } },
   } as unknown as Config;
   const paths = resolveFactoryPaths(config);
 
@@ -243,6 +245,178 @@ describe('resolveFactoryRun', () => {
     expect(r.shipMerge).toBe(true);
     expect(r.baseBranch).toBe('feat/x');
     expect(resolveFactoryRun(h.config, {}).shipMerge).toBe(false);
+  });
+});
+
+describe('runFactory — daemon exclusion', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(process, 'cwd').mockReturnValue(root);
+    jest.mocked(log.warn).mockClear();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  function seedDaemon(h: Harness, patch: Partial<DaemonLockPayload> = {}, raw?: string) {
+    const daemon = { ...DEFAULT_DAEMON_CONFIG, ...h.config.daemon, lock: { ...DEFAULT_DAEMON_CONFIG.lock, ...h.config.daemon?.lock } };
+    // The mocked cwd controls path resolution; fixture writes stay absolute.
+    daemon.lock.path = resolve(root, daemonLockPath(daemon));
+    const lock = acquireDaemonLock(h.config, daemon, { now: new Date(T0), isPidAlive: () => true });
+    const original = raw ?? JSON.stringify({ ...lock.payload, pid: 4242, ...patch });
+    writeFileSync(lock.path, original);
+    return { path: resolve(root, lock.path), original };
+  }
+
+  it.each(['default', 'relative', 'absolute', 'partial config'])('refuses a live daemon with a %s path before work and releases only its own lease', async (pathKind) => {
+    const h = harness();
+    if (pathKind === 'default') delete h.config.daemon;
+    if (pathKind === 'relative') h.config.daemon!.lock.path = relative(process.cwd(), join(root, 'daemon.lock'));
+    if (pathKind === 'partial config') Object.assign(h.config, { daemon: { lock: { path: join(root, 'daemon.lock') } } });
+    const lock = seedDaemon(h);
+    const isPidAlive = jest.fn(() => {
+      // Our lease must be published before checking the competing daemon.
+      expect(readLease(h.paths.stateDir, 'factory')?.pid).toBe(process.pid);
+      return true;
+    });
+    const options = { once: true, isPidAlive };
+
+    await expect(h.run(options)).rejects.toMatchObject({
+      name: 'DaemonLockError', path: lock.path,
+      message: `Cannot start alpha-loop factory: alpha-loop daemon is already running (pid 4242). Lock: ${lock.path}`,
+    });
+
+    expect(isPidAlive).toHaveBeenCalledWith(4242);
+    for (const action of ['prepare', 'preflight', 'pollReady', 'spawnDeveloper', 'spawnPm', 'listShippable'] as const) {
+      expect(h.actions[action]).not.toHaveBeenCalled();
+    }
+    expect(readLease(h.paths.stateDir, 'factory')).toBeNull();
+    expect(readFileSync(lock.path, 'utf-8')).toBe(lock.original);
+    expect(existsSync(h.paths.inboxPath)).toBe(false);
+    expect(existsSync(h.paths.statePath)).toBe(false);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: 'dead owner', patch: {}, alive: false },
+    { name: 'expired heartbeat', patch: { updatedAt: new Date(T0 - 25 * 60 * 60 * 1000).toISOString() }, alive: true },
+    { name: 'invalid timestamp', patch: { updatedAt: 'invalid' }, alive: true },
+    { name: 'invalid JSON', patch: {}, alive: true, raw: '{broken' },
+    { name: 'incomplete payload', patch: {}, alive: true, raw: '{}' },
+  ])('reports a $name once across ticks and leaves it untouched', async ({ patch, alive, raw }) => {
+    const h = harness({ pm: { enabled: false }, ship: { enabled: false } });
+    const lock = seedDaemon(h, patch, raw);
+
+    const result = await h.run({ maxTicks: 3, isPidAlive: () => alive });
+
+    expect(result.ticks).toBe(3);
+    expect(h.actions.prepare).toHaveBeenCalledTimes(1);
+    expect(h.actions.pollReady).toHaveBeenCalledTimes(3);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledWith(`Ignoring stale daemon lock: ${lock.path}`);
+    expect(readFileSync(lock.path, 'utf-8')).toBe(lock.original);
+    expect(readLease(h.paths.stateDir, 'factory')).toBeNull();
+  });
+
+  it('uses the configured daemon expiration and honors disabled TTL', async () => {
+    const h = harness();
+    h.config.daemon!.lock.staleAfterSeconds = 0;
+    const lock = seedDaemon(h, { updatedAt: new Date(T0 - 25 * 60 * 60 * 1000).toISOString() });
+
+    await expect(h.run({ once: true, isPidAlive: () => true })).rejects.toMatchObject({ path: lock.path });
+
+    h.config.daemon!.lock.staleAfterSeconds = 60;
+    expect((await h.run({ once: true, isPidAlive: () => true })).ticks).toBe(1);
+    expect(readFileSync(lock.path, 'utf-8')).toBe(lock.original);
+  });
+
+  it('respects an existing daemon lock even when lock creation is disabled in config', async () => {
+    const h = harness();
+    h.config.daemon!.lock.enabled = false;
+    const lock = seedDaemon(h);
+
+    await expect(h.run({ once: true, isPidAlive: () => true })).rejects.toMatchObject({ path: lock.path });
+    expect(h.actions.prepare).not.toHaveBeenCalled();
+    expect(readFileSync(lock.path, 'utf-8')).toBe(lock.original);
+  });
+
+  it('starts silently when the daemon lock is missing', async () => {
+    const h = harness();
+    delete h.config.daemon;
+    const isPidAlive = jest.fn(() => false);
+
+    expect((await h.run({ once: true, isPidAlive })).ticks).toBe(1);
+
+    expect(h.actions.prepare).toHaveBeenCalledTimes(1);
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(isPidAlive).not.toHaveBeenCalled();
+    expect(existsSync(daemonLockPath(DEFAULT_DAEMON_CONFIG))).toBe(false);
+  });
+
+  it('keeps dry run read-only and exempt from a live daemon lock', async () => {
+    const h = harness();
+    const lock = seedDaemon(h);
+    const isPidAlive = jest.fn(() => true);
+
+    expect((await h.run({ dryRun: true, isPidAlive })).status).toBe('dry-run');
+
+    expect(h.actions.prepare).not.toHaveBeenCalled();
+    expect(h.actions.preflight).not.toHaveBeenCalled();
+    expect(h.actions.spawnDeveloper).not.toHaveBeenCalled();
+    expect(h.actions.spawnPm).not.toHaveBeenCalled();
+    expect(isPidAlive).not.toHaveBeenCalled();
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(existsSync(h.paths.stateDir)).toBe(false);
+    expect(readFileSync(lock.path, 'utf-8')).toBe(lock.original);
+  });
+
+  it.each(['daemon', 'factory'])('excludes an overlapping startup when the %s starts first', async (first) => {
+    const h = harness();
+    const daemon = h.config.daemon!;
+    const actions: DaemonActions = {
+      triage: jest.fn().mockResolvedValue(undefined),
+      pollFeedback: jest.fn().mockResolvedValue({ status: 'processed', processed: 0 }),
+      pollIssues: jest.fn().mockReturnValue([]),
+      runIssue: jest.fn(), resumeIssue: jest.fn(),
+      emitEvent: jest.fn().mockResolvedValue({ event: {}, deliveries: [] }),
+    };
+    const daemonOptions = { onceTick: true, now: () => new Date(T0), isPidAlive: () => true, installSignalHandlers: false };
+    const factoryOptions = { once: true, isPidAlive: () => true };
+
+    if (first === 'daemon') {
+      let overlap: Promise<void> | undefined;
+      await runDaemonLoop(h.config, daemon, actions, {
+        ...daemonOptions,
+        now: () => {
+          // Start the factory after the daemon publishes its lock but before
+          // the daemon checks the factory lease or emits its startup event.
+          if (!overlap && existsSync(daemonLockPath(daemon))) {
+            overlap = expect(h.run(factoryOptions)).rejects.toMatchObject({ path: daemonLockPath(daemon) });
+          }
+          return new Date(T0);
+        },
+      });
+      expect(overlap).toBeDefined();
+      await overlap;
+      expect(actions.triage).toHaveBeenCalledTimes(1);
+      expect(h.actions.prepare).not.toHaveBeenCalled();
+    } else {
+      h.actions.prepare.mockImplementation(async () => {
+        const lease = readLease(h.paths.stateDir, 'factory');
+        await expect(runDaemonLoop(h.config, daemon, actions, daemonOptions)).rejects.toMatchObject({
+          path: join(h.paths.stateDir, 'factory.lock'),
+        });
+        expect(readLease(h.paths.stateDir, 'factory')).toEqual(lease);
+      });
+      expect((await h.run(factoryOptions)).ticks).toBe(1);
+      expect(actions.emitEvent).not.toHaveBeenCalled();
+      expect(actions.triage).not.toHaveBeenCalled();
+      expect(h.actions.prepare).toHaveBeenCalledTimes(1);
+    }
+    expect(readLease(h.paths.stateDir, 'factory')).toBeNull();
+    expect(existsSync(daemonLockPath(daemon))).toBe(false);
   });
 });
 

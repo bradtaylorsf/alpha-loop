@@ -108,10 +108,11 @@ function errCode(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | undefined)?.code;
 }
 
-function readRaw(path: string): string | null {
+function readRaw(path: string, strict = false): string | null {
   try {
     return readFileSync(path, 'utf-8');
-  } catch {
+  } catch (err) {
+    if (strict && errCode(err) !== 'ENOENT') throw err;
     return null;
   }
 }
@@ -244,8 +245,9 @@ function tokenOfLease(raw: string): string | undefined {
   return parseLease(raw)?.token;
 }
 
-export function readLease(dir: string, key: string): LeasePayload | null {
-  const raw = readRaw(leasePath(dir, key));
+/** Strict reads propagate I/O errors so startup guards cannot mistake an unreadable lease for an absent one. */
+export function readLease(dir: string, key: string, options: { strict?: boolean } = {}): LeasePayload | null {
+  const raw = readRaw(leasePath(dir, key), options.strict);
   return raw === null ? null : parseLease(raw);
 }
 

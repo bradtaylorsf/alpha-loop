@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -6,6 +6,7 @@ import {
   acquireDaemonLock,
   createDaemonScheduler,
   daemonLockPath,
+  DaemonLockError,
   enabledDaemonTickKinds,
   refreshDaemonLock,
   releaseDaemonLock,
@@ -14,7 +15,9 @@ import {
   runDaemonTick,
   type DaemonActions,
 } from '../../src/lib/daemon.js';
-import { DEFAULT_DAEMON_CONFIG, type Config, type DaemonConfig } from '../../src/lib/config.js';
+import { DEFAULT_DAEMON_CONFIG, DEFAULT_FACTORY_CONFIG, resolveFactoryPaths, type Config, type DaemonConfig } from '../../src/lib/config.js';
+import { acquireLease, type LeasePayload } from '../../src/lib/lease.js';
+import { log } from '../../src/lib/logger.js';
 import { sessionManifestPath, type DurableSessionManifest } from '../../src/lib/session.js';
 
 function makeDaemon(overrides: Partial<DaemonConfig> = {}): DaemonConfig {
@@ -208,6 +211,168 @@ describe('daemon mode selection', () => {
     expect(enabledDaemonTickKinds('feedback-only')).toEqual(['feedback', 'resume', 'health']);
     expect(enabledDaemonTickKinds('run-only')).toEqual(['run', 'health']);
     expect(enabledDaemonTickKinds('full')).toEqual(['triage', 'feedback', 'resume', 'run', 'health']);
+  });
+});
+
+describe('daemon — factory exclusion', () => {
+  const now = new Date('2026-11-05T10:00:00Z');
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(log, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  function seedFactory(config: Config, patch: Partial<LeasePayload> = {}, raw?: string) {
+    const lease = acquireLease(resolveFactoryPaths(config).stateDir, 'factory', {
+      owner: 'factory-supervisor', now, aliveOverridesTtl: true,
+    })!;
+    const original = raw ?? JSON.stringify({ ...lease.payload, pid: 4242, ...patch });
+    writeFileSync(lease.path, original);
+    return { path: lease.path, original };
+  }
+
+  it.each(['default', 'relative', 'absolute'])('refuses a live factory at a %s path before work and releases only its own lock', async (pathKind) => {
+    const daemon = makeDaemon();
+    const config = makeConfig({
+      daemon,
+      ...(pathKind === 'default' ? {} : {
+        factory: { ...DEFAULT_FACTORY_CONFIG, stateDir: pathKind === 'relative' ? 'custom/factory' : join(tempDir, 'custom/factory') },
+      }),
+    });
+    const lease = seedFactory(config);
+    const actions = makeActions();
+    const isPidAlive = jest.fn(() => {
+      expect(existsSync(daemonLockPath(daemon))).toBe(true);
+      return true;
+    });
+
+    await expect(runDaemonLoop(config, daemon, actions, {
+      onceTick: true, now: () => now, isPidAlive, installSignalHandlers: false,
+    })).rejects.toMatchObject({
+      name: 'DaemonLockError', path: lease.path,
+      message: `Cannot start alpha-loop daemon: alpha-loop factory is already running (pid 4242). Lock: ${lease.path}`,
+    });
+
+    expect(isPidAlive).toHaveBeenCalledWith(4242);
+    expect(actions.triage).not.toHaveBeenCalled();
+    expect(actions.pollIssues).not.toHaveBeenCalled();
+    expect(actions.emitEvent).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
+    expect(existsSync(daemonLockPath(daemon))).toBe(false);
+    expect(readFileSync(lease.path, 'utf-8')).toBe(lease.original);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it.each(['config', 'option'])('checks the factory even when daemon locking is disabled by %s', async (disabledBy) => {
+    const daemon = makeDaemon({ lock: { ...DEFAULT_DAEMON_CONFIG.lock, enabled: disabledBy !== 'config' } });
+    const config = makeConfig({ daemon });
+    const lease = seedFactory(config);
+    const actions = makeActions();
+
+    await expect(runDaemonLoop(config, daemon, actions, {
+      onceTick: true, now: () => now, isPidAlive: () => true, installSignalHandlers: false,
+      ...(disabledBy === 'option' ? { acquireLock: false } : {}),
+    })).rejects.toBeInstanceOf(DaemonLockError);
+
+    expect(actions.emitEvent).not.toHaveBeenCalled();
+    expect(existsSync(daemonLockPath(daemon))).toBe(false);
+    expect(readFileSync(lease.path, 'utf-8')).toBe(lease.original);
+  });
+
+  it('respects a live supervisor beyond its TTL', async () => {
+    const daemon = makeDaemon();
+    const config = makeConfig({ daemon });
+    const lease = seedFactory(config, { ttlSeconds: 60, refreshedAt: new Date(now.getTime() - 120_000).toISOString() });
+
+    await expect(runDaemonLoop(config, daemon, makeActions(), {
+      onceTick: true, now: () => now, isPidAlive: () => true, installSignalHandlers: false,
+    })).rejects.toMatchObject({ path: lease.path });
+
+    expect(readFileSync(lease.path, 'utf-8')).toBe(lease.original);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('does not probe a remote supervisor PID and respects its unexpired TTL', async () => {
+    const daemon = makeDaemon();
+    const config = makeConfig({ daemon });
+    const lease = seedFactory(config, { hostname: 'remote-factory-host', ttlSeconds: 60 });
+    const isPidAlive = jest.fn(() => false);
+
+    await expect(runDaemonLoop(config, daemon, makeActions(), {
+      onceTick: true, now: () => now, isPidAlive, installSignalHandlers: false,
+    })).rejects.toMatchObject({ path: lease.path });
+
+    expect(isPidAlive).not.toHaveBeenCalled();
+    expect(readFileSync(lease.path, 'utf-8')).toBe(lease.original);
+  });
+
+  it.each([
+    { name: 'dead owner', patch: {}, alive: false },
+    { name: 'expired TTL', patch: { aliveOverridesTtl: false, ttlSeconds: 60, refreshedAt: '2026-11-05T09:00:00Z' }, alive: true },
+    { name: 'expired remote supervisor', patch: { hostname: 'remote-factory-host', ttlSeconds: 60, refreshedAt: '2026-11-05T09:00:00Z' }, alive: true },
+    { name: 'invalid JSON', patch: {}, alive: true, raw: '{broken' },
+    { name: 'incomplete payload', patch: {}, alive: true, raw: '{}' },
+  ])('reports a $name once across ticks and leaves it untouched', async ({ patch, alive, raw }) => {
+    const daemon = makeDaemon({ mode: 'triage-only', triageIntervalSeconds: 1, healthIntervalSeconds: 1, idleSleepSeconds: 1 });
+    const config = makeConfig({ daemon });
+    const lease = seedFactory(config, patch, raw);
+    const actions = makeActions();
+    let clock = now.getTime();
+
+    const result = await runDaemonLoop(config, daemon, actions, {
+      maxTicks: 4, now: () => new Date(clock), isPidAlive: () => alive, installSignalHandlers: false,
+      sleep: async (ms) => { clock += ms; },
+    });
+
+    expect(result.ticksRun).toBe(4);
+    expect(actions.triage).toHaveBeenCalledTimes(2);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledWith(`Ignoring stale factory lock: ${lease.path}`);
+    expect(readFileSync(lease.path, 'utf-8')).toBe(lease.original);
+    expect(existsSync(daemonLockPath(daemon))).toBe(false);
+  });
+
+  it('starts silently when no factory lease exists', async () => {
+    const daemon = makeDaemon();
+    const config = makeConfig({ daemon });
+    const actions = makeActions();
+    const isPidAlive = jest.fn(() => false);
+
+    await runDaemonLoop(config, daemon, actions, {
+      onceTick: true, now: () => now, isPidAlive, installSignalHandlers: false,
+    });
+
+    expect(actions.triage).toHaveBeenCalledTimes(1);
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(isPidAlive).not.toHaveBeenCalled();
+    expect(existsSync(resolveFactoryPaths(config).stateDir)).toBe(false);
+  });
+
+  it.each(['EACCES', 'EIO'])('refuses to work when reading the factory lease fails with %s', async (code) => {
+    const daemon = makeDaemon();
+    const config = makeConfig({ daemon });
+    const lease = seedFactory(config);
+    const actions = makeActions();
+    const error = Object.assign(new Error(`${code}: cannot read ${lease.path}`), { code, path: lease.path });
+    const read = fs.readFileSync;
+    const readSpy = jest.spyOn(fs, 'readFileSync').mockImplementation((path, options) => {
+      if (path === lease.path) throw error;
+      return read(path, options);
+    });
+
+    await expect(runDaemonLoop(config, daemon, actions, {
+      onceTick: true, now: () => now, isPidAlive: () => true, installSignalHandlers: false,
+    })).rejects.toBe(error);
+
+    expect(actions.triage).not.toHaveBeenCalled();
+    expect(actions.pollIssues).not.toHaveBeenCalled();
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
+    expect(existsSync(daemonLockPath(daemon))).toBe(false);
+    readSpy.mockRestore();
+    expect(readFileSync(lease.path, 'utf-8')).toBe(lease.original);
   });
 });
 
