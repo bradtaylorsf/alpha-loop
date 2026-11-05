@@ -177,6 +177,61 @@ TypeScript. The tests cover BEHIND branch updates, fresh-CI waits, throttling, r
 conflict questions, and report-only behavior. The script uses `pnpm exec jest` so Jest receives
 `--runTestsByPath` directly; `pnpm test --runTestsByPath ...` is rejected by pnpm 9 before tests run.
 
+### Independent PR review (library API)
+
+`src/lib/factory-review.ts` exports `reviewPr(config, prNumber, { spawn?, cwd? })`. It reviews the
+complete session PR diff from the merge base to the captured head, using the PR's actual base
+branch. It clones through `gh repo clone`, honoring the configured Git protocol and authentication.
+It runs in a temporary standalone clone with independent Git metadata, detached at that
+head, with its remote removed before the agent starts. It does not install dependencies or link
+environment files. The prompt requires inspection only: no fixes, commits, pushes, project scripts
+or agent-side GitHub writes. The checkout is removed on success or failure.
+
+The agent/model comes from `pipeline.review`, falling back to `reviewModel` and the top-level
+agent/model. The timeout uses `agent_timeout`, capped at 30 minutes. Tests can inject `spawn`;
+`cwd` defaults to the caller's working directory and is passed explicitly to GitHub operations.
+`config.dryRun` returns without spawning, cloning, or changing GitHub.
+
+The reviewer requests `AgentOptions.finalResponseOnly` from the shared runner. Claude uses its
+terminal result, Codex/Ollama use stdout without progress from stderr, and OpenCode uses JSON events
+from a completed final step. Missing or errored results cannot grant approval. Other runner callers
+retain their existing output behavior unless they opt in.
+
+The module owns the GitHub writes. It revokes any old `factory-reviewed` label before re-review,
+requires successful agent output, and rejects a changed head or base before publishing. It creates
+missing verdict labels and creates or updates one comment belonging to the authenticated user,
+identified by `<!-- alpha-loop:factory-review -->`. The comment records the reviewed head SHA,
+base SHA and findings. Only after the comment succeeds and the PR is checked again does it apply
+`factory-reviewed` (pass) or `factory-changes-requested` (block), removing the opposite label and
+preserving unrelated labels. Failures propagate to the caller without granting approval.
+
+`buildFactoryReviewPrompt(pr, diff)` and `parseFactoryReviewVerdict(output)` are pure helpers.
+The output must be strict JSON with exactly `verdict` (`pass` or `block`) and `findings` (an array).
+Each finding has `severity` (`critical`, `warning`, `info`), a nonempty `description`, and optional
+nonempty `file` and positive integer `line`. Critical and warning findings require `block`; only
+info findings or no findings require `pass`. Markdown fences, extra fields and inconsistent
+verdicts are rejected.
+
+`decideShip` accepts the optional `ShipPolicy.requireFactoryReview` flag (default disabled).
+When enabled, an otherwise eligible PR waits without `factory-reviewed`, or whenever
+`factory-changes-requested` is present, including when both labels exist. This gates normal merges,
+admin merges and branch updates; it does not bypass CI, conflicts or human review safeguards.
+
+Supervisor scheduling and YAML `ship.require_factory_review` wiring are still pending. Callers
+must serialize reviews of the same PR and invalidate approval/re-review when its head changes,
+including after a shipper branch update. Labels themselves are not bound to a commit: the recorded
+SHA and pre-publication checks do not make GitHub label updates atomic with head changes.
+
+To verify the reviewer and its shipper integration:
+
+```bash
+pnpm exec jest --runInBand --runTestsByPath tests/lib/factory-review.test.ts tests/lib/factory-ship.test.ts tests/lib/factory.test.ts
+pnpm build
+```
+
+These tests use a fake reviewer and mocked GitHub writes, plus a local Git fixture that checks the
+captured checkout/diff, cleanup, and preservation of the developer's repository.
+
 ## The two files you use
 
 Both live under `.alpha-loop/factory/` by default (gitignored). You can point `inbox_path` and
@@ -272,6 +327,7 @@ factory:
 
 - GitHub rate-limit accounting is still per process (#444).
 - Issues stranded `in-progress` by a crashed worker are not reclaimed automatically yet (#446).
-- There is no independent reviewer role or post-merge QA role yet (#450, #451).
+- The independent reviewer library and ship policy gate are available; supervisor review scheduling
+  and YAML wiring are pending. There is no post-merge QA role yet (#451).
 - On repos where the protected branch requires an approving review and the loop opens PRs under your
   own account, the shipper cannot merge into that branch without `ship.admin_merge`. It asks instead.
