@@ -1,5 +1,5 @@
 import {
-  summarizeChecks, decideShip, listShippablePrs, mergeShippablePr,
+  summarizeChecks, decideShip, listShippablePrs, mergeShippablePr, updateShippablePrBranch,
   type ShipPr, type ShipPolicy,
 } from '../../src/lib/factory-ship';
 
@@ -213,11 +213,33 @@ describe('decideShip', () => {
       .toMatchObject({ action: 'ask', key: 'ship:512:review-required' });
   });
 
-  test('BEHIND → wait', () => {
+  test('BEHIND with successful checks and mergeability → update-branch', () => {
     const decision = decideShip(pr({ mergeStateStatus: 'BEHIND' }), policy(), NOW);
-    expect(decision).toMatchObject({ action: 'wait' });
-    if (decision.action !== 'wait') throw new Error('expected wait');
+    expect(decision).toMatchObject({ action: 'update-branch' });
+    if (decision.action !== 'update-branch') throw new Error('expected update-branch');
     expect(decision.reason).toContain('behind');
+  });
+
+  test.each<[Partial<ShipPr>, Partial<ShipPolicy>, string]>([
+    [{ isDraft: true }, {}, 'skip'],
+    [{ headRefName: 'feat/manual' }, {}, 'skip'],
+    [{ checks: 'failure' }, {}, 'ask'],
+    [{ checks: 'pending' }, {}, 'wait'],
+    [{ checks: 'none' }, {}, 'wait'],
+    [{ checks: 'none' }, { requireChecks: false }, 'wait'],
+    [{ mergeable: 'UNKNOWN' }, {}, 'wait'],
+    [{ mergeable: 'CONFLICTING' }, {}, 'ask'],
+    [{ reviewDecision: 'CHANGES_REQUESTED' }, { adminMerge: true }, 'ask'],
+    [{ reviewDecision: 'REVIEW_REQUIRED' }, {}, 'ask'],
+    [{ reviewDecision: 'REVIEW_REQUIRED' }, { adminMerge: true }, 'ask'],
+    [{ reviewDecision: 'REVIEW_REQUIRED', requiredChecksMissing: ['ci'] }, { adminMerge: true }, 'wait'],
+    [{ reviewDecision: 'REVIEW_REQUIRED', requiredChecksMissing: [] }, { adminMerge: true }, 'update-branch'],
+    [{ reviewDecision: 'REVIEW_REQUIRED', requiredChecksMissing: [], checks: 'none' }, { adminMerge: true, requireChecks: false }, 'wait'],
+    [{}, { requireChecks: false, mergeMethod: 'rebase' }, 'update-branch'],
+    [{}, { merge: false }, 'skip'],
+    [{ reviewDecision: 'REVIEW_REQUIRED', requiredChecksMissing: [] }, { adminMerge: true, merge: false }, 'skip'],
+  ])('BEHIND preserves safeguards for PR %j and policy %j → %s', (overrides, settings, action) => {
+    expect(decideShip(pr({ mergeStateStatus: 'BEHIND', ...overrides }), policy(settings), NOW)).toMatchObject({ action });
   });
 
   test.each(['CLEAN', 'HAS_HOOKS'])('%s → merge', (mergeStateStatus) => {
@@ -354,6 +376,42 @@ describe('listShippablePrs', () => {
       exitCode: 0,
     });
     expect(listShippablePrs('o/r', 'master', []).map((p) => p.number)).toEqual([512]);
+  });
+});
+
+describe('updateShippablePrBranch', () => {
+  test('an already-current branch is a successful no-op, not an update', () => {
+    mockExec.mockReturnValueOnce({ exitCode: 0, stdout: '✓ PR branch already up-to-date\n', stderr: '' });
+    expect(updateShippablePrBranch('o/r', pr())).toEqual({ updated: false, conflict: false });
+  });
+
+  test('uses the default merge strategy, quotes the repo, and marks the gh call as a mutation', () => {
+    expect(updateShippablePrBranch("o/r's", pr())).toEqual({ updated: true, conflict: false });
+    expect(mockGhExec).toHaveBeenCalledTimes(1);
+    expect(mockGhExec).toHaveBeenCalledWith("gh pr update-branch 512 --repo 'o/r'\\''s'", undefined, true);
+  });
+
+  test.each([
+    ['Cannot update PR branch due to conflicts', ''],
+    ['', 'GraphQL: merge conflict between base and head (updatePullRequestBranch)'],
+    ['GraphQL request failed', 'Merge conflict'],
+  ])('recognizes explicit conflicts in either stream (%s, %s)', (stderr, stdout) => {
+    mockExec.mockReturnValueOnce({ exitCode: 1, stderr, stdout });
+    const result = updateShippablePrBranch('o/r', pr());
+    expect(result).toMatchObject({ updated: false, conflict: true });
+    for (const message of [stderr, stdout].filter(Boolean)) expect(result.error).toContain(message);
+  });
+
+  test.each(['HTTP 403: Resource not accessible', 'HTTP 502', 'HTTP 409: head SHA changed'])('other failures are not merge conflicts: %s', (stderr) => {
+    mockExec.mockReturnValueOnce({ exitCode: 1, stderr, stdout: '' });
+    expect(updateShippablePrBranch('o/r', pr())).toEqual({ updated: false, conflict: false, error: expect.stringContaining(stderr) });
+  });
+
+  test('retains stdout errors and falls back to the exit code for empty errors', () => {
+    mockExec.mockReturnValueOnce({ exitCode: 1, stderr: '', stdout: 'Network unavailable' });
+    expect(updateShippablePrBranch('o/r', pr()).error).toContain('Network unavailable');
+    mockExec.mockReturnValueOnce({ exitCode: 2, stderr: '', stdout: '' });
+    expect(updateShippablePrBranch('o/r', pr())).toEqual({ updated: false, conflict: false, error: expect.stringContaining('exit 2') });
   });
 });
 
