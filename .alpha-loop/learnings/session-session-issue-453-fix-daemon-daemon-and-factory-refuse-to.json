@@ -1,0 +1,89 @@
+{
+  "name": "session/issue-453-fix-daemon-daemon-and-factory-refuse-to",
+  "branch": "session/issue-453-fix-daemon-daemon-and-factory-refuse-to",
+  "completed": "2026-11-05T10:53:22.611Z",
+  "results": [
+    {
+      "issueNum": 453,
+      "title": "fix(daemon): daemon and factory refuse to run at the same time in one repo",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/470",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 789,
+      "filesChanged": 5
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 71729,
+      "tokens_out": 55176,
+      "cost_usd": 0,
+      "wall_time_s": 153.65,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:34:23.489Z",
+      "issue_num": 453
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 199931,
+      "tokens_out": 153793,
+      "cost_usd": 0,
+      "wall_time_s": 422.614,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:36:57.587Z",
+      "issue_num": 453
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 176030,
+      "tokens_out": 135408,
+      "cost_usd": 0,
+      "wall_time_s": 191.118,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:44:10.896Z",
+      "issue_num": 453
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 17551,
+      "tokens_out": 13501,
+      "cost_usd": 0,
+      "wall_time_s": 35.363,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:47:39.767Z",
+      "issue_num": 453
+    },
+    {
+      "stage": "learn",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 5974,
+      "tokens_out": 4595,
+      "cost_usd": 0,
+      "wall_time_s": 37.006,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:47:39.740Z",
+      "issue_num": 453
+    }
+  ]
+}
