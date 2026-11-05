@@ -1,24 +1,22 @@
 ## Architecture
-- `src/cli.ts` is the Commander.js entry point; it registers handlers from `src/commands/*.ts` for `init`, `run`, `resume`, `scan`, `plan`, `review`, `history`, and related workflows.
-- `src/commands/run.ts` drives execution through `src/lib/pipeline.ts`, which coordinates agents, worktrees, tests, GitHub state, sessions, prompts, and learning extraction.
-- GitHub is the database: Issues form the kanban, labels represent workflow state, PRs hold reviews, and Actions provide CI; access is centralized in `src/lib/github.ts`.
-- `src/lib/` contains shared workflow services, while `src/engine/` handles agent CLI selection and prerequisites; `tests/` mirrors source behavior.
-- Root `templates/` contains npm-distributed starter assets; `.alpha-loop/` contains this repository’s configuration, tracked learnings, and local session data.
+- `src/cli.ts` is the Commander entry point; handlers live in `src/commands/`. `run.ts` coordinates the Plan → Build → Test → Review → Ship workflow through shared pipeline libraries.
+- GitHub is the database: issues track work, labels represent state, PRs support review, and Actions run CI. Access GitHub through `src/lib/github.ts`.
+- `src/engine/` handles agent CLI arguments and prerequisites. `src/lib/` contains configuration, prompts, sessions, worktrees, testing, learning, and shell helpers.
+- `.alpha-loop.yaml` configures agents, models, and harnesses. Root `templates/` ships starter configuration; `.alpha-loop/templates/` configures this repository’s own loop.
 
 ## Conventions
-- Node.js with strict TypeScript and ESM; imports include `.js` extensions, built-ins use the `node:` prefix, and implementations favor functional patterns over classes.
-- Commander.js defines the CLI, YAML supplies configuration through `.alpha-loop.yaml` and `src/lib/config.ts`, and `pnpm` is the only supported package manager.
-- Jest tests use `.test.ts`, live under `tests/`, and run with `pnpm test`; builds run with `pnpm build`.
-- New commands require a handler in `src/commands/`, registration/help text in `src/cli.ts`, tests, and synchronized README/CLAUDE command documentation.
-- Agent behavior is defined through templates and synchronized into harness-specific directories for Codex and other supported coding agents.
+- Node.js and strict TypeScript with ESM; use `.js` import extensions, `node:` built-in imports, functional patterns, and pnpm. Avoid classes except for external API wrappers.
+- Jest tests live in `tests/`, mirror `src/`, and use `.test.ts` filenames. Run `pnpm test`; compile with `pnpm build`.
+- Tests must close HTTP connections and servers during teardown. Use Jest fake timers for polling and heartbeat tests; avoid real timers. Jest uses `forceExit: true` and a 30-second timeout.
+- Add command handlers under `src/commands/` and register them in `src/cli.ts`. Keep command help, README/CLAUDE command documentation, and configuration documentation aligned with changes.
 
 ## Critical Rules
-- Do not modify `AGENTS.md`; do not directly edit `.Codex/`, `.agents/`, `.codex/`, or `.alpha-loop/templates/`, which are protected or generated workflow assets.
-- Do not confuse root `templates/`—distributed to users—with `.alpha-loop/templates/`, which configures this repository’s own loop.
-- Keep CLI flags/help, command handlers, README, and CLAUDE.md synchronized whenever public commands or configuration change.
-- Tests must close servers and HTTP connections, use fake timers for polling or heartbeat behavior, and never leave open handles.
-- Never publish manually or edit the package version; merging conventional commits to `master` triggers the automated release workflow.
+- Do not modify `AGENTS.md` unless explicitly requested. Change `.alpha-loop/templates/` through `alpha-loop review --apply`; never directly edit generated `.Codex/`, `.agents/`, or `.codex/` files.
+- Do not confuse distribution `templates/` with repository-specific `.alpha-loop/templates/`: changes to the former affect newly initialized user projects.
+- Preserve agent independence: keep harness argument construction, prompt generation, and configuration compatible when changing agent integrations.
+- Never manually publish or bump versions. `.github/workflows/release.yml` automates releases from eligible pushes to `master`; conventional commit messages determine version increments.
 
 ## Active State
 - Test status: (will be filled in by the loop)
 - Recent changes: (will be filled in by the loop)
+- Context source: supplied project instructions; repository files and current runtime state were not inspected because tool use was prohibited.
