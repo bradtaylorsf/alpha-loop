@@ -11,6 +11,7 @@ jest.mock('../../src/lib/github', () => ({
 }));
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -26,6 +27,7 @@ import {
 } from '../../src/commands/factory.js';
 import { DEFAULT_FACTORY_CONFIG, resolveFactoryPaths, type Config, type FactoryPaths } from '../../src/lib/config.js';
 import type { FactoryState } from '../../src/lib/factory.js';
+import * as factoryStatus from '../../src/lib/factory-status.js';
 import { readInbox } from '../../src/lib/factory-inbox.js';
 import { answerQuestion, askQuestion, markQuestion, readQuestions } from '../../src/lib/factory-questions.js';
 import { acquireLease } from '../../src/lib/lease.js';
@@ -218,27 +220,28 @@ describe('factory status', () => {
     return state;
   }
 
-  it('reports not running when there is no supervisor lease', () => {
-    factoryStatusCommand({}, { config, now: () => NOW });
+  it('reports not running when there is no supervisor lease', async () => {
+    await factoryStatusCommand({}, { config, now: () => NOW });
     const out = output();
     expect(out).toContain('Factory: not running');
     expect(out).toContain('Open questions (0):');
     expect(out).toContain(`Inbox: ${paths.inboxPath}`);
   });
 
-  it('shows workers, last plan, counts, ship decisions, and open questions while running', () => {
+  it('shows workers, last plan, counts, ship decisions, and open questions while running', async () => {
     writeState();
     acquireLease(paths.stateDir, 'factory', { owner: 'factory-supervisor', ttlSeconds: 300, now: NOW });
     const q = askQuestion(paths.questionsPath, { role: 'shipper', key: 'ship:12:review-required', pr: 12, question: 'PR #12 needs a review', context: '' }, { now: new Date('2026-11-05T09:00:00Z') }).question;
     factoryIdeaCommand(['An idea'], { config });
     logSpy.mockClear();
 
-    factoryStatusCommand({}, { config, now: () => NOW });
+    await factoryStatusCommand({}, { config, now: () => NOW });
 
     const out = output();
     expect(out).toContain(`Factory: running (pid ${process.pid}, tick 12, running)`);
     expect(out).toContain('Base: feat/x · developers: 2 · epics: #454');
-    expect(out).toContain('dev-7-abc  developer  #7  pid 5555  12m  /logs/dev-7/worker.log');
+    expect(out).toMatch(/dev-7-abc\s+developer\s+#7\s+5555\s+12m\s+-/);
+    expect(out).toContain('Log dev-7-abc: /logs/dev-7/worker.log');
     expect(out).toContain('Last plan: dispatched #7; skipped 1');
     expect(out).toContain('#8 overlap (src/lib/x.ts with #7)');
     expect(out).toContain('Counts: dispatched 3 · succeeded 1 · failed 1 · waiting 0 · merged 1');
@@ -247,15 +250,157 @@ describe('factory status', () => {
     expect(out).toContain('Pending ideas: 1');
   });
 
-  it('prints a JSON snapshot with --json', () => {
+  it('prints the unchanged JSON snapshot with --json without reading worker logs', async () => {
     const state = writeState({ status: 'stopped' });
-    factoryStatusCommand({ json: true }, { config, now: () => NOW });
+    const tails = jest.spyOn(factoryStatus, 'readWorkerLogTails');
+    await factoryStatusCommand({ json: true }, { config, now: () => NOW });
+    expect(tails).not.toHaveBeenCalled();
+    tails.mockRestore();
     const snap = JSON.parse(output());
+    expect(Object.keys(snap).sort()).toEqual(['openQuestions', 'paths', 'pendingIdeas', 'running', 'state', 'supervisor']);
     expect(snap.running).toBe(false);
     expect(snap.supervisor).toBeNull();
     expect(snap.state).toEqual(state);
     expect(snap.paths.questionsPath).toBe(paths.questionsPath);
     expect(snap.pendingIdeas).toBe(0);
+  });
+
+  it('includes the latest worker log in one-shot text', async () => {
+    const logPath = join(root, 'worker.log');
+    writeFileSync(logPath, 'old line\nlatest line\n');
+    const state = writeState();
+    writeState({ workers: [{ ...state.workers[0], logPath }] });
+    await factoryStatusCommand({}, { config, now: () => NOW });
+    expect(output()).toContain('latest line');
+    expect(output()).not.toContain('old line');
+    expect(output()).not.toContain('\x1b');
+  });
+
+  describe('watch', () => {
+    let signals: EventEmitter;
+    let write: jest.Mock;
+
+    beforeEach(() => {
+      jest.useFakeTimers({ now: NOW });
+      signals = new EventEmitter();
+      write = jest.fn();
+    });
+    afterEach(() => {
+      signals.emit('SIGINT');
+      jest.useRealTimers();
+    });
+
+    it('renders immediately and reloads state, tails, questions, inbox, and time every five seconds', async () => {
+      const logPath = join(root, 'worker.log');
+      writeFileSync(logPath, 'first update\n');
+      const state = writeState();
+      const workers = [{ ...state.workers[0], startedAt: NOW.toISOString(), logPath }];
+      writeState({ workers });
+      acquireLease(paths.stateDir, 'factory', { owner: 'factory-supervisor', ttlSeconds: 300, now: NOW });
+      const q = askQuestion(paths.questionsPath, { role: 'developer', key: 'dev:7', question: 'Retry?', context: '' }, { now: NOW }).question;
+      const watching = factoryStatusCommand({ watch: true }, { config, signals, write, isTTY: false });
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(write.mock.calls[0][0]).toContain('first update');
+      expect(write.mock.calls[0][0]).toContain(`${q.id}  0s`);
+      expect(write.mock.calls[0][0]).toContain('Pending ideas: 0');
+
+      writeFileSync(logPath, 'second update\n');
+      writeState({ workers, tick: 13, recent: [{ at: NOW.toISOString(), type: 'worker.started', issue: 7 }] });
+      factoryIdeaCommand(['Fresh idea'], { config });
+      answerQuestion(paths.questionsPath, q.id, 'yes');
+      jest.advanceTimersByTime(4999);
+      expect(write).toHaveBeenCalledTimes(1);
+      jest.advanceTimersByTime(1);
+      const frame = write.mock.calls[1][0];
+      expect(frame).toContain('tick 13');
+      expect(frame).toMatch(/dev-7-abc\s+developer\s+#7\s+5555\s+5s\s+second update/);
+      expect(frame).toContain(`${q.id}  5s  developer  Retry?  [answered]`);
+      expect(frame).toContain('Pending ideas: 1');
+      expect(frame).toContain('worker.started  issue=7');
+      expect(frame).not.toContain('\x1b');
+
+      markQuestion(paths.questionsPath, q.id, 'applied');
+      jest.advanceTimersByTime(5000);
+      expect(write.mock.calls[2][0]).toContain('Open questions (0):');
+      signals.emit('SIGINT');
+      await watching;
+      expect(jest.getTimerCount()).toBe(0);
+      expect(process.exitCode).toBeUndefined();
+    });
+
+    it('keeps watching absent or stopped supervisors with a custom cadence and TTY redraws', async () => {
+      const watching = factoryStatusCommand({ watch: '0.25' }, { config, signals, write, isTTY: true });
+      expect(write.mock.calls[0][0]).toMatch(/^\x1b\[2J\x1b\[HFactory: not running/);
+      writeState({ status: 'stopped', workers: [] });
+      jest.advanceTimersByTime(249);
+      expect(write).toHaveBeenCalledTimes(1);
+      jest.advanceTimersByTime(1);
+      expect(write.mock.calls[1][0]).toContain('last state stopped');
+      expect(write.mock.calls[1][0]).toMatch(/^\x1b\[2J\x1b\[H/);
+      rmSync(paths.statePath);
+      jest.advanceTimersByTime(250);
+      expect(write.mock.calls[2][0]).toContain('Workers (0):');
+      signals.emit('SIGINT');
+      await watching;
+    });
+
+    it.each(['SIGINT', 'SIGTERM'])('cleans up on %s without removing other listeners or stopping workers', async (signal) => {
+      const otherListener = jest.fn();
+      signals.on(signal, otherListener);
+      const kill = jest.spyOn(process, 'kill');
+      const watching = factoryStatusCommand({ watch: 2 }, { config, signals, write });
+      expect(jest.getTimerCount()).toBe(1);
+      signals.emit(signal);
+      await watching;
+      expect(jest.getTimerCount()).toBe(0);
+      expect(signals.listeners(signal)).toEqual([otherListener]);
+      expect(signals.listenerCount(signal === 'SIGINT' ? 'SIGTERM' : 'SIGINT')).toBe(0);
+      expect(otherListener).toHaveBeenCalledTimes(1);
+      jest.advanceTimersByTime(10_000);
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(kill).not.toHaveBeenCalled();
+      kill.mockRestore();
+      expect(process.exitCode).toBeUndefined();
+    });
+
+    it('installs signal handling before the first frame and does not start a timer after shutdown', async () => {
+      write.mockImplementation(() => signals.emit('SIGINT'));
+      await factoryStatusCommand({ watch: true }, { config, signals, write });
+      expect(jest.getTimerCount()).toBe(0);
+      expect(signals.eventNames()).toEqual([]);
+      expect(write).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([1, 2])('cleans up after an output failure on frame %i', async (failureFrame) => {
+      write.mockImplementation(() => {
+        if (write.mock.calls.length === failureFrame) throw new Error('output failed');
+      });
+      const watching = factoryStatusCommand({ watch: true }, { config, signals, write });
+      if (failureFrame === 2) jest.advanceTimersByTime(5000);
+      await watching;
+      expect(jest.getTimerCount()).toBe(0);
+      expect(signals.eventNames()).toEqual([]);
+      expect(process.exitCode).toBe(1);
+      expect(mockError).toHaveBeenCalledWith('output failed');
+    });
+
+    it('cleans up when collecting the next frame fails', async () => {
+      const now = jest.fn().mockReturnValueOnce(NOW).mockImplementation(() => { throw new Error('clock failed'); });
+      const watching = factoryStatusCommand({ watch: true }, { config, signals, write, now });
+      jest.advanceTimersByTime(5000);
+      await watching;
+      expect(jest.getTimerCount()).toBe(0);
+      expect(signals.eventNames()).toEqual([]);
+      expect(mockError).toHaveBeenCalledWith('clock failed');
+    });
+
+    it('rejects JSON watch before installing listeners or rendering', async () => {
+      await factoryStatusCommand({ watch: true, json: true }, { config, signals, write });
+      expect(write).not.toHaveBeenCalled();
+      expect(jest.getTimerCount()).toBe(0);
+      expect(signals.eventNames()).toEqual([]);
+      expect(mockError).toHaveBeenCalledWith('--watch cannot be combined with --json');
+    });
   });
 });
 

@@ -1,0 +1,89 @@
+{
+  "name": "session/issue-447-feat-factory-factory-status-watch-live-v",
+  "branch": "session/issue-447-feat-factory-factory-status-watch-live-v",
+  "completed": "2026-11-05T10:13:46.983Z",
+  "results": [
+    {
+      "issueNum": 447,
+      "title": "feat(factory): `factory status --watch` live view with per-worker log tails",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/462",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 888,
+      "filesChanged": 5
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 56321,
+      "tokens_out": 43324,
+      "cost_usd": 0,
+      "wall_time_s": 180.693,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:54:43.019Z",
+      "issue_num": 447
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 199308,
+      "tokens_out": 153314,
+      "cost_usd": 0,
+      "wall_time_s": 559.644,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:57:44.284Z",
+      "issue_num": 447
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 108151,
+      "tokens_out": 83193,
+      "cost_usd": 0,
+      "wall_time_s": 129.282,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:07:11.069Z",
+      "issue_num": 447
+    },
+    {
+      "stage": "learn",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 5508,
+      "tokens_out": 4237,
+      "cost_usd": 0,
+      "wall_time_s": 28.63,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:09:36.972Z",
+      "issue_num": 447
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 53828,
+      "tokens_out": 41406,
+      "cost_usd": 0,
+      "wall_time_s": 47.966,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:09:36.998Z",
+      "issue_num": 447
+    }
+  ]
+}

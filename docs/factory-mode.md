@@ -23,6 +23,8 @@ alpha-loop factory idea "Add a post-merge smoke test for session PRs"
 alpha-loop factory --dry-run          # show what the next tick would ingest, dispatch, and ship
 alpha-loop factory --developers 3     # run continuously
 alpha-loop factory status             # in another terminal
+alpha-loop factory status --watch     # refresh every 5 seconds; Ctrl-C exits the view
+alpha-loop factory status --watch 2   # refresh every 2 seconds
 alpha-loop factory questions          # what the factory needs from you
 alpha-loop factory answer Q-20261104-001 "Yes — allow admin merge for session PRs"
 ```
@@ -39,7 +41,7 @@ alpha-loop factory --epic 454 --base feat/factory-mode --developers 3 --until-id
 alpha-loop factory [--developers n] [--epic <ids>] [--once] [--until-idle] [--max-ticks n]
                    [--max-runtime <min>] [--no-pm] [--no-ship] [--ship-merge] [--base <branch>]
                    [--dry-run] [--verbose]
-alpha-loop factory status [--json]
+alpha-loop factory status [--json | --watch [seconds]]
 alpha-loop factory idea <text...>
 alpha-loop factory questions [--all]
 alpha-loop factory answer <id> <text...>
@@ -57,6 +59,25 @@ Flags override the `factory:` config block for one run. How the run ends:
 
 Only one supervisor runs per state directory. A second one exits with `factory already running (pid N)`
 and exit code 2.
+
+### Watching status
+
+`alpha-loop factory status` prints one snapshot. Add `--watch` to refresh immediately and every
+5 seconds, or `--watch 2` for a custom interval in seconds (fractional values are supported, from
+0.001 to 2147483.647). The view shows worker IDs, roles, issues or PM ideas, PIDs, elapsed times,
+and each worker's last nonblank log line, followed by log paths. It also retains the supervisor,
+base branch, last plan, counts, and ship decisions, and shows open question ages, answered questions
+waiting to be applied, the pending idea count, and the last five recorded factory events.
+
+Each refresh reads at most the final 4 KiB of each worker log. Missing or empty logs show `-`;
+an overlong line cut off by that window starts with `…`. Long log lines are shortened for display.
+Events come from `state.json`, not a scan of `events.jsonl`.
+
+On a terminal, watch redraws the view. Redirected output appends complete plain-text snapshots:
+`alpha-loop factory status --watch 2 > factory-status.log`. It keeps watching when the supervisor
+is absent or stopped; any workers in a stopped snapshot are labeled as last recorded. Ctrl-C
+(SIGINT) or SIGTERM exits only the status view, without stopping the supervisor or workers.
+`--json` remains a one-shot snapshot without log tails and cannot be combined with `--watch`.
 
 ### Each tick
 

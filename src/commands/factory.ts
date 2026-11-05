@@ -6,16 +6,20 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadConfig, resolveFactoryPaths, type Config, type FactoryPaths } from '../lib/config.js';
+import { loadConfig, resolveFactoryPaths, type Config } from '../lib/config.js';
 import { runFactory, type FactoryRunOptions, type FactoryState } from '../lib/factory.js';
 import { appendIdea, readInbox } from '../lib/factory-inbox.js';
 import { runPmForIdea, type PmContext } from '../lib/factory-pm.js';
 import { answerQuestion, answeredQuestions, readQuestions, type FactoryQuestion } from '../lib/factory-questions.js';
 import { pmProgressPath, readPmWorkerContext, writeJsonAtomic, type PmWorkerProgress, type PmWorkerResult } from '../lib/factory-workers.js';
 import { listOpenIssues } from '../lib/github.js';
-import { isLeaseStale, readLease, type LeasePayload } from '../lib/lease.js';
+import { isLeaseStale, readLease } from '../lib/lease.js';
 import { log } from '../lib/logger.js';
 import { getVisionContext } from '../lib/vision.js';
+import { formatAge, readWorkerLogTails, renderFactoryStatus, type FactoryStatusSnapshot } from '../lib/factory-status.js';
+
+// Preserve the existing command module's public helpers.
+export { formatAge, type FactoryStatusSnapshot } from '../lib/factory-status.js';
 
 export type FactoryCommandOptions = {
   developers?: number;
@@ -101,17 +105,6 @@ export async function factoryRunCommand(
 
 // ── factory status ───────────────────────────────────────────────────────────
 
-export function formatAge(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return '?';
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 48) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
-  return `${Math.floor(h / 24)}d`;
-}
-
 function readState(path: string): FactoryState | null {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as FactoryState;
@@ -130,15 +123,6 @@ function firstLine(text: string, max = 100): string {
   const line = text.split('\n')[0].trim();
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
-
-export type FactoryStatusSnapshot = {
-  running: boolean;
-  supervisor: Pick<LeasePayload, 'pid' | 'hostname' | 'acquiredAt' | 'refreshedAt'> | null;
-  state: FactoryState | null;
-  openQuestions: Array<Pick<FactoryQuestion, 'id' | 'status' | 'role' | 'askedAt' | 'key' | 'question'>>;
-  pendingIdeas: number;
-  paths: FactoryPaths;
-};
 
 export function factoryStatusSnapshot(config: Config, now: Date = new Date()): FactoryStatusSnapshot {
   const paths = resolveFactoryPaths(config);
@@ -162,54 +146,69 @@ export function factoryStatusSnapshot(config: Config, now: Date = new Date()): F
   };
 }
 
-export function factoryStatusCommand(options: { json?: boolean }, deps: ConfigDeps = {}): void {
+export type FactoryStatusOptions = { json?: boolean; watch?: boolean | string | number };
+
+export type FactoryStatusDeps = ConfigDeps & {
+  signals?: Pick<NodeJS.EventEmitter, 'on' | 'removeListener'>;
+  /** Receives one complete frame; defaults to console.log. */
+  write?: (frame: string) => void;
+  isTTY?: boolean;
+};
+
+function watchIntervalMs(value: FactoryStatusOptions['watch']): number | undefined {
+  if (value === undefined || value === false) return undefined;
+  const ms = (value === true ? 5 : Number(value)) * 1000;
+  if (!Number.isFinite(ms) || ms < 1 || ms > 2_147_483_647) {
+    throw new Error('--watch seconds must be a finite positive number between 0.001 and 2147483.647');
+  }
+  return ms;
+}
+
+export async function factoryStatusCommand(options: FactoryStatusOptions, deps: FactoryStatusDeps = {}): Promise<void> {
   try {
+    const interval = watchIntervalMs(options.watch);
+    if (interval !== undefined && options.json) throw new Error('--watch cannot be combined with --json');
     const config = configFor(deps);
-    const now = deps.now?.() ?? new Date();
-    const snap = factoryStatusSnapshot(config, now);
-    if (options.json) {
-      console.log(JSON.stringify(snap, null, 2));
+    const write = deps.write ?? ((frame: string) => console.log(frame));
+    const isTTY = deps.isTTY ?? process.stdout.isTTY;
+    const frame = (): void => {
+      const now = deps.now?.() ?? new Date();
+      const snap = factoryStatusSnapshot(config, now);
+      if (options.json) {
+        // Keep the one-shot JSON schema unchanged, without opening worker logs.
+        write(JSON.stringify(snap, null, 2));
+        return;
+      }
+      const tails = readWorkerLogTails(snap.state?.workers ?? []);
+      const text = renderFactoryStatus(snap, { tails, now });
+      // Only clear a terminal. No cursor hiding, raw input, or alternate screen to restore.
+      write(`${interval !== undefined && isTTY ? '\x1b[2J\x1b[H' : ''}${text}`);
+    };
+    if (interval === undefined) {
+      frame();
       return;
     }
 
-    const { state } = snap;
-    const lines: string[] = [];
-    if (snap.running && snap.supervisor) {
-      lines.push(`Factory: running (pid ${snap.supervisor.pid}${state ? `, tick ${state.tick}, ${state.status}` : ''})`);
-    } else {
-      lines.push(`Factory: not running${state ? ` (last state ${state.status} at ${state.updatedAt})` : ''}`);
-    }
-    if (state) {
-      lines.push(`Base: ${state.baseBranch} · developers: ${state.developers} · epics: ${state.epics.length ? state.epics.map((e) => `#${e}`).join(', ') : 'all'}`);
-      if (snap.running) {
-        lines.push(`Workers (${state.workers.length}):`);
-        for (const w of state.workers) {
-          const target = w.issue !== undefined ? `#${w.issue}` : w.ideaId ?? '';
-          const elapsed = formatAge(now.getTime() - Date.parse(w.startedAt));
-          lines.push(`  ${w.id}  ${w.role}  ${target}  pid ${w.pid ?? '-'}  ${elapsed}  ${w.logPath}`);
-        }
-      }
-      const dispatched = state.lastPlan.dispatched.map((n) => `#${n}`).join(', ') || 'nothing';
-      lines.push(`Last plan: dispatched ${dispatched}; skipped ${state.lastPlan.skipped.length}`);
-      for (const s of state.lastPlan.skipped.slice(0, 10)) {
-        lines.push(`  #${s.issue} ${s.reason}${s.detail ? ` (${s.detail})` : ''}`);
-      }
-      const c = state.counts;
-      lines.push(`Counts: dispatched ${c.dispatched} · succeeded ${c.succeeded} · failed ${c.failed} · waiting ${c.waiting} · merged ${c.merged} · ideas ${c.ideasIngested} · questions ${c.questionsAsked}`);
-      if (state.ship.lastRunAt) {
-        lines.push(`Ship: last pass ${state.ship.lastRunAt}${state.ship.error ? ` — error: ${state.ship.error}` : ''}`);
-        for (const d of state.ship.decisions) lines.push(`  PR #${d.pr}: ${d.action} — ${d.reason}`);
-      }
-    }
-    lines.push(`Open questions (${snap.openQuestions.length}):`);
-    for (const q of snap.openQuestions) {
-      lines.push(`  ${q.id}  ${formatAge(now.getTime() - Date.parse(q.askedAt))}  ${q.role}  ${firstLine(q.question)}${q.status === 'answered' ? '  [answered]' : ''}`);
-    }
-    lines.push(`Pending ideas: ${snap.pendingIdeas}`);
-    lines.push(`Inbox: ${snap.paths.inboxPath}`);
-    lines.push(`Questions: ${snap.paths.questionsPath}`);
-    lines.push(`State: ${snap.paths.statePath}`);
-    console.log(lines.join('\n'));
+    const signals = deps.signals ?? process;
+    await new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setInterval> | undefined;
+      let stopped = false;
+      const cleanup = (): void => {
+        stopped = true;
+        if (timer !== undefined) clearInterval(timer);
+        signals.removeListener('SIGINT', stop);
+        signals.removeListener('SIGTERM', stop);
+      };
+      const stop = (): void => { cleanup(); resolve(); };
+      const refresh = (): void => {
+        try { frame(); } catch (err) { cleanup(); reject(err); }
+      };
+      signals.on('SIGINT', stop);
+      signals.on('SIGTERM', stop);
+      refresh();
+      // A signal or output failure during the first frame must not leave a timer behind.
+      if (!stopped) timer = setInterval(refresh, interval);
+    });
   } catch (err) {
     log.error(errorMessage(err));
     process.exitCode = 1;
