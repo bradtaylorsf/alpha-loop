@@ -1453,6 +1453,7 @@ export async function processIssue(
       const wt = await setupWorktree({
         issueNum,
         allowDestructive: allowDestructiveWorktreeSetup(config, issueNum),
+        checkDestructivePermission: () => allowDestructiveWorktreeSetup(config, issueNum),
         projectDir,
         baseBranch: config.baseBranch,
         sessionBranch: session.branch,
@@ -3003,6 +3004,7 @@ export async function processBatch(
     const wt = await setupWorktree({
       issueNum: issues[0].number, // Use first issue number for branch naming
       allowDestructive: allowDestructiveWorktreeSetup(config, issues[0].number),
+      checkDestructivePermission: () => allowDestructiveWorktreeSetup(config, issues[0].number),
       projectDir,
       baseBranch: config.baseBranch,
       sessionBranch: session.branch,

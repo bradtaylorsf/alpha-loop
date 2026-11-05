@@ -2113,6 +2113,10 @@ Coordinate hosted work.
     expect(mockSetupWorktree).toHaveBeenCalledTimes(1);
     expect(mockAllowDestructive).toHaveBeenCalledWith(expect.objectContaining({ quick: true }), 42);
     expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 42, allowDestructive: permission }));
+    const recheck = mockSetupWorktree.mock.calls[0][0].checkDestructivePermission;
+    expect(recheck?.()).toBe(permission);
+    mockAllowDestructive.mockReturnValue(!permission);
+    expect(recheck?.()).toBe(!permission);
 
     // Both issues processed with the shared quick worktree
     expect(mockProcessIssue).toHaveBeenCalledTimes(2);

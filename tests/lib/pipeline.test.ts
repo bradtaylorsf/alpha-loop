@@ -341,6 +341,10 @@ describe('processIssue', () => {
     await processIssue(42, 'Test issue', 'Body', config, makeSession());
     expect(mockAllowDestructive).toHaveBeenCalledWith(config, 42);
     expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 42, allowDestructive: permission }));
+    const recheck = mockSetupWorktree.mock.calls[0][0].checkDestructivePermission;
+    expect(recheck?.()).toBe(permission);
+    mockAllowDestructive.mockReturnValue(!permission);
+    expect(recheck?.()).toBe(!permission);
   });
 
   test('fails closed when a review gate artifact is missing', async () => {
@@ -1842,6 +1846,10 @@ describe('processBatch', () => {
     await processBatch(batchIssues, config, makeSession());
     expect(mockAllowDestructive).toHaveBeenCalledWith(config, 10);
     expect(mockSetupWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueNum: 10, allowDestructive: permission }));
+    const recheck = mockSetupWorktree.mock.calls[0][0].checkDestructivePermission;
+    expect(recheck?.()).toBe(permission);
+    mockAllowDestructive.mockReturnValue(!permission);
+    expect(recheck?.()).toBe(!permission);
   });
 
   const batchIssues = [

@@ -149,6 +149,51 @@ describe('setupWorktree', () => {
       expect(commands().filter(cmd => /worktree remove|branch -D|push origin --delete/.test(cmd))).toEqual([]);
     };
 
+    test('rechecks ownership after waiting for the Git lock', async () => {
+      let ownsLease = true;
+      const permission = ownsLease;
+      mockWithFileLock.mockImplementationOnce((_path, fn) => {
+        ownsLease = false;
+        return fn();
+      });
+      mockExists.mockImplementation(path => path === worktreePath);
+      mockExec.mockImplementation(cmd => ({ ...ok, stdout: cmd.includes('--abbrev-ref') ? 'other-worker' : '' }));
+
+      await expect(setupWorktree({
+        ...baseOptions,
+        allowDestructive: permission,
+        checkDestructivePermission: () => ownsLease,
+      })).rejects.toThrow(/lease/);
+      expectNoDestruction();
+    });
+
+    test.each(['worktree', 'local branch', 'remote branch'])('rechecks ownership before deleting the %s', async target => {
+      let ownsLease = true;
+      mockExists.mockImplementation(path => target === 'worktree' && path === worktreePath);
+      mockExec.mockImplementation(cmd => {
+        if (cmd.includes('--abbrev-ref')) {
+          ownsLease = false;
+          return { ...ok, stdout: 'other-worker' };
+        }
+        if (cmd === "git rev-parse --verify 'agent/issue-42'" && target === 'remote branch') {
+          ownsLease = false;
+          return missing;
+        }
+        if (cmd.includes('worktree add')) {
+          ownsLease = false;
+          return missing;
+        }
+        return ok;
+      });
+
+      await expect(setupWorktree({
+        ...baseOptions,
+        allowDestructive: true,
+        checkDestructivePermission: () => ownsLease,
+      })).rejects.toThrow(/lease/);
+      expectNoDestruction();
+    });
+
     test.each([true, undefined, false])('wrong-branch cleanup with allowDestructive=%s', async (allowDestructive) => {
       let exists = true;
       mockExists.mockImplementation(path => path === worktreePath && exists);

@@ -1585,6 +1585,7 @@ async function executeSessionRun(
           const wt = await setupWorktree({
             issueNum: issuesToProcess[0].number,
             allowDestructive: allowDestructiveWorktreeSetup(config, issuesToProcess[0].number),
+            checkDestructivePermission: () => allowDestructiveWorktreeSetup(config, issuesToProcess[0].number),
             projectDir: process.cwd(),
             baseBranch: config.baseBranch,
             sessionBranch: session.branch,

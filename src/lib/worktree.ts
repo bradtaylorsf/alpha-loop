@@ -36,6 +36,8 @@ export type SetupWorktreeOptions = {
   savedPath?: string | null;
   /** Permit destructive recovery. Defaults to true for non-factory compatibility. */
   allowDestructive?: boolean;
+  /** Revalidate lease-derived permission under the Git lock before destructive commands. */
+  checkDestructivePermission?: () => boolean;
   dryRun?: boolean;
 };
 
@@ -121,7 +123,8 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
   const { worktreesDir, worktreePath, safe } = resolveWorktreeLocation(projectDir, issueNum, requestedPath);
   const requiresSavedBranch = Boolean(savedBranch?.trim());
   const preservesNamedBranch = requiresSavedBranch || Boolean(explicitBranch);
-  const allowDestructive = options.allowDestructive ?? true;
+  const canDestroy = (): boolean => (options.allowDestructive ?? true)
+    && (options.checkDestructivePermission?.() ?? true);
   const refuseDestructive = (reason: string): never => {
     throw new Error(`Refusing destructive setup for issue #${issueNum}, branch ${branch}, worktree ${worktreePath}: ${reason}. Requires ownership of the live issue-${issueNum} lease or explicit allowDestructive: true`);
   };
@@ -143,6 +146,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
   // worktree registry, the index lock). Parallel factory workers serialize
   // on one repo-wide lock; dependency install and setup stay outside it.
   const resumed = withFileLockSync(gitLockPath(projectDir), (): boolean => {
+    const allowDestructive = canDestroy();
     let reused = false;
 
     // --- Case 1: Worktree directory exists — check if we can reuse it ---
@@ -154,7 +158,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
         reused = true;
       } else {
         // Worktree exists but on wrong branch or broken — remove and recreate
-        if (!allowDestructive) refuseDestructive('existing worktree is on another branch or cannot be inspected');
+        if (!canDestroy()) refuseDestructive('existing worktree is on another branch or cannot be inspected');
         log.warn(`Worktree at ${worktreePath} is on wrong branch, removing...`);
         exec(`git worktree remove ${shellQuote(worktreePath)} --force`, { cwd: projectDir });
         exec('git worktree prune', { cwd: projectDir });
@@ -179,7 +183,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
           if (preservesNamedBranch) {
             throw new Error(`Failed to recreate worktree from ${branch}: ${reuseResult.stderr}`);
           }
-          if (!allowDestructive) refuseDestructive(`could not attach existing branch: ${reuseResult.stderr}`);
+          if (!canDestroy()) refuseDestructive(`could not attach existing branch: ${reuseResult.stderr}`);
           // Can't reuse a disposable issue branch — force-delete and fall through to fresh creation.
           exec(`git branch -D ${shellQuote(branch)}`, { cwd: projectDir });
           exec('git worktree prune', { cwd: projectDir });
@@ -233,6 +237,7 @@ export async function setupWorktree(options: SetupWorktreeOptions): Promise<Work
       // Issue branches are disposable between fresh runs. Explicitly named
       // branches (notably session branches) must never delete their remote.
       if (allowDestructive && !explicitBranch) {
+        if (!canDestroy()) refuseDestructive('issue lease ownership changed before remote branch cleanup');
         exec(`git push origin --delete ${shellQuote(branch)}`, { cwd: projectDir });
       }
 

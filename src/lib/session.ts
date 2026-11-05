@@ -1270,6 +1270,7 @@ export async function ensureSessionWorktree(
   const worktree = await setupWorktree({
     issueNum,
     allowDestructive: allowDestructiveWorktreeSetup(config, issueNum),
+    checkDestructivePermission: () => allowDestructiveWorktreeSetup(config, issueNum),
     projectDir,
     baseBranch: branchSource,
     branch: session.branch,
@@ -1277,11 +1278,12 @@ export async function ensureSessionWorktree(
     skipInstall: config.skipInstall,
     setupCommand: config.webApp?.setupCommand || config.setupCommand,
   });
-  session.worktreePath = worktree.path;
-
   if (config.autoMerge && !remoteExists) {
     withFileLockSync(gitLockPath(projectDir), () => {
       if (worktree.resumed) {
+        if (!allowDestructiveWorktreeSetup(config, issueNum)) {
+          throw new Error(`Refusing destructive session reset for issue #${issueNum}, branch ${session.branch}, worktree ${worktree.path}: requires ownership of the live issue-${issueNum} lease`);
+        }
         const reset = exec(`git reset --hard ${shellQuote(`origin/${branchSource}`)}`, { cwd: worktree.path });
         if (reset.exitCode !== 0) {
           throw new Error(`Failed to reset stale session branch ${session.branch}: ${reset.stderr}`);
@@ -1324,6 +1326,9 @@ export async function ensureSessionWorktree(
     log.info(`Session branch already exists: ${session.branch}`);
   }
 
+  // Cache only successful setup: a refused reset must not let a retry skip
+  // ownership checks or let the caller's finally block clean up this checkout.
+  session.worktreePath = worktree.path;
   return worktree.path;
 }
 
