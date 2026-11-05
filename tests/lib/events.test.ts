@@ -431,6 +431,40 @@ describe('lifecycle events', () => {
     }
   });
 
+  it.each(['timeout', 'stdin error'] as const)('cleans up command processes and pipes after a %s', async (failure) => {
+    jest.useFakeTimers();
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), { pid: 987654, stdin, stdout, stderr, kill: jest.fn() });
+    const spawn = jest.spyOn(childProcess, 'spawn').mockReturnValue(child as unknown as ReturnType<typeof childProcess.spawn>);
+    const killGroup = jest.spyOn(process, 'kill').mockReturnValue(true);
+    const pending = emitFactoryEvent({
+      config: makeConfig({ events: { includePromptText: false, redact: [], destinations: {
+        script: { type: 'command', command: 'on-event', stdin: 'json', events: ['*'], format: 'json', required: true, timeout: 1, retries: 0 },
+        audit: { type: 'log', events: ['*'], format: 'json', required: false, timeout: 1, retries: 0 },
+      } } }),
+      type: 'factory.stopped', stateDir: tempDir,
+    });
+    try {
+      if (failure === 'timeout') await jest.advanceTimersByTimeAsync(1000);
+      else stdin.emit('error', new Error('broken pipe'));
+
+      const result = await pending;
+      expect(result?.deliveries.map((d) => d.status)).toEqual(['failed', 'success']);
+      expect(result?.deliveries[0].error).toBe(failure === 'timeout' ? 'Command timed out after 1s' : 'broken pipe');
+      expect(spawn).toHaveBeenCalledWith('on-event', expect.objectContaining({ detached: process.platform !== 'win32' }));
+      if (process.platform !== 'win32') expect(killGroup).toHaveBeenCalledWith(-child.pid, 'SIGKILL');
+      else expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+      expect([stdin.destroyed, stdout.destroyed, stderr.destroyed]).toEqual([true, true, true]);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      stdin.destroy();
+      stdout.destroy();
+      stderr.destroy();
+    }
+  });
+
   it('catches unexpected factory emission errors and redacts the warning', async () => {
     const warn = jest.spyOn(log, 'warn').mockImplementation(() => {});
     const config = makeConfig();

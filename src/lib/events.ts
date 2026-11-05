@@ -604,19 +604,35 @@ async function deliverCommand(
   redactDiagnostic: (text: string) => string,
 ): Promise<Pick<EventDeliveryRecord, 'stdout' | 'stderr' | 'exitCode'>> {
   return new Promise((resolve, reject) => {
+    const processGroup = process.platform !== 'win32';
     const child = spawn(destination.command, {
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: process.cwd(),
+      detached: processGroup,
     });
     let stdout = '';
     let stderr = '';
     let settled = false;
+    const terminate = (): void => {
+      // Killing only the shell leaves its command running with inherited
+      // pipes, which can keep the factory alive after delivery has failed.
+      child.stdin?.destroy();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      if (processGroup && child.pid) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+          return;
+        } catch { /* the group may already have exited */ }
+      }
+      try { child.kill('SIGKILL'); } catch { /* already exited */ }
+    };
     const timeoutMs = destination.timeout > 0 ? destination.timeout * 1000 : DEFAULT_TIMEOUT_MS;
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill('SIGTERM');
+      terminate();
       reject(new Error(`Command timed out after ${destination.timeout || 10}s`));
     }, timeoutMs);
 
@@ -630,7 +646,7 @@ async function deliverCommand(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      child.kill('SIGTERM');
+      terminate();
       reject(err);
     };
     child.on('error', onError);
