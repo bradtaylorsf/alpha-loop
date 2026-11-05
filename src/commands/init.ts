@@ -356,6 +356,7 @@ automation_policy:
 # \`alpha-loop factory\` runs the loop as a parallel code factory: a PM turns
 # rough ideas (inbox.md) into issues, N developer workers build ready issues
 # in their own session branches/PRs, and a shipper merges green session PRs.
+# QA builds/smokes the remote base and files failures into the inbox.
 # The factory only asks you things in questions.md. State lives in state_dir
 # (gitignored).
 # factory:
@@ -376,6 +377,10 @@ automation_policy:
 #     auto_ready: true         # Label new issues ready immediately
 #     max_ideas_per_tick: 1
 #     timeout_seconds: 600
+#   qa:
+#     enabled: true
+#     after_merges: 5           # Positive integer; confirmed factory merges
+#     interval_minutes: 30      # Positive integer; either threshold triggers QA
 #   ship:
 #     enabled: true
 #     merge: false             # Report-only until you set this to true

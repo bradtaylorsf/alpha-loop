@@ -15,13 +15,14 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { FactoryPaths } from './config.js';
 import type { InboxIdea } from './factory-inbox.js';
 import type { PmDecision } from './factory-pm.js';
 import type { FactoryWorkerContext } from '../commands/run.js';
 
-export type WorkerRole = 'developer' | 'pm';
+export type WorkerRole = 'developer' | 'pm' | 'qa';
 
 export type WorkerExit = { exitCode: number; result: unknown | null; error?: string };
 
@@ -403,4 +404,55 @@ export function readPmWorkerContext(paths: Pick<FactoryPaths, 'workersDir'>, con
     timeoutSeconds,
     dryRun: ctx.dryRun === true,
   };
+}
+
+// ── QA worker ────────────────────────────────────────────────────────────────
+
+export type QaWorkerContext = {
+  version: 1;
+  workerId: string;
+  baseBranch: string;
+  resultPath: string;
+  merges: number;
+  startedAt: string;
+  ownerPid: number;
+  hostname: string;
+};
+
+export function spawnQaWorker(opts: {
+  paths: FactoryPaths; baseBranch: string; merges: number;
+  spawnImpl?: SpawnImpl; killGroup?: KillGroupImpl | null; now?: Date;
+}): WorkerHandle {
+  const now = opts.now ?? new Date();
+  const id = `qa-${randomUUID()}`;
+  const workerDir = join(opts.paths.workersDir, id);
+  const contextPath = join(workerDir, 'context.json');
+  writeJsonAtomic(contextPath, {
+    version: 1, workerId: id, baseBranch: opts.baseBranch, merges: opts.merges,
+    resultPath: join(workerDir, 'result.json'), startedAt: now.toISOString(), ownerPid: process.pid, hostname: hostname(),
+  } satisfies QaWorkerContext);
+  const handle = startWorker({ id, role: 'qa', workerDir,
+    args: [...process.execArgv, process.argv[1], 'factory', 'qa-worker', '--context', contextPath],
+    spawnImpl: opts.spawnImpl ?? spawn, killGroup: resolveKillGroup(opts.spawnImpl, opts.killGroup), now });
+  // The child also writes started.json on entry, closing the spawn/record crash window.
+  writeJsonAtomic(join(workerDir, 'process.json'), { pid: handle.pid });
+  return handle;
+}
+
+export function readQaWorkerContext(paths: Pick<FactoryPaths, 'workersDir'>, contextPath: string): QaWorkerContext {
+  const path = resolve(contextPath);
+  const workerDir = dirname(path);
+  const id = basename(workerDir);
+  const fail = (): never => { throw new Error('Invalid factory QA worker context'); };
+  if (dirname(workerDir) !== paths.workersDir || basename(path) !== 'context.json' || !/^qa-[A-Za-z0-9-]+$/.test(id)) fail();
+  let raw: unknown;
+  try { raw = JSON.parse(readFileSync(path, 'utf8')); } catch { fail(); }
+  if (!raw || typeof raw !== 'object') fail();
+  const ctx = raw as QaWorkerContext;
+  if (ctx.version !== 1 || ctx.workerId !== id || ctx.resultPath !== join(workerDir, 'result.json')
+    || typeof ctx.baseBranch !== 'string' || !ctx.baseBranch.trim()
+    || !Number.isSafeInteger(ctx.merges) || ctx.merges < 0
+    || !Number.isInteger(ctx.ownerPid) || ctx.ownerPid <= 0 || typeof ctx.hostname !== 'string'
+    || typeof ctx.startedAt !== 'string' || !Number.isFinite(Date.parse(ctx.startedAt))) fail();
+  return ctx;
 }

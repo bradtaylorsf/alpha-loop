@@ -9,13 +9,14 @@
  *   3. PM intake: one inbox idea at a time → a PM worker child process
  *   4. planner dispatch: fill free developer slots with `run --issue` workers
  *   5. ship pass: merge green session PRs (fail closed), ask about blockers
- *   6. write state.json + events.jsonl
+ *   6. QA checks the remote base after the merge/time threshold
+ *   7. write state.json + events.jsonl
  *
  * Everything with side effects goes through FactoryActions so tests drive the
  * whole loop with fakes, an injected clock, and an instant abortable sleep.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -26,7 +27,7 @@ import {
   type FactoryPaths,
   FACTORY_MAX_DEVELOPERS,
 } from './config.js';
-import { ensureInboxFile, nextPendingIdeas, readInbox, recoverTakenIdeas, updateIdea, type InboxIdea } from './factory-inbox.js';
+import { appendTaggedIdea, ensureInboxFile, nextPendingIdeas, readInbox, recoverTakenIdeas, updateIdea, type InboxIdea } from './factory-inbox.js';
 import { planDispatch, extractTouches, type DispatchCandidate, type DispatchPlan, type DispatchSkip } from './factory-planner.js';
 import {
   answeredQuestions,
@@ -44,11 +45,15 @@ import {
   readWorkerResult,
   spawnDeveloperWorker,
   spawnPmWorker,
+  spawnQaWorker,
+  readQaWorkerContext,
+  type QaWorkerContext,
   writeJsonAtomic,
   type PmWorkerResult,
   type WorkerExit,
   type WorkerHandle,
 } from './factory-workers.js';
+import { cleanupQaWorktree, formatQaBugIdea, isQaResult, qaFailureFingerprint, qaWorktreePath, readQaState, shouldRunQa } from './factory-qa.js';
 import { parseSubIssues } from './epics.js';
 import { ingestFeedback } from './feedback.js';
 import { closeIssue, commentIssue, getIssueWithComments, labelIssue, pollIssues, type Issue } from './github.js';
@@ -92,6 +97,10 @@ export type FactoryActions = {
   getEpicChildren(epic: number): number[];
   spawnDeveloper(req: DeveloperSpawnRequest): WorkerHandle;
   spawnPm(req: PmSpawnRequest): WorkerHandle;
+  spawnQa(req: { baseBranch: string; merges: number }): WorkerHandle;
+  qaProcessAlive(pid: number): boolean;
+  killQaProcess(pid: number, signal: NodeJS.Signals): void;
+  cleanupQa(workerId: string): string[];
   listShippable(): ShipPr[];
   updateBranch(pr: ShipPr): ReturnType<typeof updateShippablePrBranch>;
   merge(pr: ShipPr, admin: boolean): { merged: boolean; error?: string };
@@ -134,6 +143,8 @@ export type FactoryMemory = {
   branchUpdates: Record<string, { attemptedAt: string; previousHead?: string }>;
   /** Issues whose session PR this factory merged (dependency-satisfied even if still open). */
   mergedIssues: number[];
+  /** Per-base cadence and durable receipts for idempotent result recovery. */
+  qa?: Record<string, { mergesSinceLastQa: number; lastQaAt: string | null; consumed: string[] }>;
 };
 
 export type FactoryState = {
@@ -309,6 +320,14 @@ export function createDefaultFactoryActions(
       priorAnswers: req.priorAnswers,
       pm: { ...factory.pm, dryRun: ctx.dryRun },
     }),
+    spawnQa: (req) => spawnQaWorker({ paths: ctx.paths, ...req }),
+    qaProcessAlive: (pid) => {
+      try { process.kill(-pid, 0); return true; }
+      catch (err) { return (err as NodeJS.ErrnoException).code !== 'ESRCH'; }
+    },
+    killQaProcess: (pid, signal) => { try { process.kill(-pid, signal); } catch { /* already gone */ } },
+    cleanupQa: (workerId) => cleanupQaWorktree({ projectDir: process.cwd(), stateDir: ctx.paths.stateDir,
+      worktreePath: qaWorktreePath(ctx.paths.stateDir, workerId) }),
     listShippable: () => listShippablePrs(config.repo, ctx.baseBranch, factory.ship.headPrefixes, {
       requiredChecks: factory.ship.adminMerge,
     }),
@@ -357,6 +376,18 @@ type DevWorker = {
   touches: string[];
   lease: LeaseHandle | null;
   startedMs: number;
+  exit?: WorkerExit;
+  timedOut: boolean;
+  termSentMs?: number;
+  killSent: boolean;
+};
+
+type QaWorker = {
+  handle: WorkerHandle;
+  baseBranch: string;
+  merges: number;
+  startedMs: number;
+  recovered: boolean;
   exit?: WorkerExit;
   timedOut: boolean;
   termSentMs?: number;
@@ -454,7 +485,16 @@ export function readFactoryMemory(statePath: string): FactoryMemory {
         };
       }
     }
-    return { owned, shipAsked, branchUpdates, mergedIssues };
+    const qa: NonNullable<FactoryMemory['qa']> = {};
+    if (m.qa && typeof m.qa === 'object') {
+      for (const [base, entry] of Object.entries(m.qa)) {
+        if (!base.startsWith('refs/heads/') || !entry || !Number.isSafeInteger(entry.mergesSinceLastQa) || entry.mergesSinceLastQa < 0) continue;
+        qa[base] = { mergesSinceLastQa: entry.mergesSinceLastQa,
+          lastQaAt: typeof entry.lastQaAt === 'string' && Number.isFinite(Date.parse(entry.lastQaAt)) ? entry.lastQaAt : null,
+          consumed: Array.isArray(entry.consumed) ? entry.consumed.filter((id): id is string => typeof id === 'string' && /^qa-[A-Za-z0-9-]+$/.test(id)) : [] };
+      }
+    }
+    return { owned, shipAsked, branchUpdates, mergedIssues, ...(Object.keys(qa).length ? { qa } : {}) };
   } catch {
     return emptyMemory();
   }
@@ -785,11 +825,16 @@ async function superviseFactory(
   const recent: FactoryEvent[] = [];
   const devWorkers = new Map<number, DevWorker>();
   let pmWorker: PmWorker | null = null;
+  let qaWorker: QaWorker | null = null;
   const failedThisRun = new Set<number>();
   const applyAttempts = new Map<string, number>();
   /** `${id}|${key}|${answer hash}` of answers applied in this run (survives a stale-buffer revert of the file). */
   const appliedThisRun = new Set<string>();
   const memory = readFactoryMemory(paths.statePath);
+  memory.qa ??= {};
+  const qaMemoryFor = (base: string): NonNullable<FactoryMemory['qa']>[string] =>
+    memory.qa![`refs/heads/${base}`] ??= { mergesSinceLastQa: 0, lastQaAt: null, consumed: [] };
+  const qaMemory = qaMemoryFor(run.baseBranch);
   const mergedIssues = new Set(memory.mergedIssues);
   let lastPlan: FactoryState['lastPlan'] = { dispatched: [], skipped: [] };
   let lastDispatchDegraded = false;
@@ -864,8 +909,9 @@ async function superviseFactory(
   const liveHandles = (): WorkerHandle[] => [
     ...[...devWorkers.values()].filter((w) => !w.exit).map((w) => w.handle),
     ...(pmWorker && !pmWorker.exit ? [pmWorker.handle as WorkerHandle] : []),
+    ...(qaWorker && !qaWorker.exit ? [qaWorker.handle] : []),
   ];
-  const workerCount = (): number => devWorkers.size + (pmWorker ? 1 : 0);
+  const workerCount = (): number => devWorkers.size + (pmWorker ? 1 : 0) + (qaWorker ? 1 : 0);
   const killAll = (signal: NodeJS.Signals): void => {
     for (const handle of liveHandles()) handle.kill(signal);
   };
@@ -925,6 +971,7 @@ async function superviseFactory(
       workers: [
         ...[...devWorkers.values()].map((w) => w.handle),
         ...(pmWorker ? [pmWorker.handle] : []),
+        ...(qaWorker ? [qaWorker.handle] : []),
       ].map((h) => ({
         id: h.id,
         role: h.role ?? 'pm',
@@ -1180,6 +1227,111 @@ async function superviseFactory(
     }
   };
 
+  const qaReceipt = (base: string, id: string): boolean => qaMemoryFor(base).consumed.includes(id);
+
+  const reapQa = (interrupted = false): void => {
+    const w = qaWorker;
+    if (!w?.exit) return;
+    const raw = w.exit.result;
+    const result = isQaResult(raw) && raw.baseBranch === w.baseBranch ? raw : null;
+    const attempted = result !== null || existsSync(join(paths.workersDir, w.handle.id, 'attempted.json'));
+    const cadence = qaMemoryFor(w.baseBranch);
+    let cleanupErrors = result?.cleanupErrors ?? [];
+    if (cleanupErrors.length > 0 || (!result && (attempted || existsSync(qaWorktreePath(paths.stateDir, w.handle.id))))) {
+      try { cleanupErrors = [...cleanupErrors, ...actions.cleanupQa(w.handle.id)]; }
+      catch (err) { cleanupErrors.push(errorMessage(err)); }
+    }
+    if (cleanupErrors.length) log.warn(`Factory QA cleanup: ${cleanupErrors.join('; ')}`);
+    if (!qaReceipt(w.baseBranch, w.handle.id)) {
+      // Append before the receipt. A crash between them repeats only the locked dedupe lookup.
+      if (result?.status === 'failure' && !interrupted) {
+        const { idea, created } = appendTaggedIdea(paths.inboxPath, formatQaBugIdea(result), {
+          source: 'qa', fingerprint: qaFailureFingerprint(result.failure!),
+        });
+        record('qa.bug', { workerId: w.handle.id, idea: idea.id, created });
+      }
+      if (attempted) {
+        cadence.mergesSinceLastQa = Math.max(0, cadence.mergesSinceLastQa - w.merges);
+        cadence.lastQaAt = result?.startedAt ?? w.handle.startedAt;
+      }
+      cadence.consumed.push(w.handle.id);
+      // Persist counter and receipt atomically before acknowledging the worker.
+      if (!writeState()) throw new Error('Could not persist QA result receipt');
+    }
+    record(interrupted ? 'qa.stopped' : result ? `qa.${result.status}` : 'qa.worker-failed', {
+      workerId: w.handle.id, baseBranch: w.baseBranch, testedSha: result?.testedSha,
+      error: result ? undefined : w.exit.error ?? 'missing or invalid QA result', cleanupErrors,
+    });
+    if (!result && !interrupted) log.warn(`Factory QA: ${w.exit.error ?? 'missing or invalid worker result'} (${w.handle.logPath})`);
+    qaWorker = null;
+    lastWorkerFinishedMs = actions.now().getTime();
+  };
+
+  /** Adopt unconsumed QA children, including a child surviving its old supervisor. */
+  const recoverQa = (): void => {
+    if (qaWorker && !qaWorker.recovered) return;
+    if (!qaWorker) {
+      let names: string[] = [];
+      try { names = readdirSync(paths.workersDir).filter(id => /^qa-[A-Za-z0-9-]+$/.test(id)).sort(); } catch { return; }
+      for (const id of names) {
+        let ctx: QaWorkerContext;
+        try { ctx = readQaWorkerContext(paths, join(paths.workersDir, id, 'context.json')); } catch { continue; }
+        if (qaReceipt(ctx.baseBranch, id)) continue;
+        const resultPath = ctx.resultPath;
+        // Polling is driven by the existing tick, never a background timer.
+        const handle: WorkerHandle = { id, role: 'qa', pid: null, startedAt: ctx.startedAt,
+          resultPath, contextPath: join(paths.workersDir, id, 'context.json'), logPath: join(paths.workersDir, id, 'worker.log'),
+          done: new Promise(() => {}),
+          kill: (signal = 'SIGTERM') => { if (handle.pid) actions.killQaProcess(handle.pid, signal); } };
+        qaWorker = { handle, baseBranch: ctx.baseBranch, merges: ctx.merges, recovered: true,
+          startedMs: Date.parse(ctx.startedAt), timedOut: false, killSent: false };
+        record('qa.recovered', { workerId: id });
+        break;
+      }
+    }
+    const w = qaWorker;
+    if (!w) return;
+    let ctx: QaWorkerContext;
+    try { ctx = readQaWorkerContext(paths, w.handle.contextPath); } catch { return; }
+    // PIDs are meaningful only on the host which spawned the worker. Fail closed elsewhere.
+    if (ctx.hostname !== hostname()) return;
+    const dir = join(paths.workersDir, w.handle.id);
+    const started = readWorkerResult(join(dir, 'started.json')).result as { pid?: unknown } | null;
+    const spawned = readWorkerResult(join(dir, 'process.json')).result as { pid?: unknown } | null;
+    const pid = started?.pid ?? spawned?.pid;
+    if (typeof pid === 'number' && Number.isInteger(pid) && pid > 0) {
+      w.handle.pid = pid;
+      if (actions.qaProcessAlive(pid)) return;
+    } else if (spawned?.pid === null) {
+      // Spawn failed; no checks attempted, no merges consumed.
+    } else {
+      // A crash between spawn and recording its PID is ambiguous. The child's
+      // started.json resolves it; until then do not start or clean another run.
+      return;
+    }
+    const { result, error } = readWorkerResult(w.handle.resultPath);
+    w.exit = { exitCode: isQaResult(result) ? 0 : 1, result, error };
+    reapQa();
+    recoverQa();
+  };
+
+  const qaPass = (): void => {
+    if (qaWorker || (status !== 'running' && qaMemory.mergesSinceLastQa < factory.qa.afterMerges)) return;
+    const state = readQaState(paths.stateDir, run.baseBranch);
+    const lastQaAt = [state.lastQaAt, qaMemory.lastQaAt].filter((at): at is string => at !== null)
+      .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
+    if (!shouldRunQa({ mergesSinceLastQa: qaMemory.mergesSinceLastQa, lastQaAt, now: actions.now(), config: factory.qa })) return;
+    try {
+      const merges = qaMemory.mergesSinceLastQa;
+      const handle = actions.spawnQa({ baseBranch: run.baseBranch, merges });
+      const w: QaWorker = { handle, baseBranch: run.baseBranch, merges, startedMs: actions.now().getTime(),
+        recovered: false, timedOut: false, killSent: false };
+      handle.done.then(exit => { w.exit = exit; }, err => { w.exit = { exitCode: 1, result: null, error: errorMessage(err) }; });
+      qaWorker = w;
+      record('qa.started', { workerId: handle.id, baseBranch: run.baseBranch, merges });
+    } catch (err) { record('qa.spawn-failed', { error: errorMessage(err) }); log.warn(`Factory QA: ${errorMessage(err)}`); }
+  };
+
   const enforceTimeouts = (): void => {
     const now = actions.now().getTime();
     const check = (w: { handle: Pick<WorkerHandle, 'id'> & { kill?: WorkerHandle['kill'] }; startedMs: number; exit?: WorkerExit; timedOut: boolean; termSentMs?: number; killSent: boolean }, limitMs: number, label: string): void => {
@@ -1198,6 +1350,7 @@ async function superviseFactory(
     };
     for (const w of devWorkers.values()) check(w, workerTimeoutMs, `developer worker for #${w.issue}`);
     if (pmWorker) check(pmWorker, pmTimeoutMs, `PM worker for ${pmWorker.idea.id}`);
+    if (qaWorker) check(qaWorker, workerTimeoutMs, 'QA worker');
   };
 
   const requeueIdea = (q: FactoryQuestion): { applied: boolean; note: string } | null => {
@@ -1536,6 +1689,7 @@ async function superviseFactory(
         }
         if (result.merged) {
           counts.merged += 1;
+          qaMemory.mergesSinceLastQa += 1;
           decisions.push({ pr: pr.number, action: 'merge', reason: decision.reason });
           record('ship.merged', { pr: pr.number, admin: decision.admin, issue });
           log.success(`Factory ship: merged PR #${pr.number}${decision.admin ? ' (admin)' : ''}`);
@@ -1640,6 +1794,8 @@ async function superviseFactory(
     await flushMicrotasks();
     reapDevelopers();
     reapPm('tick');
+    recoverQa();
+    reapQa();
 
     const live = liveHandles();
     if (live.length > 0) {
@@ -1656,6 +1812,11 @@ async function superviseFactory(
 
     // Workers that exited during shutdown: keep successes, never count our own kill as a failure.
     reapDevelopers(true);
+    if (qaWorker?.recovered) {
+      const w = qaWorker;
+      if (w.handle.pid && !actions.qaProcessAlive(w.handle.pid)) w.exit = { exitCode: 1, ...readWorkerResult(w.handle.resultPath) };
+    }
+    reapQa(true);
     for (const w of devWorkers.values()) {
       // Still not exited even after SIGKILL: keep its lease so the issue is not
       // re-dispatched into a worktree something is still writing to. The lease
@@ -1700,6 +1861,7 @@ async function superviseFactory(
     }
     refreshSupervisor();
     recoverOrphanedIdeas();
+    recoverQa();
     writeState();
 
     while (!stopRequested) {
@@ -1708,6 +1870,8 @@ async function superviseFactory(
       if (!refreshSupervisor()) break;
       reapDevelopers();
       reapPm();
+      recoverQa();
+      reapQa();
       recoverOrphanedIdeas();
       enforceTimeouts();
       applyAnswers();
@@ -1716,7 +1880,7 @@ async function superviseFactory(
         pmIntake();
         dispatchedThisTick = await dispatch();
       }
-      if (!stopRequested) shipPass();
+      if (!stopRequested) { shipPass(); qaPass(); }
       refreshDevLeases();
 
       if (status === 'running') {

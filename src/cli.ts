@@ -78,7 +78,7 @@ program
 // developer/shipper factory; the rest are the human's side of it.
 const factoryCmd = program
   .command('factory')
-  .description('Run the parallel code factory: PM, planner, N developers, CI-gated shipper');
+  .description('Run the parallel code factory: PM, planner, N developers, CI-gated shipper, post-merge QA');
 
 factoryCmd
   .command('run', { isDefault: true })
@@ -135,6 +135,14 @@ factoryCmd
   .action(async (id: string, text: string[]) => {
     const { factoryAnswerCommand } = await import('./commands/factory.js');
     factoryAnswerCommand(id, text);
+  });
+
+factoryCmd
+  .command('qa-worker', { hidden: true })
+  .requiredOption('--context <path>', 'QA worker context file')
+  .action(async (options) => {
+    const { factoryQaWorkerCommand } = await import('./commands/factory.js');
+    factoryQaWorkerCommand(options);
   });
 
 factoryCmd

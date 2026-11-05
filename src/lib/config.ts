@@ -243,6 +243,13 @@ export type FactoryShipConfig = {
   headPrefixes: string[];
 };
 
+/** Post-merge smoke checks on a fresh remote-base worktree. */
+export type FactoryQaConfig = {
+  enabled: boolean;
+  afterMerges: number;
+  intervalMinutes: number;
+};
+
 /** `alpha-loop factory` — parallel multi-role supervisor configuration. */
 export type FactoryConfig = {
   /** Parallel developer workers (1..16). */
@@ -265,6 +272,7 @@ export type FactoryConfig = {
   workerTimeoutMinutes: number;
   pm: FactoryPmConfig;
   ship: FactoryShipConfig;
+  qa: FactoryQaConfig;
 };
 
 /** Absolute factory file locations, resolved from the project root. */
@@ -366,6 +374,7 @@ export const DEFAULT_FACTORY_CONFIG: FactoryConfig = {
   avoidOverlap: true,
   epics: [],
   workerTimeoutMinutes: 120,
+  qa: { enabled: true, afterMerges: 5, intervalMinutes: 30 },
   pm: {
     enabled: true,
     agent: '',
@@ -1191,6 +1200,25 @@ function parseFactoryShipConfig(raw: unknown, base: FactoryShipConfig): FactoryS
   return ship;
 }
 
+function parseFactoryQaConfig(raw: unknown, base: FactoryQaConfig): FactoryQaConfig {
+  if (raw === undefined) return { ...base };
+  if (!isPlainObject(raw)) {
+    console.warn('[config] factory.qa: expected an object');
+    return { ...base };
+  }
+  const threshold = (value: unknown, key: string, fallback: number): number => {
+    if (value === undefined) return fallback;
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return value;
+    console.warn(`[config] factory.qa.${key}: expected a positive integer`);
+    return fallback;
+  };
+  return {
+    enabled: parseBooleanValue(raw.enabled, 'factory.qa.enabled', base.enabled),
+    afterMerges: threshold(raw.after_merges, 'after_merges', base.afterMerges),
+    intervalMinutes: threshold(raw.interval_minutes, 'interval_minutes', base.intervalMinutes),
+  };
+}
+
 function parseFactoryConfig(raw: unknown): FactoryConfig | undefined {
   if (!isPlainObject(raw)) {
     if (raw !== undefined && raw !== null) console.warn('[config] factory: expected an object');
@@ -1200,6 +1228,7 @@ function parseFactoryConfig(raw: unknown): FactoryConfig | undefined {
     ...DEFAULT_FACTORY_CONFIG,
     epics: [...DEFAULT_FACTORY_CONFIG.epics],
     pm: { ...DEFAULT_FACTORY_CONFIG.pm },
+    qa: { ...DEFAULT_FACTORY_CONFIG.qa },
     ship: { ...DEFAULT_FACTORY_CONFIG.ship, headPrefixes: [...DEFAULT_FACTORY_CONFIG.ship.headPrefixes] },
   };
 
@@ -1228,17 +1257,19 @@ function parseFactoryConfig(raw: unknown): FactoryConfig | undefined {
   );
   factory.pm = parseFactoryPmConfig(raw.pm, factory.pm);
   factory.ship = parseFactoryShipConfig(raw.ship, factory.ship);
+  factory.qa = parseFactoryQaConfig(raw.qa, factory.qa);
   return factory;
 }
 
 /**
  * Merge factory config layers: defaults < yaml < overrides, with nested
- * pm/ship merged key-by-key so a partial override keeps the other defaults.
+ * pm/ship/qa merged key-by-key so a partial override keeps the other defaults.
  */
 function mergeFactoryConfig(...layers: Array<Partial<FactoryConfig> | undefined>): FactoryConfig {
   let merged: FactoryConfig = {
     ...DEFAULT_FACTORY_CONFIG,
     pm: { ...DEFAULT_FACTORY_CONFIG.pm },
+    qa: { ...DEFAULT_FACTORY_CONFIG.qa },
     ship: { ...DEFAULT_FACTORY_CONFIG.ship },
   };
   for (const layer of layers) {
@@ -1247,6 +1278,7 @@ function mergeFactoryConfig(...layers: Array<Partial<FactoryConfig> | undefined>
       ...merged,
       ...layer,
       pm: { ...merged.pm, ...layer.pm },
+      qa: { ...merged.qa, ...layer.qa },
       ship: { ...merged.ship, ...layer.ship },
     };
   }

@@ -351,7 +351,7 @@ During live verification, the agent takes screenshots at key states and saves th
 | `alpha-loop run --verify-only <N>` | Run just the epic verification pass — evaluates merged PRs against acceptance criteria |
 | `alpha-loop daemon` | Run hosted daemon mode continuously for repo stewardship |
 | `alpha-loop daemon --mode feedback-only` | Poll feedback and resume eligible sessions without triage or new work selection |
-| `alpha-loop factory` | Run the parallel code factory: PM turns inbox ideas into issues, N developers build in parallel, the shipper merges green PRs (see [docs/factory-mode.md](docs/factory-mode.md)) |
+| `alpha-loop factory` | Run the parallel code factory: PM turns inbox ideas into issues, N developers build in parallel, the shipper merges green PRs, QA checks the base and files bugs into the inbox (see [docs/factory-mode.md](docs/factory-mode.md)) |
 | `alpha-loop factory --dry-run` | Print what one factory tick would ingest, dispatch, and ship, without changing anything |
 | `alpha-loop factory status` | Show the supervisor, running workers, last plan, counts, and open questions |
 | `alpha-loop factory idea <text>` | Add a rough idea to the factory inbox |
@@ -498,6 +498,14 @@ test_command: pnpm test
 dev_command: pnpm dev
 auto_merge: true
 
+# Factory post-merge QA (see docs/factory-mode.md)
+factory:
+  qa:
+    enabled: true
+    after_merges: 5       # positive integer; confirmed factory merges
+    interval_minutes: 30 # positive integer; either threshold triggers QA
+# smoke_test: pnpm smoke # QA runs after pnpm build; blank falls back to test_command
+
 # Optional browser QA profile for websites and web apps
 web_app:
   build_command: pnpm build
@@ -614,7 +622,10 @@ eval_dir: .alpha-loop/evals
 | `batch` | `false` | Enable batch mode — process multiple issues per agent call |
 | `batch_size` | `5` | Number of issues per batch when batch mode is enabled |
 | `quick` | `false` | Quick mode — plan+build+commit per issue on one shared worktree, single test/review/PR pass at the end |
-| `smoke_test` | (none) | Shell command to run as a final smoke test after session review |
+| `smoke_test` | (none) | Final session smoke test; factory QA also runs it after `pnpm build`, falling back to `test_command` |
+| `factory.qa.enabled` | `true` | Run an initial and periodic QA check of the remote base in a fresh worktree |
+| `factory.qa.after_merges` | `5` | Positive integer: confirmed merges before another QA check |
+| `factory.qa.interval_minutes` | `30` | Positive integer: minutes between QA attempts; either cadence threshold triggers a check |
 | `web_app.setup_command` | top-level `setup_command` | Optional setup command for website/app repos |
 | `web_app.build_command` | package `build` script | Build command captured as part of web/app verification |
 | `web_app.test_command` | top-level `test_command` | Test command for the web/app profile |
@@ -955,6 +966,7 @@ What needs to be done.
 | `.alpha-loop/sessions/<session>/session.json` | No (gitignored) | Durable resumable session state with issue, branch, worktree, PR, stage, status, prompts, transcripts, and logs |
 | `.alpha-loop/sessions/<session>/session.lock` | No (gitignored) | Held by the live run or resume that owns the session; a second run of the same epic/milestone fails fast, and locks from dead processes are reclaimed automatically |
 | `.alpha-loop/sessions/queue-<timestamp>/queue.json` | No (gitignored) | Multi-epic queue manifest with status, dependency waves, concurrency, session PRs, logs, and failures |
+| `.alpha-loop/factory/qa.json` | No (gitignored) | Factory QA attempt time and last green SHA for the selected base; failures enter the factory inbox with dedupe metadata |
 | `.alpha-loop/feedback/` | No (gitignored) | Local idempotency records for external feedback adapter events |
 | `.alpha-loop/auth/` | No (gitignored) | Saved browser auth state for verification |
 | `.worktrees/` | No (gitignored) | Temporary git worktrees during processing |

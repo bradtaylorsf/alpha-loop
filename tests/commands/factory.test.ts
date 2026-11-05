@@ -11,12 +11,13 @@ jest.mock('../../src/lib/github', () => ({
 }));
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   factoryAnswerCommand,
   factoryIdeaCommand,
   factoryPmWorkerCommand,
+  factoryQaWorkerCommand,
   factoryQuestionsCommand,
   factoryRunCommand,
   factoryStatusCommand,
@@ -381,5 +382,50 @@ describe('factory pm-worker', () => {
     expect(runPm).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
     expect(mockError).toHaveBeenCalledWith(expect.stringMatching(/Invalid factory PM worker context/));
+  });
+});
+
+
+describe('factory qa-worker', () => {
+  function context(): string {
+    const dir = join(paths.workersDir, 'qa-test');
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, 'context.json');
+    writeFileSync(path, JSON.stringify({ version: 1, workerId: 'qa-test', baseBranch: 'feat/qa', merges: 5,
+      resultPath: join(dir, 'result.json'), startedAt: new Date().toISOString(), ownerPid: process.pid, hostname: hostname() }));
+    return path;
+  }
+
+  it('runs QA with the resolved base, shared commands and timeout; writes only the child result', () => {
+    const path = context();
+    const result = { version: 1, status: 'success', baseBranch: 'feat/qa', testedSha: 'a'.repeat(40), lastGreenSha: null,
+      startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), commits: [], historyKind: 'unavailable', cleanupErrors: [] };
+    const check = jest.fn().mockReturnValue(result);
+    factoryQaWorkerCommand({ context: path }, { config: { ...config, smokeTest: 'pnpm smoke', testCommand: 'pnpm test', setupCommand: 'pnpm setup' }, runQa: check });
+    expect(check).toHaveBeenCalledWith(expect.objectContaining({ projectDir: process.cwd(), baseBranch: 'feat/qa',
+      stateDir: paths.stateDir, workerId: 'qa-test', smokeTest: 'pnpm smoke', testCommand: 'pnpm test', setupCommand: 'pnpm setup', timeoutMinutes: 120 }));
+    expect(JSON.parse(readFileSync(join(dirname(path), 'result.json'), 'utf8'))).toEqual(result);
+    expect(existsSync(paths.inboxPath)).toBe(false);
+    expect(existsSync(join(paths.stateDir, 'qa-worker.lock'))).toBe(false);
+  });
+
+  it('rejects invalid contexts and dry-run before checks or state writes', () => {
+    const check = jest.fn();
+    factoryQaWorkerCommand({ context: join(root, 'context.json') }, { config, runQa: check });
+    expect(check).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    factoryQaWorkerCommand({ context: context() }, { config: { ...config, dryRun: true }, runQa: check });
+    expect(check).not.toHaveBeenCalled();
+    expect(existsSync(join(paths.stateDir, 'qa.json'))).toBe(false);
+  });
+
+  it('refuses to overlap a surviving QA process and releases the lease on errors', () => {
+    const path = context();
+    const lease = acquireLease(paths.stateDir, 'qa-worker', { owner: 'old-qa', aliveOverridesTtl: true });
+    expect(lease).not.toBeNull();
+    const check = jest.fn();
+    factoryQaWorkerCommand({ context: path }, { config, runQa: check });
+    expect(check).not.toHaveBeenCalled();
+    expect(mockError).toHaveBeenCalledWith(expect.stringContaining('Another QA worker'));
   });
 });

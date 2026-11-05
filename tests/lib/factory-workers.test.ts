@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { DEFAULT_FACTORY_CONFIG, resolveFactoryPaths, type Config, type FactoryPaths } from '../../src/lib/config.js';
 import {
   readPmProgress,
+  readQaWorkerContext,
+  spawnQaWorker,
   readPmWorkerContext,
   readWorkerResult,
   sessionSlugFor,
@@ -42,6 +44,25 @@ describe('factory workers', () => {
 
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it('spawns QA from the project root and validates its context and result boundary', async () => {
+    const { impl, calls, child } = fakeSpawn();
+    const killGroup = jest.fn();
+    const handle = spawnQaWorker({ paths, baseBranch: 'feat/qa', merges: 3, spawnImpl: impl, killGroup, now: NOW });
+    expect(handle.role).toBe('qa');
+    expect(calls[0].args.slice(-4)).toEqual(['factory', 'qa-worker', '--context', handle.contextPath]);
+    expect(calls[0].options).toMatchObject({ cwd: process.cwd(), detached: true });
+    const ctx = readQaWorkerContext(paths, handle.contextPath);
+    expect(ctx).toMatchObject({ baseBranch: 'feat/qa', merges: 3, resultPath: handle.resultPath });
+    expect(() => readQaWorkerContext(paths, join(root, 'context.json'))).toThrow('Invalid factory QA worker context');
+    writeFileSync(handle.contextPath, JSON.stringify({ ...ctx, resultPath: join(root, 'arbitrary.json') }));
+    expect(() => readQaWorkerContext(paths, handle.contextPath)).toThrow('Invalid factory QA worker context');
+    writeFileSync(handle.resultPath, JSON.stringify({ status: 'failure' }));
+    handle.kill('SIGTERM');
+    expect(killGroup).toHaveBeenCalledWith(4242, 'SIGTERM');
+    child.emit('close', 0, null);
+    expect(await handle.done).toMatchObject({ exitCode: 0, result: { status: 'failure' } });
   });
 
   describe('sessionSlugFor', () => {
