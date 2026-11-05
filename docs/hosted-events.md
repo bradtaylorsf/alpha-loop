@@ -75,9 +75,10 @@ Canonical factory events and delivery attempts are written to `<state_dir>/lifec
 (by default `.alpha-loop/factory/lifecycle-events.jsonl`). The existing `events.jsonl` supervisor
 audit stream is separate. Factory delivery is best effort: failures are logged, including failures
 of `required: true` destinations, and later destinations still run. Configured redaction also covers
-factory delivery responses, stdout/stderr, and warnings. The supervisor drains queued notifications
-before returning; retries and timeouts still apply. `factory --dry-run` sends nothing and writes no
-files. See [factory mode](factory-mode.md#notifications) for event triggers.
+factory delivery responses, stdout/stderr, and warnings; responses and command output are redacted
+before truncation so secrets crossing the diagnostic cutoff remain hidden. The supervisor drains
+queued notifications before returning; retries and timeouts still apply. `factory --dry-run` sends
+nothing and writes no files. See [factory mode](factory-mode.md#notifications) for event triggers.
 
 ## Slack
 

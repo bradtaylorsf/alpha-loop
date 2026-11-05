@@ -326,6 +326,48 @@ describe('lifecycle events', () => {
     expect(warn).toHaveBeenCalledTimes(2);
   });
 
+  it.each([200, 500])('redacts secrets crossing the webhook diagnostic cutoff for HTTP %s', async (status) => {
+    process.env.FACTORY_SECRET = 'environment-secret';
+    process.env.EVENT_URL = 'https://events.example.test/hook';
+    const response = 'x'.repeat(1985) + process.env.FACTORY_SECRET + 'y'.repeat(50);
+    globalThis.fetch = jest.fn().mockResolvedValue(new Response(response, { status })) as unknown as typeof fetch;
+    const warn = jest.spyOn(log, 'warn').mockImplementation(() => {});
+    const result = await emitFactoryEvent({
+      config: makeConfig({ events: { includePromptText: false, redact: ['FACTORY_SECRET'], destinations: {
+        webhook: { type: 'webhook', urlEnv: 'EVENT_URL', events: ['*'], format: 'json', required: true, timeout: 5, retries: 0 },
+      } } }),
+      type: 'factory.stopped', stateDir: tempDir,
+    });
+
+    expect(result?.deliveries[0].status).toBe(status === 200 ? 'success' : 'failed');
+    expect(result?.deliveries[0].responseBody).toContain('[REDACTED]');
+    expect(result?.deliveries[0].responseBody?.length).toBeLessThanOrEqual(2000);
+    for (const output of [JSON.stringify(result), readFileSync(join(tempDir, 'lifecycle-events.jsonl'), 'utf-8'), JSON.stringify(warn.mock.calls)]) {
+      expect(output).not.toContain('environment-sec');
+    }
+  });
+
+  it.each([0, 1])('redacts secrets crossing command stdout/stderr cutoffs for exit code %s', async (exitCode) => {
+    process.env.FACTORY_SECRET = 'environment-secret';
+    const command = `"${process.execPath}" -e "process.stdin.resume();const output='x'.repeat(1985)+'environment-secret'+'y'.repeat(50);process.stdout.write(output);process.stderr.write(output);process.exitCode=${exitCode}"`;
+    const warn = jest.spyOn(log, 'warn').mockImplementation(() => {});
+    const result = await emitFactoryEvent({
+      config: makeConfig({ events: { includePromptText: false, redact: ['FACTORY_SECRET'], destinations: {
+        command: { type: 'command', command, stdin: 'json', events: ['*'], format: 'json', required: true, timeout: 5, retries: 0 },
+      } } }),
+      type: 'factory.stopped', stateDir: tempDir,
+    });
+
+    expect(result?.deliveries[0].status).toBe(exitCode === 0 ? 'success' : 'failed');
+    for (const output of [result?.deliveries[0].stdout, result?.deliveries[0].stderr]) {
+      expect(output).toContain('[REDACTED]');
+      expect(output?.length).toBeLessThanOrEqual(2000);
+    }
+    for (const output of [JSON.stringify(result), readFileSync(join(tempDir, 'lifecycle-events.jsonl'), 'utf-8'), JSON.stringify(warn.mock.calls)]) {
+      expect(output).not.toContain('environment-sec');
+    }
+  });
+
   it.each(['slack', 'teams', 'discord'] as const)('includes the question and answer instructions in %s factory notifications', async (format) => {
     process.env.EVENT_URL = 'https://events.example.test/hook';
     const fetchMock = jest.fn().mockResolvedValue(new Response('ok'));

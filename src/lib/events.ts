@@ -557,13 +557,14 @@ function matchingDestinations(config: Config, eventType: EventName): Array<[stri
     .filter(([, destination]) => eventMatchesDestination(eventType, destination));
 }
 
-function responseText(response: Response): Promise<string> {
-  return response.text().then((text) => text.slice(0, MAX_RESPONSE_CHARS)).catch(() => '');
+function responseText(response: Response, redactDiagnostic: (text: string) => string): Promise<string> {
+  return response.text().then((text) => redactDiagnostic(text).slice(0, MAX_RESPONSE_CHARS)).catch(() => '');
 }
 
 async function deliverWebhook(
   destination: WebhookEventDestinationConfig,
   event: LifecycleEvent,
+  redactDiagnostic: (text: string) => string,
 ): Promise<Pick<EventDeliveryRecord, 'responseStatus' | 'responseBody'>> {
   const url = process.env[destination.urlEnv];
   if (!url) throw new Error(`Environment variable ${destination.urlEnv} is not set`);
@@ -587,7 +588,7 @@ async function deliverWebhook(
       body,
       signal: controller.signal,
     });
-    const bodyText = await responseText(response);
+    const bodyText = await responseText(response, redactDiagnostic);
     if (!response.ok) {
       throw new WebhookDeliveryError(response.status, bodyText);
     }
@@ -600,6 +601,7 @@ async function deliverWebhook(
 async function deliverCommand(
   destination: CommandEventDestinationConfig,
   event: LifecycleEvent,
+  redactDiagnostic: (text: string) => string,
 ): Promise<Pick<EventDeliveryRecord, 'stdout' | 'stderr' | 'exitCode'>> {
   return new Promise((resolve, reject) => {
     const child = spawn(destination.command, {
@@ -640,8 +642,8 @@ async function deliverCommand(
       settled = true;
       clearTimeout(timeout);
       const result = {
-        stdout: stdout.trim().slice(0, MAX_RESPONSE_CHARS),
-        stderr: stderr.trim().slice(0, MAX_RESPONSE_CHARS),
+        stdout: redactDiagnostic(stdout).trim().slice(0, MAX_RESPONSE_CHARS),
+        stderr: redactDiagnostic(stderr).trim().slice(0, MAX_RESPONSE_CHARS),
         exitCode: code ?? 1,
       };
       if ((code ?? 1) !== 0) {
@@ -680,6 +682,7 @@ async function deliverDestination(
   destination: EventDestinationConfig,
   event: LifecycleEvent,
   dryRun: boolean,
+  redactDiagnostic: (text: string) => string,
 ): Promise<EventDeliveryRecord[]> {
   if (dryRun) {
     log.dry(`Would deliver ${event.type} to ${name} (${destination.type}, ${destination.format})`);
@@ -720,8 +723,8 @@ async function deliverDestination(
     const started = Date.now();
     try {
       const details = destination.type === 'webhook'
-        ? await deliverWebhook(destination, event)
-        : await deliverCommand(destination, event);
+        ? await deliverWebhook(destination, event, redactDiagnostic)
+        : await deliverCommand(destination, event, redactDiagnostic);
       records.push({
         kind: 'delivery',
         eventId: event.id,
@@ -785,8 +788,11 @@ async function emitEvent(input: EmitLifecycleEventInput, bestEffort: boolean): P
     });
   }
 
+  // Redact complete diagnostics before truncation can leave a secret prefix
+  // that no longer matches its configured value.
+  const redactDiagnostic = (text: string): string => bestEffort ? redactEventData(text, input.config) : text;
   for (const [name, destination] of destinations) {
-    const rawRecords = await deliverDestination(name, destination, event, input.config.dryRun);
+    const rawRecords = await deliverDestination(name, destination, event, input.config.dryRun, redactDiagnostic);
     const records = bestEffort ? redactEventData(rawRecords, input.config) : rawRecords;
     deliveries.push(...records);
     if (!input.config.dryRun) {
