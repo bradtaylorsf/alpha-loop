@@ -181,7 +181,8 @@ conflict questions, and report-only behavior. The script uses `pnpm exec jest` s
 
 `src/lib/factory-review.ts` exports `reviewPr(config, prNumber, { spawn?, cwd? })`. It reviews the
 complete session PR diff from the merge base to the captured head, using the PR's actual base
-branch. It runs in a temporary standalone clone with independent Git metadata, detached at that
+branch. It clones through `gh repo clone`, honoring the configured Git protocol and authentication.
+It runs in a temporary standalone clone with independent Git metadata, detached at that
 head, with its remote removed before the agent starts. It does not install dependencies or link
 environment files. The prompt requires inspection only: no fixes, commits, pushes, project scripts
 or agent-side GitHub writes. The checkout is removed on success or failure.
@@ -190,6 +191,11 @@ The agent/model comes from `pipeline.review`, falling back to `reviewModel` and 
 agent/model. The timeout uses `agent_timeout`, capped at 30 minutes. Tests can inject `spawn`;
 `cwd` defaults to the caller's working directory and is passed explicitly to GitHub operations.
 `config.dryRun` returns without spawning, cloning, or changing GitHub.
+
+The reviewer requests `AgentOptions.finalResponseOnly` from the shared runner. Claude uses its
+terminal result, Codex/Ollama use stdout without progress from stderr, and OpenCode uses JSON events
+from a completed final step. Missing or errored results cannot grant approval. Other runner callers
+retain their existing output behavior unless they opt in.
 
 The module owns the GitHub writes. It revokes any old `factory-reviewed` label before re-review,
 requires successful agent output, and rejects a changed head or base before publishing. It creates

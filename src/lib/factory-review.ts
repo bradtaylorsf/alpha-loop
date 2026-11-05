@@ -149,9 +149,9 @@ function prepareCheckout(repo: string, pr: FactoryReviewPr, root: string, cwd: s
     cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 120_000, maxBuffer: 64 * 1024 * 1024,
   });
-  const url = github(`gh repo view ${shellQuote(repo)} --json url --jq '.url'`, cwd).trim();
-  if (!url) throw new Error('Factory review: repository URL is missing');
-  git(['clone', '--no-local', '--no-checkout', '--', url, checkout], root);
+  // Let gh honor the authenticated user's git_protocol (including SSH-only credentials).
+  // Forks must not gain an extra upstream remote that survives origin removal below.
+  github(`gh repo clone ${shellQuote(repo)} ${shellQuote(checkout)} --no-upstream -- --no-local --no-checkout`, cwd);
   git(['fetch', '--no-tags', 'origin',
     `+refs/pull/${pr.number}/head:refs/factory-review/head`,
     `+refs/heads/${pr.baseRefName}:refs/factory-review/base`,
@@ -239,7 +239,7 @@ export async function reviewPr(
       ? Math.min(config.agentTimeout * 1000, MAX_AGENT_TIMEOUT_MS) : MAX_AGENT_TIMEOUT_MS;
     const result = await (opts.spawn ?? spawnAgent)({
       agent: agent as AgentType, model, cwd: checkout,
-      prompt: buildFactoryReviewPrompt(pr, diff), timeout,
+      prompt: buildFactoryReviewPrompt(pr, diff), timeout, finalResponseOnly: true,
     });
     if (result.exitCode !== 0 || result.resultIsError) {
       throw new Error(`Factory review agent failed for PR #${prNumber} (exit ${result.exitCode})`);

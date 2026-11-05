@@ -108,6 +108,8 @@ export type AgentOptions = {
   cwd: string;
   logFile?: string;
   verbose?: boolean;
+  /** Return only the final assistant response, excluding CLI logs and tool output. */
+  finalResponseOnly?: boolean;
   /** Timeout in milliseconds. Defaults to 30 minutes. */
   timeout?: number;
   /**
@@ -210,11 +212,40 @@ export function buildAgentArgs(options: AgentOptions): { command: string; args: 
     case 'opencode': {
       const args = ['run'];
       if (options.model) args.push('--model', options.model);
+      if (options.finalResponseOnly) args.push('--format', 'json');
       return { command: 'opencode', args };
     }
     default:
       throw new Error(`Unknown agent type: ${options.agent}`);
   }
+}
+
+/** OpenCode emits tool/progress events alongside text; only a stopped final step is a result. */
+function openCodeFinalResponse(output: string): { text: string; isError: boolean } {
+  const parts = new Map<string, string>();
+  let stopped = false;
+  let failed = false;
+  try {
+    for (const line of output.split('\n').filter((line) => line.trim())) {
+      const event: unknown = JSON.parse(line);
+      if (!event || typeof event !== 'object' || !('type' in event)) throw new Error('Invalid agent event');
+      const part = 'part' in event && event.part && typeof event.part === 'object' ? event.part : undefined;
+      if (event.type === 'error') failed = true;
+      if (event.type === 'step_start') {
+        parts.clear();
+        stopped = false;
+      }
+      if (event.type === 'text' && part && 'text' in part && typeof part.text === 'string') {
+        const id = 'id' in part && typeof part.id === 'string' ? part.id : String(parts.size);
+        parts.set(id, part.text);
+      }
+      if (event.type === 'step_finish') stopped = !!part && 'reason' in part && part.reason === 'stop';
+    }
+  } catch {
+    failed = true;
+  }
+  const text = [...parts.values()].join('');
+  return { text, isError: failed || !stopped || !text.trim() };
 }
 
 /**
@@ -334,6 +365,7 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
 
   const startTime = Date.now();
   const chunks: Buffer[] = [];
+  const stdoutChunks: Buffer[] = [];
   let logStream: WriteStream | undefined;
 
   if (options.logFile) {
@@ -398,6 +430,7 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
      */
     const handleRawData = (stream: typeof child.stdout) => (data: Buffer) => {
       chunks.push(data);
+      if (options.finalResponseOnly && stream === child.stdout) stdoutChunks.push(data);
       if (options.verbose) process.stderr.write(data);
       writeToLog(stream, data.toString());
     };
@@ -528,7 +561,13 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
     function getOutput() {
       if (useStreamJson) {
         // Return the parsed result text, not raw JSON
+        if (options.finalResponseOnly) return finalResultText;
         return finalResultText || Buffer.concat(chunks).toString();
+      }
+      if (options.finalResponseOnly) {
+        const stdout = Buffer.concat(stdoutChunks).toString();
+        // Codex/ollama send only the final message to stdout and diagnostics to stderr.
+        return command === 'opencode' ? openCodeFinalResponse(stdout).text : stdout;
       }
       return Buffer.concat(chunks).toString();
     }
@@ -543,6 +582,12 @@ export async function spawnAgent(options: AgentOptions): Promise<AgentResult> {
       if (useStreamJson && !sawStreamResult && lineBuffer.trim()) {
         processStreamJsonLine(child.stdout, lineBuffer.trim());
         lineBuffer = '';
+      }
+      if (options.finalResponseOnly) {
+        if (useStreamJson && (!sawStreamResult || !finalResultText.trim())) parsedResultIsError = true;
+        if (command === 'opencode' && openCodeFinalResponse(Buffer.concat(stdoutChunks).toString()).isError) {
+          parsedResultIsError = true;
+        }
       }
       const finalOutput = output ?? getOutput();
       const duration = Date.now() - startTime;

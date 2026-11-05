@@ -92,6 +92,7 @@ describe('reviewPr with real isolated Git checkouts', () => {
   let mutateAfterComment: (() => void) | undefined;
   let sourceState: string;
   let tempRoots: string[];
+  let cloneSource: string;
 
   function git(...args: string[]): string {
     return execFileSync('git', args, { cwd: source, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -104,6 +105,7 @@ describe('reviewPr with real isolated Git checkouts', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     source = mkdtempSync(join(tmpdir(), "factory-review-source-'"));
+    cloneSource = source;
     git('init', '--initial-branch=integration');
     git('config', 'user.email', 'fixture@example.test');
     git('config', 'user.name', 'Fixture');
@@ -160,7 +162,12 @@ describe('reviewPr with real isolated Git checkouts', () => {
       if (failCommand?.test(cmd)) return { exitCode: 1, stdout: '', stderr: 'simulated GitHub failure' };
       let data: unknown;
       if (cmd.startsWith('gh pr view')) data = { ...pr, state: 'OPEN', labels: [...labels].map((name) => ({ name })) };
-      else if (cmd.startsWith('gh repo view')) return { exitCode: 0, stdout: source, stderr: '' };
+      else if (cmd.startsWith('gh repo clone')) {
+        // Exercise the clone locally while checking that production delegates protocol/auth to gh.
+        expect(cmd).toContain("--no-upstream -- --no-local --no-checkout");
+        const destination = cmd.match(/'([^']+)' --no-upstream/)![1];
+        git('clone', '--no-local', '--no-checkout', '--', cloneSource, destination);
+      }
       else if (cmd === "gh api user --jq '.login'") return { exitCode: 0, stdout: 'reviewer', stderr: '' };
       else if (cmd.includes('/labels?')) data = [[...repoLabels].map((name) => ({ name }))];
       else if (cmd.includes('/comments?')) data = [comments];
@@ -205,7 +212,7 @@ describe('reviewPr with real isolated Git checkouts', () => {
 
   test('reviews the captured head, comments once, labels a pass and cleans up without changing source', async () => {
     await expect(run()).resolves.toMatchObject({ dryRun: false, prNumber: 450, headRefOid: pr.headRefOid, verdict: pass });
-    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ agent: 'claude', model: 'review-model', timeout: 120_000 }));
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ agent: 'claude', model: 'review-model', timeout: 120_000, finalResponseOnly: true }));
     expect(comments).toHaveLength(1);
     expect(comments[0].body).toContain(pr.headRefOid);
     expect(labels).toEqual(new Set(['unrelated', 'factory-reviewed']));
@@ -288,10 +295,7 @@ describe('reviewPr with real isolated Git checkouts', () => {
   });
 
   test('failed clone cleans up before the agent can run', async () => {
-    const github = mockGh.getMockImplementation()!;
-    mockGh.mockImplementation((cmd, ...args) => cmd.startsWith('gh repo view')
-      ? { exitCode: 0, stdout: join(source, 'missing-repository'), stderr: '' }
-      : github(cmd, ...args));
+    cloneSource = join(source, 'missing-repository');
     await expect(run()).rejects.toThrow();
     expect(spawn).not.toHaveBeenCalled();
     expect(labels.has('factory-reviewed')).toBe(false);
@@ -315,7 +319,7 @@ describe('reviewPr with real isolated Git checkouts', () => {
   });
 
   test.each([
-    /gh repo view/, /gh label create/, /\/comments\?/, /--method POST/, /--add-label/,
+    /gh repo clone/, /gh label create/, /\/comments\?/, /--method POST/, /--add-label/,
   ])('GitHub failure %s is propagated without approval', async (failure) => {
     failCommand = failure;
     await expect(run()).rejects.toThrow('simulated GitHub failure');
