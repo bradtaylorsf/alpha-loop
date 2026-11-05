@@ -1,0 +1,103 @@
+{
+  "name": "session/issue-452-fix-worktree-gate-destructive-branch-wor",
+  "branch": "session/issue-452-fix-worktree-gate-destructive-branch-wor",
+  "completed": "2026-11-05T10:17:56.489Z",
+  "results": [
+    {
+      "issueNum": 452,
+      "title": "fix(worktree): gate destructive branch/worktree cleanup behind lease ownership",
+      "status": "success",
+      "prUrl": "https://github.com/bradtaylorsf/alpha-loop/pull/463",
+      "testsPassing": true,
+      "verifyPassing": true,
+      "duration": 1035,
+      "filesChanged": 5
+    }
+  ],
+  "stages": [
+    {
+      "stage": "plan",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 72028,
+      "tokens_out": 55406,
+      "cost_usd": 0,
+      "wall_time_s": 176.018,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:53:08.567Z",
+      "issue_num": 452
+    },
+    {
+      "stage": "implement",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 238818,
+      "tokens_out": 183706,
+      "cost_usd": 0,
+      "wall_time_s": 466.505,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T09:56:05.068Z",
+      "issue_num": 452
+    },
+    {
+      "stage": "review",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 117404,
+      "tokens_out": 90311,
+      "cost_usd": 0,
+      "wall_time_s": 226.969,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:03:59.373Z",
+      "issue_num": 452
+    },
+    {
+      "stage": "verify_fix",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 20302,
+      "tokens_out": 15617,
+      "cost_usd": 0,
+      "wall_time_s": 137.352,
+      "tool_calls": 0,
+      "tool_errors": 1,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:07:48.185Z",
+      "issue_num": 452
+    },
+    {
+      "stage": "learn",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 6053,
+      "tokens_out": 4656,
+      "cost_usd": 0,
+      "wall_time_s": 39.764,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:10:30.690Z",
+      "issue_num": 452
+    },
+    {
+      "stage": "assumptions",
+      "model": "",
+      "endpoint": "default",
+      "tokens_in": 44918,
+      "tokens_out": 34552,
+      "cost_usd": 0,
+      "wall_time_s": 63.201,
+      "tool_calls": 0,
+      "tool_errors": 0,
+      "stage_success": true,
+      "started_at": "2026-11-05T10:10:30.719Z",
+      "issue_num": 452
+    }
+  ]
+}
