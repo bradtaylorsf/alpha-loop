@@ -17,9 +17,10 @@ program
   .command('init')
   .description('Full project onboarding: config, templates, vision, scan, sync')
   .option('-y, --yes', 'Accept all defaults without prompting (for CI/scripted use)')
-  .action(async (options: { yes?: boolean }) => {
+  .option('--sec-mile', 'Run the security milestone selector after scan')
+  .action(async (options: { yes?: boolean; secMile?: boolean }) => {
     const { initCommand } = await import('./commands/init.js');
-    await initCommand({ yes: options.yes });
+    await initCommand({ yes: options.yes, secMile: options.secMile });
   });
 
 program
@@ -30,6 +31,9 @@ program
   .option('--skip-tests', 'Skip test execution')
   .option('--skip-review', 'Skip code review')
   .option('--skip-learn', 'Skip learning extraction')
+  .option('--skip-sec', 'Skip the session security gate and record NOT_RUN')
+  .option('--sec-mile', 'Run the security milestone selector before target selection')
+  .option('-y, --yes', 'Accept selector defaults without prompting (with --sec-mile)')
   .option('--milestone <name>', 'Process the scheduled epic for this milestone, or flat issues if none')
   .option('--auto-merge', 'Auto-merge PRs to session branch')
   .option('--merge-to <branch>', 'Use existing branch instead of creating session branch')

@@ -41,6 +41,7 @@ import { spawnAgent } from '../../src/lib/agent';
 import { log } from '../../src/lib/logger';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { Config } from '../../src/lib/config';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
 const mockExistsSync = existsSync as jest.MockedFunction<typeof existsSync>;
@@ -90,6 +91,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,

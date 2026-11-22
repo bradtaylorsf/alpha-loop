@@ -40,6 +40,16 @@ jest.mock('../../src/commands/scan', () => ({
   generateInstructions: jest.fn(),
 }));
 
+jest.mock('../../src/commands/security', () => ({
+  securityCommand: jest.fn().mockResolvedValue({
+    detection: { surfaces: [], signals: [], agentSurface: false },
+    plan: { version: 1, profiles: {}, checks: [] },
+    selected: [],
+    created: [],
+    dryRun: false,
+  }),
+}));
+
 // Mock sync so Step 8 doesn't do real file operations
 jest.mock('../../src/commands/sync', () => ({
   syncAgentAssets: jest.fn().mockReturnValue({ synced: false, docSynced: false, skillsDirs: [] }),
@@ -260,6 +270,31 @@ describe('init command', () => {
     expect(content).toContain('# test_scope: full');
     expect(content).toContain('# changed_test_command: pnpm jest --findRelatedTests --passWithNoTests {files}');
     expect(content).toContain('harnesses:');
+  });
+
+  it('calls the security selector after scan when --sec-mile is set', async () => {
+    const { scanCommand } = jest.requireMock('../../src/commands/scan') as { scanCommand: jest.Mock };
+    const { securityCommand } = jest.requireMock('../../src/commands/security') as { securityCommand: jest.Mock };
+    scanCommand.mockClear();
+    securityCommand.mockClear();
+
+    await initCommand({ yes: true, secMile: true });
+
+    expect(scanCommand).toHaveBeenCalled();
+    expect(securityCommand).toHaveBeenCalledWith(expect.objectContaining({
+      yes: true,
+      projectDir: expect.any(String),
+    }));
+    expect(scanCommand.mock.invocationCallOrder[0]).toBeLessThan(securityCommand.mock.invocationCallOrder[0]);
+  });
+
+  it('does not call the security selector when --sec-mile is unset', async () => {
+    const { securityCommand } = jest.requireMock('../../src/commands/security') as { securityCommand: jest.Mock };
+    securityCommand.mockClear();
+
+    await initCommand({ yes: true });
+
+    expect(securityCommand).not.toHaveBeenCalled();
   });
 
   it('creates config with placeholder when no git remote', async () => {

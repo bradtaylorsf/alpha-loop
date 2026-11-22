@@ -31,6 +31,8 @@ const CONFIG_FILE = '.alpha-loop.yaml';
 export type InitOptions = {
   /** Skip all interactive prompts and accept smart defaults. */
   yes?: boolean;
+  /** Run the security milestone selector after scan (step 7). */
+  secMile?: boolean;
 };
 
 /** Answers collected from the setup wizard, used to populate the YAML. */
@@ -434,6 +436,25 @@ harnesses:
 # eval:
 #   include_agent_prompts: true   # Mirror this repo's agent prompts during eval
 #   include_skills: true          # Mirror this repo's skills during eval
+
+# === Security checks ========================================================
+# Missing security_profiles keys use these URLs, refs, and watch paths.
+# security_checks: false turns the selector and the session gate off.
+# enabled: false drops that one catalog and leaves the other.
+# security_checks: true
+# security_profiles:
+#   application:
+#     enabled: true
+#     url: https://github.com/mitre/cti
+#     ref: master
+#     watch:
+#       - enterprise-attack/enterprise-attack.json
+#   agent:
+#     enabled: true
+#     url: https://github.com/secure-agentic-framework/saf-mcp
+#     ref: main
+#     watch:
+#       - research/framework-model.yml
 
 # === Post-session review ====================================================
 # Holistic code review and security scan after the session completes.
@@ -1098,6 +1119,13 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
   log.step('Step 7: Scan codebase');
   const { scanCommand } = await import('./scan.js');
   scanCommand();
+
+  // --- Optional: security milestone selector (--sec-mile) ---
+  if (options.secMile) {
+    log.step('Security milestones (--sec-mile)');
+    const { securityCommand } = await import('./security.js');
+    await securityCommand({ yes: options.yes, projectDir });
+  }
 
   // --- Step 8: Sync to harnesses ---
   log.step('Step 8: Sync to harnesses');

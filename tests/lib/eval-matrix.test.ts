@@ -15,6 +15,7 @@ import {
 import type { Config } from '../../src/lib/config.js';
 import type { EvalSuiteResult, EvalResult } from '../../src/lib/eval.js';
 import type { EvalCaseWithChecks } from '../../src/lib/eval-runner.js';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 const makeConfig = (): Config => ({
   repo: 'test/repo',
@@ -66,6 +67,8 @@ const makeConfig = (): Config => ({
   evalIncludeAgentPrompts: true,
   evalIncludeSkills: true,
   preferEpics: false,
+  securityChecks: false,
+  securityProfiles: defaultSecurityProfiles(),
 } as Config);
 
 const makeCase = (id: string, description = id): EvalCaseWithChecks => ({

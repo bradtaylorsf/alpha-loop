@@ -5,6 +5,7 @@ This folder holds the longer-form guides that support the README. Start with the
 ## Planning And Execution
 
 - [Epics](epics.md) - parent issues, ordered sub-issues, queue execution, verification-only runs, and epic safety rails.
+- [Security Profiles](security-profiles.md) - application and agent catalog defaults, declare/override/disable controls, proof limits for `--sec-mile`.
 - [Superpowers add-command plan](superpowers/plans/2026-04-15-add-command.md) and [design spec](superpowers/specs/2026-04-15-add-command-design.md) - historical planning artifacts for the `add` workflow.
 
 ## Hosted Operation

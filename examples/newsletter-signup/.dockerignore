@@ -1,0 +1,8 @@
+node_modules
+.next
+data/signups.json
+.git
+.alpha-loop
+*.md
+test-security-e2e.sh
+scripts

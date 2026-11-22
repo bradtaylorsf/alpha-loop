@@ -1,0 +1,24 @@
+# Newsletter security-profile demo. Both profiles stay enabled at defaults.
+# The scan marks the agent profile NOT_APPLICABLE when no MCP server is configured.
+# Do not set security_profiles.agent.enabled: false.
+
+repo: owner/newsletter-signup-demo
+agent: claude
+base_branch: main
+test_command: npm test
+max_issues: 5
+
+security_checks: true
+security_profiles:
+  application:
+    enabled: true
+    url: https://github.com/mitre/cti
+    ref: master
+    watch:
+      - enterprise-attack/enterprise-attack.json
+  agent:
+    enabled: true
+    url: https://github.com/secure-agentic-framework/saf-mcp
+    ref: main
+    watch:
+      - research/framework-model.yml

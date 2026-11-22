@@ -8,6 +8,7 @@ sessions/
 .alpha-loop/auth/
 .alpha-loop/feedback/
 .alpha-loop/escalation-state.json
+.alpha-loop/security-cache/
 logs/*
 !logs/.gitkeep
 .env

@@ -9,6 +9,7 @@ import {
   formatPipelineSummary,
 } from '../../src/engine/prerequisites.js';
 import type { Config } from '../../src/lib/config.js';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 // Mock child_process.execSync for `which` calls
 jest.mock('node:child_process', () => ({
@@ -58,6 +59,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,

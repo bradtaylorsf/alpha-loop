@@ -3,17 +3,20 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  commandContainsProductionHost,
   decisionAllowed,
   evaluateCommandPolicy,
   evaluateDiffPolicy,
   evaluateIssuePolicy,
   evaluateRuntimePolicy,
+  evaluateSecurityDenyPolicy,
   evaluateSessionCapacityPolicy,
   globMatches,
   parseDiffNameOnly,
 } from '../../src/lib/automation-policy.js';
 import { sessionManifestPath, type DurableSessionManifest } from '../../src/lib/session.js';
 import type { Config } from '../../src/lib/config.js';
+import { DEFAULT_SECURITY_CHECKS, defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -67,6 +70,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeSkills: true,
     sessionRetention: { pausedWorktreeDays: 0, completedWorktreeDays: 30 },
     preferEpics: false,
+    securityChecks: DEFAULT_SECURITY_CHECKS,
+    securityProfiles: defaultSecurityProfiles(),
     automationPolicy: {
       requireLabels: ['ready'],
       blockLabels: ['do-not-automate', 'needs-human-input'],
@@ -295,5 +300,35 @@ describe('automation policy', () => {
     expect(globMatches('.github/workflows/ci.yml', '.github/workflows/**')).toBe(true);
     expect(globMatches('package.json', 'package.json')).toBe(true);
     expect(globMatches('scripts/deploy.sh', 'src/**')).toBe(false);
+  });
+
+  it('security deny blocks production hosts even when allowed_commands is empty', () => {
+    const config = makeConfig({
+      automationPolicy: {
+        ...makeConfig().automationPolicy!,
+        allowedCommands: [],
+      },
+    });
+
+    expect(decisionAllowed(evaluateCommandPolicy(config, 'curl https://api.production.example.com'))).toBe(true);
+    expect(commandContainsProductionHost('curl https://api.production.example.com/health')).toBe(true);
+    expect(commandContainsProductionHost('node -e "process.exit(0)"')).toBe(false);
+
+    const blocked = evaluateSecurityDenyPolicy('curl -sf https://db.prod.internal:443/ready');
+    expect(blocked.status).toBe('blocked');
+    expect(blocked.stage).toBe('security');
+    expect(blocked.reason).toMatch(/production host/i);
+
+    const allowed = evaluateSecurityDenyPolicy('curl -sf http://127.0.0.1:3000/api/health');
+    expect(decisionAllowed(allowed)).toBe(true);
+  });
+
+  it('security deny blocks credential-shaped text in captured output', () => {
+    const decision = evaluateSecurityDenyPolicy('node -e "process.exit(0)"', {
+      capturedOutput: 'token=AKIAIOSFODNN7EXAMPLE\n',
+    });
+    expect(decision.status).toBe('blocked');
+    expect(decision.stage).toBe('security');
+    expect(decision.reason).toMatch(/credential-shaped/i);
   });
 });

@@ -37,6 +37,7 @@ jest.mock('../../src/lib/learning', () => ({
 
 import { createSession } from '../../src/lib/session.js';
 import type { Config } from '../../src/lib/config.js';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -80,6 +81,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeSkills: true,
     sessionRetention: { pausedWorktreeDays: 0, completedWorktreeDays: 30 },
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,

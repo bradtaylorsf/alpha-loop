@@ -341,8 +341,11 @@ During live verification, the agent takes screenshots at key states and saves th
 | Command | Description |
 |---------|-------------|
 | `alpha-loop init` | Full onboarding: config, templates, vision, scan, sync, commit |
+| `alpha-loop init --sec-mile` | After context scan, open the security selector (see [docs/security-profiles.md](docs/security-profiles.md)) |
 | `alpha-loop run` | Fetch matching issues, process them all, then exit |
 | `alpha-loop run --dry-run` | Preview without making changes |
+| `alpha-loop run --sec-mile` | Open the security selector before picking a target (see [docs/security-profiles.md](docs/security-profiles.md)) |
+| `alpha-loop run --skip-sec` | Skip the session-end security gate and record `NOT_RUN` (see [docs/security-profiles.md](docs/security-profiles.md)) |
 | `alpha-loop run --issue <N>` | Process exactly one open ready issue; child issues inherit one unambiguous parent epic context |
 | `alpha-loop run --epic <N>` | Process an epic — its sub-issues in checklist order, auto-verify on completion (see [docs/epics.md](docs/epics.md)) |
 | `alpha-loop run --epics <ids>` | Process an ordered comma-separated queue of epics, one session branch and PR per epic |
@@ -413,6 +416,8 @@ Options:
   --skip-tests        Skip test execution
   --skip-review       Skip code review step
   --skip-learn        Skip learning extraction
+  --skip-sec          Skip session-end security checks; record NOT_RUN (see docs/security-profiles.md)
+  --sec-mile          Open the security selector before pickTarget (see docs/security-profiles.md)
   --auto-merge        Auto-merge PRs to session branch
   --merge-to <branch> Use an existing branch instead of creating a new session branch
   --batch             Batch mode: process multiple issues per agent call (faster, fewer tokens)
@@ -599,6 +604,13 @@ eval_dir: .alpha-loop/evals
 | `eval_include_skills` | `true` | Include repo-specific skills during eval runs |
 | `post_session.review` | `true` | Run holistic code review on full session diff |
 | `post_session.security_scan` | `true` | Include security scanning in post-session review |
+| `security_checks` | `false` | Enable the security selector and session-end gate (see [docs/security-profiles.md](docs/security-profiles.md)) |
+| `security_profiles.application.url` | `https://github.com/mitre/cti` | Application catalog repository URL (see [docs/security-profiles.md](docs/security-profiles.md)) |
+| `security_profiles.agent.url` | `https://github.com/secure-agentic-framework/saf-mcp` | Agent/MCP catalog repository URL (see [docs/security-profiles.md](docs/security-profiles.md)) |
+| `security_profiles.*.enabled` | `true` | Drop one catalog when `false`; the other stays (see [docs/security-profiles.md](docs/security-profiles.md)) |
+| `.alpha-loop/security-plan.json` | (none) | Saved selected checks and accepted watched-file SHAs (see [docs/security-profiles.md](docs/security-profiles.md)) |
+| `security-check` label | (created by selector) | Marks security issues; omitted from `ready` and from `pickTarget` (see [docs/security-profiles.md](docs/security-profiles.md)) |
+| Security proof `PASS` / `FAIL` / `NOT_RUN` | (per technique) | Session-end oracle result for the session git SHA; not a compliance attestation (see [docs/security-profiles.md](docs/security-profiles.md)) |
 | `events.include_prompt_text` | `false` | Include redacted prompt text in lifecycle events; prompt paths and hashes are always retained when available |
 | `events.redact` | `[]` | Env var names or literal values to redact from lifecycle event payloads |
 | `events.destinations` | `{}` | Lifecycle event destinations (`log`, `webhook`, `command`) with per-destination event filters |
@@ -812,6 +824,7 @@ The loop uses these labels. Run `alpha-loop init` to create any that are missing
 | `in-review` | PR created, awaiting review |
 | `failed` | Loop failed after retries |
 | `epic` | Parent issue with an ordered sub-issue checklist |
+| `security-check` | Security-profile check issue; not `ready` and hidden from `pickTarget` (see [docs/security-profiles.md](docs/security-profiles.md)) |
 
 ### Milestones
 
@@ -875,10 +888,14 @@ See [docs/epics.md](docs/epics.md) for the full feature reference, including `--
 
 The [docs index](docs/README.md) groups the long-form guides by workflow:
 
-- Planning and execution: epics, queues, and issue flow.
+- Planning and execution: epics, queues, issue flow, and [security profiles](docs/security-profiles.md).
 - Hosted operation: daemon setup, policy, lifecycle events, and browser verification.
 - Models and routing: local model setup, routing profiles, and telemetry.
 - Evaluation and benchmarking: eval concepts, benchmark design, and methodology notes.
+
+Long-form guides:
+
+- [docs/security-profiles.md](docs/security-profiles.md) — application and agent catalog defaults, declare/override/disable, proof limits for `--sec-mile` / `--skip-sec`.
 
 ### GitHub Project Board
 

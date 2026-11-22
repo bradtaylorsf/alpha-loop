@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
@@ -18,6 +18,7 @@ import {
   resolveRoutingStage,
   selectRoutingProfile,
   getFallbackPolicy,
+  writeSecurityChecks,
   DEFAULT_ESCALATION_WINDOW,
   DEFAULT_ESCALATION_ERROR_THRESHOLD,
   DEFAULT_ESCALATION_REVERT_MS,
@@ -1160,5 +1161,26 @@ routing:
     const picks = [100, 200, 300, 400, 500, 600, 700].map((id) => selectRoutingProfile(config, id));
     const unique = new Set(picks);
     expect(unique.size).toBeGreaterThan(1);
+  });
+});
+
+describe('writeSecurityChecks', () => {
+  it('uncomments security_checks and sets true without dropping other keys', () => {
+    writeFileSync(
+      join(tempDir, '.alpha-loop.yaml'),
+      `repo: owner/repo
+agent: claude
+# security_checks: false
+# security_profiles:
+#   application:
+#     enabled: true
+`,
+    );
+    writeSecurityChecks(tempDir, true);
+    const text = readFileSync(join(tempDir, '.alpha-loop.yaml'), 'utf-8');
+    expect(text).toContain('repo: owner/repo');
+    expect(text).toMatch(/^security_checks: true$/m);
+    expect(text).not.toMatch(/^#\s*security_checks:/m);
+    expect(loadConfig().securityChecks).toBe(true);
   });
 });

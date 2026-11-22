@@ -46,4 +46,13 @@ describe('CLI version', () => {
 
     expect(cliSource).not.toMatch(/\.version\('[^']*'\)/);
   });
+
+  it('wires --sec-mile on init and run, and --skip-sec on run', () => {
+    const cliSource = readFileSync(join(root, 'src/cli.ts'), 'utf-8');
+
+    expect(cliSource).toMatch(/\.command\('init'\)[\s\S]*\.option\('--sec-mile'/);
+    expect(cliSource).toMatch(/\.command\('run'\)[\s\S]*\.option\('--sec-mile'/);
+    expect(cliSource).toMatch(/\.command\('run'\)[\s\S]*\.option\('--skip-sec'/);
+    expect(cliSource).toMatch(/\.command\('run'\)[\s\S]*\.option\('-y, --yes'/);
+  });
 });

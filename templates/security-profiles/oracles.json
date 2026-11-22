@@ -1,0 +1,44 @@
+{
+  "oracles": [
+    {
+      "techniqueId": "T1190",
+      "target": "application",
+      "surface": "public-http",
+      "command": "node -e \"process.exit(process.env.ALPHA_LOOP_SECURITY_BASE_URL?0:1)\"",
+      "passExit": 0,
+      "timeoutSec": 30
+    },
+    {
+      "techniqueId": "T1552",
+      "target": "application",
+      "surface": "credentials-at-rest",
+      "command": "node -e \"process.exit(process.env.ALPHA_LOOP_SECURITY_SECRETS_DIR?0:1)\"",
+      "passExit": 0,
+      "timeoutSec": 30
+    },
+    {
+      "techniqueId": "T1059",
+      "target": "application",
+      "surface": "command-execution",
+      "command": "node -e \"process.exit(process.env.ALPHA_LOOP_SECURITY_EXEC_CHECK?0:1)\"",
+      "passExit": 0,
+      "timeoutSec": 30
+    },
+    {
+      "techniqueId": "T1578",
+      "target": "application",
+      "surface": "cloud-control-plane",
+      "command": "node -e \"process.exit(process.env.ALPHA_LOOP_SECURITY_CLOUD_CHECK?0:1)\"",
+      "passExit": 0,
+      "timeoutSec": 30
+    },
+    {
+      "techniqueId": "SAF-T1001",
+      "target": "mcp-agent",
+      "surface": "mcp",
+      "command": "node -e \"process.exit(require('fs').existsSync('.mcp.json')?0:1)\"",
+      "passExit": 0,
+      "timeoutSec": 15
+    }
+  ]
+}

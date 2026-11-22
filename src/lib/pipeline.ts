@@ -3813,6 +3813,8 @@ export type QuickFinalizeOptions = {
   worktreeBranch: string;
   /** Parent epic number, used for PR title/body when present. */
   epicNum?: number;
+  /** Skip the session security gate and record NOT_RUN. */
+  skipSec?: boolean;
 };
 
 export type QuickFinalizeResult = {
@@ -3820,6 +3822,8 @@ export type QuickFinalizeResult = {
   testOutput: string;
   prUrl?: string;
   merged: boolean;
+  /** Failures from the session security gate (empty when the gate did not run). */
+  securityFailures?: Array<{ code: 'security-gate-failed'; message: string; issueNum?: number }>;
 };
 
 export type FullSuiteGateOptions = {
@@ -3939,13 +3943,13 @@ function buildQuickPRBody(
  * epic verification.
  */
 export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<QuickFinalizeResult> {
-  const { issues, config, session, worktreePath, worktreeBranch, epicNum } = options;
+  const { issues, config, session, worktreePath, worktreeBranch, epicNum, skipSec } = options;
   const projectDir = process.cwd();
   const logFile = join(session.logsDir, 'quick-finalize.log');
 
   if (config.dryRun) {
     log.dry('Would run quick-mode finalize pass (tests + single PR)');
-    return { testsPassing: true, testOutput: '', merged: false };
+    return { testsPassing: true, testOutput: '', merged: false, securityFailures: [] };
   }
 
   const { testsPassing, testOutput } = await runFullSuiteGate({
@@ -3956,6 +3960,30 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
     logFile,
     label: 'Quick finalize',
   });
+
+  // Security gate once after the quick-mode product-test gate.
+  const securityFailures: Array<{ code: 'security-gate-failed'; message: string; issueNum?: number }> = [];
+  if (config.securityChecks) {
+    try {
+      const { resolveProductSuitePassedForSecurity, runSessionSecurityGate } = await import('./security-gate.js');
+      const productSuitePassed = resolveProductSuitePassedForSecurity({
+        skipTests: config.skipTests,
+        gateTestsPassing: testsPassing,
+      });
+      const securityGate = await runSessionSecurityGate({
+        config,
+        session,
+        worktreePath,
+        productSuitePassed,
+        skipSec: skipSec === true,
+      });
+      securityFailures.push(...securityGate.failures);
+    } catch (err) {
+      const message = `Security gate failed: ${err instanceof Error ? err.message : err}`;
+      log.error(message);
+      securityFailures.push({ code: 'security-gate-failed', message });
+    }
+  }
 
   // Single PR for all quick-mode issues, targeting the session branch when
   // auto-merge is on (the session PR to base stays the reviewable artifact).
@@ -4009,7 +4037,7 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
     log.error(`Failed to create quick-mode PR: ${err instanceof Error ? err.message : err}`);
     log.warn(`Worktree preserved at ${worktreePath} — branch ${worktreeBranch} holds all quick-mode commits`);
     updateIssueOutcomes(false);
-    return { testsPassing, testOutput, merged: false };
+    return { testsPassing, testOutput, merged: false, securityFailures };
   }
 
   let merged = false;
@@ -4052,7 +4080,7 @@ export async function finalizeQuickRun(options: QuickFinalizeOptions): Promise<Q
     log.warn(`Quick finalize: post-merge cleanup failed (work is shipped and safe): ${err instanceof Error ? err.message : err}`);
   }
 
-  return { testsPassing, testOutput, prUrl, merged };
+  return { testsPassing, testOutput, prUrl, merged, securityFailures };
 }
 
 function failureResult(issueNum: number, title: string, startTime: number, reason?: 'transient' | 'permanent'): PipelineResult {
