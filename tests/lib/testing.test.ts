@@ -25,6 +25,7 @@ jest.mock('node:fs', () => ({
 import { exec } from '../../src/lib/shell';
 import { log } from '../../src/lib/logger';
 import type { Config } from '../../src/lib/config';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 
@@ -71,6 +72,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,

@@ -1,6 +1,13 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, renameSync } from 'node:fs';
 import { execSync } from 'node:child_process';
+import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import {
+  DEFAULT_SECURITY_CHECKS,
+  defaultSecurityProfiles,
+  type SecurityProfileConfig,
+  type SecurityProfilesConfig,
+} from './security-types.js';
 
 /** Per-model pricing (cost per million tokens). */
 export type ModelPricing = {
@@ -464,6 +471,10 @@ export type Config = {
    * it instead of prompting. Default: false.
    */
   preferEpics: boolean;
+  /** When false, the security selector and the session gate stay off. */
+  securityChecks: boolean;
+  /** Application and agent profile sources. Missing keys use the built-in URLs. */
+  securityProfiles: SecurityProfilesConfig;
 };
 
 const DEFAULTS: Config = {
@@ -535,6 +546,8 @@ const DEFAULTS: Config = {
   daemon: DEFAULT_DAEMON_CONFIG,
   webApp: undefined,
   preferEpics: false,
+  securityChecks: DEFAULT_SECURITY_CHECKS,
+  securityProfiles: defaultSecurityProfiles(),
 };
 
 /** Map from YAML key (snake_case) to Config key (camelCase). */
@@ -1235,6 +1248,72 @@ function parseRoutingConfig(raw: unknown): RoutingConfig | undefined {
   return populated ? result : undefined;
 }
 
+function mergeSecurityProfile(
+  base: SecurityProfileConfig,
+  overlay: Partial<SecurityProfileConfig> | undefined,
+): SecurityProfileConfig {
+  if (!overlay) {
+    return { ...base, watch: [...base.watch] };
+  }
+  return {
+    enabled: overlay.enabled ?? base.enabled,
+    url: overlay.url || base.url,
+    ref: overlay.ref || base.ref,
+    watch: overlay.watch ? [...overlay.watch] : [...base.watch],
+  };
+}
+
+function mergeSecurityProfiles(
+  base: SecurityProfilesConfig,
+  ...layers: Array<SecurityProfilesConfig | undefined>
+): SecurityProfilesConfig {
+  let application = mergeSecurityProfile(base.application, undefined);
+  let agent = mergeSecurityProfile(base.agent, undefined);
+  for (const layer of layers) {
+    if (!layer) continue;
+    application = mergeSecurityProfile(application, layer.application);
+    agent = mergeSecurityProfile(agent, layer.agent);
+  }
+  return { application, agent };
+}
+
+function parseSecurityProfile(
+  raw: unknown,
+  fallback: SecurityProfileConfig,
+  key: string,
+): SecurityProfileConfig {
+  if (raw === undefined) return mergeSecurityProfile(fallback, undefined);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn(`[config] ${key}: expected an object`);
+    return mergeSecurityProfile(fallback, undefined);
+  }
+  const record = raw as Record<string, unknown>;
+  const url = parseStringValue(record.url, `${key}.url`);
+  const ref = parseStringValue(record.ref, `${key}.ref`);
+  const watch = record.watch === undefined
+    ? undefined
+    : parseStringList(record.watch, `${key}.watch`);
+  return mergeSecurityProfile(fallback, {
+    enabled: parseBoolean(record.enabled, fallback.enabled),
+    url: url || undefined,
+    ref: ref || undefined,
+    watch,
+  });
+}
+
+function parseSecurityProfiles(raw: unknown): SecurityProfilesConfig {
+  const defaults = defaultSecurityProfiles();
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    console.warn('[config] security_profiles: expected an object');
+    return defaults;
+  }
+  const record = raw as Record<string, unknown>;
+  return {
+    application: parseSecurityProfile(record.application, defaults.application, 'security_profiles.application'),
+    agent: parseSecurityProfile(record.agent, defaults.agent, 'security_profiles.agent'),
+  };
+}
+
 function loadYamlConfig(configPath: string): Partial<Config> {
   if (!existsSync(configPath)) return {};
 
@@ -1267,6 +1346,18 @@ function loadYamlConfig(configPath: string): Partial<Config> {
     if (Object.keys(pipeline).length > 0) {
       result.pipeline = pipeline;
     }
+  }
+
+  if (parsed.security_checks !== undefined) {
+    if (typeof parsed.security_checks === 'boolean') {
+      result.securityChecks = parsed.security_checks;
+    } else {
+      console.warn(`[config] security_checks: expected a boolean (got ${String(parsed.security_checks)})`);
+    }
+  }
+
+  if (parsed.security_profiles !== undefined) {
+    result.securityProfiles = parseSecurityProfiles(parsed.security_profiles);
   }
 
   // Handle post_session nested config
@@ -1429,6 +1520,15 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     },
   };
 
+  const securityProfiles = mergeSecurityProfiles(
+    defaultSecurityProfiles(),
+    yamlConfig.securityProfiles,
+    overrides?.securityProfiles,
+  );
+  const securityChecks = overrides?.securityChecks
+    ?? yamlConfig.securityChecks
+    ?? DEFAULTS.securityChecks;
+
   const merged: Config = {
     ...DEFAULTS,
     ...autoDetect,
@@ -1443,6 +1543,8 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     webApp,
     automationPolicy,
     daemon,
+    securityChecks,
+    securityProfiles,
   };
 
   if (merged.testScope !== 'full' && merged.testScope !== 'changed') {
@@ -1559,4 +1661,37 @@ export function selectRoutingProfile(
   if (profile.length === 0) return undefined;
   if (profile.length === 1 || issueId === undefined) return profile[0];
   return profile[fnv1a32(String(issueId)) % profile.length];
+}
+
+/**
+ * Set `security_checks` in `.alpha-loop.yaml`.
+ * Prefers an in-place key edit so annotated comments stay intact.
+ */
+export function writeSecurityChecks(
+  projectDir: string,
+  enabled: boolean,
+  configPath = '.alpha-loop.yaml',
+): void {
+  const path = join(projectDir, configPath);
+  const value = enabled ? 'true' : 'false';
+  const line = `security_checks: ${value}`;
+
+  if (!existsSync(path)) {
+    writeFileSync(path, `${line}\n`);
+    return;
+  }
+
+  const original = readFileSync(path, 'utf-8');
+  let next: string;
+  if (/^security_checks:\s*(true|false)\s*$/m.test(original)) {
+    next = original.replace(/^security_checks:\s*(true|false)\s*$/m, line);
+  } else if (/^#\s*security_checks:\s*(true|false)?\s*$/m.test(original)) {
+    next = original.replace(/^#\s*security_checks:\s*(true|false)?\s*$/m, line);
+  } else {
+    next = `${original.replace(/\s*$/, '')}\n\n${line}\n`;
+  }
+
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, next);
+  renameSync(temporary, path);
 }

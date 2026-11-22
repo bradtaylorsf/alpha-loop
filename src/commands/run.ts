@@ -10,8 +10,15 @@ import { loadConfig, assertSafeShellArg, resolveStepConfig, type Config } from '
 import {
   pollIssues, listMilestones, listEpics, getEpicSubIssues, getIssueWithComments,
   getMergedPRForIssue, updateEpicChecklist, commentIssue, closeIssue, labelIssue,
+  listOpenIssues,
   type Milestone, type Issue,
 } from '../lib/github.js';
+import {
+  filterSecurityOnlyMilestones,
+  resolveProductSuitePassedForSecurity,
+  runSessionSecurityGate,
+  securityPlanFileExists,
+} from '../lib/security-gate.js';
 import { buildEpicSummary, parseSubIssues } from '../lib/epics.js';
 import { verifyEpic } from '../lib/verify-epic.js';
 import { processIssue, processBatch, finalizeQuickRun, runFullSuiteGate } from '../lib/pipeline.js';
@@ -89,6 +96,12 @@ export type RunOptions = {
   skipTests?: boolean;
   skipReview?: boolean;
   skipLearn?: boolean;
+  /** Skip the session security gate and record NOT_RUN. */
+  skipSec?: boolean;
+  /** Run the security milestone selector before target selection. */
+  secMile?: boolean;
+  /** Accept selector defaults without prompting (with --sec-mile). */
+  yes?: boolean;
   autoMerge?: boolean;
   mergeTo?: string;
   batch?: boolean;
@@ -141,7 +154,8 @@ export type EpicExecutionFailureCode =
   | 'epic-run-error'
   | 'session-test-failed'
   | 'session-review-failed'
-  | 'quick-finalize-failed';
+  | 'quick-finalize-failed'
+  | 'security-gate-failed';
 
 export type EpicExecutionFailure = {
   code: EpicExecutionFailureCode;
@@ -208,7 +222,8 @@ type CommandExitErrorCode =
   | 'project-context-refresh-required'
   | 'session-interrupt-cleanup-failed'
   | 'session-worktree-setup-failed'
-  | 'session-locked';
+  | 'session-locked'
+  | 'security-plan-missing';
 
 class CommandExitError extends Error {
   readonly code: CommandExitErrorCode | EpicExecutionFailureCode;
@@ -529,6 +544,9 @@ export function formatMilestonePickerMeta(milestone: Milestone, epics: Issue[]):
   return `${milestone.openIssues} open, ${progress}${due}${scheduled}`;
 }
 
+/** Re-export for tests: milestones whose open issues are all security-check. */
+export { filterSecurityOnlyMilestones, isSecurityCheckOnlyMilestone } from '../lib/security-gate.js';
+
 /**
  * Show open epics + milestones and let the user pick one, or choose "all in order".
  * Epics are listed first (they're typically what the user actually wants).
@@ -544,7 +562,8 @@ async function pickTarget(
   opts: { preferEpics: boolean; hideEpics: boolean },
 ): Promise<PickTargetResult> {
   const epics = opts.hideEpics ? [] : listEpics(repo);
-  const milestones = listMilestones(repo);
+  const openIssues = listOpenIssues(repo);
+  const milestones = filterSecurityOnlyMilestones(listMilestones(repo), openIssues);
 
   if (epics.length === 0 && milestones.length === 0) {
     log.info('No open epics or milestones found — processing all ready issues');
@@ -1346,6 +1365,8 @@ async function executeSessionRun(
   let epicAbort = false;
   // Quick mode: outputs from the deferred passes, fed into the epic-level learning extraction.
   let quickFinalizeTestOutput: string | null = null;
+  /** Product-suite result from finalizeQuickRun or runFullSuiteGate; null if neither ran. */
+  let gateTestsPassing: boolean | null = null;
   // Issues demoted by a failed quick finalize — already covered by the
   // quick-finalize-failed failure entry, so the per-result failure loop
   // must not add a second entry for each of them.
@@ -1684,8 +1705,17 @@ async function executeSessionRun(
             worktreePath: quickWorktree.path,
             worktreeBranch: quickWorktree.branch,
             epicNum: activeEpic,
+            skipSec: options.skipSec === true,
           });
           quickFinalizeTestOutput = quickResult.testOutput;
+          gateTestsPassing = quickResult.testsPassing;
+          for (const failure of quickResult.securityFailures ?? []) {
+            failures.push({
+              code: failure.code,
+              message: failure.message,
+              issueNum: failure.issueNum,
+            });
+          }
           // Attach the shared PR to each quick result so summaries and the
           // session PR body reference it.
           if (quickResult.prUrl) {
@@ -1776,6 +1806,7 @@ async function executeSessionRun(
         session,
         worktreePath: sessionWorktreePath,
       });
+      gateTestsPassing = fullGate.testsPassing;
       if (!fullGate.testsPassing) {
         const message = `End-of-session full test suite failed after ${config.maxTestRetries} attempts`;
         log.error(message);
@@ -1787,6 +1818,43 @@ async function executeSessionRun(
       log.error(message);
       failures.push({ code: 'session-test-failed', message });
       epicAbort = true;
+      gateTestsPassing = false;
+    }
+  }
+
+  // Session security gate (non-quick): once after runFullSuiteGate.
+  // Quick mode already runs this gate inside finalizeQuickRun.
+  // --skip-tests does not mark this gate passed. --skip-sec writes NOT_RUN.
+  if (!config.dryRun && !config.quick && config.securityChecks) {
+    try {
+      const sessionWorktreePath = session.worktreePath
+        ?? await ensureSessionWorktree(session, config);
+      if (sessionWorktreePath) {
+        const productSuitePassed = resolveProductSuitePassedForSecurity({
+          skipTests: config.skipTests,
+          gateTestsPassing,
+        });
+        const securityGate = await runSessionSecurityGate({
+          config,
+          session,
+          worktreePath: sessionWorktreePath,
+          productSuitePassed,
+          skipSec: options.skipSec === true,
+        });
+        for (const failure of securityGate.failures) {
+          failures.push({
+            code: failure.code,
+            message: failure.message,
+            issueNum: failure.issueNum,
+          });
+        }
+      } else {
+        log.warn('Security gate: session worktree unavailable — skipped');
+      }
+    } catch (err) {
+      const message = `Security gate failed: ${err instanceof Error ? err.message : err}`;
+      log.error(message);
+      failures.push({ code: 'security-gate-failed', message });
     }
   }
 
@@ -3303,6 +3371,29 @@ export async function runCommand(options: RunOptions): Promise<void> {
       });
       exitForCliEpicValidationFailure(result);
       return;
+    }
+
+    // --- Security milestone selector (--sec-mile) before target selection ---
+    if (options.secMile) {
+      log.step('Security milestones (--sec-mile)');
+      const { securityCommand } = await import('./security.js');
+      await securityCommand({
+        yes: options.yes === true,
+        dryRun: options.dryRun === true,
+      });
+      // Non-interactive --yes --sec-mile requires a saved plan before implementation.
+      if (options.yes === true && !securityPlanFileExists(process.cwd())) {
+        const message = 'run --yes --sec-mile requires .alpha-loop/security-plan.json; selector did not write a plan. Exiting before implementation.';
+        log.error(message);
+        throw new CommandExitError({
+          code: 'security-plan-missing',
+          message,
+          exitCode: 1,
+          logged: true,
+        });
+      }
+      // Reload config so security_checks: true from the selector is visible to the session gate.
+      Object.assign(config, loadConfig(buildConfigOverrides(options)));
     }
 
     // --- Target selection (epic or milestone) — must happen before session creation ---

@@ -26,6 +26,7 @@ jest.mock('../../src/lib/logger.js', () => ({
 
 import { spawnAgent } from '../../src/lib/agent.js';
 import { ghExec } from '../../src/lib/rate-limit.js';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 const mockSpawnAgent = spawnAgent as jest.MockedFunction<typeof spawnAgent>;
 const mockGhExec = ghExec as jest.MockedFunction<typeof ghExec>;
@@ -71,6 +72,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,

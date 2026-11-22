@@ -13,6 +13,7 @@ import {
   normalizeWebAppProfile,
   resolveWebAppPreviewUrl,
 } from '../../src/lib/web-app-profile.js';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 const { exec } = jest.requireMock('../../src/lib/shell.js') as { exec: jest.Mock };
 
@@ -67,6 +68,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     ...overrides,
   };
 }

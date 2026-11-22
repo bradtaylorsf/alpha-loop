@@ -50,6 +50,7 @@ import { createPR } from '../../src/lib/github';
 import { repairSessionLearningArtifacts, repairSessionSummaryArtifact } from '../../src/lib/learning';
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, unlinkSync, renameSync } from 'node:fs';
 import type { Config } from '../../src/lib/config';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockSetupWorktree = setupWorktree as jest.MockedFunction<typeof setupWorktree>;
@@ -106,6 +107,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeSkills: true,
     sessionRetention: { pausedWorktreeDays: 0, completedWorktreeDays: 30 },
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,

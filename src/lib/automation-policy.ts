@@ -7,6 +7,7 @@ import {
   type AutomationPolicyConfig,
   type Config,
 } from './config.js';
+import { scanContent } from './eval-secret-scan.js';
 import {
   loadSessionManifest,
   sessionManifestPath,
@@ -22,7 +23,15 @@ export type AutomationPolicyDecisionStage =
   | 'command'
   | 'runtime'
   | 'budget'
-  | 'diff';
+  | 'diff'
+  | 'security';
+
+/**
+ * Host tokens that name a production environment.
+ * Matches host-shaped segments such as `api.production.example.com` or `db.prod.internal`.
+ */
+const PRODUCTION_HOST_PATTERN =
+  /(?:^|[\s"'`:=/@(\[])(?:https?:\/\/)?(?:[\w-]+\.)*(?:prod|production)(?:\.[\w.-]+)+(?::\d+)?(?=[/\s"'`)\]|,;]|$)/i;
 
 export type AutomationPolicyDecision = {
   id: string;
@@ -439,6 +448,54 @@ export function evaluateCommandPolicy(
     command: normalized,
     metadata: { allowedCommands: policy.allowedCommands },
   });
+}
+
+/**
+ * Security-stage deny rules.
+ * A production host in the command, or credential-shaped text in captured output,
+ * is blocked even when `allowed_commands` is empty.
+ */
+export function evaluateSecurityDenyPolicy(
+  command: string,
+  args: { capturedOutput?: string } = {},
+): AutomationPolicyDecision {
+  const normalized = normalizeCommand(command);
+  const reasons: string[] = [];
+
+  if (normalized && PRODUCTION_HOST_PATTERN.test(normalized)) {
+    reasons.push(`Command targets a production host: ${normalized}.`);
+  }
+
+  if (args.capturedOutput !== undefined) {
+    const findings = scanContent(args.capturedOutput);
+    if (findings.length > 0) {
+      const first = findings[0];
+      reasons.push(
+        `Captured output contains credential-shaped text (${first.ruleId}: ${first.description}).`,
+      );
+    }
+  }
+
+  if (reasons.length === 0) {
+    return makeDecision({
+      status: 'allowed',
+      stage: 'security',
+      reasons: ['Security deny policy allowed this action.'],
+      command: normalized,
+    });
+  }
+
+  return makeDecision({
+    status: 'blocked',
+    stage: 'security',
+    reasons,
+    command: normalized,
+  });
+}
+
+/** True when the command string names a production host. */
+export function commandContainsProductionHost(command: string): boolean {
+  return PRODUCTION_HOST_PATTERN.test(normalizeCommand(command));
 }
 
 export function evaluateRuntimePolicy(

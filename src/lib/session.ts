@@ -53,6 +53,8 @@ export type SessionContext = {
   pendingBackgroundTasks?: PendingSessionBackgroundTask[];
   sessionReviewFindings?: GateResult;
   sessionPrUrl?: string;
+  /** Markdown proof table from the session security gate (appended to the PR body). */
+  securityProofMarkdown?: string;
   /** Dedicated checkout for every session-branch mutation. */
   worktreePath?: string;
   /** Metadata retained for lazy session branch/PR initialization. */
@@ -1620,6 +1622,11 @@ export async function finalizeSession(
         prLines.push(`- [${f.severity.toUpperCase()}] ${f.description}${fixedTag}${f.file ? ` — \`${f.file}\`` : ''}`);
       }
     }
+    prLines.push('');
+  }
+
+  if (session.securityProofMarkdown) {
+    prLines.push(session.securityProofMarkdown.trimEnd());
     prLines.push('');
   }
 

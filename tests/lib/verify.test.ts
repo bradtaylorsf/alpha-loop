@@ -1,5 +1,6 @@
 import { runVerify, isNonUiChange, runScriptVerify, runBootVerify, type VerifyResult } from '../../src/lib/verify.js';
 import type { Config } from '../../src/lib/config.js';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 // Mock agent and shell to avoid real process spawning
 jest.mock('../../src/lib/agent.js', () => ({
@@ -55,6 +56,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     autoCapture: true,
     skipPostSessionReview: false,
     skipPostSessionSecurity: false,

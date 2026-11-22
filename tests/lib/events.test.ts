@@ -10,6 +10,7 @@ import {
 } from '../../src/lib/events.js';
 import { sessionManifestPath, type DurableSessionManifest } from '../../src/lib/session.js';
 import type { Config, EventDestinationConfig } from '../../src/lib/config.js';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -63,6 +64,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     evalIncludeSkills: true,
     sessionRetention: { pausedWorktreeDays: 0, completedWorktreeDays: 30 },
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     events: { includePromptText: false, redact: [], destinations: {} },
     ...overrides,
   };

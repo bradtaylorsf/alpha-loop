@@ -1,0 +1,36 @@
+{
+  "oracles": [
+    {
+      "techniqueId": "T1190",
+      "target": "application",
+      "surface": "public-http",
+      "command": "node scripts/oracle-checks.mjs health",
+      "passExit": 0,
+      "timeoutSec": 30
+    },
+    {
+      "techniqueId": "T1133",
+      "target": "application",
+      "surface": "public-http",
+      "command": "node scripts/oracle-checks.mjs reject-empty",
+      "passExit": 0,
+      "timeoutSec": 30
+    },
+    {
+      "techniqueId": "T1078",
+      "target": "application",
+      "surface": "public-http",
+      "command": "node scripts/oracle-checks.mjs accept-valid",
+      "passExit": 0,
+      "timeoutSec": 30
+    },
+    {
+      "techniqueId": "T1552",
+      "target": "application",
+      "surface": "credentials-at-rest",
+      "command": "node scripts/oracle-checks.mjs store-not-public",
+      "passExit": 0,
+      "timeoutSec": 30
+    }
+  ]
+}

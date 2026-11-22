@@ -1,0 +1,9 @@
+node_modules/
+.next/
+data/signups.json
+.alpha-loop/security-cache/
+security-profile-report.md
+.DS_Store
+*.log
+.env
+.env.local

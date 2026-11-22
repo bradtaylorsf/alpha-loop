@@ -14,6 +14,7 @@ import {
 import type { StageTelemetry, SessionManifestLite } from '../../src/lib/telemetry';
 import type { Config } from '../../src/lib/config';
 import type { AgentResult } from '../../src/lib/agent';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 function baseConfig(): Config {
   return {
@@ -70,6 +71,8 @@ function baseConfig(): Config {
     evalIncludeAgentPrompts: true,
     evalIncludeSkills: true,
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
   };
 }
 

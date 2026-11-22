@@ -1,6 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
-import { formatEpicPickerMeta, formatMilestonePickerMeta, runCommand, runSingleEpicExecution } from '../../src/commands/run';
+import {
+  filterSecurityOnlyMilestones,
+  formatEpicPickerMeta,
+  formatMilestonePickerMeta,
+  isSecurityCheckOnlyMilestone,
+  runCommand,
+  runSingleEpicExecution,
+} from '../../src/commands/run';
 
 jest.mock('../../src/lib/shell', () => ({
   exec: jest.fn(),
@@ -29,6 +36,7 @@ jest.mock('../../src/lib/github', () => ({
   pollIssues: jest.fn(),
   listMilestones: jest.fn().mockReturnValue([]),
   listEpics: jest.fn().mockReturnValue([]),
+  listOpenIssues: jest.fn().mockReturnValue([]),
   getEpicSubIssues: jest.fn().mockReturnValue([]),
   getIssueWithComments: jest.fn(),
   getMergedPRForIssue: jest.fn(),
@@ -152,6 +160,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { emitLifecycleEvent } from '../../src/lib/events';
 import { spawnAgent } from '../../src/lib/agent';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 const mockExec = exec as jest.MockedFunction<typeof exec>;
 const mockLog = log as jest.Mocked<typeof log>;
@@ -243,6 +252,8 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     pricing: {},
     pipeline: {},
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     ...overrides,
   };
 }
@@ -332,6 +343,19 @@ describe('runCommand', () => {
     expect(mockProcessBatch).not.toHaveBeenCalled();
     expect(mockReleaseSessionLock).toHaveBeenCalledWith(session.lock);
     expect(mockLog.error).toHaveBeenCalledTimes(1);
+  });
+
+  test('pickTarget filter hides milestones whose open issues are all security-check', () => {
+    const milestones = [
+      { number: 1, title: 'Product', description: '', openIssues: 1, closedIssues: 0, dueOn: null, state: 'open' },
+      { number: 2, title: 'Security: T1190 (http)', description: '', openIssues: 1, closedIssues: 0, dueOn: null, state: 'open' },
+    ];
+    const openIssues = [
+      { milestone: 'Product', labels: ['ready'] },
+      { milestone: 'Security: T1190 (http)', labels: ['security-check'] },
+    ];
+    expect(isSecurityCheckOnlyMilestone('Security: T1190 (http)', openIssues)).toBe(true);
+    expect(filterSecurityOnlyMilestones(milestones, openIssues).map((m) => m.title)).toEqual(['Product']);
   });
 
   test('picker metadata shows epic milestone membership and scheduled epic counts', () => {

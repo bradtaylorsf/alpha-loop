@@ -16,6 +16,7 @@ import {
 } from '../../src/lib/daemon.js';
 import { DEFAULT_DAEMON_CONFIG, type Config, type DaemonConfig } from '../../src/lib/config.js';
 import { sessionManifestPath, type DurableSessionManifest } from '../../src/lib/session.js';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 function makeDaemon(overrides: Partial<DaemonConfig> = {}): DaemonConfig {
   return {
@@ -95,6 +96,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
       maxIssueCostUsd: 0,
     },
     preferEpics: false,
+    securityChecks: false,
+    securityProfiles: defaultSecurityProfiles(),
     daemon: makeDaemon(),
     ...overrides,
   };

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadRepoPromptContext } from '../../src/lib/eval-runner.js';
 import type { Config } from '../../src/lib/config.js';
+import { defaultSecurityProfiles } from '../../src/lib/security-types.js';
 
 let tempDir: string;
 
@@ -46,7 +47,9 @@ const makeConfig = (overrides?: Partial<Config>): Config => ({
   pipeline: {},
   evalIncludeAgentPrompts: true,
   evalIncludeSkills: true,
-    preferEpics: false,
+  preferEpics: false,
+  securityChecks: false,
+  securityProfiles: defaultSecurityProfiles(),
   ...overrides,
 } as Config);
 
